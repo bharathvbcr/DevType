@@ -349,8 +349,10 @@ else
   else
     echo "    signing: ${SIGN_MODE} (${SIGN_ARG})"
   fi
+  # bash 3.2 (system /bin/bash) treats "${empty[@]}" as unbound under `set -u`, so the
+  # default non-hardened path would abort here. The `+` expansion drops to nothing instead.
   codesign --force --sign "${SIGN_ARG}" --identifier "${BUNDLE_ID}" \
-    "${CODESIGN_EXTRA[@]}" "${APP_BUNDLE}" >/dev/null
+    ${CODESIGN_EXTRA[@]+"${CODESIGN_EXTRA[@]}"} "${APP_BUNDLE}" >/dev/null
 fi
 
 # Verify codesign identifier matches Info.plist CFBundleIdentifier (TCC identity).

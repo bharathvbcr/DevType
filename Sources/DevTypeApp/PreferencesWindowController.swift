@@ -19,7 +19,7 @@ import ServiceManagement
 //     arithmetic — broken past ~3 apps)
 //   • §4.5 statistics (were collected and never shown)
 
-/// Sections, in tab order.
+/// Sections, in sidebar order.
 enum PreferencesTab: Int, CaseIterable {
     case general
     case snippets
@@ -32,6 +32,15 @@ enum PreferencesTab: Int, CaseIterable {
         case .snippets: return LocalizationManager.shared.s("prefs.tab.snippets")
         case .hotkeys: return LocalizationManager.shared.s("prefs.tab.hotkeys")
         case .advanced: return LocalizationManager.shared.s("prefs.tab.advanced")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: return "gearshape"
+        case .snippets: return "square.stack.3d.up"
+        case .hotkeys: return "keyboard"
+        case .advanced: return "wrench.and.screwdriver"
         }
     }
 }
@@ -57,8 +66,8 @@ final class PreferencesWindowController: NSWindowController {
             preferences = controller
             let newWindow = NSWindow(contentViewController: controller)
             newWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            newWindow.setContentSize(NSSize(width: 660, height: 620))
-            newWindow.minSize = NSSize(width: 620, height: 480)
+            newWindow.setContentSize(NSSize(width: 740, height: 620))
+            newWindow.minSize = NSSize(width: 680, height: 520)
             DevTypeTheme.styleWindow(newWindow, title: LocalizationManager.shared.s("window.preferences"))
             newWindow.center()
             newWindow.isReleasedWhenClosed = false
@@ -78,6 +87,90 @@ private final class PrefsFlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+// MARK: - Sidebar nav row
+
+/// System Settings–style sidebar row: icon + label, rounded selection, hover
+/// wash, and a ⌘1…⌘4 key equivalent so the window is keyboard-navigable.
+private final class SidebarNavRow: NSButton {
+    let tab: PreferencesTab
+    private let symbolName: String
+    var isSelectedRow = false { didSet { needsDisplay = true } }
+    private var hovering = false { didSet { needsDisplay = true } }
+
+    init(tab: PreferencesTab, target: AnyObject?, action: Selector?) {
+        self.tab = tab
+        self.symbolName = tab.symbol
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        title = tab.title
+        isBordered = false
+        wantsLayer = true
+        focusRingType = .none
+        translatesAutoresizingMaskIntoConstraints = false
+        keyEquivalent = String(tab.rawValue + 1)
+        keyEquivalentModifierMask = [.command]
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        heightAnchor.constraint(equalToConstant: 30).isActive = true
+        setAccessibilityRole(NSAccessibility.Role.button)
+        setAccessibilityLabel(tab.title)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 1, dy: 1.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        if isSelectedRow {
+            DevTypeTheme.accent.withAlphaComponent(hovering ? 0.30 : 0.24).setFill()
+            path.fill()
+            DevTypeTheme.accent.withAlphaComponent(0.45).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        } else if hovering {
+            DevTypeTheme.contrastOverlay(0.07).setFill()
+            path.fill()
+        }
+
+        let tint: NSColor = isSelectedRow ? DevTypeTheme.accentBright : DevTypeTheme.textSecondary
+        let icon = DevTypeTheme.tintedSymbol(symbolName, size: 12, weight: .semibold, color: tint)
+        let iconY = (bounds.height - (icon?.size.height ?? 0)) / 2
+        icon?.draw(
+            in: NSRect(x: 10, y: iconY, width: icon?.size.width ?? 0, height: icon?.size.height ?? 0),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1.0,
+            respectFlipped: true,
+            hints: nil
+        )
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: DevTypeTheme.font(12.5, isSelectedRow ? .semibold : .medium),
+            .foregroundColor: isSelectedRow ? DevTypeTheme.textPrimary : DevTypeTheme.textSecondary
+        ]
+        let textSize = (title as NSString).size(withAttributes: attributes)
+        (title as NSString).draw(
+            at: NSPoint(x: 34, y: (bounds.height - textSize.height) / 2),
+            withAttributes: attributes
+        )
+    }
+}
+
 // MARK: - Preferences content
 
 final class PreferencesViewController: NSViewController,
@@ -88,8 +181,12 @@ final class PreferencesViewController: NSViewController,
     private let store = SnippetStore.shared
     private weak var hotkeyManager: HotkeyManager?
 
-    private var tabControl: NSSegmentedControl?
+    private var navRows: [SidebarNavRow] = []
+    private var selectedTab: PreferencesTab = .general
     private var panes: [PreferencesTab: NSView] = [:]
+    private var paneTitleLabel: NSTextField?
+    /// Glanceable engine state pinned to the bottom of the sidebar.
+    private var engineStatusPill: PillBadgeView?
 
     // General
     private let openAtLoginSwitch = NSSwitch()
@@ -161,56 +258,137 @@ final class PreferencesViewController: NSViewController,
         root.wantsLayer = true
         root.layer?.backgroundColor = DevTypeTheme.windowBackground.cgColor
 
-        let header = DevTypeTheme.makeBrandHeader(
-            title: loc.s("prefs.title"),
-            subtitle: loc.s("manager.subtitle"),
-            logoSize: 34
-        )
-        root.addSubview(header)
+        // MARK: Sidebar — brand, nav rows, engine status.
+        let sidebar = NSView()
+        sidebar.wantsLayer = true
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.layer?.backgroundColor = DevTypeTheme.cardBackground.cgColor
 
-        let tabs = NSSegmentedControl(
-            labels: PreferencesTab.allCases.map(\.title),
-            trackingMode: .selectOne,
-            target: self,
-            action: #selector(tabChanged(_:))
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        let brand = DevTypeTheme.makeBrandHeader(
+            title: "DevType",
+            subtitle: "v\(version)",
+            logoSize: 32
         )
-        tabs.translatesAutoresizingMaskIntoConstraints = false
-        tabs.segmentDistribution = .fillEqually
-        tabs.selectedSegment = PreferencesTab.general.rawValue
-        tabs.setAccessibilityLabel(loc.s("ax.preferences.tabs"))
-        tabControl = tabs
-        root.addSubview(tabs)
 
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(container)
+        let navStack = NSStackView()
+        navStack.orientation = .vertical
+        navStack.alignment = .leading
+        navStack.spacing = 3
+        navStack.translatesAutoresizingMaskIntoConstraints = false
+        navStack.setAccessibilityRole(NSAccessibility.Role.tabGroup)
+        navStack.setAccessibilityLabel(loc.s("ax.preferences.tabs"))
+        for tab in PreferencesTab.allCases {
+            let row = SidebarNavRow(tab: tab, target: self, action: #selector(navRowTapped(_:)))
+            row.isSelectedRow = tab == selectedTab
+            navRows.append(row)
+            navStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: navStack.widthAnchor).isActive = true
+        }
+
+        let sidebarHairline = DevTypeTheme.makeHairline()
+        let engineCaption = DevTypeTheme.makeLabel(
+            loc.s("prefs.advanced.engine"),
+            font: DevTypeTheme.font(10, .semibold),
+            color: DevTypeTheme.textTertiary
+        )
+        engineCaption.translatesAutoresizingMaskIntoConstraints = false
+        let statusPill = PillBadgeView(
+            text: loc.s("status.active"),
+            tint: DevTypeTheme.statusGreen,
+            showsDot: true
+        )
+        engineStatusPill = statusPill
+
+        sidebar.addSubview(brand)
+        sidebar.addSubview(navStack)
+        sidebar.addSubview(sidebarHairline)
+        sidebar.addSubview(engineCaption)
+        sidebar.addSubview(statusPill)
+
+        // MARK: Content — section title + swappable pane host.
+        // Vertical rule — `makeHairline()` carries a fixed 1pt *height*, so a
+        // plain layer-backed view is used for the vertical variant instead.
+        let separator = NSView()
+        separator.wantsLayer = true
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        separator.layer?.backgroundColor = DevTypeTheme.hairline.cgColor
+        separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
+
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let paneTitle = DevTypeTheme.makeLabel(
+            selectedTab.title,
+            font: DevTypeTheme.font(20, .bold),
+            color: DevTypeTheme.textPrimary
+        )
+        paneTitle.translatesAutoresizingMaskIntoConstraints = false
+        paneTitleLabel = paneTitle
+
+        let paneHost = NSView()
+        paneHost.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(paneTitle)
+        content.addSubview(paneHost)
 
         for tab in PreferencesTab.allCases {
             let pane = makeScrollingPane(for: tab)
-            pane.isHidden = tab != .general
-            container.addSubview(pane)
+            pane.isHidden = tab != selectedTab
+            paneHost.addSubview(pane)
             panes[tab] = pane
             NSLayoutConstraint.activate([
-                pane.topAnchor.constraint(equalTo: container.topAnchor),
-                pane.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                pane.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                pane.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+                pane.topAnchor.constraint(equalTo: paneHost.topAnchor),
+                pane.leadingAnchor.constraint(equalTo: paneHost.leadingAnchor),
+                pane.trailingAnchor.constraint(equalTo: paneHost.trailingAnchor),
+                pane.bottomAnchor.constraint(equalTo: paneHost.bottomAnchor)
             ])
         }
 
+        root.addSubview(sidebar)
+        root.addSubview(separator)
+        root.addSubview(content)
+
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: root.topAnchor, constant: 40),
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            header.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -20),
+            sidebar.topAnchor.constraint(equalTo: root.topAnchor),
+            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            sidebar.widthAnchor.constraint(equalToConstant: 196),
 
-            tabs.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 14),
-            tabs.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            tabs.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            brand.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 44),
+            brand.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16),
+            brand.trailingAnchor.constraint(lessThanOrEqualTo: sidebar.trailingAnchor, constant: -12),
 
-            container.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 12),
-            container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            container.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+            navStack.topAnchor.constraint(equalTo: brand.bottomAnchor, constant: 20),
+            navStack.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
+            navStack.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
+
+            sidebarHairline.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 14),
+            sidebarHairline.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -14),
+            sidebarHairline.bottomAnchor.constraint(equalTo: engineCaption.topAnchor, constant: -10),
+
+            engineCaption.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16),
+            engineCaption.bottomAnchor.constraint(equalTo: statusPill.topAnchor, constant: -6),
+
+            statusPill.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 14),
+            statusPill.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -16),
+
+            separator.topAnchor.constraint(equalTo: root.topAnchor),
+            separator.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            separator.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+
+            content.topAnchor.constraint(equalTo: root.topAnchor),
+            content.leadingAnchor.constraint(equalTo: separator.trailingAnchor),
+            content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+
+            paneTitle.topAnchor.constraint(equalTo: content.topAnchor, constant: 46),
+            paneTitle.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            paneTitle.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24),
+
+            paneHost.topAnchor.constraint(equalTo: paneTitle.bottomAnchor, constant: 10),
+            paneHost.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            paneHost.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            paneHost.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
 
         view = root
@@ -227,21 +405,67 @@ final class PreferencesViewController: NSViewController,
     }
 
     func select(_ tab: PreferencesTab) {
-        tabControl?.selectedSegment = tab.rawValue
-        applyTabSelection(tab)
+        applyTabSelection(tab, animated: false)
     }
 
-    @objc private func tabChanged(_ sender: NSSegmentedControl) {
-        let tab = PreferencesTab(rawValue: sender.selectedSegment) ?? .general
-        applyTabSelection(tab)
+    @objc private func navRowTapped(_ sender: SidebarNavRow) {
+        applyTabSelection(sender.tab, animated: true)
     }
 
-    private func applyTabSelection(_ tab: PreferencesTab) {
+    private func applyTabSelection(_ tab: PreferencesTab, animated: Bool) {
+        selectedTab = tab
+        for row in navRows {
+            let selected = row.tab == tab
+            row.isSelectedRow = selected
+            row.setAccessibilityValue(selected)
+        }
+        paneTitleLabel?.stringValue = tab.title
         for (candidate, pane) in panes {
             pane.isHidden = candidate != tab
         }
+        // Gentle cross-fade on the incoming pane; suppressed under Reduce Motion.
+        if animated, !DevTypeAccessibility.reduceMotion, let pane = panes[tab] {
+            pane.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                pane.animator().alphaValue = 1
+            }
+        } else {
+            panes[tab]?.alphaValue = 1
+        }
         if tab == .snippets { stats.refresh() }
         if tab == .advanced { reloadAdvanced() }
+    }
+
+    /// Sidebar footer: one glance answers "is it on?" without opening the menu.
+    private func refreshEngineStatus() {
+        let snapshot = PermissionProbe().snapshot()
+        let display = EngineDisplayStatus.resolve(
+            snapshot: snapshot,
+            isTapRunning: EventTapEngine.shared.isTapRunning,
+            isEnabled: EventTapEngine.shared.isEnabled,
+            isSecureInputActive: EventTapEngine.shared.isSecureInputActive
+        )
+        let text: String
+        let tint: NSColor
+        switch display {
+        case .active:
+            text = loc.s("status.active")
+            tint = DevTypeTheme.statusGreen
+        case .secure:
+            text = loc.s("status.secure")
+            tint = DevTypeTheme.statusBlue
+        case .paused:
+            text = loc.s("status.paused")
+            tint = DevTypeTheme.statusGray
+        case .needsPermissions:
+            text = loc.s("status.needsPermissions")
+            tint = DevTypeTheme.accent
+        case .tapFailed:
+            text = loc.s("status.tapFailed")
+            tint = DevTypeTheme.accent
+        }
+        engineStatusPill?.update(text: text, tint: tint)
     }
 
     /// Re-pulls every value from its source of truth.
@@ -251,6 +475,7 @@ final class PreferencesViewController: NSViewController,
         reloadSnippets()
         reloadHotkeys()
         reloadAdvanced()
+        refreshEngineStatus()
     }
 
     // MARK: Pane construction

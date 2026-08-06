@@ -140,6 +140,9 @@ private final class FillInFormController: NSViewController {
             values[field.id] = field.defaultValue
             stack.addArrangedSubview(makeFieldView(field))
         }
+        // §4: name the form container; each control inside is labelled below.
+        stack.setAccessibilityRole(NSAccessibility.Role.group)
+        stack.setAccessibilityLabel(loc.s("ax.fillin.form"))
         root.addSubview(stack)
 
         // Buttons
@@ -230,6 +233,9 @@ private final class FillInFormController: NSViewController {
             font: DevTypeTheme.font(11, .semibold),
             color: DevTypeTheme.textSecondary
         )
+        // §4: the caption is a sibling view of the control, so it is decoration
+        // for AX purposes — every control below carries `field.name` itself.
+        caption.setAccessibilityElement(false)
         container.addArrangedSubview(caption)
 
         switch field.kind {
@@ -237,6 +243,7 @@ private final class FillInFormController: NSViewController {
             let input = GlassTextField()
             input.stringValue = field.defaultValue
             input.widthAnchor.constraint(equalToConstant: 400).isActive = true
+            input.setAccessibilityLabel(field.name)
             textFields[field.id] = input
             container.addArrangedSubview(input)
         case .area:
@@ -262,6 +269,8 @@ private final class FillInFormController: NSViewController {
             text.backgroundColor = .clear
             text.insertionPointColor = DevTypeTheme.accentBright
             text.textContainerInset = NSSize(width: 6, height: 5)
+            // §4: an unlabelled NSTextView announces only "text entry area".
+            text.setAccessibilityLabel(field.name)
             scroll.documentView = text
             textViews[field.id] = text
 
@@ -282,6 +291,7 @@ private final class FillInFormController: NSViewController {
             if !field.defaultValue.isEmpty, let idx = options.firstIndex(of: field.defaultValue) {
                 popup.selectItem(at: idx)
             }
+            popup.setAccessibilityLabel(field.name)
             popups[field.id] = popup
             container.addArrangedSubview(popup)
         case .part:
@@ -298,6 +308,10 @@ private final class FillInFormController: NSViewController {
                 font: DevTypeTheme.font(12, .medium),
                 color: DevTypeTheme.textPrimary
             )
+            // §4: NSSwitch carries no title of its own; the label beside it is a
+            // separate view that AppKit will not associate automatically.
+            toggle.setAccessibilityLabel(loc.s("fillin.include", field.name))
+            label.setAccessibilityElement(false)
             row.addArrangedSubview(toggle)
             row.addArrangedSubview(label)
             toggles[field.id] = toggle

@@ -68,6 +68,10 @@ enum GroupEditorSheet {
 // MARK: - Icon choice button
 
 /// One selectable SF-symbol cell in the icon picker grid.
+///
+/// §4: this is a one-of-many picker whose entire state was carried by a border
+/// and a tint — image-only, unlabelled, and invisible to VoiceOver. It is now a
+/// `.radioButton` with a spoken symbol name and a selected / not-selected value.
 private final class IconChoiceButton: NSButton {
     let symbolName: String
 
@@ -82,6 +86,15 @@ private final class IconChoiceButton: NSButton {
         layer?.cornerRadius = 8
         layer?.backgroundColor = NSColor.white.withAlphaComponent(0.05).cgColor
         image = DevTypeTheme.tintedSymbol(symbolName, size: 14, weight: .medium, color: DevTypeTheme.textSecondary)
+
+        // `DevTypeAccessibility.symbolDescription` already curates / humanizes
+        // every SF Symbol name the app renders — reuse it rather than inventing
+        // a second table of icon names.
+        let spokenName = DevTypeAccessibility.symbolDescription(symbolName)
+        toolTip = spokenName
+        setAccessibilityRole(NSAccessibility.Role.radioButton)
+        setAccessibilityLabel(spokenName)
+        setAccessibilityValue(LocalizationManager.shared.s("ax.notSelected"))
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: 34),
@@ -103,6 +116,9 @@ private final class IconChoiceButton: NSButton {
             layer?.borderWidth = 0
             image = DevTypeTheme.tintedSymbol(symbolName, size: 14, weight: .medium, color: DevTypeTheme.textSecondary)
         }
+        // §5.2: selection is conveyed by border + tint alone on screen; the AX
+        // value gives it a text equivalent.
+        setAccessibilityValue(LocalizationManager.shared.s(selected ? "ax.selected" : "ax.notSelected"))
     }
 
 }
@@ -110,8 +126,32 @@ private final class IconChoiceButton: NSButton {
 // MARK: - Color swatch button
 
 /// Round color swatch; empty hex = "no color" (accent default).
+///
+/// §4 / §5.2: a swatch whose only content is a fill colour is the textbook case
+/// of "state conveyed by colour alone". Each one now carries a spoken colour
+/// name and a selected / not-selected value.
 private final class ColorSwatchButton: NSButton {
     let colorHex: String
+
+    /// Localization keys for the palette in `DevTypeTheme.groupColorPalette`
+    /// order. Keyed by hex so a palette reorder cannot silently mislabel them.
+    private static let colorNameKeys: [String: String] = [
+        "#DC2626": "ax.color.red",
+        "#F97316": "ax.color.orange",
+        "#FACC15": "ax.color.yellow",
+        "#30D159": "ax.color.green",
+        "#0A84FF": "ax.color.blue",
+        "#BF5AF2": "ax.color.purple",
+        "#FF375F": "ax.color.pink",
+        "#8E8E93": "ax.color.gray"
+    ]
+
+    static func spokenName(forHex hex: String) -> String {
+        let loc = LocalizationManager.shared
+        if let key = colorNameKeys[hex.uppercased()] { return loc.s(key) }
+        // Unknown / empty hex is the "no colour" swatch.
+        return hex.isEmpty ? loc.s("ax.color.none") : hex
+    }
 
     init(colorHex: String, target: AnyObject?, action: Selector?) {
         self.colorHex = colorHex
@@ -130,6 +170,13 @@ private final class ColorSwatchButton: NSButton {
             layer?.borderWidth = 1.5
             layer?.borderColor = DevTypeTheme.textTertiary.cgColor
         }
+
+        let name = Self.spokenName(forHex: colorHex)
+        toolTip = name
+        setAccessibilityRole(NSAccessibility.Role.radioButton)
+        setAccessibilityLabel(name)
+        setAccessibilityValue(LocalizationManager.shared.s("ax.notSelected"))
+
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: 20),
             heightAnchor.constraint(equalToConstant: 20)
@@ -149,6 +196,7 @@ private final class ColorSwatchButton: NSButton {
             layer?.borderWidth = 1.5
             layer?.borderColor = DevTypeTheme.textTertiary.cgColor
         }
+        setAccessibilityValue(LocalizationManager.shared.s(selected ? "ax.selected" : "ax.notSelected"))
     }
 }
 
@@ -232,6 +280,8 @@ private final class GroupEditorController: NSViewController {
             ]
         )
         nameField.stringValue = existing?.name ?? ""
+        // §4: the caption is a separate label, so VoiceOver cannot infer it.
+        nameField.setAccessibilityLabel(loc.s("ax.groupeditor.name"))
         root.addSubview(nameCaption)
         root.addSubview(nameField)
 
@@ -252,6 +302,9 @@ private final class GroupEditorController: NSViewController {
         iconGrid.alignment = .leading
         iconGrid.spacing = 8
         iconGrid.translatesAutoresizingMaskIntoConstraints = false
+        // §4: name the radio group so its 14 members have a spoken container.
+        iconGrid.setAccessibilityRole(NSAccessibility.Role.radioGroup)
+        iconGrid.setAccessibilityLabel(loc.s("ax.groupeditor.icon"))
         root.addSubview(iconGrid)
 
         // Color swatches ("none" + palette)
@@ -264,12 +317,16 @@ private final class GroupEditorController: NSViewController {
         swatchRow.orientation = .horizontal
         swatchRow.spacing = 10
         swatchRow.translatesAutoresizingMaskIntoConstraints = false
+        swatchRow.setAccessibilityRole(NSAccessibility.Role.radioGroup)
+        swatchRow.setAccessibilityLabel(loc.s("ax.groupeditor.color"))
         root.addSubview(swatchRow)
 
         // Enabled toggle
         enabledSwitch.state = (existing?.enabled ?? true) ? .on : .off
         enabledSwitch.controlSize = .small
         enabledSwitch.translatesAutoresizingMaskIntoConstraints = false
+        // §4: NSSwitch has no title of its own; the adjacent label is a separate view.
+        enabledSwitch.setAccessibilityLabel(loc.s("ax.groupeditor.enabled"))
         let enabledLabel = DevTypeTheme.makeLabel(
             loc.s("groupeditor.enabled"),
             font: DevTypeTheme.font(11.5, .medium),
@@ -287,6 +344,7 @@ private final class GroupEditorController: NSViewController {
         errorLabel.translatesAutoresizingMaskIntoConstraints = false
         errorLabel.isHidden = true
         errorLabel.maximumNumberOfLines = 2
+        errorLabel.setAccessibilityRole(NSAccessibility.Role.staticText)
         root.addSubview(errorLabel)
 
         // Buttons
@@ -410,6 +468,8 @@ private final class GroupEditorController: NSViewController {
     private func showError(_ message: String) {
         errorLabel.stringValue = message
         errorLabel.isHidden = false
+        // §4: a visually-only error is invisible to VoiceOver.
+        errorLabel.setAccessibilityValue(message)
         view.layoutSubtreeIfNeeded()
         let animation = CAKeyframeAnimation(keyPath: "transform.translation.x")
         animation.values = [0, -6, 5, -3, 2, 0]
