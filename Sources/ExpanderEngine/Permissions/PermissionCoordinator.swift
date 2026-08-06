@@ -92,14 +92,28 @@ public final class PermissionCoordinator {
     private var onTapStartFailed: (() -> Void)?
     private var onIdentityResolved: ((String?) -> Void)?
     private var sawAXGrantedWhileUntrusted = false
-    private var lastInjectOutcome: InjectOutcome?
-    private var lastInjectRefuseProvenance: InjectRefuseProvenance?
+
+    /// §1.11: `lastInjectOutcome` / `lastInjectRefuseProvenance` / `lastEmittedStatus` are written
+    /// from `injectQueue`, `processingQueue` **and** main while `_cachedSnapshot` right beside them
+    /// was carefully guarded. `InjectOutcome.refused(String)` carries a `String`, so a torn write
+    /// is an over-release risk, not just a stale read. All three now live behind `outcomeLock`.
+    ///
+    /// §2.4: `os_unfair_lock` (not `NSLock`) so the userInteractive tap callback reading
+    /// `cachedSnapshot` cannot be blocked behind a utility-QoS writer without priority donation.
+    private let outcomeLock = UnfairLock()
+    private var _lastInjectOutcome: InjectOutcome?
+    private var _lastInjectRefuseProvenance: InjectRefuseProvenance?
+    private var _lastEmittedStatus: Status?
+
     private var axWasFalse = true
-    private var lastEmittedStatus: Status?
 
     /// Cached snapshot for the event-tap hot path (updated on observer ticks / refresh — never probe inside the CG callback).
-    private let snapshotLock = NSLock()
+    private let snapshotLock = UnfairLock()
     private var _cachedSnapshot: PermissionSnapshot?
+
+    /// §3.2: bounded per-attempt inject telemetry. `lastInjectOutcome` is a single slot; this is
+    /// the history that answers "does expansion work in Slack?".
+    public let injectTelemetry = InjectTelemetryLog.shared
 
     public init() {}
 
@@ -122,12 +136,17 @@ public final class PermissionCoordinator {
     }
 
     public var lastRecordedInjectOutcome: InjectOutcome? {
-        lastInjectOutcome
+        outcomeLock.withLock { _lastInjectOutcome }
     }
 
     /// Gate / frontmost / timestamp captured at the most recent refuse (not cleared on later success).
     public var lastRecordedInjectRefuseProvenance: InjectRefuseProvenance? {
-        lastInjectRefuseProvenance
+        outcomeLock.withLock { _lastInjectRefuseProvenance }
+    }
+
+    private var lastEmittedStatus: Status? {
+        get { outcomeLock.withLock { _lastEmittedStatus } }
+        set { outcomeLock.withLock { _lastEmittedStatus = newValue } }
     }
 
     /// True when UI should prominently offer Relaunch (Settings flip may not apply until restart).
@@ -139,7 +158,7 @@ public final class PermissionCoordinator {
     /// `postedUnverified` is excluded: Cmd+V was sent and AX cannot confirm delivery (normal for
     /// Chrome/Electron/apps that hide AX values). It is informational only, not an urgent failure.
     public var hasUrgentInjectFailure: Bool {
-        switch lastInjectOutcome {
+        switch lastRecordedInjectOutcome {
         case .failedSilent:
             return true
         case .succeeded, .refused, .postedUnverified, .degradedAXOnly, .none:
@@ -239,25 +258,70 @@ public final class PermissionCoordinator {
         _ outcome: InjectOutcome,
         refuseContext: InjectRefuseProvenance? = nil
     ) {
-        lastInjectOutcome = outcome
+        recordInjectOutcome(outcome, refuseContext: refuseContext, path: nil)
+    }
+
+    /// §3.2: same as `recordInjectOutcome(_:refuseContext:)` plus the inject path taken
+    /// ("ax", "axPlusHID", "clipboard", "hid", …) for the telemetry ring. Added as an overload
+    /// rather than a defaulted parameter so existing call sites are untouched.
+    public func recordInjectOutcome(
+        _ outcome: InjectOutcome,
+        refuseContext: InjectRefuseProvenance?,
+        path: String?
+    ) {
+        var reason: String? = nil
+        var provenance: InjectRefuseProvenance? = nil
+
         switch outcome {
         case .succeeded:
             DevTypeLog.inject.info("[Inject] outcome=succeeded")
         case .postedUnverified:
             DevTypeLog.inject.notice("[Inject] outcome=postedUnverified")
-        case .refused(let reason):
-            if let refuseContext {
-                lastInjectRefuseProvenance = refuseContext
-            } else {
-                lastInjectRefuseProvenance = InjectRefuseProvenance.capture(reason: reason)
-            }
-            DevTypeLog.inject.notice("[Inject] outcome=refused reason=\(reason, privacy: .public)")
+        case .refused(let refuseReason):
+            reason = refuseReason
+            provenance = refuseContext ?? InjectRefuseProvenance.capture(reason: refuseReason)
+            DevTypeLog.inject.notice("[Inject] outcome=refused reason=\(refuseReason, privacy: .public)")
         case .degradedAXOnly:
             DevTypeLog.inject.info("[Inject] outcome=degradedAXOnly (Post Events missing)")
         case .failedSilent:
             DevTypeLog.inject.error("[Inject] outcome=failedSilent")
         }
+
+        outcomeLock.lock()
+        _lastInjectOutcome = outcome
+        if let provenance {
+            _lastInjectRefuseProvenance = provenance
+        }
+        outcomeLock.unlock()
+
+        // §3.2: prefer the bundle captured at refuse time; a later frontmost read can race the
+        // app switch that caused the refuse in the first place.
+        // §2.3: read the engine's cached frontmost bundle ID rather than touching NSWorkspace —
+        // this can be called from `injectQueue` / `processingQueue`, not just main.
+        var bundleID: String? = EventTapEngine.shared.cachedFrontmostBundleID
+        if let captured = provenance?.frontmostBundleID {
+            bundleID = captured
+        } else if let captured = refuseContext?.frontmostBundleID {
+            bundleID = captured
+        }
+        injectTelemetry.record(
+            outcome: outcome,
+            bundleID: bundleID,
+            path: path,
+            reason: reason
+        )
+
         emitStatus(snapshot: probe.snapshot())
+    }
+
+    /// §3.2 / §2.10: diagnostic block for `DiagnosticReport` — per-app delivery ratios, refuse
+    /// reason histogram, and the event-tap disable counters (`tapDisabledByTimeout` means our
+    /// callback was too slow and is the actionable one).
+    public func injectTelemetrySummaryLines() -> [String] {
+        var lines = injectTelemetry.summaryLines()
+        lines.append("")
+        lines.append(EventTapEngine.shared.tapDisableCounters.summaryLine)
+        return lines
     }
 
     public func markAXPossiblyNeedsRelaunch() {
@@ -330,7 +394,7 @@ public final class PermissionCoordinator {
             snapshot: snapshot,
             tapRunning: EventTapEngine.shared.isTapRunning,
             recommendsRelaunchForAX: recommendsRelaunch,
-            lastInjectOutcome: lastInjectOutcome
+            lastInjectOutcome: lastRecordedInjectOutcome
         )
         if status != lastEmittedStatus {
             DevTypeLog.permission.info(

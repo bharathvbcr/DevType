@@ -30,7 +30,17 @@ public enum DiagnosticReport {
         public var expandGateAtLastRefuse: PermissionCoordinator.InjectRefuseProvenance?
         public var siblingPaths: [String]
         public var macOSVersion: String
+        /// Read live from `CFBundleShortVersionString` / `CFBundleVersion`, which
+        /// `Scripts/package-app.sh` now stamps from `git describe` (§7.6).
         public var appVersion: String?
+        /// §2.10: `EventTapEngine.TapDisableCounters.summaryLine` — `byTimeout` means our
+        /// callback blew the system budget and is the most likely silent field failure.
+        public var tapDisableSummary: String?
+        /// §3.2: `PermissionCoordinator.injectTelemetrySummaryLines()` — per-bundle inject
+        /// success ratios plus the refuse-reason histogram.
+        public var injectTelemetryLines: [String]
+        /// §3.9: triggers longer than the match buffer, which can never fire.
+        public var overlongTriggerLines: [String]
 
         public init(
             generatedAt: Date = Date(),
@@ -53,7 +63,10 @@ public enum DiagnosticReport {
             expandGateAtLastRefuse: PermissionCoordinator.InjectRefuseProvenance? = nil,
             siblingPaths: [String],
             macOSVersion: String,
-            appVersion: String?
+            appVersion: String?,
+            tapDisableSummary: String? = nil,
+            injectTelemetryLines: [String] = [],
+            overlongTriggerLines: [String] = []
         ) {
             self.generatedAt = generatedAt
             self.bundleID = bundleID
@@ -76,6 +89,9 @@ public enum DiagnosticReport {
             self.siblingPaths = siblingPaths
             self.macOSVersion = macOSVersion
             self.appVersion = appVersion
+            self.tapDisableSummary = tapDisableSummary
+            self.injectTelemetryLines = injectTelemetryLines
+            self.overlongTriggerLines = overlongTriggerLines
         }
     }
 
@@ -170,7 +186,13 @@ public enum DiagnosticReport {
             expandGateAtLastRefuse: PermissionCoordinator.shared.lastRecordedInjectRefuseProvenance,
             siblingPaths: identity.siblingPaths(),
             macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            appVersion: appVersion
+            appVersion: appVersion,
+            // §2.10 / §3.2 / §3.9: three diagnostics the engine already maintains and
+            // that nothing used to print. Every one of them answers a question a bug
+            // report cannot otherwise answer.
+            tapDisableSummary: EventTapEngine.shared.tapDisableCounters.summaryLine,
+            injectTelemetryLines: PermissionCoordinator.shared.injectTelemetrySummaryLines(),
+            overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics()
         )
     }
 
@@ -231,6 +253,32 @@ public enum DiagnosticReport {
             "-- Sibling DevType paths --",
             context.siblingPaths.isEmpty ? "(none)" : context.siblingPaths.joined(separator: "\n"),
         ])
+
+        // §2.10: tap-disable-by-timeout is the most likely silent field failure and used
+        // to produce one indistinguishable `notice` line with no counter.
+        lines.append("")
+        lines.append("-- Event tap health --")
+        lines.append(context.tapDisableSummary ?? "(not captured)")
+
+        // §3.2: five outcomes and a dozen refuse reasons used to collapse into one
+        // overwritten variable.
+        lines.append("")
+        lines.append("-- Inject telemetry --")
+        if context.injectTelemetryLines.isEmpty {
+            lines.append("(none)")
+        } else {
+            lines.append(contentsOf: context.injectTelemetryLines)
+        }
+
+        // §3.9: triggers past the 64-character match buffer can never fire and nothing said so.
+        lines.append("")
+        lines.append("-- Overlong triggers --")
+        if context.overlongTriggerLines.isEmpty {
+            lines.append("(none)")
+        } else {
+            lines.append(contentsOf: context.overlongTriggerLines)
+        }
+
         return lines.joined(separator: "\n")
     }
 

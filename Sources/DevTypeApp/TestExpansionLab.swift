@@ -6,6 +6,9 @@ import ExpanderEngine
 enum TestExpansionLab {
     /// Presents a sheet (or panel) with a lab field, injects `:test` (or fallback), and reports the outcome.
     static func run(from hostWindow: NSWindow?) {
+        // §6.1: this file had zero `loc.s` calls — 308 lines of English shown to
+        // a user who may not have got the app working yet.
+        let loc = LocalizationManager.shared
         let snippets = SnippetStore.shared.loadSnippets()
         let snippet = snippets.first { $0.triggerKeyword == ":test" }
             ?? SnippetModel(title: "Test", triggerKeyword: ":test", replacementText: "DevType OK")
@@ -23,26 +26,29 @@ enum TestExpansionLab {
         )
         let planLabel: String
         switch plan {
-        case .axPlusHID: planLabel = "AX+HID"
-        case .axOnly: planLabel = "AX-only (degraded)"
-        case .refuse(let reason): planLabel = "refused — \(reason)"
+        case .axPlusHID: planLabel = loc.s("lab.plan.axhid")
+        case .axOnly: planLabel = loc.s("lab.plan.axonly")
+        case .refuse(let reason): planLabel = loc.s("lab.plan.refused", reason)
         }
 
         if case .refuse(let reason) = plan {
+            let yes = loc.s("lab.yes")
+            let no = loc.s("lab.no")
             presentResult(
                 hostWindow: hostWindow,
-                title: "Test Expansion — Refused",
-                body: """
-                Inject was not attempted — planner refused.
-
-                Trigger: \(snippet.triggerKeyword)
-                Plan: \(planLabel)
-                Reason: \(reason)
-
-                Listen=\(snapshot.canListenTap ? "OK" : "no") AX=\(snapshot.canUseAX ? "OK" : "no") Post=\(snapshot.canPostEvents ? "OK" : "no") Tap=\(EventTapEngine.shared.isTapRunning ? "running" : "stopped")
-
-                Grant Accessibility (and Post Events if needed), then retry. Live typing in Notes is separate from this lab.
-                """,
+                title: loc.s("lab.refused.title"),
+                body: loc.s(
+                    "lab.refused.body",
+                    snippet.triggerKeyword,
+                    planLabel,
+                    reason,
+                    snapshot.canListenTap ? yes : no,
+                    snapshot.canUseAX ? yes : no,
+                    snapshot.canPostEvents ? yes : no,
+                    EventTapEngine.shared.isTapRunning
+                        ? loc.s("lab.tap.running")
+                        : loc.s("lab.tap.stopped")
+                ),
                 style: .warning
             )
             DevTypeLog.inject.notice(
@@ -67,15 +73,11 @@ enum TestExpansionLab {
         body: String,
         style: NSAlert.Style
     ) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = body
-        alert.alertStyle = style
-        alert.addButton(withTitle: "OK")
-        if let hostWindow {
-            alert.beginSheetModal(for: hostWindow, completionHandler: nil)
+        // §4.8: routed through the shared helper.
+        if style == .informational {
+            DevTypeAlert.info(title: title, message: body, window: hostWindow)
         } else {
-            _ = alert.runModal()
+            DevTypeAlert.warn(title: title, message: body, window: hostWindow)
         }
     }
 }
@@ -109,6 +111,8 @@ private final class LabSession: NSObject {
         super.init()
     }
 
+    private let loc = LocalizationManager.shared
+
     func present() {
         retainSelf = self
 
@@ -121,7 +125,7 @@ private final class LabSession: NSObject {
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.isReleasedWhenClosed = false
-        DevTypeTheme.styleWindow(panel, title: "DevType Inject Lab")
+        DevTypeTheme.styleWindow(panel, title: loc.s("window.lab"))
         self.panel = panel
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 320))
@@ -131,9 +135,7 @@ private final class LabSession: NSObject {
         let badge = IconBadgeView(symbol: "bolt.fill", tint: DevTypeTheme.accent, size: 30, pointSize: 13)
         badge.translatesAutoresizingMaskIntoConstraints = false
 
-        let caption = NSTextField(wrappingLabelWithString: """
-        Controlled NSTextView lab — inject runs into this field (not Notes). Plan: \(planLabel)
-        """)
+        let caption = NSTextField(wrappingLabelWithString: loc.s("lab.caption", planLabel))
         caption.font = DevTypeTheme.font(11)
         caption.textColor = DevTypeTheme.textSecondary
         caption.translatesAutoresizingMaskIntoConstraints = false
@@ -183,14 +185,18 @@ private final class LabSession: NSObject {
             scroll.bottomAnchor.constraint(equalTo: editorBlock.bottomAnchor, constant: -4)
         ])
 
-        let statusLabel = NSTextField(labelWithString: "Focusing lab field…")
+        let statusLabel = NSTextField(labelWithString: loc.s("lab.focusing"))
         statusLabel.font = DevTypeTheme.font(11, .medium)
         statusLabel.textColor = DevTypeTheme.accentBright
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         self.statusLabel = statusLabel
 
+        // §5.1: the lab's text view is the whole point of the panel — name it.
+        textView.setAccessibilityLabel(loc.s("lab.caption", planLabel))
+        statusLabel.setAccessibilityLabel(loc.s("window.lab"))
+
         let closeButton = CapsuleButton(
-            title: "Close",
+            title: loc.s("common.close"),
             style: .secondary,
             target: self,
             action: #selector(close)
@@ -240,7 +246,7 @@ private final class LabSession: NSObject {
             panel.makeKeyAndOrderFront(nil)
             panel.makeFirstResponder(textView)
             textView.window?.makeFirstResponder(textView)
-            statusLabel.stringValue = "Injecting into lab field…"
+            statusLabel.stringValue = self.loc.s("lab.injecting")
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
                 guard let self else { return }
@@ -267,12 +273,12 @@ private final class LabSession: NSObject {
         let outcome = PermissionCoordinator.shared.lastRecordedInjectOutcome
         let outcomeLabel: String
         switch outcome {
-        case .succeeded: outcomeLabel = "succeeded"
-        case .postedUnverified: outcomeLabel = "posted/unverified"
-        case .degradedAXOnly: outcomeLabel = "AX-only (degraded)"
-        case .failedSilent: outcomeLabel = "failed (silent HID)"
-        case .refused(let reason): outcomeLabel = "refused — \(reason)"
-        case .none: outcomeLabel = "unknown"
+        case .succeeded: outcomeLabel = loc.s("lab.outcome.succeeded")
+        case .postedUnverified: outcomeLabel = loc.s("lab.outcome.posted")
+        case .degradedAXOnly: outcomeLabel = loc.s("lab.outcome.degraded")
+        case .failedSilent: outcomeLabel = loc.s("lab.outcome.failed")
+        case .refused(let reason): outcomeLabel = loc.s("lab.outcome.refused", reason)
+        case .none: outcomeLabel = loc.s("lab.outcome.unknown")
         }
 
         let matched = actual == expected
@@ -280,14 +286,13 @@ private final class LabSession: NSObject {
             || (!expected.isEmpty && actual.contains(expected))
 
         if matched {
-            statusLabel.stringValue = "✓ Lab inject \(outcomeLabel) — text delivered to NSTextView"
+            statusLabel.stringValue = loc.s("lab.ok", outcomeLabel)
             statusLabel.textColor = DevTypeTheme.greenStatus
             DevTypeLog.inject.info(
                 "[Inject] Test Expansion lab OK plan=\(self.planLabel, privacy: .public) outcome=\(outcomeLabel, privacy: .public)"
             )
         } else {
-            statusLabel.stringValue =
-                "✗ Lab inject \(outcomeLabel) — field did not receive expected text (AX focus may have missed the lab)"
+            statusLabel.stringValue = loc.s("lab.mismatch", outcomeLabel)
             statusLabel.textColor = DevTypeTheme.redBright
             DevTypeLog.inject.error(
                 "[Inject] Test Expansion lab MISMATCH plan=\(self.planLabel, privacy: .public) outcome=\(outcomeLabel, privacy: .public) actualLen=\(actual.count, privacy: .public)"

@@ -146,23 +146,148 @@ public enum EngineDisplayStatus: Equatable {
 public final class EventTapEngine {
     public static let shared = EventTapEngine()
 
-    private var eventTapPort: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    // MARK: - §1.1 tap thread
+
+    /// §1.1 kill switch. When `true` (default) the tap source is attached to a dedicated
+    /// `userInteractive` thread's run loop instead of the main run loop, so a slow AX probe or a
+    /// disk write on the callback path can no longer stall the whole system's keyboard.
+    ///
+    /// Flip it back with `defaults write com.devtype.app DevTypeUseDedicatedTapThread -bool NO`
+    /// (read once at first use) or by assigning before `start()`.
+    public static let useDedicatedTapThreadDefaultsKey = "DevTypeUseDedicatedTapThread"
+
+    public static var useDedicatedTapThread: Bool = {
+        let key = "DevTypeUseDedicatedTapThread"
+        if UserDefaults.standard.object(forKey: key) != nil {
+            return UserDefaults.standard.bool(forKey: key)
+        }
+        return true
+    }()
+
+    private let tapThread = TapRunLoopThread()
+
+    /// §1.11: `eventTapPort` / `runLoopSource` were mutated by `start`/`stop` and read by
+    /// `reEnableTap()` (from the callback) and `checkTapHealth()` (main timer) with no lock at
+    /// all, in a class where everything else is locked. Once §1.1 moves the callback off main
+    /// that is a live data race, so they now sit behind their own lock.
+    private let tapLock = UnfairLock()
+    private var _eventTapPort: CFMachPort?
+    private var _runLoopSource: CFRunLoopSource?
+    private var _tapRunLoop: CFRunLoop?
+
     private let processingQueue = DispatchQueue(label: "com.devtype.eventprocessing", qos: .userInteractive)
 
-    private let lock = NSLock()
-    private var ringBuffer: [Character] = []
+    // MARK: - Buffer / flags
+
+    /// §2.4: `os_unfair_lock` (via `UnfairLock`) rather than `NSLock` — `NSLock` does not donate
+    /// priority, so the userInteractive tap callback could block behind a utility-QoS file-watch
+    /// thread holding this lock in the `snippets` setter.
+    private let lock = UnfairLock()
+    /// §2.3: a real fixed-capacity ring. The old "ring buffer" was an `Array` plus
+    /// `removeFirst(...)` — an O(n) memmove on every keystroke at steady state.
+    private var ringBuffer = CharacterRingBuffer(capacity: EventTapEngine.maxBufferCapacity)
     private var layoutBuffer = LayoutBuffer()
-    private let maxBufferCapacity = 64
+    /// §3.9: longest trigger the buffer can hold. Anything longer can never fire —
+    /// see `overlongTriggerDiagnostics()`.
+    public static let maxBufferCapacity = 64
+    /// UTF-16 units fetched per keyDown. Stack scratch, not a heap allocation (§2.3).
+    private static let unicodeScratchCapacity = 128
     /// UTF-16 length of the most recent keyDown that appended to the buffer (for AX erase math).
     private var lastEventUTF16Count: Int = 1
 
-    private var _snippets: [SnippetModel] = []
     private var _isEnabled: Bool = true
     private var _isTapRunning: Bool = false
     private var _isExpanding: Bool = false
     private var _matchingSuspended: Bool = false
     private var _isSecureInputActive: Bool = false
+
+    // MARK: - §2.1 cached matcher
+
+    /// §2.1 / §2.4: read-mostly `(snippets, matcher)` state, swapped as one immutable reference.
+    /// The callback copies a single class pointer out from under this lock and never rebuilds
+    /// anything — the matcher used to be reconstructed from scratch on *every keystroke*.
+    private let matchStateLock = UnfairLock()
+    private var _matchSnapshot: SnippetMatchSnapshot = .empty
+    private var _snapshotRevision: UInt64 = 0
+
+    // MARK: - §2.3 cached frontmost context
+
+    /// Everything the callback needs that would otherwise cost AppKit / Carbon IPC per keystroke.
+    /// With §1.1 moving the callback off the main thread these caches are **mandatory**
+    /// (`NSWorkspace` is AppKit), not merely an optimization.
+    public struct FrontmostContext: Equatable {
+        public var bundleID: String?
+        public var processID: pid_t?
+        /// `AppMuteStore` verdict for `bundleID`; refreshed on app switch and mute-list change.
+        public var isMuted: Bool
+        /// Dedicated terminal app — a pure bundle-ID set lookup, no AX and no NSWorkspace.
+        public var isTerminal: Bool
+
+        public init(
+            bundleID: String? = nil,
+            processID: pid_t? = nil,
+            isMuted: Bool = false,
+            isTerminal: Bool = false
+        ) {
+            self.bundleID = bundleID
+            self.processID = processID
+            self.isMuted = isMuted
+            self.isTerminal = isTerminal
+        }
+    }
+
+    private let contextLock = UnfairLock()
+    private var _frontmostContext = FrontmostContext()
+    /// Cached `isTwoSetKoreanSourceID(currentInputSourceID())`. The tap used to call
+    /// `TISCopyCurrentKeyboardInputSource` + a CFString bridge per key just to test a constant.
+    private var _allowPhysicalFallback = false
+    private var muteObserverInstalled = false
+
+    // MARK: - §2.10 tap disable telemetry
+
+    /// §2.10: per-reason counters for `tapDisabledBy…`. `byTimeout` means *our callback was too
+    /// slow* and is the actionable one; `byUserInput` is the user/system disabling the tap.
+    public struct TapDisableCounters: Equatable {
+        public var byTimeout: Int = 0
+        public var byUserInput: Int = 0
+        public var reEnables: Int = 0
+        public var escalatedReinstalls: Int = 0
+        public var lastTimeoutAt: Date?
+        public var lastUserInputAt: Date?
+
+        public init() {}
+
+        public var summaryLine: String {
+            "Tap disables: byTimeout=\(byTimeout) byUserInput=\(byUserInput)"
+                + " reEnables=\(reEnables) reinstalls=\(escalatedReinstalls)"
+        }
+    }
+
+    public enum TapDisableReason: Equatable {
+        /// `kCGEventTapDisabledByTimeout` — the callback exceeded the system budget.
+        case timeout
+        /// `kCGEventTapDisabledByUserInput`.
+        case userInput
+        case unspecified
+    }
+
+    /// Timeout disables inside `tapDisableEscalationWindow` before a plain re-enable is treated
+    /// as insufficient and a full tap reinstall is attempted.
+    public static let tapDisableEscalationThreshold = 3
+    public static let tapDisableEscalationWindow: TimeInterval = 10.0
+    public static let tapReinstallInitialBackoff: TimeInterval = 5.0
+    public static let tapReinstallMaxBackoff: TimeInterval = 60.0
+
+    private let counterLock = UnfairLock()
+    private var _tapDisableCounters = TapDisableCounters()
+    private var _recentTimeoutStamps: [Date] = []
+    private var _nextReinstallAllowedAt: Date?
+    private var _reinstallBackoff: TimeInterval = EventTapEngine.tapReinstallInitialBackoff
+
+    /// §2.10: public so `DiagnosticReport` can print them.
+    public var tapDisableCounters: TapDisableCounters {
+        counterLock.withLock { _tapDisableCounters }
+    }
 
     /// Event-time quiescence clock (boot nanos via CGEvent.timestamp).
     public let inputClock = InputClock()
@@ -192,17 +317,56 @@ public final class EventTapEngine {
         .leftMouseDown, .rightMouseDown, .otherMouseDown
     ]
 
+    /// §2.1: the setter is the **only** place the matcher is built. The tap callback used to
+    /// reconstruct `AbbreviationMatcher(snippets:)` on every keystroke — at 1000 snippets that is
+    /// ~2000 dictionary inserts + ~1000 string allocations per typed character, inside a
+    /// CGEventTap callback macOS disables when it runs long.
     public var snippets: [SnippetModel] {
         get {
-            lock.lock()
-            defer { lock.unlock() }
-            return _snippets
+            matchStateLock.lock()
+            defer { matchStateLock.unlock() }
+            return _matchSnapshot.snippets
         }
         set {
-            lock.lock()
-            _snippets = newValue
-            lock.unlock()
+            matchStateLock.lock()
+            let revision = _snapshotRevision &+ 1
+            _snapshotRevision = revision
+            matchStateLock.unlock()
+
+            // Build outside the lock: a rebuild can take milliseconds at large libraries and the
+            // tap callback reads this lock on the keystroke path.
+            let snapshot = SnippetMatchSnapshot(snippets: newValue, revision: revision)
+
+            matchStateLock.lock()
+            // Last writer wins; a slower build must never clobber a newer one.
+            if snapshot.revision >= _matchSnapshot.revision {
+                _matchSnapshot = snapshot
+            }
+            matchStateLock.unlock()
+
+            logOverlongTriggers(in: snapshot)
         }
+    }
+
+    /// §2.1: current immutable `(snippets, matcher)` pair. Cheap — one reference copy.
+    public var matchSnapshot: SnippetMatchSnapshot {
+        matchStateLock.lock()
+        defer { matchStateLock.unlock() }
+        return _matchSnapshot
+    }
+
+    /// §2.3: last known frontmost app context (bundle ID, PID, mute + terminal verdicts).
+    /// Updated from the `didActivateApplication` observer, never read from AppKit on the tap thread.
+    public var frontmostContext: FrontmostContext {
+        contextLock.lock()
+        defer { contextLock.unlock() }
+        return _frontmostContext
+    }
+
+    public var cachedFrontmostBundleID: String? {
+        contextLock.lock()
+        defer { contextLock.unlock() }
+        return _frontmostContext.bundleID
     }
 
     /// User pause flag. When false, matching is skipped but the tap may still be installed.
@@ -269,7 +433,7 @@ public final class EventTapEngine {
             let changed = _isSecureInputActive != newValue
             _isSecureInputActive = newValue
             if newValue && changed {
-                ringBuffer.removeAll(keepingCapacity: true)
+                ringBuffer.removeAll()
                 layoutBuffer.clear()
                 lastEventUTF16Count = 1
             }
@@ -324,12 +488,29 @@ public final class EventTapEngine {
         didSwallow
     }
 
-    private let tapCallback: CGEventTapCallBack = { proxy, type, event, refcon in
+    private let tapCallback: CGEventTapCallBack = { _, type, event, refcon in
         guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
         let engine = Unmanaged<EventTapEngine>.fromOpaque(refcon).takeUnretainedValue()
+        // §1.1: this now runs on `TapRunLoopThread`, which (unlike the main run loop) does not
+        // wrap each source callout in an autorelease pool of its own.
+        return autoreleasepool { () -> Unmanaged<CGEvent>? in
+            engine.handleTapEvent(type: type, event: event)
+        }
+    }
 
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            engine.reEnableTap()
+    /// The whole tap hot path. Extracted from the C callback so it can use `autoreleasepool`,
+    /// early `return`s and instance state directly.
+    ///
+    /// Everything here must be safe off the main thread (§1.1): no AppKit, no synchronous AX IPC,
+    /// no disk. AppKit-derived facts come from the caches refreshed by the app-switch /
+    /// input-source observers (§2.3).
+    private func handleTapEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout {
+            handleTapDisabled(reason: .timeout)
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .tapDisabledByUserInput {
+            handleTapDisabled(reason: .userInput)
             return Unmanaged.passUnretained(event)
         }
 
@@ -337,18 +518,18 @@ public final class EventTapEngine {
         if !isSynthetic {
             let eventTime = InputClock.seconds(sinceBootNanos: event.timestamp)
             if EventTapEngine.mouseDownTypes.contains(type) || type == .keyDown {
-                engine.inputClock.mark(at: eventTime)
+                inputClock.mark(at: eventTime)
             }
         }
 
         // Mouse clicks move the caret — buffer is no longer valid.
         if EventTapEngine.mouseDownTypes.contains(type) {
-            engine.resetBuffer()
+            resetBuffer()
             return Unmanaged.passUnretained(event)
         }
 
         if type == .flagsChanged {
-            engine.handleFlagsChanged(event)
+            handleFlagsChanged(event)
             return Unmanaged.passUnretained(event)
         }
 
@@ -356,13 +537,21 @@ public final class EventTapEngine {
             return Unmanaged.passUnretained(event)
         }
 
+        // §2.4: one lock acquisition for all four gate flags instead of four.
+        lock.lock()
+        let expanding = _isExpanding
+        let enabled = _isEnabled
+        let secureFlag = _isSecureInputActive
+        let suspended = _matchingSuspended
+        lock.unlock()
+
         // Pass through while inject+restore owns the critical section.
         // Must NOT swallow synthetic HID (backspace / ⌘V / arrows) we post ourselves.
-        if engine.isExpanding || isSynthetic {
+        if expanding || isSynthetic {
             return Unmanaged.passUnretained(event)
         }
 
-        guard engine.isEnabled && !engine.isSecureInputActive && !engine.matchingSuspended else {
+        guard enabled && !secureFlag && !suspended else {
             return Unmanaged.passUnretained(event)
         }
 
@@ -374,131 +563,195 @@ public final class EventTapEngine {
         }
 
         if EventTapEngine.shouldResetBuffer(flags: flags, keyCode: keyCode) {
-            engine.resetBuffer()
+            resetBuffer()
+            // §3.1: escape / arrows / chorded keys mean the caret probably moved, so the recorded
+            // expansion no longer describes the text sitting in front of the caret. Undoing after
+            // that would erase whatever happens to be there now — drop the record instead.
+            TextInjectionPipeline.shared.clearLastExpansion()
             return Unmanaged.passUnretained(event)
         }
 
+        // §2.3: stack scratch instead of `[UniChar](repeating: 0, count: 128)` — that was a
+        // 256-byte heap allocation plus a zero-fill on every key event. The `String` is only
+        // built when the key actually produced characters.
         var length = 0
-        var chars = [UniChar](repeating: 0, count: 128)
-        event.keyboardGetUnicodeString(maxStringLength: 128, actualStringLength: &length, unicodeString: &chars)
+        var unicodeStr = ""
+        withUnsafeTemporaryAllocation(
+            of: UniChar.self,
+            capacity: EventTapEngine.unicodeScratchCapacity
+        ) { scratch in
+            guard let base = scratch.baseAddress else { return }
+            var actual = 0
+            event.keyboardGetUnicodeString(
+                maxStringLength: EventTapEngine.unicodeScratchCapacity,
+                actualStringLength: &actual,
+                unicodeString: base
+            )
+            length = actual
+            if actual > 0 {
+                unicodeStr = String(utf16CodeUnits: base, count: actual)
+            }
+        }
 
-        let unicodeStr = String(utf16CodeUnits: chars, count: length)
         let shift = flags.contains(.maskShift)
         let physicalChar = USKeyboardLayout.character(forKeyCode: Int(keyCode), shift: shift)
             ?? unicodeStr.first
         let keyAction = KeyClassifier.action(forKeyCode: Int(keyCode))
 
-        engine.lock.lock()
+        // §3.1: undo-expansion. A bare backspace within `InjectTiming.undoExpansionWindow` of a
+        // delivered expansion reverts it — erase the injected text, put the trigger back. This is
+        // the behaviour every competing expander ships, and all the machinery already existed in
+        // the pipeline; nothing reached it.
+        //
+        // Deliberately narrow so it cannot fire by accident:
+        //   - real key only (synthetic events were filtered above, so our own erase backspaces
+        //     cannot re-enter here and walk backwards through the document),
+        //   - autorepeat already filtered above, so holding backspace undoes at most once,
+        //   - no modifiers: ⌥⌫ / ⌘⌫ delete by word or to line start, which is not an undo,
+        //   - never while an expansion is in flight — already guaranteed, since the
+        //     `expanding || isSynthetic` guard above returned early; re-reading it here would
+        //     take `lock` again on the hot path for a value we have already proven false.
+        // `undoLastExpansion()` is single-shot and does not block this callback (it hops to main
+        // itself), and the erase still runs behind the erase-precondition guard — so if the user
+        // typed more text after expanding, it refuses rather than destroying the field.
+        if keyAction == .deleteLast,
+           flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty,
+           TextInjectionPipeline.shared.undoLastExpansion() {
+            resetBuffer()
+            return nil   // swallow: the undo replaces this backspace
+        }
+
+        lock.lock()
         if keyAction == .deleteLast {
-            if !engine.ringBuffer.isEmpty {
-                engine.ringBuffer.removeLast()
-            }
-            engine.layoutBuffer.deleteLast()
-            engine.lastEventUTF16Count = 1
+            ringBuffer.removeLast()
+            layoutBuffer.deleteLast()
+            lastEventUTF16Count = 1
         } else if length > 0 {
-            for char in unicodeStr {
-                engine.ringBuffer.append(char)
-            }
+            // §2.3: the ring evicts its own oldest entry — no O(n) `removeFirst` memmove per key.
+            ringBuffer.append(contentsOf: unicodeStr)
             if let physicalChar {
-                engine.layoutBuffer.appendLiteral(composed: unicodeStr, physical: physicalChar)
+                layoutBuffer.appendLiteral(composed: unicodeStr, physical: physicalChar)
             }
             // AX ranges are UTF-16; keep erase math in the same units.
-            engine.lastEventUTF16Count = max(1, unicodeStr.utf16.count)
-            if engine.ringBuffer.count > engine.maxBufferCapacity {
-                engine.ringBuffer.removeFirst(engine.ringBuffer.count - engine.maxBufferCapacity)
-            }
+            lastEventUTF16Count = max(1, unicodeStr.utf16.count)
         }
-        let currentSnapshot = String(engine.ringBuffer)
-        let layoutSnapshot = engine.layoutBuffer
-        let activeSnippets = engine._snippets
-        let lastUTF16Count = engine.lastEventUTF16Count
-        engine.lock.unlock()
+        // §2.3: hand the matcher `[Character]` directly. The old path built a `String` here that
+        // `AbbreviationMatcher.match` immediately undid with `Array(buffer)`.
+        let bufferCharacters = ringBuffer.makeArray()
+        let layoutSnapshot = layoutBuffer
+        let lastUTF16Count = lastEventUTF16Count
+        lock.unlock()
+
+        // §2.3: cached frontmost facts. `AppMuteStore.isFrontmostMuted()` (NSWorkspace + NSLock),
+        // `TISCopyCurrentKeyboardInputSource` and `isFrontmostAppTerminal()` all used to run per
+        // key; with §1.1 they would also be AppKit/Carbon calls off the main thread.
+        contextLock.lock()
+        let context = _frontmostContext
+        let allowPhysical = _allowPhysicalFallback
+        contextLock.unlock()
 
         // Hot path: muted check + matcher + sync-safe planner gate only.
         // Heavy AX (secure/IME/focus) stays off-callback; refuse there reinjects the swallow.
-        if AppMuteStore.shared.isFrontmostMuted() {
+        if context.isMuted {
             return Unmanaged.passUnretained(event)
         }
 
-        let allowPhysical = isTwoSetKoreanSourceID(EventTapEngine.currentInputSourceID())
-        if let match = engine.findMatch(
-            in: currentSnapshot,
+        // §2.1: cached matcher — one reference copy, no rebuild.
+        let snapshotState = matchSnapshot
+        guard let match = findMatch(
+            characters: bufferCharacters,
             layout: layoutSnapshot,
             allowPhysicalFallback: allowPhysical,
-            snippets: activeSnippets
-        ) {
-            let snapshot = PermissionCoordinator.shared.cachedSnapshot
-            let lookup: (String) -> String? = { trigger in
-                activeSnippets.first { $0.triggerKeyword == trigger || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased()) }?.replacementText
-            }
-            // Sync-safe shape for planner (no pasteboard; empty clipboard for refuse shape).
-            let preview = MacroRenderer.expand(
-                content: match.snippet.replacementText,
-                fillValues: [:],
-                lookup: lookup,
-                clipboardText: ""
-            )
-            let previewText = preview.needsFillIn ? match.snippet.replacementText : preview.text
-            let previewCursor = preview.needsFillIn ? nil : preview.cursorOffset
-            let needsCursor = InjectionPlanner.needsCursorHID(
-                cursorOffset: previewCursor,
-                totalUTF16Length: previewText.utf16.count
-            )
-            // Dedicated terminals only on hot path (NSWorkspace); IDE shell needs AX → deferred.
-            let isTerminal = AXContextChecker.shared.isFrontmostAppTerminal()
-            let plan = InjectionPlanner().plan(
-                snapshot: snapshot,
-                isTerminal: isTerminal,
-                needsCursorHID: needsCursor,
-                isMultiLine: previewText.contains(where: \.isNewline) || preview.needsFillIn
-            )
-            guard EventTapEngine.shouldSwallowTrigger(plan: plan) else {
-                // InjectionPlanner refuse — must not swallow (pass key through).
-                return Unmanaged.passUnretained(event)
-            }
-
-            let focusPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            engine.beginExpansion()
-            engine.resetBuffer()
-            let utf16Trigger = match.eraseCount
-            let charCount = lastUTF16Count
-            let swallowedUnicode = unicodeStr
-            let swallowedKeyCode = keyCode
-            let swallowedFlags = flags
-            let terminator = match.terminator
-            let eraseOverride = match.source == .physical ? match.eraseCount : nil
-            // Exact text expected left of the caret. Carries both unit systems (UTF-16 for AX
-            // ranges, graphemes for backspaces) so neither path has to re-derive them.
-            let erasePlan: ErasePlan
-            if let fieldText = match.fieldText {
-                erasePlan = ErasePlan.forMatch(
-                    matchedTrigger: fieldText,
-                    terminator: terminator,
-                    swallowedFinalKey: true,
-                    swallowedUnicode: swallowedUnicode,
-                    caseInsensitive: !match.snippet.isCaseSensitive
-                )
-            } else {
-                erasePlan = .counted(match.eraseCount)
-            }
-            engine.processingQueue.async {
-                engine.performDeferredExpand(
-                    snippet: match.snippet,
-                    triggerUTF16Length: utf16Trigger,
-                    lastEventUTF16Count: charCount,
-                    swallowedUnicode: swallowedUnicode,
-                    swallowedKeyCode: swallowedKeyCode,
-                    swallowedFlags: swallowedFlags,
-                    terminator: terminator,
-                    eraseCountOverride: eraseOverride,
-                    erasePlan: erasePlan,
-                    armedFocusPID: focusPID
-                )
-            }
-            return nil // Swallow only after sync-safe planner allow
+            snapshot: snapshotState,
+            bundleID: context.bundleID
+        ) else {
+            return Unmanaged.passUnretained(event)
         }
 
-        return Unmanaged.passUnretained(event)
+        let activeSnippets = snapshotState.snippets
+        let snapshot = PermissionCoordinator.shared.cachedSnapshot
+        let lookup: (String) -> String? = { trigger in
+            activeSnippets.first { $0.triggerKeyword == trigger || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased()) }?.replacementText
+        }
+        // Sync-safe shape for planner (no pasteboard; empty clipboard for refuse shape).
+        let preview = MacroRenderer.expand(
+            content: match.snippet.replacementText,
+            fillValues: [:],
+            lookup: lookup,
+            clipboardText: ""
+        )
+        let previewText = preview.needsFillIn ? match.snippet.replacementText : preview.text
+        let previewCursor = preview.needsFillIn ? nil : preview.cursorOffset
+        let needsCursor = InjectionPlanner.needsCursorHID(
+            cursorOffset: previewCursor,
+            totalUTF16Length: previewText.utf16.count
+        )
+        // Dedicated terminals only on hot path (cached bundle ID); IDE shell needs AX → deferred.
+        let isTerminal = context.isTerminal
+        let plan = InjectionPlanner().plan(
+            snapshot: snapshot,
+            isTerminal: isTerminal,
+            needsCursorHID: needsCursor,
+            isMultiLine: previewText.contains(where: \.isNewline) || preview.needsFillIn
+        )
+        guard EventTapEngine.shouldSwallowTrigger(plan: plan) else {
+            // InjectionPlanner refuse — must not swallow (pass key through).
+            return Unmanaged.passUnretained(event)
+        }
+
+        // §1.8: `_isSecureInputActive` comes from a 350 ms poll, so for up to 350 ms after a
+        // password field takes focus a trigger would still be swallowed here and asynchronously
+        // reinjected — REORDERING CHARACTERS IN A PASSWORD FIELD. `IsSecureEventInputEnabled()`
+        // is a cheap non-IPC read; pay it once, only after a match (rare), before swallowing.
+        // Deliberately does not mutate the polled flag: the monitor is edge-triggered, and
+        // forcing it true here could latch matching off until the next real transition.
+        if AXContextChecker.isSecureEventInputEnabledLive() {
+            DevTypeLog.eventTap.notice(
+                "[EventTap] live Secure Input check blocked a swallow (polled flag was stale)"
+            )
+            return Unmanaged.passUnretained(event)
+        }
+
+        let focusPID = context.processID
+        beginExpansion()
+        resetBuffer()
+        let utf16Trigger = match.eraseCount
+        let charCount = lastUTF16Count
+        let swallowedUnicode = unicodeStr
+        let swallowedKeyCode = keyCode
+        let swallowedFlags = flags
+        let terminator = match.terminator
+        let eraseOverride = match.source == .physical ? match.eraseCount : nil
+        // Exact text expected left of the caret. Carries both unit systems (UTF-16 for AX
+        // ranges, graphemes for backspaces) so neither path has to re-derive them.
+        let erasePlan: ErasePlan
+        if let fieldText = match.fieldText {
+            erasePlan = ErasePlan.forMatch(
+                matchedTrigger: fieldText,
+                terminator: terminator,
+                swallowedFinalKey: true,
+                swallowedUnicode: swallowedUnicode,
+                caseInsensitive: !match.snippet.isCaseSensitive
+            )
+        } else {
+            erasePlan = .counted(match.eraseCount)
+        }
+        let matchedSnippet = match.snippet
+        processingQueue.async { [weak self] in
+            self?.performDeferredExpand(
+                snippet: matchedSnippet,
+                triggerUTF16Length: utf16Trigger,
+                lastEventUTF16Count: charCount,
+                swallowedUnicode: swallowedUnicode,
+                swallowedKeyCode: swallowedKeyCode,
+                swallowedFlags: swallowedFlags,
+                terminator: terminator,
+                eraseCountOverride: eraseOverride,
+                erasePlan: erasePlan,
+                armedFocusPID: focusPID
+            )
+        }
+        return nil // Swallow only after sync-safe planner allow
     }
 
     public init() {
@@ -506,11 +759,17 @@ public final class EventTapEngine {
         _isEnabled = !paused
         installAppSwitchObserver()
         installInputSourceObserver()
+        installMuteListObserver()
+        refreshInputSourceCache()
+        primeFrontmostContext()
     }
 
     deinit {
         removeAppSwitchObserver()
         removeInputSourceObserver()
+        // §1.1: the worker parks in `CFRunLoopRun()` and keeps itself alive; without this a
+        // discarded engine (tests) would leak a running thread.
+        tapThread.shutdown()
     }
 
     public func start() -> Bool {
@@ -531,7 +790,10 @@ public final class EventTapEngine {
             )
             return false
         }
-        if eventTapPort != nil {
+        tapLock.lock()
+        let hadPort = _eventTapPort != nil
+        tapLock.unlock()
+        if hadPort {
             stop()
         }
 
@@ -542,7 +804,7 @@ public final class EventTapEngine {
         mask |= 1 << CGEventType.rightMouseDown.rawValue
         mask |= 1 << CGEventType.otherMouseDown.rawValue
 
-        eventTapPort = CGEvent.tapCreate(
+        let createdPort = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
@@ -551,7 +813,7 @@ public final class EventTapEngine {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
 
-        guard let port = eventTapPort else {
+        guard let port = createdPort else {
             lock.lock()
             _isTapRunning = false
             lock.unlock()
@@ -561,29 +823,81 @@ public final class EventTapEngine {
             return false
         }
 
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
+
+        // §1.1: attach to the dedicated tap thread's run loop so the callback (and everything it
+        // synchronously touches) no longer runs on main. Falls back to the historical main
+        // run loop if the worker did not come up, or if the kill switch is off.
+        var targetRunLoop: CFRunLoop? = CFRunLoopGetMain()
+        var onDedicatedThread = false
+        if EventTapEngine.useDedicatedTapThread {
+            if let workerLoop = tapThread.startAndWait() {
+                targetRunLoop = workerLoop
+                onDedicatedThread = true
+            } else {
+                DevTypeLog.eventTap.error(
+                    "[EventTap] dedicated tap thread did not start — falling back to the main run loop"
+                )
+            }
+        }
+
+        CFRunLoopAddSource(targetRunLoop, source, .commonModes)
+        CFRunLoopWakeUp(targetRunLoop)
         CGEvent.tapEnable(tap: port, enable: true)
+
+        tapLock.lock()
+        _eventTapPort = port
+        _runLoopSource = source
+        _tapRunLoop = targetRunLoop
+        tapLock.unlock()
+
         lock.lock()
         _isTapRunning = true
         lock.unlock()
+        // Refresh the AppKit-derived caches the callback depends on before the first key arrives.
+        primeFrontmostContext()
+        refreshInputSourceCache()
         startHealthMonitor()
-        DevTypeLog.eventTap.info("[EventTap] start success — defaultTap installed + health monitor")
+        DevTypeLog.eventTap.info(
+            "[EventTap] start success — defaultTap installed + health monitor (dedicatedThread=\(onDedicatedThread, privacy: .public))"
+        )
         return true
     }
 
+    /// Removes the tap. Safe from any thread, including the tap thread itself — `CFRunLoop` is the
+    /// one Core Foundation class documented as thread-safe. The worker thread is left parked (it
+    /// holds a keep-alive port) so a later `start()` does not have to churn threads; use
+    /// `shutdownTapThread()` for a full teardown.
     public func stop() {
         let wasRunning = isTapRunning
         stopHealthMonitor()
-        if let port = eventTapPort {
+
+        tapLock.lock()
+        let port = _eventTapPort
+        let source = _runLoopSource
+        let loop = _tapRunLoop
+        _eventTapPort = nil
+        _runLoopSource = nil
+        _tapRunLoop = nil
+        tapLock.unlock()
+
+        if let port {
             CGEvent.tapEnable(tap: port, enable: false)
+        }
+        if let source {
+            // Falls back to main only for the degenerate case where the tap was installed on the
+            // main run loop (kill switch off / worker thread failed to start).
+            let hostLoop: CFRunLoop? = loop ?? CFRunLoopGetMain()
+            CFRunLoopRemoveSource(hostLoop, source, .commonModes)
+            CFRunLoopSourceInvalidate(source)
+        }
+        if let port {
             CFMachPortInvalidate(port)
         }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        if let loop {
+            CFRunLoopWakeUp(loop)
         }
-        eventTapPort = nil
-        runLoopSource = nil
+
         lock.lock()
         _isTapRunning = false
         lock.unlock()
@@ -592,12 +906,105 @@ public final class EventTapEngine {
         }
     }
 
+    /// §1.1: full teardown of the dedicated tap thread. `stop()` alone leaves it parked.
+    public func shutdownTapThread() {
+        stop()
+        tapThread.shutdown()
+    }
+
+    /// True when the tap source is attached to the dedicated §1.1 thread rather than main.
+    public var isTapOnDedicatedThread: Bool {
+        tapLock.lock()
+        let loop = _tapRunLoop
+        tapLock.unlock()
+        guard let loop, let worker = tapThread.runLoop else { return false }
+        return loop === worker
+    }
+
     public func reEnableTap() {
-        guard let port = eventTapPort else { return }
-        DevTypeLog.eventTap.notice(
-            "[EventTap] re-enable after tapDisabledByTimeout/UserInput"
-        )
+        tapLock.lock()
+        let port = _eventTapPort
+        tapLock.unlock()
+        guard let port else { return }
+        // §2.10: the loud, counted line lives in `handleTapDisabled`; this stays quiet so a
+        // re-enable storm does not drown the log it is trying to explain.
+        DevTypeLog.eventTap.debug("[EventTap] tapEnable(true)")
         CGEvent.tapEnable(tap: port, enable: true)
+    }
+
+    /// §2.10: counted, rate-limited handling for `tapDisabledByTimeout` / `ByUserInput`.
+    ///
+    /// The old code re-enabled and logged one indistinguishable `notice`, which hid the fact that
+    /// `byTimeout` means *our callback was too slow* — the actionable failure mode, and the one
+    /// §1.1 exists to fix. Repeated timeouts in a short window now escalate to a full tap
+    /// reinstall, with exponential backoff so a persistent problem cannot become a reinstall loop.
+    ///
+    /// Runs on the tap thread; the reinstall itself is hopped to main because it creates a new
+    /// mach port and run loop source.
+    public func handleTapDisabled(reason: TapDisableReason) {
+        let now = Date()
+
+        counterLock.lock()
+        switch reason {
+        case .timeout:
+            _tapDisableCounters.byTimeout += 1
+            _tapDisableCounters.lastTimeoutAt = now
+            _recentTimeoutStamps.append(now)
+            _recentTimeoutStamps.removeAll {
+                now.timeIntervalSince($0) > EventTapEngine.tapDisableEscalationWindow
+            }
+        case .userInput:
+            _tapDisableCounters.byUserInput += 1
+            _tapDisableCounters.lastUserInputAt = now
+        case .unspecified:
+            break
+        }
+        _tapDisableCounters.reEnables += 1
+        let burst = _recentTimeoutStamps.count
+        var escalate = false
+        if reason == .timeout, burst >= EventTapEngine.tapDisableEscalationThreshold {
+            let allowedAt = _nextReinstallAllowedAt ?? Date.distantPast
+            if now >= allowedAt {
+                escalate = true
+                _tapDisableCounters.escalatedReinstalls += 1
+                _nextReinstallAllowedAt = now.addingTimeInterval(_reinstallBackoff)
+                _reinstallBackoff = min(
+                    _reinstallBackoff * 2,
+                    EventTapEngine.tapReinstallMaxBackoff
+                )
+                _recentTimeoutStamps.removeAll()
+            }
+        }
+        let counters = _tapDisableCounters
+        counterLock.unlock()
+
+        // Cheap and safe from the tap thread: flip the enable bit back on immediately.
+        reEnableTap()
+
+        let reasonLabel: String
+        switch reason {
+        case .timeout: reasonLabel = "tapDisabledByTimeout"
+        case .userInput: reasonLabel = "tapDisabledByUserInput"
+        case .unspecified: reasonLabel = "tapDisabled"
+        }
+
+        if reason == .timeout {
+            DevTypeLog.eventTap.error(
+                "[EventTap] \(reasonLabel, privacy: .public) — callback exceeded the system budget (burst=\(burst, privacy: .public) \(counters.summaryLine, privacy: .public))"
+            )
+        } else {
+            DevTypeLog.eventTap.notice(
+                "[EventTap] \(reasonLabel, privacy: .public) re-enabled (\(counters.summaryLine, privacy: .public))"
+            )
+        }
+
+        guard escalate else { return }
+        DevTypeLog.eventTap.error(
+            "[EventTap] \(burst, privacy: .public) timeout disables within \(EventTapEngine.tapDisableEscalationWindow, privacy: .public)s — reinstalling the tap"
+        )
+        DispatchQueue.main.async { [weak self] in
+            self?.reinstallFromHealthMonitor(reason: "tapDisabledByTimeout burst")
+        }
     }
 
     /// Starts a main-queue timer that re-enables or reinstalls an inert CGEvent tap.
@@ -627,7 +1034,12 @@ public final class EventTapEngine {
         lock.unlock()
         guard expectRunning, userEnabled else { return }
 
-        guard let port = eventTapPort else {
+        // §1.11: never touch `_eventTapPort` unlocked — the tap thread reads it from `reEnableTap`.
+        tapLock.lock()
+        let currentPort = _eventTapPort
+        tapLock.unlock()
+
+        guard let port = currentPort else {
             DevTypeLog.eventTap.notice(
                 "[EventTap] health: port missing while expected running — reinstalling"
             )
@@ -683,10 +1095,39 @@ public final class EventTapEngine {
 
     public func resetBuffer() {
         lock.lock()
-        ringBuffer.removeAll(keepingCapacity: true)
+        ringBuffer.removeAll()
         layoutBuffer.clear()
         lastEventUTF16Count = 1
         lock.unlock()
+    }
+
+    // MARK: - §3.9 trigger-length diagnostics
+
+    /// §3.9: triggers longer than `maxBufferCapacity`. They can never fire — the ring buffer and
+    /// `LayoutBuffer` both cap at that length — and previously nothing said so.
+    public func overlongTriggers() -> [String] {
+        matchSnapshot.matcher.overlongTriggers
+    }
+
+    /// Human-readable form for the manager UI / `DiagnosticReport`. Empty when nothing is broken.
+    public func overlongTriggerDiagnostics() -> [String] {
+        let triggers = overlongTriggers()
+        guard !triggers.isEmpty else { return [] }
+        var lines = [
+            "\(triggers.count) trigger(s) exceed the \(EventTapEngine.maxBufferCapacity)-character match buffer and can never fire:"
+        ]
+        for trigger in triggers.sorted() {
+            lines.append("  \(trigger) (\(trigger.count) characters)")
+        }
+        return lines
+    }
+
+    private func logOverlongTriggers(in snapshot: SnippetMatchSnapshot) {
+        let triggers = snapshot.matcher.overlongTriggers
+        guard !triggers.isEmpty else { return }
+        DevTypeLog.eventTap.notice(
+            "[EventTap] \(triggers.count, privacy: .public) trigger(s) longer than \(EventTapEngine.maxBufferCapacity, privacy: .public) characters can never fire — see overlongTriggerDiagnostics()"
+        )
     }
 
     /// Off-callback expand: AX gates, macro resolve / fill-in, inject plan, then inject-owned lifetime.
@@ -993,19 +1434,47 @@ public final class EventTapEngine {
     }
 
     /// Pure match via AbbreviationMatcher (+ optional physical Hangul fallback).
+    ///
+    /// §2.1: the normal path (`snippets == nil`) reads the matcher built once in the `snippets`
+    /// setter. Only an explicit override builds a transient matcher, which is exactly what the
+    /// old code did on **every keystroke**.
     public func findMatch(
         in bufferSnapshot: String,
         layout: LayoutBuffer = LayoutBuffer(),
         allowPhysicalFallback: Bool = false,
         snippets: [SnippetModel]? = nil
     ) -> SnippetMatch? {
-        let activeSnippets = snippets ?? self.snippets
-        let matcher = AbbreviationMatcher(snippets: activeSnippets)
-        guard let decision = LayoutAwareMatcher.decide(
-            composedBuffer: bufferSnapshot,
+        let state: SnippetMatchSnapshot
+        if let snippets {
+            state = SnippetMatchSnapshot(snippets: snippets)
+        } else {
+            state = matchSnapshot
+        }
+        return findMatch(
+            characters: Array(bufferSnapshot),
             layout: layout,
-            matcher: matcher,
-            allowPhysicalFallback: allowPhysicalFallback
+            allowPhysicalFallback: allowPhysicalFallback,
+            snapshot: state,
+            bundleID: nil
+        )
+    }
+
+    /// §2.3 / §4.4: allocation-lean match used by the tap callback.
+    /// `bundleID` is the cached frontmost app; app-scoped snippets (`includeApps` /
+    /// `excludeApps`) that do not apply to it are skipped by the matcher.
+    public func findMatch(
+        characters: [Character],
+        layout: LayoutBuffer = LayoutBuffer(),
+        allowPhysicalFallback: Bool = false,
+        snapshot: SnippetMatchSnapshot,
+        bundleID: String? = nil
+    ) -> SnippetMatch? {
+        guard let decision = LayoutAwareMatcher.decide(
+            composedCharacters: characters,
+            layout: layout,
+            matcher: snapshot.matcher,
+            allowPhysicalFallback: allowPhysicalFallback,
+            bundleID: bundleID
         ) else {
             return nil
         }
@@ -1045,7 +1514,7 @@ public final class EventTapEngine {
     private func endExpansion() {
         lock.lock()
         _isExpanding = false
-        ringBuffer.removeAll(keepingCapacity: true)
+        ringBuffer.removeAll()
         layoutBuffer.clear()
         lastEventUTF16Count = 1
         lock.unlock()
@@ -1059,14 +1528,85 @@ public final class EventTapEngine {
         }
     }
 
+    // MARK: - §2.3 cached-context maintenance
+
+    /// Reads `NSWorkspace` **on main** and refreshes the cached frontmost context.
+    /// Public so the app can re-prime after a state change it knows about.
+    public func primeFrontmostContext() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.primeFrontmostContext()
+            }
+            return
+        }
+        let app = NSWorkspace.shared.frontmostApplication
+        updateFrontmostContext(bundleID: app?.bundleIdentifier, processID: app?.processIdentifier)
+    }
+
+    private func updateFrontmostContext(bundleID: String?, processID: pid_t?) {
+        // Both of these are pure lookups (a `Set` membership test and a dictionary read behind
+        // `AppMuteStore`'s own lock) — no AppKit, so the tap thread never has to repeat them.
+        let muted = bundleID.map { AppMuteStore.shared.isMuted($0) } ?? false
+        let terminal = bundleID.map { AXContextChecker.shared.isTerminalBundleID($0) } ?? false
+        contextLock.lock()
+        _frontmostContext = FrontmostContext(
+            bundleID: bundleID,
+            processID: processID,
+            isMuted: muted,
+            isTerminal: terminal
+        )
+        contextLock.unlock()
+    }
+
+    /// §2.3: `TISCopyCurrentKeyboardInputSource` + a CFString bridge, once per input-source
+    /// change instead of once per keystroke (it was only being used to test a constant).
+    private func refreshInputSourceCache() {
+        let allow = isTwoSetKoreanSourceID(EventTapEngine.currentInputSourceID())
+        contextLock.lock()
+        _allowPhysicalFallback = allow
+        contextLock.unlock()
+    }
+
+    private func installMuteListObserver() {
+        guard !muteObserverInstalled else { return }
+        muteObserverInstalled = true
+        AppMuteStore.shared.addListener { [weak self] in
+            self?.refreshMuteFlag()
+        }
+    }
+
+    private func refreshMuteFlag() {
+        contextLock.lock()
+        let bundleID = _frontmostContext.bundleID
+        contextLock.unlock()
+        let muted = bundleID.map { AppMuteStore.shared.isMuted($0) } ?? false
+        contextLock.lock()
+        // An app switch may have landed between the two sections — only apply if still current.
+        if _frontmostContext.bundleID == bundleID {
+            _frontmostContext.isMuted = muted
+        }
+        contextLock.unlock()
+    }
+
     private func installAppSwitchObserver() {
         guard appSwitchObserver == nil else { return }
         appSwitchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: nil
-        ) { [weak self] _ in
-            self?.resetBuffer()
+        ) { [weak self] note in
+            guard let self else { return }
+            // §2.3: refresh the cache here rather than calling NSWorkspace from the tap thread.
+            // The notification already carries the application that just activated.
+            if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                self.updateFrontmostContext(
+                    bundleID: app.bundleIdentifier,
+                    processID: app.processIdentifier
+                )
+            } else {
+                self.primeFrontmostContext()
+            }
+            self.resetBuffer()
         }
     }
 
@@ -1084,6 +1624,8 @@ public final class EventTapEngine {
             object: nil,
             queue: nil
         ) { [weak self] _ in
+            // §2.3: recompute the physical-fallback flag here, not per keystroke.
+            self?.refreshInputSourceCache()
             self?.resetBuffer()
         }
     }

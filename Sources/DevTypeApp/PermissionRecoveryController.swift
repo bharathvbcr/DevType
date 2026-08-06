@@ -42,6 +42,10 @@ final class PermissionRecoveryController: NSViewController {
     private var lastLoggedAccessibilityReset: Bool?
     private var lastLoggedIdentityChanged: Bool?
 
+    // §6.1: 1,028 lines with zero `loc.s` calls — one of the two screens a
+    // Korean or Japanese user hits *before* the app works at all.
+    private let loc = LocalizationManager.shared
+
     init(onStatusChanged: @escaping () -> Void = {}) {
         self.onStatusChanged = onStatusChanged
         super.init(nibName: nil, bundle: nil)
@@ -79,13 +83,13 @@ final class PermissionRecoveryController: NSViewController {
         document.addSubview(stack)
 
         let headerView = DevTypeTheme.makeBrandHeader(
-            title: "Permission Recovery",
-            subtitle: "Capability split • Request ≠ Open Settings",
+            title: loc.s("recovery.title"),
+            subtitle: loc.s("recovery.subtitle"),
             logoSize: 40
         )
 
         let tabs = NSSegmentedControl(
-            labels: ["Status & Fix", "Diagnostics"],
+            labels: [loc.s("recovery.tab.status"), loc.s("recovery.tab.diagnostics")],
             trackingMode: .selectOne,
             target: self,
             action: #selector(tabChanged)
@@ -93,6 +97,7 @@ final class PermissionRecoveryController: NSViewController {
         tabs.translatesAutoresizingMaskIntoConstraints = false
         tabs.selectedSegment = Tab.status.rawValue
         tabs.segmentDistribution = .fillEqually
+        tabs.setAccessibilityLabel(loc.s("recovery.title"))
         tabControl = tabs
 
         addChild(diagnostics)
@@ -176,7 +181,7 @@ final class PermissionRecoveryController: NSViewController {
         var accessRequest: CapsuleButton?
         let accessCard = createPermissionRow(
             symbol: "accessibility",
-            title: "Accessibility",
+            title: loc.s("recovery.cap.accessibility"),
             description: PermissionCopy.unlockDescription(for: .accessibility),
             statusLabel: accessibilityStatusLabel,
             openTitle: PermissionCopy.openSettingsButtonTitle(for: .accessibility),
@@ -189,7 +194,7 @@ final class PermissionRecoveryController: NSViewController {
         var inputRequest: CapsuleButton?
         let inputCard = createPermissionRow(
             symbol: "keyboard",
-            title: "Input Monitoring",
+            title: loc.s("recovery.cap.inputMonitoring"),
             description: PermissionCopy.unlockDescription(for: .inputMonitoring),
             statusLabel: inputMonitoringStatusLabel,
             openTitle: PermissionCopy.openSettingsButtonTitle(for: .inputMonitoring),
@@ -202,7 +207,7 @@ final class PermissionRecoveryController: NSViewController {
         var postRequest: CapsuleButton?
         let postCard = createPermissionRow(
             symbol: "cursorarrow.rays",
-            title: "Post Events",
+            title: loc.s("recovery.cap.postEvents"),
             description: PermissionCopy.unlockDescription(for: .postEvent),
             statusLabel: postEventStatusLabel,
             openTitle: PermissionCopy.openSettingsButtonTitle(for: .postEvent),
@@ -214,7 +219,7 @@ final class PermissionRecoveryController: NSViewController {
 
         // MARK: Action row
         let relaunchBtn = CapsuleButton(
-            title: "Relaunch DevType",
+            title: loc.s("recovery.relaunch"),
             symbol: "arrow.clockwise",
             style: .primary,
             target: self,
@@ -222,14 +227,14 @@ final class PermissionRecoveryController: NSViewController {
         )
         relaunchButton = relaunchBtn
         let refreshBtn = CapsuleButton(
-            title: "Re-check",
+            title: loc.s("recovery.recheck"),
             symbol: "arrow.triangle.2.circlepath",
             style: .secondary,
             target: self,
             action: #selector(refreshPermissions)
         )
         let testExpandBtn = CapsuleButton(
-            title: "Test Expansion",
+            title: loc.s("recovery.testExpansion"),
             symbol: "bolt.fill",
             style: .secondary,
             target: self,
@@ -243,7 +248,7 @@ final class PermissionRecoveryController: NSViewController {
 
         // MARK: Long-tail troubleshooting, collapsed by default
         let toggle = CapsuleButton(
-            title: "More troubleshooting",
+            title: loc.s("recovery.more"),
             symbol: "chevron.down",
             style: .secondary,
             target: self,
@@ -318,7 +323,7 @@ final class PermissionRecoveryController: NSViewController {
     @objc private func toggleExtendedGuidance() {
         let showing = !extendedGuidanceLabel.isHidden
         extendedGuidanceLabel.isHidden = showing
-        extendedGuidanceToggle?.title = showing ? "More troubleshooting" : "Hide troubleshooting"
+        extendedGuidanceToggle?.title = showing ? loc.s("recovery.more") : loc.s("recovery.less")
         extendedGuidanceToggle?.setSymbol(showing ? "chevron.down" : "chevron.up")
     }
 
@@ -358,7 +363,7 @@ final class PermissionRecoveryController: NSViewController {
             action: openAction
         )
         let requestButton = CapsuleButton(
-            title: "Request",
+            title: loc.s("recovery.request"),
             symbol: "hand.raised",
             style: .primary,
             target: self,
@@ -371,6 +376,12 @@ final class PermissionRecoveryController: NSViewController {
         buttonStack.spacing = 8
 
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        // §5.1: the capability row is one meaningful unit — name it so VoiceOver
+        // announces "Accessibility, granted" rather than three loose labels.
+        container.setAccessibilityLabel(title)
+        statusLabel.setAccessibilityLabel(title)
+        openButton.setAccessibilityLabel("\(openTitle) — \(title)")
+        requestButton.setAccessibilityLabel("\(loc.s("recovery.request")) — \(title)")
 
         let rowStack = NSStackView(views: [badge, textStack, statusLabel, buttonStack])
         rowStack.translatesAutoresizingMaskIntoConstraints = false
@@ -454,11 +465,11 @@ final class PermissionRecoveryController: NSViewController {
             || PermissionCoordinator.shared.recommendsRelaunch
         if let relaunchButton {
             if needsRelaunch {
-                relaunchButton.title = "Relaunch DevType (recommended)"
+                relaunchButton.title = loc.s("recovery.relaunchRecommended")
                 relaunchButton.buttonStyle = .primary
                 relaunchButton.setSymbol("arrow.clockwise")
             } else {
-                relaunchButton.title = "Relaunch DevType"
+                relaunchButton.title = loc.s("recovery.relaunch")
                 relaunchButton.buttonStyle = .secondary
                 relaunchButton.setSymbol("arrow.clockwise")
             }
@@ -567,32 +578,39 @@ final class PermissionRecoveryController: NSViewController {
         // card above stays one readable instruction instead of four paragraphs.
         var extended: [String] = []
 
+        // §6.1: every one of these was an interpolated English literal.
+        let tapWord = tapRunning ? loc.s("recovery.tap.running") : loc.s("recovery.tap.notRunning")
         if snapshot.canListenTap && tapRunning && snapshot.isFullyCapable {
-            summaryLabel.stringValue = "✓ All capabilities · Tap running · Engine: \(engineLabel)"
+            summaryLabel.stringValue = loc.s("recovery.summary.allGood", engineLabel)
             summaryLabel.textColor = DevTypeTheme.statusGreen
-            guidanceLabel.stringValue = "You're set — text expansions are active for \(bundleID)."
+            guidanceLabel.stringValue = loc.s("recovery.guidance.allGood", bundleID)
             guidanceLabel.textColor = DevTypeTheme.statusGreen
         } else if snapshot.canListenTap && tapRunning && snapshot.isDegradedInject {
-            summaryLabel.stringValue = "Tap running · Inject degraded · Engine: \(engineLabel)"
+            summaryLabel.stringValue = loc.s("recovery.summary.degraded", engineLabel)
             summaryLabel.textColor = DevTypeTheme.statusOrange
             guidanceLabel.stringValue = PermissionCopy.degradedInjectTooltip(snapshot: snapshot)
             guidanceLabel.textColor = DevTypeTheme.statusOrange
         } else if snapshot.canListenTap && snapshot.canUseAX && !tapRunning {
             // Distinct from "permissions denied": Listen+AX OK but tapCreate failed.
-            summaryLabel.stringValue = "Listen+AX granted · Tap create failed · Engine: \(engineLabel)"
+            summaryLabel.stringValue = loc.s("recovery.summary.tapCreateFailed", engineLabel)
             summaryLabel.textColor = DevTypeTheme.statusOrange
             guidanceLabel.stringValue = PermissionCopy.tapCreateFailedDespiteListenGuidance
             guidanceLabel.textColor = DevTypeTheme.statusOrange
         } else {
-            var summary = "\(snapshot.missingCapabilitiesSummary) · Tap \(tapRunning ? "running" : "not running") · Engine: \(engineLabel)"
+            var summary = loc.s(
+                "recovery.summary.missing",
+                snapshot.missingCapabilitiesSummary,
+                tapWord,
+                engineLabel
+            )
             if snapshot.blocksDefaultEventTap {
-                summary += " · Listen+AX required for event tap"
+                summary += loc.s("recovery.suffix.listenAXRequired")
             }
             if accessibilityReset {
-                summary += " · Accessibility reset"
+                summary += loc.s("recovery.suffix.axReset")
             }
             if identityChanged {
-                summary += " · Binary identity changed"
+                summary += loc.s("recovery.suffix.identityChanged")
             }
             summaryLabel.stringValue = summary
             summaryLabel.textColor = DevTypeTheme.accentBright
@@ -620,13 +638,16 @@ final class PermissionRecoveryController: NSViewController {
                 extended.append(PermissionCopy.staleLegacyBundleIdGuidance)
                 extended.append(PermissionCopy.staleTCCRecordGuidance)
             } else {
-                guidanceLabel.stringValue = "Finish granting missing capabilities above."
+                guidanceLabel.stringValue = loc.s("recovery.guidance.finishGranting")
                 guidanceLabel.textColor = DevTypeTheme.textSecondary
             }
         }
 
         if !siblingPaths.isEmpty {
-            guidanceLabel.stringValue += "\nQuit other DevType copies (especially .build) so Settings toggles apply to \(ProcessIdentity.preferredInstalledAppPath)."
+            guidanceLabel.stringValue += "\n" + loc.s(
+                "recovery.guidance.siblings",
+                ProcessIdentity.preferredInstalledAppPath
+            )
             guidanceLabel.textColor = DevTypeTheme.statusOrange
         }
 
@@ -638,13 +659,11 @@ final class PermissionRecoveryController: NSViewController {
             case .postedUnverified:
                 // Informational only — Cmd+V was sent, but AX can't confirm (normal for Chrome,
                 // Electron, and apps that hide accessibility values). Do not override summary color.
-                guidanceLabel.stringValue =
-                    "Last expand posted the paste shortcut but DevType could not confirm the text landed. This is expected for Chrome, Electron, and similar apps. If text appears in the field, the expand is working. Use Test Expansion to verify delivery in a controlled AppKit field."
+                guidanceLabel.stringValue = loc.s("recovery.inject.postedUnverified")
             case .refused(let reason):
                 summaryLabel.textColor = DevTypeTheme.accentBright
                 if snapshot.canListenTap && tapRunning {
-                    summaryLabel.stringValue =
-                        "Inject refused · Tap running · Engine: \(engineLabel)"
+                    summaryLabel.stringValue = loc.s("recovery.inject.refusedSummary", engineLabel)
                     guidanceLabel.stringValue = Self.guidanceForInjectRefuse(
                         reason: reason,
                         canUseAX: snapshot.canUseAX
@@ -652,11 +671,13 @@ final class PermissionRecoveryController: NSViewController {
                     guidanceLabel.textColor = DevTypeTheme.statusOrange
                 }
             case .failedSilent:
-                summaryLabel.stringValue =
-                    "Inject failed · Tap \(tapRunning ? "running" : "not running") · Engine: \(engineLabel)"
+                summaryLabel.stringValue = loc.s(
+                    "recovery.inject.failedSummary",
+                    tapWord,
+                    engineLabel
+                )
                 summaryLabel.textColor = DevTypeTheme.accentBright
-                guidanceLabel.stringValue =
-                    "Last expand erased the abbreviation but the paste did not land (or Post Events/HID failed). DevType tried to restore the trigger. Retry the expand, or use Test Expansion in a plain text field. If this keeps happening, click Request Post Events then Re-check."
+                guidanceLabel.stringValue = loc.s("recovery.inject.failedGuidance")
                 guidanceLabel.textColor = DevTypeTheme.statusOrange
             }
         }
@@ -671,7 +692,7 @@ final class PermissionRecoveryController: NSViewController {
         extendedGuidanceToggle?.isHidden = !hasContent
         if !hasContent {
             extendedGuidanceLabel.isHidden = true
-            extendedGuidanceToggle?.title = "More troubleshooting"
+            extendedGuidanceToggle?.title = loc.s("recovery.more")
             extendedGuidanceToggle?.setSymbol("chevron.down")
         }
     }
@@ -680,81 +701,85 @@ final class PermissionRecoveryController: NSViewController {
     private func injectHealthSummary(snapshot: PermissionSnapshot, tapRunning: Bool) -> String {
         var parts: [String] = []
         if !tapRunning && snapshot.canListenTap {
-            parts.append("Tap expected but not running — UI will not show stale Active.")
+            parts.append(loc.s("recovery.health.tapExpected"))
         }
         if snapshot.isDegradedInject {
             parts.append(PermissionCopy.degradedInjectTooltip(snapshot: snapshot))
         }
         if snapshot.canListenTap && snapshot.canUseAX && snapshot.canPostEvents && tapRunning {
-            parts.append("Inject path: full (AX + HID).")
+            parts.append(loc.s("recovery.health.full"))
         } else if snapshot.canListenTap && snapshot.canUseAX && !snapshot.canPostEvents {
-            parts.append("Inject path: AX-only (no HID paste/cursor).")
+            parts.append(loc.s("recovery.health.axOnly"))
         } else if snapshot.canListenTap && !snapshot.canUseAX {
-            parts.append("Inject path: refused (Accessibility fail-closed).")
+            parts.append(loc.s("recovery.health.refused"))
         }
-        var health = parts.isEmpty ? "Inject health: idle" : parts.joined(separator: " ")
+        var health = parts.isEmpty ? loc.s("recovery.health.idle") : parts.joined(separator: " ")
         if let outcome = PermissionCoordinator.shared.lastRecordedInjectOutcome {
             switch outcome {
             case .succeeded:
-                health += " · Last inject: succeeded"
+                health += loc.s("recovery.health.last.succeeded")
             case .postedUnverified:
-                health += " · Last inject: posted (unverified — target app may not expose AX value)"
+                health += loc.s("recovery.health.last.posted")
             case .refused(let reason):
-                health += " · Last inject: refused — \(reason)"
+                health += loc.s("recovery.health.last.refused", reason)
             case .degradedAXOnly:
-                health += " · Last inject: AX-only (degraded)"
+                health += loc.s("recovery.health.last.degraded")
             case .failedSilent:
-                health += " · Last inject: failed (paste did not land)"
+                health += loc.s("recovery.health.last.failed")
             }
         }
         return health
     }
 
     /// Honest Recovery copy: do not blame Accessibility when AX is already granted.
+    ///
+    /// The `reason` strings come from `PermissionCopy` / the inject pipeline and
+    /// stay English (they are engine diagnostics, matched on here); the guidance
+    /// wrapped around them is localized.
     private static func guidanceForInjectRefuse(reason: String, canUseAX: Bool) -> String {
+        let loc = LocalizationManager.shared
         if !canUseAX
             || reason.contains("Accessibility unavailable")
             || reason.contains("AXIsProcessTrusted false") {
-            return "Last expand was blocked (\(reason)). Fix Accessibility, then Re-check."
+            return loc.s("recovery.refuse.ax", reason)
         }
         if reason.contains("Secure Input") {
-            return "Last expand was blocked by Secure Input. Typed abbreviations cannot expand in password fields — use ⌘/ (Inline Search) or a hotkey to paste instead."
+            return loc.s("recovery.refuse.secureInput")
         }
         if reason.localizedCaseInsensitiveContains("secure text field") {
-            return "Last expand was blocked in a password/secure field. Use ⌘/ (Inline Search) or a hotkey to paste — typing the abbreviation cannot work there."
+            return loc.s("recovery.refuse.secureField")
         }
         if reason.contains("IME") {
-            return "Last expand was blocked during IME composition. Finish or cancel the composition, then retry."
+            return loc.s("recovery.refuse.ime")
         }
         if reason.contains("timed out")
             || reason.contains("No focused")
             || reason.contains("focus query failed") {
-            return "Last expand was blocked because focus could not be verified. Click into a normal text field and retry after focus settles."
+            return loc.s("recovery.refuse.focus")
         }
-        return "Last expand was blocked (\(reason)). Click into a normal text field (not a password field), then retry."
+        return loc.s("recovery.refuse.generic", reason)
     }
 
     private func updateStatusLabel(_ label: NSTextField, isGranted: Bool) {
-        if isGranted {
-            label.stringValue = "✓ Granted"
-            label.textColor = DevTypeTheme.statusGreen
-            label.font = DevTypeTheme.font(11, .bold)
-        } else {
-            label.stringValue = "⚠️ Missing"
-            label.textColor = DevTypeTheme.accentBright
-            label.font = DevTypeTheme.font(11, .bold)
-        }
+        // §5.2: the ✓ / ⚠️ glyph is the non-colour channel; the AX value below
+        // makes the state audible.
+        label.stringValue = isGranted
+            ? loc.s("recovery.status.granted")
+            : loc.s("recovery.status.missing")
+        label.textColor = isGranted ? DevTypeTheme.statusGreen : DevTypeTheme.accentBright
+        label.font = DevTypeTheme.font(11, .bold)
+        label.setAccessibilityValue(label.stringValue)
     }
 
     private func styleRequestButton(_ button: CapsuleButton?, isGranted: Bool) {
         guard let button else { return }
         if isGranted {
-            button.title = "Granted"
+            button.title = loc.s("recovery.granted")
             button.isEnabled = false
             button.buttonStyle = .secondary
             button.setSymbol("checkmark")
         } else {
-            button.title = "Request"
+            button.title = loc.s("recovery.request")
             button.isEnabled = true
             button.buttonStyle = .primary
             button.setSymbol("hand.raised")
@@ -862,8 +887,9 @@ final class PermissionRecoveryController: NSViewController {
         }
     }
 
-    private static let openSettingsThenRelaunchHint =
-        "Still missing — click Open Settings if the prompt was dismissed, then Relaunch DevType."
+    private static var openSettingsThenRelaunchHint: String {
+        LocalizationManager.shared.s("recovery.stillMissing")
+    }
 
     @objc private func requestAccessibility() {
         request(
@@ -901,7 +927,7 @@ final class PermissionRecoveryController: NSViewController {
             logLabel: "Post Events",
             perform: { _ = PermissionRequester.shared.requestPostEvent() },
             stillMissing: { !PermissionProbe().snapshot().canPostEvents },
-            stillMissingHint: "Still missing — click Request again; Post Events has no dedicated Settings list."
+            stillMissingHint: loc.s("recovery.stillMissingPost")
         )
     }
 

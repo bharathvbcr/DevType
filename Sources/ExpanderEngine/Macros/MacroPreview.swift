@@ -3,12 +3,18 @@
 import Foundation
 
 /// Side-effect-free preview renderer for the snippet editor.
+///
+/// §3.5: "side-effect-free" is load-bearing — this renders on every row of the manager list and
+/// the inline search panel, so counters are *peeked*, never advanced, and random values render as
+/// a placeholder instead of churning.
 public enum MacroPreview {
 
     public static func render(_ content: String, now: Date = Date()) -> String {
         let tokens = MacroParser.parse(content)
         var out = ""
         var i = 0
+        // §3.5: open `%case:…%` blocks as (transform, out.count when the block opened).
+        var caseStack: [(transform: TextCaseTransform, start: Int)] = []
 
         while i < tokens.count {
             let token = tokens[i]
@@ -57,8 +63,34 @@ public enum MacroPreview {
 
             case .date(let format):
                 out += formattedDate(format, now: now)
+
+            case .uuid:
+                out += "[uuid]"
+
+            case .random:
+                out += "[random]"
+
+            case .counter(let name, _):
+                // Peek only — previewing a snippet must never advance a live counter.
+                out += String(MacroCounterStore.shared.value(for: name))
+
+            case .caseStart(let transform):
+                caseStack.append((transform: transform, start: out.count))
+
+            case .caseEnd:
+                if let open = caseStack.popLast(), open.start <= out.count {
+                    let head = String(out.prefix(open.start))
+                    let body = String(out.dropFirst(open.start))
+                    out = head + open.transform.apply(to: body)
+                }
             }
             i += 1
+        }
+
+        while let open = caseStack.popLast(), open.start <= out.count {
+            let head = String(out.prefix(open.start))
+            let body = String(out.dropFirst(open.start))
+            out = head + open.transform.apply(to: body)
         }
         return out
     }

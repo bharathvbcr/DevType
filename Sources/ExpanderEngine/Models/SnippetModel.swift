@@ -15,10 +15,31 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
     public var imagePath: String
     public var createdAt: Date
     public var updatedAt: Date
+    /// Legacy in-library usage counter. Live counts now live in `UsageStatsStore`
+    /// (§1.5); this field is retained so existing JSON keeps decoding and so the
+    /// sidecar can be seeded from it on first load.
     public var usageCount: Int
+    /// §4.4: Free-form tags for organization / filtering. Backward-compatible (defaults to empty).
+    public var tags: [String]
+    /// §4.4: Bundle IDs this snippet is limited to. Empty = available everywhere.
+    public var includeApps: [String]
+    /// §4.4: Bundle IDs this snippet is suppressed in. Takes precedence over `includeApps`.
+    public var excludeApps: [String]
 
     /// True when this snippet pastes an image instead of text.
     public var isImageSnippet: Bool { !imagePath.isEmpty }
+
+    /// §4.4: App-scope test for the matcher / injection layers.
+    /// `nil` or empty `bundleID` means "unknown frontmost app" — such a context only
+    /// satisfies snippets that are not restricted to a specific app list.
+    public func appliesTo(bundleID: String?) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else { return includeApps.isEmpty }
+        if excludeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame }) {
+            return false
+        }
+        if includeApps.isEmpty { return true }
+        return includeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame })
+    }
 
     public init(
         id: UUID = UUID(),
@@ -33,7 +54,10 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         imagePath: String = "",
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
-        usageCount: Int = 0
+        usageCount: Int = 0,
+        tags: [String] = [],
+        includeApps: [String] = [],
+        excludeApps: [String] = []
     ) {
         self.id = id
         self.title = title
@@ -48,6 +72,9 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.usageCount = usageCount
+        self.tags = tags
+        self.includeApps = includeApps
+        self.excludeApps = excludeApps
     }
 
     /// Display title for lists: label if present, else title, else trigger.
@@ -61,6 +88,8 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         case id, title, label, triggerKeyword, replacementText
         case isCaseSensitive, requireWordBoundary, isPlainText, enabled
         case imagePath, createdAt, updatedAt, usageCount
+        // §4.4: added in schema v2.1 — always decoded with `decodeIfPresent`.
+        case tags, includeApps, excludeApps
     }
 
     public init(from decoder: Decoder) throws {
@@ -78,6 +107,10 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
         usageCount = try c.decodeIfPresent(Int.self, forKey: .usageCount) ?? 0
+        // §4.4: absent in every pre-existing library file — default, never fail.
+        tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
+        includeApps = try c.decodeIfPresent([String].self, forKey: .includeApps) ?? []
+        excludeApps = try c.decodeIfPresent([String].self, forKey: .excludeApps) ?? []
     }
 }
 

@@ -43,7 +43,14 @@ public struct InjectionPlanner: Sendable {
 
     /// Pure helper: whether a snippet resolution wants caret placement after inject
     /// (AX caret first; HID arrows only when Post is available).
-    /// Lengths are UTF-16 code units (AX / HID arrow counts).
+    ///
+    /// §1.6: both lengths here are **UTF-16 code units**, which is the right unit for the
+    /// AX caret path (`kAXSelectedTextRange` ranges are UTF-16). It is *not* the unit HID
+    /// arrows move in — a posted `kVK_LeftArrow` moves one **grapheme cluster**, so an emoji
+    /// or astral CJK character after `{{cursor}}` used to be over-counted. This function only
+    /// answers "is there anything to the right of the caret?", which is unit-agnostic; the
+    /// UTF-16 → grapheme conversion for the arrow count itself lives in
+    /// `HIDKeyPoster.leftArrowCount(text:utf16OffsetFromEnd:)`.
     public static func needsCursorHID(cursorOffset: Int?, totalUTF16Length: Int) -> Bool {
         guard let offset = cursorOffset, offset <= totalUTF16Length else { return false }
         return (totalUTF16Length - offset) > 0

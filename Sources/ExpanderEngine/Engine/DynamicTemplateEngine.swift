@@ -10,12 +10,16 @@ public final class SafeMathParser {
     public static func evaluate(_ expression: String) -> Double? {
         let trimmed = expression.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= maxExpressionLength else { return nil }
-        let tokens = tokenize(trimmed)
+        // §3.6: `tokenize` now reports malformed input instead of silently dropping the offending
+        // token — `{{calc:2--}}` used to lose the trailing operator and render a bare `2`.
+        guard let tokens = tokenize(trimmed), !tokens.isEmpty else { return nil }
         guard tokens.count <= maxTokenCount else { return nil }
         var index = 0
         guard let result = parseExpression(tokens: tokens, index: &index), index == tokens.count else {
             return nil
         }
+        // Overflow / division artifacts (`2^99999`) are not a usable expansion.
+        guard result.isFinite else { return nil }
         return result
     }
 
@@ -26,7 +30,8 @@ public final class SafeMathParser {
         case closeParen
     }
 
-    private static func tokenize(_ input: String) -> [Token] {
+    /// Returns `nil` when the input is not a well-formed arithmetic expression.
+    private static func tokenize(_ input: String) -> [Token]? {
         var tokens: [Token] = []
         let chars = Array(input)
         var i = 0
@@ -50,9 +55,9 @@ public final class SafeMathParser {
                         numStr.append(chars[i])
                         i += 1
                     }
-                    if let val = Double(numStr) {
-                        tokens.append(.number(val))
-                    }
+                    // §3.6: a sign with no numeral behind it is malformed, not a no-op.
+                    guard let val = Double(numStr) else { return nil }
+                    tokens.append(.number(val))
                 } else {
                     tokens.append(.op(c))
                     i += 1
@@ -63,12 +68,12 @@ public final class SafeMathParser {
                     numStr.append(chars[i])
                     i += 1
                 }
-                if let val = Double(numStr) {
-                    tokens.append(.number(val))
-                }
+                // §3.6: rejects "1.2.3", lone ".", and non-ASCII digits rather than dropping them.
+                guard let val = Double(numStr) else { return nil }
+                tokens.append(.number(val))
             } else {
                 // Reject unknown characters instead of silently skipping (bounded / safer).
-                return []
+                return nil
             }
         }
         return tokens
@@ -153,10 +158,12 @@ public final class SafeMathParser {
 public final class DynamicTemplateEngine {
     public static let shared = DynamicTemplateEngine()
 
-    private let lock = NSLock()
-    private var cachedFormatters: [String: DateFormatter] = [:]
     private static let dateTagRegex = try? NSRegularExpression(pattern: "\\{\\{date:(.*?)\\}\\}", options: [])
     private static let calcTagRegex = try? NSRegularExpression(pattern: "\\{\\{calc:(.*?)\\}\\}", options: [])
+    // §3.5 — generated values. `[^{}]*` keeps the spec from swallowing a neighbouring tag.
+    private static let uuidTagRegex = try? NSRegularExpression(pattern: "\\{\\{uuid(?::([^{}]*))?\\}\\}", options: [])
+    private static let randomTagRegex = try? NSRegularExpression(pattern: "\\{\\{random(?::([^{}]*))?\\}\\}", options: [])
+    private static let counterTagRegex = try? NSRegularExpression(pattern: "\\{\\{counter(?::([^{}]*))?\\}\\}", options: [])
 
     public init() {}
 
@@ -171,10 +178,11 @@ public final class DynamicTemplateEngine {
         }
     }
 
-    /// Strips nested template markers from clipboard before secondary `{{clipboard}}` injection.
-    public static func sanitizeClipboardText(_ raw: String) -> String {
-        var output = raw
-        // Remove any template-like tokens so clipboard cannot inject {{calc}} / {{cursor}} / etc.
+    // MARK: - Clipboard sanitization (§1.12)
+
+    /// Compiled once. `sanitizeClipboardText` sits on the expansion path and used to rebuild six
+    /// `NSRegularExpression`s per call.
+    private static let clipboardSanitizers: [NSRegularExpression] = {
         let patterns = [
             "\\{\\{clipboard\\}\\}",
             "\\{\\{cursor\\}\\}",
@@ -183,11 +191,20 @@ public final class DynamicTemplateEngine {
             "\\{\\{calc:[^}]*\\}\\}",
             "\\{\\{[^}]+\\}\\}"
         ]
-        for pattern in patterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                let range = NSRange(location: 0, length: (output as NSString).length)
-                output = regex.stringByReplacingMatches(in: output, options: [], range: range, withTemplate: "")
-            }
+        return patterns.compactMap { try? NSRegularExpression(pattern: $0, options: []) }
+    }()
+
+    /// Strips nested template markers from clipboard before secondary `{{clipboard}}` injection.
+    ///
+    /// §1.12: also used by `MacroParser` for the TextExpander-style `%clipboard` token, which
+    /// previously inserted the raw clipboard into text that was then fed to this engine.
+    public static func sanitizeClipboardText(_ raw: String) -> String {
+        // Fast path: nothing template-shaped, nothing to strip.
+        guard raw.contains("{{") else { return raw }
+        var output = raw
+        for regex in clipboardSanitizers {
+            let range = NSRange(location: 0, length: (output as NSString).length)
+            output = regex.stringByReplacingMatches(in: output, options: [], range: range, withTemplate: "")
         }
         return output
     }
@@ -197,14 +214,32 @@ public final class DynamicTemplateEngine {
         text.contains("{{clipboard}}")
     }
 
+    // MARK: - Resolve
+
     public func resolve(_ template: String, currentDate: Date = Date(), clipboardText: String? = nil) -> ExpansionResult {
+        resolve(template, currentDate: currentDate, clipboardText: clipboardText, environment: .default)
+    }
+
+    /// §3.5: resolution with injectable locale / counter / random collaborators.
+    public func resolve(
+        _ template: String,
+        currentDate: Date = Date(),
+        clipboardText: String? = nil,
+        environment: MacroEnvironment
+    ) -> ExpansionResult {
+        var environment = environment
+        if environment.memoSalt.isEmpty {
+            // Scope volatile memo keys to this template so two different snippets expanded in the
+            // same half-second cannot share a random value.
+            environment.memoSalt = "mustache:\(template.hashValue)"
+        }
         var output = template
 
-        // 1. Process Date tags: {{date}} and {{date:FORMAT}}
-        output = processDateTags(in: output, currentDate: currentDate)
+        // 1. Process Date tags: {{date}} and {{date:FORMAT}} (offsets handled by DateFormatLibrary)
+        output = processDateTags(in: output, currentDate: currentDate, environment: environment)
 
         // 2. Process Time tag: {{time}}
-        let timeFormatter = getFormatter(dateFormat: nil, timeStyle: .medium)
+        let timeFormatter = getFormatter(timeStyle: .medium, environment: environment)
         output = output.replacingOccurrences(of: "{{time}}", with: timeFormatter.string(from: currentDate))
 
         // 3. Process Clipboard tag: {{clipboard}} — read pasteboard only when the tag is present.
@@ -217,7 +252,14 @@ public final class DynamicTemplateEngine {
         // 4. Process Calculation tags: {{calc: 12 + 4}}
         output = processCalcTags(in: output)
 
-        // 5. Process Cursor tag: {{cursor}} — UTF-16 offset for AX/HID.
+        // 5. §3.5 — generated values: {{uuid}}, {{random:1-100}}, {{counter:name}}
+        output = processGeneratedTags(in: output, environment: environment)
+
+        // 6. §3.5 — case transforms: {{upper:…}} / {{lower:…}} / {{title:…}} / {{sentence:…}}
+        output = Self.processCaseTransformTags(in: output, locale: environment.locale)
+
+        // 7. Process Cursor tag: {{cursor}} — UTF-16 offset for AX/HID. First marker wins, which
+        //    is also what `MacroParser` does for `%|` (§3.6).
         var cursorOffset: Int? = nil
         if let firstCursorRange = output.range(of: "{{cursor}}") {
             let prefix = output[..<firstCursorRange.lowerBound]
@@ -228,7 +270,7 @@ public final class DynamicTemplateEngine {
         return ExpansionResult(text: output, cursorOffset: cursorOffset)
     }
 
-    private func processDateTags(in text: String, currentDate: Date) -> String {
+    private func processDateTags(in text: String, currentDate: Date, environment: MacroEnvironment) -> String {
         var output = text
 
         if let regex = Self.dateTagRegex {
@@ -239,15 +281,20 @@ public final class DynamicTemplateEngine {
                 let formatRange = match.range(at: 1)
                 let customFormat = nsString.substring(with: formatRange)
 
-                // Preset names (us, full, iso, …) resolve via the library;
-                // anything else stays a raw DateFormatter pattern.
-                let replacement = DateFormatLibrary.format(customFormat, now: currentDate)
+                // Preset names (us, full, iso, …) resolve via the library; `:+1d` offsets are
+                // applied there too (§3.5); anything else stays a raw DateFormatter pattern.
+                let replacement = DateFormatLibrary.format(
+                    customFormat,
+                    now: currentDate,
+                    locale: environment.locale,
+                    timeZone: environment.timeZone
+                )
 
                 output = (output as NSString).replacingCharacters(in: match.range, with: replacement)
             }
         }
 
-        let defaultFormatter = getFormatter(dateStyle: .medium)
+        let defaultFormatter = getFormatter(dateStyle: .medium, environment: environment)
         output = output.replacingOccurrences(of: "{{date}}", with: defaultFormatter.string(from: currentDate))
 
         return output
@@ -271,33 +318,147 @@ public final class DynamicTemplateEngine {
                         replacement = String(val)
                     }
                     output = (output as NSString).replacingCharacters(in: match.range, with: replacement)
-                } else {
-                    // Bound / invalid: leave empty rather than injecting raw expression.
-                    output = (output as NSString).replacingCharacters(in: match.range, with: "")
                 }
+                // §3.6: otherwise leave the original tag text in place. Replacing it with an empty
+                // string deleted user content mid-expansion with no signal that anything happened.
             }
         }
         return output
     }
 
-    private func getFormatter(dateFormat: String? = nil, dateStyle: DateFormatter.Style = .none, timeStyle: DateFormatter.Style = .none) -> DateFormatter {
-        lock.lock()
-        defer { lock.unlock() }
+    // MARK: - Generated values (§3.5)
 
-        let key = "\(dateFormat ?? "")_\(dateStyle.rawValue)_\(timeStyle.rawValue)"
-        if let existing = cachedFormatters[key] {
-            return existing
+    private func processGeneratedTags(in text: String, environment: MacroEnvironment) -> String {
+        var output = text
+        output = Self.replaceTags(in: output, regex: Self.uuidTagRegex) { spec, _ in
+            environment.uuidValue(spec: spec)
         }
+        output = Self.replaceTags(in: output, regex: Self.randomTagRegex) { spec, occurrence in
+            environment.randomValue(spec: spec, syntax: "mustache", occurrence: occurrence)
+        }
+        output = Self.replaceTags(in: output, regex: Self.counterTagRegex) { spec, _ in
+            let parsed = MacroCounterSpec.parse(spec)
+            return environment.counterValue(name: parsed.name, step: parsed.step)
+        }
+        return output
+    }
 
-        let formatter = DateFormatter()
-        formatter.locale = Locale.current
-        if let dateFormat = dateFormat {
-            formatter.dateFormat = dateFormat
-        } else {
-            formatter.dateStyle = dateStyle
-            formatter.timeStyle = timeStyle
+    private static func replaceTags(
+        in text: String,
+        regex: NSRegularExpression?,
+        transform: (String, Int) -> String
+    ) -> String {
+        guard let regex else { return text }
+        var output = text
+        let nsString = output as NSString
+        let matches = regex.matches(in: output, options: [], range: NSRange(location: 0, length: nsString.length))
+        guard !matches.isEmpty else { return output }
+        for (occurrence, match) in Array(matches.enumerated()).reversed() {
+            var spec = ""
+            if match.numberOfRanges >= 2 {
+                let specRange = match.range(at: 1)
+                if specRange.location != NSNotFound {
+                    spec = nsString.substring(with: specRange)
+                }
+            }
+            output = (output as NSString).replacingCharacters(
+                in: match.range,
+                with: transform(spec, occurrence)
+            )
         }
-        cachedFormatters[key] = formatter
-        return formatter
+        return output
+    }
+
+    // MARK: - Case transforms (§3.5)
+
+    private static let caseTransformOpeners: [(marker: String, transform: TextCaseTransform)] = [
+        (marker: "{{upper:", transform: .upper),
+        (marker: "{{lower:", transform: .lower),
+        (marker: "{{title:", transform: .title),
+        (marker: "{{sentence:", transform: .sentence),
+    ]
+
+    /// Resolves `{{upper:…}}` and friends innermost-first with balanced `{{`/`}}` counting, so a
+    /// nested tag inside the body does not terminate the transform early.
+    static func processCaseTransformTags(in text: String, locale: Locale) -> String {
+        guard text.contains("{{") else { return text }
+        var output = text
+        var iterations = 0
+        while iterations < 32 {
+            iterations += 1
+            var opener: (range: Range<String.Index>, transform: TextCaseTransform)?
+            for entry in caseTransformOpeners {
+                guard let range = output.range(of: entry.marker, options: .backwards) else { continue }
+                if opener == nil || range.lowerBound > opener!.range.lowerBound {
+                    opener = (range: range, transform: entry.transform)
+                }
+            }
+            guard let opener else { break }
+            guard let close = matchingCloseRange(in: output, from: opener.range.upperBound) else { break }
+            let body = String(output[opener.range.upperBound..<close.lowerBound])
+            let transformed = applyPreservingCursorTag(opener.transform, to: body, locale: locale)
+            output.replaceSubrange(opener.range.lowerBound..<close.upperBound, with: transformed)
+        }
+        return output
+    }
+
+    private static func matchingCloseRange(in text: String, from start: String.Index) -> Range<String.Index>? {
+        var depth = 0
+        var index = start
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if next < text.endIndex, text[index] == "{", text[next] == "{" {
+                depth += 1
+                index = text.index(after: next)
+                continue
+            }
+            if next < text.endIndex, text[index] == "}", text[next] == "}" {
+                if depth == 0 { return index..<text.index(after: next) }
+                depth -= 1
+                index = text.index(after: next)
+                continue
+            }
+            index = next
+        }
+        return nil
+    }
+
+    /// `{{cursor}}` is resolved after transforms; never fold its case.
+    private static func applyPreservingCursorTag(
+        _ transform: TextCaseTransform,
+        to body: String,
+        locale: Locale
+    ) -> String {
+        guard body.contains("{{cursor}}") else { return transform.apply(to: body, locale: locale) }
+        return body.components(separatedBy: "{{cursor}}")
+            .map { transform.apply(to: $0, locale: locale) }
+            .joined(separator: "{{cursor}}")
+    }
+
+    // MARK: - Formatters
+
+    /// §2.9: previously a private per-engine cache that pinned `Locale.current` at fill time and
+    /// never invalidated, while `processDateTags` bypassed it entirely by routing to
+    /// `DateFormatLibrary.format`. Both paths now share one cache keyed by
+    /// `(shape, locale, time zone)`.
+    private func getFormatter(
+        dateFormat: String? = nil,
+        dateStyle: DateFormatter.Style = .none,
+        timeStyle: DateFormatter.Style = .none,
+        environment: MacroEnvironment = .default
+    ) -> DateFormatter {
+        if let dateFormat {
+            return DateFormatLibrary.formatter(
+                pattern: dateFormat,
+                locale: environment.locale,
+                timeZone: environment.timeZone
+            )
+        }
+        return DateFormatLibrary.formatter(
+            dateStyle: dateStyle,
+            timeStyle: timeStyle,
+            locale: environment.locale,
+            timeZone: environment.timeZone
+        )
     }
 }

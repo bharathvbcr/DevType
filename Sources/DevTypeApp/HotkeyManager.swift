@@ -24,8 +24,17 @@ final class HotkeyManager {
     var onInlineSearch: (() -> Void)?
     var onInsertText: ((String) -> Void)?
     var onOpenURL: ((String) -> Void)?
+    /// §4.2: `RegisterEventHotKey` failure used to be logged and dropped, so a
+    /// shortcut claimed by another app silently did nothing forever. Preferences
+    /// (and the app delegate) hook this to tell the user.
+    /// Parameters: human-readable shortcut, OSStatus.
+    var onRegistrationFailed: ((String, OSStatus) -> Void)?
     /// Device-local macros loaded from UserDefaults (`devtype.hotkeyMacros`).
     var macros: [HotkeyMacroAction] = HotkeyManager.loadMacros()
+
+    /// §4.2: user-configurable, persisted in `devtype.hotkey.inlineSearch`.
+    /// Defaults to ⌘/ for compatibility with the old hardcoded binding.
+    var inlineSearchShortcut: DevTypeShortcut = HotkeyPreferences.inlineSearchShortcut
 
     func registerAll() {
         installHandlerIfNeeded()
@@ -35,6 +44,28 @@ final class HotkeyManager {
             registerMacro(macro)
         }
     }
+
+    /// §4.2: rebinds the palette shortcut, persists it, and re-registers.
+    /// Returns `noErr` on success so Preferences can surface the failure inline
+    /// as well as through `onRegistrationFailed`.
+    @discardableResult
+    func applyInlineSearchShortcut(_ shortcut: DevTypeShortcut) -> OSStatus {
+        HotkeyPreferences.inlineSearchShortcut = shortcut
+        inlineSearchShortcut = shortcut
+        lastRegistrationStatus = noErr
+        registerAll()
+        return lastRegistrationStatus
+    }
+
+    /// §4.3: replaces the macro list, persists it, and re-registers.
+    func applyMacros(_ updated: [HotkeyMacroAction]) {
+        HotkeyPreferences.saveMacros(updated)
+        macros = updated
+        registerAll()
+    }
+
+    /// Status from the most recent inline-search registration attempt.
+    private(set) var lastRegistrationStatus: OSStatus = noErr
 
     static func loadMacros() -> [HotkeyMacroAction] {
         guard let data = UserDefaults.standard.data(forKey: "devtype.hotkeyMacros"),
@@ -60,26 +91,33 @@ final class HotkeyManager {
     }
 
     private func registerInlineSearch() {
-        let keyCode = UInt32(kVK_ANSI_Slash)
-        let modifiers = UInt32(cmdKey)
+        // §4.2: was `kVK_ANSI_Slash` + `cmdKey`, hardcoded. Now read from
+        // `HotkeyPreferences` so the Preferences recorder can rebind it.
+        let shortcut = inlineSearchShortcut
         let id = nextID
         nextID += 1
         let hotKeyID = EventHotKeyID(signature: OSType(0x4454_5059), id: id) // DTYP
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(
-            keyCode,
-            modifiers,
+            shortcut.keyCode,
+            shortcut.carbonModifiers,
             hotKeyID,
             GetEventDispatcherTarget(),
             0,
             &ref
         )
+        lastRegistrationStatus = status
+        let label = shortcut.displayString
         if status == noErr, let ref {
             refs[id] = ref
             inlineSearchHotkeyID = id
-            DevTypeLog.app.info("[Hotkey] inline search registered (⌘/)")
+            DevTypeLog.app.info("[Hotkey] inline search registered (\(label, privacy: .public))")
         } else {
-            DevTypeLog.app.error("[Hotkey] inline search registration failed status=\(status)")
+            // §4.2: no longer a silent log-and-forget — the user is told.
+            DevTypeLog.app.error(
+                "[Hotkey] inline search registration failed shortcut=\(label, privacy: .public) status=\(status, privacy: .public)"
+            )
+            onRegistrationFailed?(label, status)
         }
     }
 
@@ -87,6 +125,9 @@ final class HotkeyManager {
         for (_, ref) in refs { UnregisterEventHotKey(ref) }
         refs.removeAll()
         inlineSearchHotkeyID = nil
+        // §4.3: re-registering after an edit reuses fresh IDs; stale entries here
+        // would keep firing removed macros.
+        macroByID.removeAll()
     }
 
     private func installHandlerIfNeeded() {
@@ -140,6 +181,16 @@ final class HotkeyManager {
             var stored = macro
             stored.id = id
             macroByID[id] = stored
+        } else {
+            // §4.2/§4.3: macro registration failures were not even logged.
+            let label = DevTypeShortcut(
+                keyCode: macro.keyCode,
+                carbonModifiers: macro.modifiers
+            ).displayString
+            DevTypeLog.app.error(
+                "[Hotkey] macro registration failed shortcut=\(label, privacy: .public) status=\(status, privacy: .public)"
+            )
+            onRegistrationFailed?(label, status)
         }
     }
 

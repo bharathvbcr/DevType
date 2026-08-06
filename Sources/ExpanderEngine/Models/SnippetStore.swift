@@ -53,6 +53,15 @@ public final class SnippetStore {
 
     public enum LoadIssue: Equatable {
         case corrupted(backupURL: URL)
+        /// §0.3: the file exists but could not be read at all (I/O error, or an
+        /// iCloud item that never materialized). Distinct from `corrupted`: we
+        /// have no bytes, so there is nothing to back up.
+        case unreadable(path: String, reason: String)
+        /// §0.3: the file is present but empty. Surfaced so the UI can warn
+        /// before the user saves emptiness over a real library.
+        case emptyFile(path: String)
+        /// §1.13: iCloud reports unresolved conflict versions for the library.
+        case conflicted(path: String, versionCount: Int)
     }
 
     public enum SaveOutcome: Equatable {
@@ -62,6 +71,85 @@ public final class SnippetStore {
         case failed(String)
 
         public var didSave: Bool { self == .saved }
+    }
+
+    /// §1.13: one iCloud conflict version, surfaced instead of being silently overwritten.
+    public struct ConflictVersion: Equatable {
+        public let url: URL
+        public let modificationDate: Date?
+        public let deviceName: String?
+
+        public init(url: URL, modificationDate: Date?, deviceName: String?) {
+            self.url = url
+            self.modificationDate = modificationDate
+            self.deviceName = deviceName
+        }
+    }
+
+    /// §1.9: a trigger that the matcher will silently shadow, or an unusable trigger.
+    /// Reported instead of deleting the snippet.
+    public struct TriggerConflict: Equatable {
+        public enum Kind: Equatable {
+            /// Trigger is empty — the snippet can never fire.
+            case emptyTrigger
+            /// Two or more snippets resolve to the same matcher key; the first wins.
+            case duplicateTrigger
+            /// A case-sensitive and a case-insensitive snippet fold to the same key.
+            case caseShadow
+        }
+
+        public let kind: Kind
+        /// The matcher key involved (case-folded for case-insensitive snippets).
+        public let trigger: String
+        public let snippetIDs: [UUID]
+        public let groupNames: [String]
+
+        public init(kind: Kind, trigger: String, snippetIDs: [UUID], groupNames: [String]) {
+            self.kind = kind
+            self.trigger = trigger
+            self.snippetIDs = snippetIDs
+            self.groupNames = groupNames
+        }
+    }
+
+    /// §1.10: how an import folds into the existing library.
+    public enum ImportMode: Equatable {
+        /// Match by trigger inside a same-named group, update in place, append the
+        /// rest. Never removes a local snippet. Default.
+        case merge
+        /// Legacy behaviour: same-named groups are replaced wholesale. Destructive.
+        case replaceGroup
+        /// Always land in a freshly named group, leaving existing groups untouched.
+        case intoNewGroup
+    }
+
+    /// §1.10: what an import actually did, so the UI can show a diff.
+    public struct ImportSummary: Equatable {
+        public let mode: ImportMode
+        public let groupsCreated: [String]
+        public let groupsUpdated: [String]
+        public let snippetsAdded: Int
+        public let snippetsUpdated: Int
+        public let snippetsUnchanged: Int
+        public let outcome: SaveOutcome
+
+        public init(
+            mode: ImportMode,
+            groupsCreated: [String],
+            groupsUpdated: [String],
+            snippetsAdded: Int,
+            snippetsUpdated: Int,
+            snippetsUnchanged: Int,
+            outcome: SaveOutcome
+        ) {
+            self.mode = mode
+            self.groupsCreated = groupsCreated
+            self.groupsUpdated = groupsUpdated
+            self.snippetsAdded = snippetsAdded
+            self.snippetsUpdated = snippetsUpdated
+            self.snippetsUnchanged = snippetsUnchanged
+            self.outcome = outcome
+        }
     }
 
     public struct Location: Equatable {
@@ -89,6 +177,12 @@ public final class SnippetStore {
     public static let storeDirEnvKey = "DEVTYPE_STORE_DIR"
     public static let syncedFileName = "DevType-snippets.json"
 
+    /// §2.5: watcher events are coalesced over this window before any disk work happens.
+    public static let externalChangeDebounce: TimeInterval = 0.25
+
+    /// §0.3: bounded wait for `startDownloadingUbiquitousItem` to materialize the file.
+    public static let ubiquitousDownloadTimeout: TimeInterval = 2.0
+
     private enum FileDigest: Equatable {
         case absent
         case unreadable
@@ -104,9 +198,19 @@ public final class SnippetStore {
     private let saveBlockLock = NSLock()
     private var listeners: [UUID: ([SnippetModel]) -> Void] = [:]
     private var groupListeners: [UUID: ([SnippetGroup]) -> Void] = [:]
+    /// §1.4: lets the UI surface a save that never landed.
+    private var saveFailureListeners: [UUID: (SaveOutcome?) -> Void] = [:]
+    /// §1.13: lets the UI surface an iCloud conflict instead of losing a side.
+    private var conflictListeners: [UUID: ([ConflictVersion]) -> Void] = [:]
     private var _cachedGroups: [SnippetGroup]?
     private var _lastLoadIssue: LoadIssue?
     private var _saveBlocked: SaveOutcome?
+    /// §0.3: latched when the library on disk could not be read/decoded. Blocks
+    /// every save (including forced ones) until a clean reload or an explicit
+    /// `clearLibraryReadFailure()` / `forceOverwriteLibrary(...)`.
+    private var _hardFailure: SaveOutcome?
+    private var _lastSaveFailure: SaveOutcome?
+    private var _pendingConflicts: [ConflictVersion] = []
 
     private var fileURL: URL
     private var expectsExistingLibrary: Bool
@@ -118,7 +222,38 @@ public final class SnippetStore {
     private var watcher: StoreWatching?
     private let digestLock = NSLock()
     private var savedDigest: FileDigest = .absent
-    private var isApplyingExternalState = false
+
+    /// §2.5: reentrancy guard. Set for the duration of an external-state apply so a
+    /// watcher event produced by that apply cannot recurse back into `reloadFromDisk`.
+    private let externalStateLock = NSLock()
+    private var _isApplyingExternalState = false
+    private var externalChangeGeneration: UInt64 = 0
+    /// §2.5: digest work (full-file read + SHA256) runs here, never on main.
+    private let coalesceQueue = DispatchQueue(label: "devtype.store.external", qos: .utility)
+
+    /// §1.5: usage counters live in a coalesced sidecar, not in the library file.
+    /// Assignable so tests can point at a temp file.
+    public var usageStatsStore: UsageStatsStore = .shared
+
+    // MARK: - Active location registry (§3.7)
+
+    private static let activeDirectoryLock = NSLock()
+    private static var _activeLibraryDirectory: URL?
+
+    /// §3.7: directory holding the most recently initialized/relocated library.
+    /// `ImageAttachmentStore` follows this so image attachments travel with the
+    /// library instead of being frozen at first access.
+    public static var activeLibraryDirectory: URL? {
+        activeDirectoryLock.lock()
+        defer { activeDirectoryLock.unlock() }
+        return _activeLibraryDirectory
+    }
+
+    private static func setActiveLibraryDirectory(_ url: URL?) {
+        activeDirectoryLock.lock()
+        _activeLibraryDirectory = url
+        activeDirectoryLock.unlock()
+    }
 
     /// Set when the last disk load recovered from corrupt JSON. Cleared after UI consumes it.
     public var lastLoadIssue: LoadIssue? {
@@ -218,17 +353,23 @@ public final class SnippetStore {
         let loaded = Self.loadFrom(location)
         _cachedGroups = loaded.groups
         _lastLoadIssue = loaded.loadIssue
+        _pendingConflicts = loaded.conflicts
         saveBlockLock.lock()
-        _saveBlocked = loaded.blocked
+        _saveBlocked = loaded.hardFailure ?? loaded.blocked
+        _hardFailure = loaded.hardFailure
         saveBlockLock.unlock()
         setLastKnownDigest(loaded.digest)
 
-        if (_cachedGroups ?? []).isEmpty && !expectsExistingLibrary {
+        // §0.3: only re-enter the load path to seed a genuinely absent local
+        // library. A hard failure must not be re-read (it would take a second
+        // backup) and must never be "recovered" by writing demo snippets.
+        if (_cachedGroups ?? []).isEmpty && !expectsExistingLibrary && loaded.hardFailure == nil {
             _cachedGroups = loadGroupsUnlocked()
         }
 
         self.watcher = watcherFactory(fileURL)
         startWatching()
+        Self.setActiveLibraryDirectory(fileURL.deletingLastPathComponent())
     }
 
     deinit { watcher?.stop() }
@@ -263,10 +404,35 @@ public final class SnippetStore {
         return token
     }
 
+    /// §1.4: fires with the current failure (or `nil` when clear) on registration and
+    /// on every subsequent change, so the UI can show "your edit did not save".
+    @discardableResult
+    public func addSaveFailureListener(_ listener: @escaping (SaveOutcome?) -> Void) -> UUID {
+        let token = UUID()
+        lock.lock()
+        saveFailureListeners[token] = listener
+        lock.unlock()
+        listener(lastSaveFailure)
+        return token
+    }
+
+    /// §1.13: fires with the current unresolved iCloud conflict versions.
+    @discardableResult
+    public func addConflictListener(_ listener: @escaping ([ConflictVersion]) -> Void) -> UUID {
+        let token = UUID()
+        lock.lock()
+        conflictListeners[token] = listener
+        lock.unlock()
+        listener(pendingConflicts())
+        return token
+    }
+
     public func removeListener(token: UUID) {
         lock.lock()
         listeners.removeValue(forKey: token)
         groupListeners.removeValue(forKey: token)
+        saveFailureListeners.removeValue(forKey: token)
+        conflictListeners.removeValue(forKey: token)
         lock.unlock()
     }
 
@@ -290,52 +456,64 @@ public final class SnippetStore {
         var digest: FileDigest = .absent
         var loadIssue: LoadIssue?
         var blocked: SaveOutcome?
+        /// §0.3: set when the bytes on disk could not be turned into a library.
+        var hardFailure: SaveOutcome?
+        var conflicts: [ConflictVersion] = []
+        var fileWasPresent = false
+        /// True when we actually produced a trustworthy library (including a
+        /// legitimately empty one).
+        var decodeSucceeded = false
     }
 
     private func loadGroupsUnlocked() -> [SnippetGroup] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        let loaded = Self.loadFrom(
+            Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary)
+        )
+        setLastKnownDigest(loaded.digest)
+        // `lock` is held by our callers, so store without notifying.
+        storePendingConflicts(loaded.conflicts)
+        if let issue = loaded.loadIssue { _lastLoadIssue = issue }
+
+        guard loaded.fileWasPresent else {
+            // §0.3: nothing on disk. When the user pointed us at an existing
+            // library (iCloud / Link) the file is expected to arrive later — do
+            // NOT seed defaults over it, and keep whatever we already had.
             if expectsExistingLibrary {
-                return []
-            }
-            let defaults = Self.sanitizeGroups([SnippetGroup(name: SnippetDocument.defaultGroupName, snippets: defaultSnippets())])
-            writeGroupsToDisk(defaults, force: true)
-            return defaults
-        }
-
-        let data: Data
-        do {
-            data = try Data(contentsOf: fileURL)
-        } catch {
-            DevTypeLog.store.error(
-                "[Store] Failed to read snippets from \(self.fileURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
-            )
-            return Self.sanitizeGroups([SnippetGroup(name: SnippetDocument.defaultGroupName, snippets: defaultSnippets())])
-        }
-
-        if data.isEmpty || String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
-            return []
-        }
-
-        do {
-            let document = try Self.decodeDocument(from: data)
-            if document.schemaVersion > SnippetDocument.currentSchemaVersion {
                 saveBlockLock.lock()
-                _saveBlocked = .blockedByNewerSchema
+                _saveBlocked = loaded.blocked
                 saveBlockLock.unlock()
+                return _cachedGroups ?? []
             }
-            return Self.sanitizeGroups(document.groups)
-        } catch {
-            DevTypeLog.store.error(
-                "[Store] Failed to decode snippets from \(self.fileURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            // First run on a local store. This is the only remaining auto-write
+            // and it cannot destroy anything: there is no file to destroy.
+            let defaults = Self.sanitizeGroups(
+                [SnippetGroup(name: SnippetDocument.defaultGroupName, snippets: defaultSnippets())]
             )
-            let backupURL = fileURL.appendingPathExtension("bak")
-            try? FileManager.default.removeItem(at: backupURL)
-            try? FileManager.default.copyItem(at: fileURL, to: backupURL)
-            _lastLoadIssue = .corrupted(backupURL: backupURL)
-            let defaults = Self.sanitizeGroups([SnippetGroup(name: SnippetDocument.defaultGroupName, snippets: defaultSnippets())])
-            writeGroupsToDisk(defaults, force: true)
+            _ = writeGroupsToDisk(defaults, force: true)
             return defaults
         }
+
+        if let hard = loaded.hardFailure {
+            // §0.3: the old code wrote 4 demo snippets here with `force: true`,
+            // bypassing the digest and block guards and syncing the replacement
+            // to every other device. Now: back the file up, latch a hard failure
+            // so every save is refused, and hand back the last-known state
+            // WITHOUT persisting anything.
+            saveBlockLock.lock()
+            _hardFailure = hard
+            _saveBlocked = hard
+            saveBlockLock.unlock()
+            DevTypeLog.store.error(
+                "[Store] Library at \(self.fileURL.path, privacy: .public) is unreadable; saves are blocked until this is resolved."
+            )
+            return _cachedGroups ?? []
+        }
+
+        saveBlockLock.lock()
+        _saveBlocked = loaded.blocked
+        if loaded.decodeSucceeded { _hardFailure = nil }
+        saveBlockLock.unlock()
+        return loaded.groups
     }
 
     /// Decodes versioned `SnippetDocument`, v1 `snippets` envelope, or legacy bare `[SnippetModel]` arrays.
@@ -392,90 +570,536 @@ public final class SnippetStore {
         saveGroups(updated)
     }
 
+    /// §1.4: the cache is committed and listeners fire **only** when the bytes
+    /// actually reached disk. Previously the cache was updated first and every
+    /// listener fired unconditionally, so the UI reported success for writes that
+    /// were refused by `blockedReason()` or the digest guard — and every edit was
+    /// lost at quit.
     @discardableResult
     public func saveGroups(_ groups: [SnippetGroup]) -> SaveOutcome {
         let sanitized = Self.sanitizeGroups(groups)
+        let outcome = writeGroupsToDisk(sanitized)
+
+        guard outcome.didSave else {
+            DevTypeLog.store.error(
+                "[Store] Save did not land: \(String(describing: outcome), privacy: .public)"
+            )
+            publishSaveFailure(outcome)
+            return outcome
+        }
+
         lock.lock()
         _cachedGroups = sanitized
         let snippetListeners = listeners
         let groupListenersCopy = groupListeners
         lock.unlock()
 
-        let outcome = writeGroupsToDisk(sanitized)
+        publishSaveFailure(nil)
+
         let flat = sanitized.flatMap(\.snippets)
         for listener in snippetListeners.values { listener(flat) }
         for listener in groupListenersCopy.values { listener(sanitized) }
         return outcome
     }
 
+    /// §1.10: `.merge` shim preserving the original signature.
     @discardableResult
     public func importGroups(_ imported: [SnippetGroup]) -> SaveOutcome {
-        var current = loadGroups()
-        for group in imported {
-            if let idx = current.firstIndex(where: { $0.name == group.name }) {
-                current[idx] = group
-            } else {
-                current.append(group)
-            }
-        }
-        return saveGroups(current)
+        importGroups(imported, mode: .merge).outcome
     }
 
-    public func incrementUsage(for snippetID: UUID) {
-        var groups = loadGroups()
-        var changed = false
-        for gi in groups.indices {
-            for si in groups[gi].snippets.indices where groups[gi].snippets[si].id == snippetID {
-                groups[gi].snippets[si].usageCount += 1
-                groups[gi].snippets[si].updatedAt = Date()
-                changed = true
-            }
-        }
-        if changed {
-            _ = saveGroups(groups)
-        }
-    }
-
+    /// §1.10: the old implementation did `current[idx] = group`, so importing an
+    /// Espanso `base.yml` (group name = file basename) or a TextExpander group
+    /// called "General" replaced the user's default group wholesale. Merge is now
+    /// the default and never drops a local snippet.
     @discardableResult
-    private func writeGroupsToDisk(_ groups: [SnippetGroup], force: Bool = false) -> SaveOutcome {
-        if !force, let blocked = blockedReason() { return blocked }
+    public func importGroups(_ imported: [SnippetGroup], mode: ImportMode) -> ImportSummary {
+        var current = loadGroups()
+        var created: [String] = []
+        var updatedGroups: [String] = []
+        var added = 0
+        var changed = 0
+        var unchanged = 0
 
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let document = SnippetDocument(groups: groups)
-            let data = try encoder.encode(document)
+        for group in imported {
+            switch mode {
+            case .intoNewGroup:
+                var copy = group
+                copy.name = Self.uniqueGroupName(base: group.name, existing: current.map(\.name))
+                added += copy.snippets.count
+                current.append(copy)
+                created.append(copy.name)
 
-            if !force {
-                let onDisk = Self.currentDigest(at: fileURL)
-                guard onDisk == lastKnownDigest() else {
-                    saveBlockLock.lock()
-                    _saveBlocked = .blockedByRemoteChange
-                    saveBlockLock.unlock()
-                    return .blockedByRemoteChange
+            case .replaceGroup:
+                if let idx = current.firstIndex(where: { $0.name == group.name }) {
+                    added += group.snippets.count
+                    current[idx] = group
+                    updatedGroups.append(group.name)
+                } else {
+                    added += group.snippets.count
+                    current.append(group)
+                    created.append(group.name)
+                }
+
+            case .merge:
+                if let idx = current.firstIndex(where: { $0.name == group.name }) {
+                    let result = Self.mergeSnippets(incoming: group.snippets, into: current[idx].snippets)
+                    current[idx].snippets = result.snippets
+                    added += result.added
+                    changed += result.updated
+                    unchanged += result.unchanged
+                    if result.added > 0 || result.updated > 0 {
+                        updatedGroups.append(group.name)
+                    }
+                } else {
+                    added += group.snippets.count
+                    current.append(group)
+                    created.append(group.name)
                 }
             }
+        }
 
-            let parent = fileURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-            try data.write(to: fileURL, options: .atomic)
-            setLastKnownDigest(.sha(Self.sha256(of: data)))
+        let outcome = saveGroups(current)
+        return ImportSummary(
+            mode: mode,
+            groupsCreated: created,
+            groupsUpdated: updatedGroups,
+            snippetsAdded: added,
+            snippetsUpdated: changed,
+            snippetsUnchanged: unchanged,
+            outcome: outcome
+        )
+    }
+
+    private struct MergeResult {
+        var snippets: [SnippetModel]
+        var added: Int
+        var updated: Int
+        var unchanged: Int
+    }
+
+    private static func mergeSnippets(incoming: [SnippetModel], into local: [SnippetModel]) -> MergeResult {
+        var result = local
+        var exactIndex: [String: Int] = [:]
+        var foldedIndex: [String: Int] = [:]
+        for (i, snippet) in result.enumerated() where !snippet.triggerKeyword.isEmpty {
+            if exactIndex[snippet.triggerKeyword] == nil {
+                exactIndex[snippet.triggerKeyword] = i
+            }
+            let folded = snippet.triggerKeyword.lowercased()
+            if foldedIndex[folded] == nil {
+                foldedIndex[folded] = i
+            }
+        }
+
+        var added = 0
+        var updated = 0
+        var unchanged = 0
+
+        for candidate in incoming {
+            let trigger = candidate.triggerKeyword
+            let folded = trigger.lowercased()
+            let match = trigger.isEmpty ? nil : (exactIndex[trigger] ?? foldedIndex[folded])
+
+            guard let idx = match else {
+                result.append(candidate)
+                if !trigger.isEmpty {
+                    let position = result.count - 1
+                    if exactIndex[trigger] == nil { exactIndex[trigger] = position }
+                    if foldedIndex[folded] == nil { foldedIndex[folded] = position }
+                }
+                added += 1
+                continue
+            }
+
+            let localSnippet = result[idx]
+            var mergedTags = localSnippet.tags
+            for tag in candidate.tags where !mergedTags.contains(tag) {
+                mergedTags.append(tag)
+            }
+
+            // Local identity and enablement win so usage stats, references, and a
+            // deliberate "off" switch survive a re-import.
+            let merged = SnippetModel(
+                id: localSnippet.id,
+                title: candidate.title.isEmpty ? localSnippet.title : candidate.title,
+                label: candidate.label.isEmpty ? localSnippet.label : candidate.label,
+                triggerKeyword: localSnippet.triggerKeyword,
+                replacementText: candidate.replacementText,
+                isCaseSensitive: candidate.isCaseSensitive,
+                requireWordBoundary: candidate.requireWordBoundary,
+                isPlainText: candidate.isPlainText,
+                enabled: localSnippet.enabled,
+                imagePath: candidate.imagePath.isEmpty ? localSnippet.imagePath : candidate.imagePath,
+                createdAt: localSnippet.createdAt,
+                updatedAt: Date(),
+                usageCount: localSnippet.usageCount,
+                tags: mergedTags,
+                includeApps: candidate.includeApps.isEmpty ? localSnippet.includeApps : candidate.includeApps,
+                excludeApps: candidate.excludeApps.isEmpty ? localSnippet.excludeApps : candidate.excludeApps
+            )
+
+            let identical = localSnippet.title == merged.title
+                && localSnippet.label == merged.label
+                && localSnippet.replacementText == merged.replacementText
+                && localSnippet.isCaseSensitive == merged.isCaseSensitive
+                && localSnippet.requireWordBoundary == merged.requireWordBoundary
+                && localSnippet.isPlainText == merged.isPlainText
+                && localSnippet.imagePath == merged.imagePath
+                && localSnippet.tags == merged.tags
+                && localSnippet.includeApps == merged.includeApps
+                && localSnippet.excludeApps == merged.excludeApps
+
+            if identical {
+                unchanged += 1
+            } else {
+                result[idx] = merged
+                updated += 1
+            }
+        }
+
+        return MergeResult(snippets: result, added: added, updated: updated, unchanged: unchanged)
+    }
+
+    private static func uniqueGroupName(base: String, existing: [String]) -> String {
+        let name = base.isEmpty ? SnippetDocument.defaultGroupName : base
+        let taken = Set(existing)
+        guard taken.contains(name) else { return name }
+        var suffix = 2
+        while taken.contains("\(name) \(suffix)") { suffix += 1 }
+        return "\(name) \(suffix)"
+    }
+
+    // MARK: - Usage statistics (§1.5)
+
+    /// §1.5: no longer rewrites the library. Counters go to `UsageStatsStore`,
+    /// which coalesces writes (~5 s) and flushes on terminate.
+    public func incrementUsage(for snippetID: UUID) {
+        usageStatsStore.recordUsage(for: snippetID)
+    }
+
+    /// Live usage count: sidecar value, falling back to the legacy in-library
+    /// counter for snippets that have not been used since the migration.
+    public func usageCount(for snippet: SnippetModel) -> Int {
+        max(snippet.usageCount, usageStatsStore.usageCount(for: snippet.id))
+    }
+
+    public func usageCount(forSnippetID snippetID: UUID) -> Int {
+        usageStatsStore.usageCount(for: snippetID)
+    }
+
+    /// §4.5: survives relaunch, unlike the in-memory recents list.
+    public func lastUsedAt(forSnippetID snippetID: UUID) -> Date? {
+        usageStatsStore.lastUsedAt(for: snippetID)
+    }
+
+    /// §1.5 migration: copies legacy in-library `usageCount` values into the
+    /// sidecar. Idempotent — only fills IDs the sidecar has never seen. Call once
+    /// at launch.
+    public func migrateLegacyUsageCounts() {
+        usageStatsStore.seedLegacyCounts(from: loadSnippets())
+    }
+
+    /// §4.5: most-used snippets, highest first.
+    public func topUsedSnippets(limit: Int = 10) -> [SnippetModel] {
+        let byID = snippetsByID()
+        return usageStatsStore.topSnippetIDs(limit: limit).compactMap { byID[$0] }
+    }
+
+    /// §4.5: most-recently-used snippets, newest first.
+    public func recentlyUsedSnippets(limit: Int = 10) -> [SnippetModel] {
+        let byID = snippetsByID()
+        return usageStatsStore.recentSnippetIDs(limit: limit).compactMap { byID[$0] }
+    }
+
+    private func snippetsByID() -> [UUID: SnippetModel] {
+        var byID: [UUID: SnippetModel] = [:]
+        for snippet in loadSnippets() where byID[snippet.id] == nil {
+            byID[snippet.id] = snippet
+        }
+        return byID
+    }
+
+    /// Flush pending usage counters. Call from `applicationWillTerminate`.
+    public func flushUsageStats() {
+        usageStatsStore.flush()
+    }
+
+    // MARK: - Export (§0.4)
+
+    /// §0.4: pretty-printed JSON of the current document envelope. Works even
+    /// while saves are blocked — it is the escape hatch for exactly that state.
+    public func exportLibraryData() throws -> Data {
+        try Self.encodeLibrary(loadGroups())
+    }
+
+    /// §0.4: writes the export to `url` (use with `NSSavePanel`).
+    public func exportLibrary(to url: URL) throws {
+        let data = try exportLibraryData()
+        let parent = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+    }
+
+    /// Single encode implementation reused by export, backups, and relocation.
+    static func encodeLibrary(_ groups: [SnippetGroup]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(SnippetDocument(groups: groups))
+    }
+
+    // MARK: - Save state (§1.4 / §0.3)
+
+    /// §1.4: last save that did not land, or `nil` when the last save succeeded.
+    public var lastSaveFailure: SaveOutcome? {
+        saveBlockLock.lock()
+        defer { saveBlockLock.unlock() }
+        return _lastSaveFailure
+    }
+
+    /// §1.4: clears the surfaced failure after the UI has shown it. Does not
+    /// unblock saving — that is `clearLibraryReadFailure()` / a clean reload.
+    public func acknowledgeSaveFailure() {
+        publishSaveFailure(nil)
+    }
+
+    /// §0.3: true while the library on disk could not be read; every save is refused.
+    public var isLibraryReadFailed: Bool {
+        saveBlockLock.lock()
+        defer { saveBlockLock.unlock() }
+        return _hardFailure != nil
+    }
+
+    public var libraryReadFailureReason: String? {
+        saveBlockLock.lock()
+        defer { saveBlockLock.unlock() }
+        if case .failed(let reason)? = _hardFailure { return reason }
+        return nil
+    }
+
+    /// §0.3: user-driven recovery — stop refusing saves. The next save overwrites
+    /// whatever is on disk, so callers must confirm first and should offer
+    /// `exportLibrary(to:)` beforehand.
+    public func clearLibraryReadFailure() {
+        saveBlockLock.lock()
+        _hardFailure = nil
+        _saveBlocked = nil
+        saveBlockLock.unlock()
+        publishSaveFailure(nil)
+    }
+
+    /// §0.3: the single deliberate escape hatch that bypasses the hard-fail latch
+    /// and the digest guard. Nothing on the load path may call this.
+    @discardableResult
+    public func forceOverwriteLibrary(with groups: [SnippetGroup]) -> SaveOutcome {
+        let sanitized = Self.sanitizeGroups(groups)
+        let outcome = writeGroupsToDisk(sanitized, force: true, bypassHardFailure: true)
+        guard outcome.didSave else {
+            publishSaveFailure(outcome)
+            return outcome
+        }
+        saveBlockLock.lock()
+        _hardFailure = nil
+        saveBlockLock.unlock()
+
+        lock.lock()
+        _cachedGroups = sanitized
+        let snippetListeners = listeners
+        let groupListenersCopy = groupListeners
+        lock.unlock()
+
+        publishSaveFailure(nil)
+        let flat = sanitized.flatMap(\.snippets)
+        for listener in snippetListeners.values { listener(flat) }
+        for listener in groupListenersCopy.values { listener(sanitized) }
+        return outcome
+    }
+
+    private func publishSaveFailure(_ outcome: SaveOutcome?) {
+        saveBlockLock.lock()
+        let changed = _lastSaveFailure != outcome
+        _lastSaveFailure = outcome
+        saveBlockLock.unlock()
+        guard changed else { return }
+
+        lock.lock()
+        let observers = saveFailureListeners
+        lock.unlock()
+        for observer in observers.values { observer(outcome) }
+    }
+
+    // MARK: - Conflicts (§1.13)
+
+    /// §1.13: iCloud conflict versions detected by the last load. Non-empty means
+    /// the cache was deliberately *not* replaced from disk.
+    public func pendingConflicts() -> [ConflictVersion] {
+        saveBlockLock.lock()
+        defer { saveBlockLock.unlock() }
+        return _pendingConflicts
+    }
+
+    /// Re-queries the file system rather than using the cached snapshot.
+    public func unresolvedConflicts() -> [ConflictVersion] {
+        Self.unresolvedConflicts(at: fileURL)
+    }
+
+    /// §1.13: keep this device's library. Marks every conflict version resolved,
+    /// removes the others, and force-writes the in-memory cache.
+    @discardableResult
+    public func resolveConflictsKeepingLocal() -> SaveOutcome {
+        Self.markConflictsResolved(at: fileURL)
+        setPendingConflicts([])
+        let groups = loadGroups()
+        let outcome = writeGroupsToDisk(groups, force: true, bypassHardFailure: true)
+        if outcome.didSave {
             saveBlockLock.lock()
-            _saveBlocked = nil
+            _hardFailure = nil
             saveBlockLock.unlock()
-            return .saved
+            publishSaveFailure(nil)
+        } else {
+            publishSaveFailure(outcome)
+        }
+        return outcome
+    }
+
+    /// §1.13: accept whatever the current (winning) file holds and drop the others.
+    @discardableResult
+    public func resolveConflictsKeepingRemote() -> Bool {
+        Self.markConflictsResolved(at: fileURL)
+        setPendingConflicts([])
+        reloadFromDisk()
+        return pendingConflicts().isEmpty
+    }
+
+    /// Stores the snapshot without notifying. Safe to call while `lock` is held
+    /// (`loadGroupsUnlocked` does) — it only touches `saveBlockLock`.
+    @discardableResult
+    private func storePendingConflicts(_ conflicts: [ConflictVersion]) -> Bool {
+        saveBlockLock.lock()
+        let changed = _pendingConflicts != conflicts
+        _pendingConflicts = conflicts
+        saveBlockLock.unlock()
+        return changed
+    }
+
+    /// Must NOT be called while `lock` is held — it reads the listener table.
+    private func setPendingConflicts(_ conflicts: [ConflictVersion]) {
+        guard storePendingConflicts(conflicts) else { return }
+        lock.lock()
+        let observers = conflictListeners
+        lock.unlock()
+        for observer in observers.values { observer(conflicts) }
+    }
+
+    private static func unresolvedConflicts(at url: URL) -> [ConflictVersion] {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let versions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url),
+              !versions.isEmpty else {
+            return []
+        }
+        return versions.map {
+            ConflictVersion(
+                url: $0.url,
+                modificationDate: $0.modificationDate,
+                deviceName: $0.localizedNameOfSavingComputer
+            )
+        }
+    }
+
+    private static func markConflictsResolved(at url: URL) {
+        guard let versions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url) else { return }
+        for version in versions { version.isResolved = true }
+        try? NSFileVersion.removeOtherVersionsOfItem(at: url)
+    }
+
+    // MARK: - Writing
+
+    @discardableResult
+    private func writeGroupsToDisk(
+        _ groups: [SnippetGroup],
+        force: Bool = false,
+        bypassHardFailure: Bool = false
+    ) -> SaveOutcome {
+        // §0.3: a latched read failure refuses even forced writes. Only
+        // `forceOverwriteLibrary` / conflict resolution may bypass it.
+        if !bypassHardFailure, let hard = hardFailure() { return hard }
+        if !force, let blocked = blockedReason() { return blocked }
+
+        let data: Data
+        do {
+            data = try Self.encodeLibrary(groups)
         } catch {
+            DevTypeLog.store.error(
+                "[Store] Failed to encode snippets: \(error.localizedDescription, privacy: .public)"
+            )
+            return .failed(error.localizedDescription)
+        }
+
+        // §1.13: the digest re-check and the write happen inside one coordinated
+        // write block, so the previous check-then-write TOCTOU window is closed
+        // against other coordinated readers/writers (other DevType instances,
+        // iCloud, Finder).
+        var raceDetected = false
+        var writeError: Error?
+        var coordinationError: NSError?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(
+            writingItemAt: fileURL,
+            options: [.forReplacing],
+            error: &coordinationError
+        ) { actualURL in
+            if !force {
+                let onDisk = Self.currentDigest(at: actualURL)
+                guard onDisk == self.lastKnownDigest() else {
+                    raceDetected = true
+                    return
+                }
+            }
+            do {
+                let parent = actualURL.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+                try data.write(to: actualURL, options: .atomic)
+            } catch {
+                writeError = error
+            }
+        }
+
+        if raceDetected {
+            saveBlockLock.lock()
+            _saveBlocked = .blockedByRemoteChange
+            saveBlockLock.unlock()
+            return .blockedByRemoteChange
+        }
+        if let error = coordinationError {
+            DevTypeLog.store.error(
+                "[Store] File coordination failed while saving: \(error.localizedDescription, privacy: .public)"
+            )
+            return .failed(error.localizedDescription)
+        }
+        if let error = writeError {
             DevTypeLog.store.error(
                 "[Store] Failed to save snippets: \(error.localizedDescription, privacy: .public)"
             )
             return .failed(error.localizedDescription)
         }
+
+        setLastKnownDigest(.sha(Self.sha256(of: data)))
+        saveBlockLock.lock()
+        _saveBlocked = nil
+        saveBlockLock.unlock()
+        return .saved
     }
 
     private func blockedReason() -> SaveOutcome? {
         saveBlockLock.lock()
         defer { saveBlockLock.unlock() }
-        return _saveBlocked
+        return _hardFailure ?? _saveBlocked
+    }
+
+    private func hardFailure() -> SaveOutcome? {
+        saveBlockLock.lock()
+        defer { saveBlockLock.unlock() }
+        return _hardFailure
     }
 
     private func lastKnownDigest() -> FileDigest {
@@ -500,55 +1124,249 @@ public final class SnippetStore {
         return .sha(sha256(of: raw))
     }
 
+    // MARK: - Reading (§0.3 / §1.13)
+
+    /// §0.3: `fileExists(atPath:)` returns false for an evicted iCloud item, which
+    /// is how a synced library used to look "missing" and get replaced with demos.
+    /// Ask iCloud to materialize it first, with a bounded wait.
+    @discardableResult
+    static func materializeIfNeeded(
+        _ url: URL,
+        timeout: TimeInterval = SnippetStore.ubiquitousDownloadTimeout
+    ) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) { return true }
+
+        let placeholder = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).icloud")
+        let hasPlaceholder = fm.fileExists(atPath: placeholder.path)
+        guard hasPlaceholder || isUbiquitousLocation(url) else { return false }
+
+        do {
+            try fm.startDownloadingUbiquitousItem(at: url)
+        } catch {
+            DevTypeLog.store.error(
+                "[Store] startDownloadingUbiquitousItem failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return false
+        }
+        DevTypeLog.store.notice(
+            "[Store] Waiting for iCloud to materialize \(url.lastPathComponent, privacy: .public)"
+        )
+
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while Date() < deadline {
+            if fm.fileExists(atPath: url.path) { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return fm.fileExists(atPath: url.path)
+    }
+
+    /// §1.13: coordinated read so we never observe a half-written or
+    /// mid-sync file.
+    private static func coordinatedRead(at url: URL) throws -> Data {
+        var result: Data?
+        var readError: Error?
+        var coordinationError: NSError?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { actualURL in
+            do {
+                result = try Data(contentsOf: actualURL)
+            } catch {
+                readError = error
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        if let readError { throw readError }
+        guard let result else { throw CocoaError(.fileReadUnknown) }
+        return result
+    }
+
+    /// §0.3: timestamped, never-overwritten backup. The old code used a single
+    /// `.bak` and deleted the previous one first, so a second failed load
+    /// destroyed the only copy of the user's library.
+    private static func makeTimestampedBackup(of url: URL) -> URL? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        let stamp = Int(Date().timeIntervalSince1970)
+        var candidate = url.appendingPathExtension("bak.\(stamp)")
+        var suffix = 1
+        while fm.fileExists(atPath: candidate.path) {
+            candidate = url.appendingPathExtension("bak.\(stamp)-\(suffix)")
+            suffix += 1
+            if suffix > 1000 { return nil }
+        }
+        do {
+            try fm.copyItem(at: url, to: candidate)
+            DevTypeLog.store.notice(
+                "[Store] Wrote library backup \(candidate.lastPathComponent, privacy: .public)"
+            )
+            return candidate
+        } catch {
+            DevTypeLog.store.error(
+                "[Store] Could not back up unreadable library: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
     private static func loadFrom(_ location: Location) -> Loaded {
         var out = Loaded()
-        guard FileManager.default.fileExists(atPath: location.fileURL.path) else {
+        let url = location.fileURL
+
+        guard materializeIfNeeded(url) else {
             if location.expectsExistingLibrary {
                 out.blocked = .failed("Library not available at configured location")
             }
             return out
         }
+        out.fileWasPresent = true
+        out.conflicts = unresolvedConflicts(at: url)
+        if !out.conflicts.isEmpty {
+            out.loadIssue = .conflicted(path: url.path, versionCount: out.conflicts.count)
+        }
+
+        let raw: Data
         do {
-            let raw = try Data(contentsOf: location.fileURL)
-            out.digest = .sha(sha256(of: raw))
+            raw = try coordinatedRead(at: url)
+        } catch {
+            DevTypeLog.store.error(
+                "[Store] Failed to read snippets from \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            out.digest = .unreadable
+            out.loadIssue = .unreadable(path: url.path, reason: error.localizedDescription)
+            out.hardFailure = .failed("Could not read \(url.path): \(error.localizedDescription)")
+            return out
+        }
+
+        out.digest = .sha(sha256(of: raw))
+
+        let isBlank = raw.isEmpty
+            || String(data: raw, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
+        if isBlank {
+            // An empty file is a legitimate (if suspicious) empty library — never
+            // a reason to write demo snippets. Surface it instead.
+            out.loadIssue = out.loadIssue ?? .emptyFile(path: url.path)
+            out.decodeSucceeded = true
+            return out
+        }
+
+        do {
             let document = try decodeDocument(from: raw)
             out.groups = document.groups
+            out.decodeSucceeded = true
             if document.schemaVersion > SnippetDocument.currentSchemaVersion {
                 out.blocked = .blockedByNewerSchema
             }
         } catch {
-            let backupURL = location.fileURL.appendingPathExtension("bak")
-            try? FileManager.default.removeItem(at: backupURL)
-            try? FileManager.default.copyItem(at: location.fileURL, to: backupURL)
-            out.loadIssue = .corrupted(backupURL: backupURL)
+            DevTypeLog.store.error(
+                "[Store] Failed to decode snippets from \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            if let backupURL = makeTimestampedBackup(of: url) {
+                out.loadIssue = .corrupted(backupURL: backupURL)
+            } else {
+                out.loadIssue = .unreadable(path: url.path, reason: error.localizedDescription)
+            }
+            out.hardFailure = .failed("Could not decode \(url.path): \(error.localizedDescription)")
         }
         return out
     }
 
-    // MARK: - External change detection
+    // MARK: - External change detection (§2.5)
 
     private func startWatching() {
         guard let watcher else { return }
         watcher.onChange = { [weak self] in
-            DispatchQueue.main.async { self?.externalChangeDetected() }
+            self?.externalChangeDetected()
         }
         watcher.start()
     }
 
+    /// §2.5: every one of our own writes trips `DirectoryWatcher`. This used to
+    /// hop straight to main and do a full-file read + SHA256 there, with no
+    /// debounce. Now the event is coalesced and the digest runs on a utility queue.
     func externalChangeDetected() {
-        let onDisk = Self.currentDigest(at: fileURL)
-        guard onDisk != lastKnownDigest() else { return }
-        reloadFromDisk()
+        externalStateLock.lock()
+        externalChangeGeneration &+= 1
+        let generation = externalChangeGeneration
+        externalStateLock.unlock()
+
+        coalesceQueue.asyncAfter(deadline: .now() + Self.externalChangeDebounce) { [weak self] in
+            guard let self else { return }
+            self.externalStateLock.lock()
+            let isCurrent = generation == self.externalChangeGeneration
+            let applying = self._isApplyingExternalState
+            self.externalStateLock.unlock()
+            // Reentrancy guard: an apply in flight is generating these events itself.
+            guard isCurrent, !applying else { return }
+
+            let onDisk = Self.currentDigest(at: self.fileURL)
+            // Self-writes update `savedDigest` before the watcher fires, so they
+            // are filtered out here and never round-trip through the cache.
+            guard onDisk != self.lastKnownDigest() else { return }
+
+            DispatchQueue.main.async { self.reloadFromDisk() }
+        }
     }
 
     private func reloadFromDisk() {
-        isApplyingExternalState = true
-        defer { isApplyingExternalState = false }
+        externalStateLock.lock()
+        if _isApplyingExternalState {
+            externalStateLock.unlock()
+            return
+        }
+        _isApplyingExternalState = true
+        externalStateLock.unlock()
+        defer {
+            externalStateLock.lock()
+            _isApplyingExternalState = false
+            externalStateLock.unlock()
+        }
 
         let loaded = Self.loadFrom(Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary))
         setLastKnownDigest(loaded.digest)
+        setPendingConflicts(loaded.conflicts)
+        if let issue = loaded.loadIssue {
+            lock.lock()
+            _lastLoadIssue = issue
+            lock.unlock()
+        }
+
+        // §1.13: iCloud left more than one candidate. Do not pick a winner behind
+        // the user's back — block saving and let the UI resolve it.
+        if !loaded.conflicts.isEmpty {
+            DevTypeLog.store.error(
+                "[Store] \(loaded.conflicts.count, privacy: .public) unresolved iCloud conflict version(s) for \(self.fileURL.lastPathComponent, privacy: .public); cache left untouched"
+            )
+            saveBlockLock.lock()
+            _saveBlocked = .blockedByRemoteChange
+            saveBlockLock.unlock()
+            publishSaveFailure(.blockedByRemoteChange)
+            return
+        }
+
+        if let hard = loaded.hardFailure {
+            // §0.3: never replace a good in-memory library with a bad file.
+            saveBlockLock.lock()
+            _hardFailure = hard
+            _saveBlocked = hard
+            saveBlockLock.unlock()
+            publishSaveFailure(hard)
+            return
+        }
+
+        guard loaded.decodeSucceeded else {
+            // File vanished (deleted/evicted mid-flight). Keep the cache.
+            saveBlockLock.lock()
+            _saveBlocked = loaded.blocked
+            saveBlockLock.unlock()
+            return
+        }
+
         saveBlockLock.lock()
         _saveBlocked = loaded.blocked
+        _hardFailure = nil
         saveBlockLock.unlock()
 
         lock.lock()
@@ -573,9 +1391,7 @@ public final class SnippetStore {
             backup = writeBackup(existing, tag: "pre-save-as")
         }
         let groups = loadGroups()
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let raw = try? encoder.encode(SnippetDocument(groups: groups)) else {
+        guard let raw = try? Self.encodeLibrary(groups) else {
             return RelocationResult(success: false, backupURL: backup, message: "Could not encode library.", activeLocation: fileURL)
         }
         do {
@@ -603,9 +1419,7 @@ public final class SnippetStore {
             backup = writeBackup(existing, tag: "pre-stop-sync")
         }
         let groups = loadGroups()
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let raw = try? encoder.encode(SnippetDocument(groups: groups)) else {
+        guard let raw = try? Self.encodeLibrary(groups) else {
             return RelocationResult(success: false, backupURL: backup, message: "Could not encode library.", activeLocation: fileURL)
         }
         do {
@@ -621,12 +1435,28 @@ public final class SnippetStore {
     @discardableResult
     private func relocate(to location: Location, backupURL: URL?) -> RelocationResult {
         watcher?.stop()
+        let previousDirectory = fileURL.deletingLastPathComponent()
         fileURL = location.fileURL
         expectsExistingLibrary = location.expectsExistingLibrary
+        Self.setActiveLibraryDirectory(fileURL.deletingLastPathComponent())
         lock.lock()
         _cachedGroups = nil
         lock.unlock()
+        // §0.3: a relocation is a fresh start; do not carry a previous file's
+        // read failure over to the new location.
+        saveBlockLock.lock()
+        _hardFailure = nil
+        _saveBlocked = nil
+        saveBlockLock.unlock()
         let groups = loadGroups()
+
+        // §3.7: images live beside the library. Move them so image snippets keep
+        // working after the library moves to (or off) iCloud.
+        ImageAttachmentStore.shared.adoptLibraryLocation(
+            fileURL,
+            migratingFrom: previousDirectory.appendingPathComponent("Images", isDirectory: true)
+        )
+
         watcher = watcherFactory(fileURL)
         startWatching()
         let flat = groups.flatMap(\.snippets)
@@ -640,9 +1470,7 @@ public final class SnippetStore {
     }
 
     private func exportCurrentLibrary(tag: String) -> URL? {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let raw = try? encoder.encode(SnippetDocument(groups: loadGroups())) else { return nil }
+        guard let raw = try? Self.encodeLibrary(loadGroups()) else { return nil }
         return writeBackup(raw, tag: tag)
     }
 
@@ -668,6 +1496,13 @@ public final class SnippetStore {
         return result
     }
 
+    /// §1.10: same as `importSnippets(from:)` but returns the merge diff.
+    public func importSnippets(from url: URL, mode: ImportMode) throws -> (SnippetImporter.ImportResult, ImportSummary) {
+        let result = try SnippetImporter.importFrom(url)
+        let summary = importGroups(result.groups, mode: mode)
+        return (result, summary)
+    }
+
     /// Imports TextExpander data from a folder URL.
     @discardableResult
     public func importTextExpander(from folder: URL) throws -> TEImporter.ImportResult {
@@ -684,18 +1519,14 @@ public final class SnippetStore {
         return result
     }
 
-    /// Drops empty triggers and de-duplicates by trigger (first wins, case-sensitive key).
+    // MARK: - Trigger hygiene (§1.9)
+
+    /// §1.9: **non-destructive**. This used to silently drop empty-trigger and
+    /// duplicate-trigger snippets on every save *and* every load, so duplicating a
+    /// snippet and editing the body before the trigger lost the snippet at the next
+    /// save. Problems are now reported through `triggerConflicts()` instead.
     public static func sanitize(_ snippets: [SnippetModel]) -> [SnippetModel] {
-        var seen = Set<String>()
-        var result: [SnippetModel] = []
-        for snippet in snippets {
-            let trigger = snippet.triggerKeyword
-            guard !trigger.isEmpty else { continue }
-            if seen.contains(trigger) { continue }
-            seen.insert(trigger)
-            result.append(snippet)
-        }
-        return result
+        snippets
     }
 
     public static func sanitizeGroups(_ groups: [SnippetGroup]) -> [SnippetGroup] {
@@ -703,6 +1534,97 @@ public final class SnippetStore {
             var copy = group
             copy.snippets = sanitize(group.snippets)
             return copy
+        }
+    }
+
+    /// §1.9: triggers the matcher will shadow, plus unusable (empty) triggers.
+    public func triggerConflicts() -> [TriggerConflict] {
+        Self.triggerConflicts(in: loadGroups())
+    }
+
+    /// §1.9: case folding matches `AbbreviationMatcher` — case-sensitive snippets
+    /// key on the exact trigger, case-insensitive ones on `lowercased()` — so the
+    /// store and the matcher agree about what collides.
+    public static func triggerConflicts(in groups: [SnippetGroup]) -> [TriggerConflict] {
+        struct Entry {
+            let id: UUID
+            let groupName: String
+            let trigger: String
+            let caseSensitive: Bool
+        }
+
+        var empties: [Entry] = []
+        var byFolded: [String: [Entry]] = [:]
+
+        for group in groups {
+            for snippet in group.snippets {
+                let entry = Entry(
+                    id: snippet.id,
+                    groupName: group.name,
+                    trigger: snippet.triggerKeyword,
+                    caseSensitive: snippet.isCaseSensitive
+                )
+                if snippet.triggerKeyword.isEmpty {
+                    empties.append(entry)
+                } else {
+                    byFolded[snippet.triggerKeyword.lowercased(), default: []].append(entry)
+                }
+            }
+        }
+
+        var out: [TriggerConflict] = []
+        if !empties.isEmpty {
+            out.append(TriggerConflict(
+                kind: .emptyTrigger,
+                trigger: "",
+                snippetIDs: empties.map(\.id),
+                groupNames: empties.map(\.groupName)
+            ))
+        }
+
+        for (folded, entries) in byFolded where entries.count > 1 {
+            let sensitive = entries.filter(\.caseSensitive)
+            let insensitive = entries.filter { !$0.caseSensitive }
+
+            // Identical spellings among case-sensitive snippets: matcher keeps the first.
+            var byExact: [String: [Entry]] = [:]
+            for entry in sensitive { byExact[entry.trigger, default: []].append(entry) }
+            for (spelling, dupes) in byExact where dupes.count > 1 {
+                out.append(TriggerConflict(
+                    kind: .duplicateTrigger,
+                    trigger: spelling,
+                    snippetIDs: dupes.map(\.id),
+                    groupNames: dupes.map(\.groupName)
+                ))
+            }
+
+            // Several case-insensitive snippets fold to one key: matcher keeps the first.
+            if insensitive.count > 1 {
+                out.append(TriggerConflict(
+                    kind: .duplicateTrigger,
+                    trigger: folded,
+                    snippetIDs: insensitive.map(\.id),
+                    groupNames: insensitive.map(\.groupName)
+                ))
+            }
+
+            // Mixed: the case-sensitive entry wins for its exact spelling, so the
+            // case-insensitive snippet is partially shadowed.
+            if !insensitive.isEmpty && !sensitive.isEmpty {
+                out.append(TriggerConflict(
+                    kind: .caseShadow,
+                    trigger: folded,
+                    snippetIDs: entries.map(\.id),
+                    groupNames: entries.map(\.groupName)
+                ))
+            }
+        }
+
+        return out.sorted { lhs, rhs in
+            if lhs.trigger != rhs.trigger { return lhs.trigger < rhs.trigger }
+            let l = lhs.snippetIDs.first?.uuidString ?? ""
+            let r = rhs.snippetIDs.first?.uuidString ?? ""
+            return l < r
         }
     }
 
@@ -717,5 +1639,14 @@ public final class SnippetStore {
 
     public func search(_ query: String, limit: Int? = nil) -> [SearchHit] {
         SnippetSearch.run(query: query, in: loadGroups(), includeDisabled: false, limit: limit)
+    }
+
+    // MARK: - Image housekeeping (§3.7)
+
+    /// §3.7: deletes stored images no live snippet references. Returns the file
+    /// names removed (or that would be removed when `dryRun` is true).
+    @discardableResult
+    public func collectOrphanedImages(dryRun: Bool = false) -> [String] {
+        ImageAttachmentStore.shared.collectOrphans(for: loadGroups(), dryRun: dryRun)
     }
 }

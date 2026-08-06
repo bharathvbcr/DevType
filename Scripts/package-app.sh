@@ -67,6 +67,66 @@ sha256_file() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
 
+# --- §7.6: version stamping -------------------------------------------------
+# Resources/Info.plist carries placeholders; the real version is derived from git
+# so a DiagnosticReport from the field maps back to an exact commit. Falls back to
+# the source plist values in a tarball / no-git checkout.
+#
+# CFBundleShortVersionString: nearest tag, e.g. "0.2.1" (or "0.2.1-4-gabc1234" when
+#   ahead of the tag, "+dirty" appended for an unclean tree).
+# CFBundleVersion: monotonic commit count, which is what macOS / Sparkle compare.
+compute_version() {
+  local tag desc count dirty
+  if ! git -C "${ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! git -C "${ROOT}" rev-parse HEAD >/dev/null 2>&1; then
+    return 1   # repo exists but has no commits yet
+  fi
+  count="$(git -C "${ROOT}" rev-list --count HEAD 2>/dev/null || echo 0)"
+  dirty=""
+  git -C "${ROOT}" diff --quiet HEAD -- 2>/dev/null || dirty="+dirty"
+  if desc="$(git -C "${ROOT}" describe --tags --always --dirty=+dirty 2>/dev/null)"; then
+    tag="${desc#v}"
+  else
+    tag="0.0.0-$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)${dirty}"
+  fi
+  VERSION_SHORT="${tag}"
+  VERSION_BUILD="${count}"
+  return 0
+}
+
+VERSION_SHORT=""
+VERSION_BUILD=""
+if compute_version; then
+  echo "==> version ${VERSION_SHORT} (build ${VERSION_BUILD})"
+else
+  VERSION_SHORT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${PLIST_SRC}" 2>/dev/null || echo 0.0.0)"
+  VERSION_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${PLIST_SRC}" 2>/dev/null || echo 1)"
+  echo "==> version ${VERSION_SHORT} (build ${VERSION_BUILD}) — no git metadata, using Info.plist values"
+fi
+
+# Staged plist = source plist + stamped version. Everything downstream compares and
+# copies THIS, not PLIST_SRC, so the existing CDHash-preservation caching still works:
+# identical version + identical source plist => byte-identical staged plist => no resign.
+PLIST_STAGED="$(mktemp -t devtype-info-plist)"
+trap 'rm -f "${PLIST_STAGED}"' EXIT
+cp "${PLIST_SRC}" "${PLIST_STAGED}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION_SHORT}" "${PLIST_STAGED}" >/dev/null
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION_BUILD}" "${PLIST_STAGED}" >/dev/null
+
+# §7.5: signing assets live in Resources/ for discoverability but must not be copied
+# into the shipped bundle.
+RESOURCE_EXCLUDES=("Info.plist" "DevType.entitlements")
+is_excluded_resource() {
+  local name="$1" ex
+  for ex in "${RESOURCE_EXCLUDES[@]}"; do
+    [[ "${name}" == "${ex}" ]] && return 0
+  done
+  return 1
+}
+ENTITLEMENTS="${ROOT}/Resources/DevType.entitlements"
+
 # codesign prints several lines; piping it into a consumer that exits early (awk exit,
 # head) SIGPIPEs codesign, and under `set -o pipefail` that non-zero status propagates
 # out of the assignment and `set -e` kills the script. Capture once, parse from a
@@ -190,7 +250,9 @@ identity_plist_unchanged() {
   [[ "${src_id}" == "${BUNDLE_ID}" && "${pkg_id}" == "${BUNDLE_ID}" ]] || return 1
   [[ "${src_exec}" == "DevType" && "${pkg_exec}" == "DevType" ]] || return 1
   # Full plist compare for usage descriptions / identity — if only icons change, plist still matches.
-  cmp -s "${PLIST_SRC}" "${packaged}"
+  # §7.6: compare against the version-stamped staging copy, not the raw source, so a
+  # version bump correctly forces a resign but an unchanged build still skips it.
+  cmp -s "${PLIST_STAGED}" "${packaged}"
 }
 
 IDENTITY_SUPPORT_UNCHANGED=1
@@ -206,8 +268,9 @@ if [[ -d "${ROOT}/Resources" ]]; then
   for resfile in "${ROOT}/Resources"/*; do
     if [[ -f "${resfile}" ]]; then
       resname="$(basename "${resfile}")"
-      # Info.plist is handled separately as identity support.
-      [[ "${resname}" == "Info.plist" ]] && continue
+      # Info.plist is handled separately as identity support; entitlements are a
+      # signing input, not a bundle resource.
+      is_excluded_resource "${resname}" && continue
       if [[ ! -f "${RESOURCES_DIR}/${resname}" ]] || ! cmp -s "${resfile}" "${RESOURCES_DIR}/${resname}"; then
         COSMETIC_CHANGED=1
       fi
@@ -243,8 +306,9 @@ else
   # Prefer in-place updates over rm -rf so the bundle path stays continuous for TCC.
   mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 
-  # Copy plist as-is so usage descriptions and identity stay intact.
-  cp "${PLIST_SRC}" "${CONTENTS}/Info.plist"
+  # Copy the version-stamped plist so usage descriptions and identity stay intact
+  # while CFBundleShortVersionString / CFBundleVersion carry real values (§7.6).
+  cp "${PLIST_STAGED}" "${CONTENTS}/Info.plist"
 
   if [[ "${BINARY_UNCHANGED}" -eq 1 && -x "${PACKAGED_EXE}" ]] \
      && packaged_binary_aligns_with_spm "${BINARY}" "${PACKAGED_EXE}"; then
@@ -254,9 +318,13 @@ else
     chmod +x "${PACKAGED_EXE}"
   fi
 
-  # Copy all resources
+  # Copy all resources except signing inputs / the separately-staged plist.
   if [[ -d "${ROOT}/Resources" ]]; then
-    cp -R "${ROOT}/Resources/"* "${RESOURCES_DIR}/"
+    for resfile in "${ROOT}/Resources"/*; do
+      [[ -e "${resfile}" ]] || continue
+      is_excluded_resource "$(basename "${resfile}")" && continue
+      cp -R "${resfile}" "${RESOURCES_DIR}/"
+    done
   fi
 
   # PkgInfo marks this as an application bundle (APPL / ???? creator).
@@ -264,8 +332,25 @@ else
 
   # Sign with stable bundle ID (no --deep; sign the bundle itself).
   # Only runs when SPM binary or identity support changed (or prior signature invalid).
-  echo "    signing: ${SIGN_MODE} (${SIGN_ARG})"
-  codesign --force --sign "${SIGN_ARG}" --identifier "${BUNDLE_ID}" "${APP_BUNDLE}" >/dev/null
+  # §7.5: notarization requires the Hardened Runtime. It is OFF by default so local
+  # dev signing behaviour is unchanged, and ON automatically for a Developer ID
+  # identity (the only identity that can be notarized) or when forced explicitly.
+  CODESIGN_EXTRA=()
+  HARDENED="${DEVTYPE_HARDENED_RUNTIME:-auto}"
+  if [[ "${HARDENED}" == "auto" ]]; then
+    if [[ "${SIGN_ARG}" == Developer\ ID* ]]; then HARDENED=1; else HARDENED=0; fi
+  fi
+  if [[ "${HARDENED}" == "1" ]]; then
+    CODESIGN_EXTRA+=(--options runtime --timestamp)
+    if [[ -f "${ENTITLEMENTS}" ]]; then
+      CODESIGN_EXTRA+=(--entitlements "${ENTITLEMENTS}")
+    fi
+    echo "    signing: ${SIGN_MODE} (${SIGN_ARG}) [hardened runtime]"
+  else
+    echo "    signing: ${SIGN_MODE} (${SIGN_ARG})"
+  fi
+  codesign --force --sign "${SIGN_ARG}" --identifier "${BUNDLE_ID}" \
+    "${CODESIGN_EXTRA[@]}" "${APP_BUNDLE}" >/dev/null
 fi
 
 # Verify codesign identifier matches Info.plist CFBundleIdentifier (TCC identity).

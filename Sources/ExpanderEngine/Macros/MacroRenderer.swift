@@ -50,7 +50,39 @@ public enum MacroRenderer {
         now: Date = Date(),
         templateEngine: DynamicTemplateEngine = .shared
     ) -> MacroExpansionResult {
+        expand(
+            content: content,
+            fillValues: fillValues,
+            lookup: lookup,
+            clipboardText: clipboardText,
+            now: now,
+            templateEngine: templateEngine,
+            environment: .default
+        )
+    }
+
+    /// §3.5: expansion with injectable locale / counter / random collaborators.
+    ///
+    /// One user-visible expansion runs this pipeline more than once — `EventTapEngine` renders a
+    /// preview to pick an injection strategy, then `TextInjectionPipeline` renders the real
+    /// payload. `memoSalt` is derived from `content` so both passes agree on the value of any
+    /// `%random%` / `%counter%` token instead of planning against one string and injecting
+    /// another (see `MacroVolatileStore`).
+  public static func expand(
+        content: String,
+        fillValues: [Int: String] = [:],
+        lookup: @escaping (String) -> String? = { _ in nil },
+        clipboardText: String? = nil,
+        now: Date = Date(),
+        templateEngine: DynamicTemplateEngine = .shared,
+        environment: MacroEnvironment
+    ) -> MacroExpansionResult {
         let clipboardSnapshot = clipboardText ?? (NSPasteboard.general.string(forType: .string) ?? "")
+
+        var environment = environment
+        if environment.memoSalt.isEmpty {
+            environment.memoSalt = "te:\(content.hashValue)"
+        }
 
         let teNested = MacroParser.resolveNested(content, lookup: lookup)
         let fullyNested = resolveMustacheNested(teNested, lookup: lookup)
@@ -68,17 +100,22 @@ public enum MacroRenderer {
             )
         }
 
+        // §1.12: `MacroParser.render` routes `%clipboard` through
+        // `DynamicTemplateEngine.sanitizeClipboardText` before the mustache pass below sees it,
+        // so a clipboard containing `{{calc:…}}` / `{{cursor}}` can no longer inject templates.
         let teResult = MacroParser.render(
             tokens: tokens,
             fillValues: fillValues,
             clipboard: clipboardSnapshot,
-            now: now
+            now: now,
+            environment: environment
         )
 
         let mustacheResult = templateEngine.resolve(
             teResult.text,
             currentDate: now,
-            clipboardText: clipboardSnapshot
+            clipboardText: clipboardSnapshot,
+            environment: environment
         )
 
         let cursorOffset = mergeCursorOffsets(

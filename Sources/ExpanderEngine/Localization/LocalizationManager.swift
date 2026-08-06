@@ -1,0 +1,1921 @@
+import Combine
+import Foundation
+
+extension Notification.Name {
+    /// §7.1: `public` because `LocalizationManager` moved out of `DevTypeApp` (an
+    /// `executableTarget`, which the test target cannot import) and into `ExpanderEngine`,
+    /// so the en/ko/ja key + format-specifier parity can actually be asserted.
+    public static let devTypeLanguageChanged = Notification.Name("devtype.language.changed")
+}
+
+public enum AppLanguage: String, CaseIterable, Identifiable {
+    case system
+    case en
+    case ko
+    case ja
+
+    public var id: String { rawValue }
+
+    public var endonym: String {
+        switch self {
+        case .system: return "System"
+        case .en: return "English"
+        case .ko: return "한국어"
+        case .ja: return "日本語"
+        }
+    }
+
+    /// §6.2: `effectiveLanguageCode()` used to hardcode `hasPrefix("ko")` /
+    /// `hasPrefix("ja")` in a switch, so adding a fourth language meant editing
+    /// that switch. Matching is now driven off this table — a new case only has
+    /// to declare its own prefixes.
+    public var localeMatchPrefixes: [String] {
+        switch self {
+        case .system: return []
+        case .en: return ["en"]
+        case .ko: return ["ko"]
+        case .ja: return ["ja"]
+        }
+    }
+
+    /// Concrete (non-`system`) languages, in resolution order.
+    public static var concreteCases: [AppLanguage] {
+        allCases.filter { $0 != .system }
+    }
+
+    /// §6.2: the list `Resources/Info.plist` needs under `CFBundleLocalizations`.
+    /// DevTypeApp does not own Info.plist — this is the source of truth to copy from.
+    public static var bundleLocalizationCodes: [String] {
+        concreteCases.map(\.rawValue)
+    }
+}
+
+/// §6.2: CLDR-ish plural categories. Only what DevType's three languages need.
+public enum PluralCategory: String {
+    case one
+    case other
+}
+
+/// In-code string tables for SPM executable (no Bundle.module .lproj dependency).
+public final class LocalizationManager: ObservableObject {
+    public static let shared = LocalizationManager()
+
+    public static let deviceKey = "devtype.device.uiLanguage"
+
+    @Published public var language: AppLanguage {
+        didSet {
+            UserDefaults.standard.set(language.rawValue, forKey: Self.deviceKey)
+            NotificationCenter.default.post(name: .devTypeLanguageChanged, object: nil)
+        }
+    }
+
+    private let tables: [AppLanguage: [String: String]]
+
+    public init() {
+        let stored = UserDefaults.standard.string(forKey: Self.deviceKey)
+        language = stored.flatMap(AppLanguage.init(rawValue:)) ?? .system
+        tables = Self.buildTables()
+    }
+
+    public func s(_ key: String, _ args: CVarArg...) -> String {
+        let format = lookup(key)
+        if args.isEmpty { return format }
+        return String(format: format, arguments: args)
+    }
+
+    /// §6.2: plural-aware lookup. Tables store `key.one` / `key.other`; the
+    /// category is chosen per the resolved UI language, not the system locale,
+    /// so a Korean UI on an English Mac still gets Korean's single form.
+    ///
+    /// `count` selects the variant; it is **not** auto-prepended to `args`, so
+    /// formats stay readable — pass it explicitly where the string needs it:
+    ///
+    ///     loc.p("manager.group.delete.message", count: n, group.name, n)
+    public func p(_ key: String, count: Int, _ args: CVarArg...) -> String {
+        let language = resolvedLanguage()
+        let category = Self.pluralCategory(for: count, language: language)
+        let format = lookupPlural(key, category: category, language: language)
+        if args.isEmpty { return format }
+        return String(format: format, arguments: args)
+    }
+
+    /// Non-variadic overload for call sites that already have an argument array.
+    public func plural(_ key: String, count: Int, arguments: [CVarArg]) -> String {
+        let language = resolvedLanguage()
+        let category = Self.pluralCategory(for: count, language: language)
+        let format = lookupPlural(key, category: category, language: language)
+        if arguments.isEmpty { return format }
+        return String(format: format, arguments: arguments)
+    }
+
+    // MARK: - Resolution
+
+    private func lookup(_ key: String) -> String {
+        let language = resolvedLanguage()
+        return tables[language]?[key] ?? tables[.en]?[key] ?? key
+    }
+
+    private func lookupPlural(
+        _ key: String,
+        category: PluralCategory,
+        language: AppLanguage
+    ) -> String {
+        let table = tables[language]
+        let fallback = tables[.en]
+        let candidates = [
+            "\(key).\(category.rawValue)",
+            "\(key).other",
+            key
+        ]
+        for candidate in candidates {
+            if let hit = table?[candidate] { return hit }
+        }
+        for candidate in candidates {
+            if let hit = fallback?[candidate] { return hit }
+        }
+        return key
+    }
+
+    private func resolvedLanguage() -> AppLanguage {
+        AppLanguage(rawValue: effectiveLanguageCode()) ?? .en
+    }
+
+    /// §6.2: table-driven. Walks the user's preferred languages in order and
+    /// returns the first `AppLanguage` whose `localeMatchPrefixes` matches.
+    public func effectiveLanguageCode() -> String {
+        guard language == .system else { return language.rawValue }
+        for preferred in Locale.preferredLanguages {
+            let lowered = preferred.lowercased()
+            for candidate in AppLanguage.concreteCases {
+                for prefix in candidate.localeMatchPrefixes where lowered.hasPrefix(prefix) {
+                    return candidate.rawValue
+                }
+            }
+        }
+        return AppLanguage.en.rawValue
+    }
+
+    private static func pluralCategory(for count: Int, language: AppLanguage) -> PluralCategory {
+        switch language {
+        case .en:
+            return abs(count) == 1 ? .one : .other
+        case .ko, .ja, .system:
+            // Korean and Japanese have no grammatical plural — one form covers all counts.
+            return .other
+        }
+    }
+
+    // MARK: - Tables
+
+    private static func buildTables() -> [AppLanguage: [String: String]] {
+        return [.en: en(), .ko: ko(), .ja: ja()]
+    }
+
+    /// §7.1: the string table for one language, so the key-set / format-specifier parity test
+    /// can compare them. A `%d` in `en` and a `%@` in `ko` for the same key is a
+    /// `String(format:arguments:)` crash at runtime, and nothing else catches it.
+    ///
+    /// `.system` is not a real table — it resolves to a concrete language at lookup time — so it
+    /// returns empty.
+    public static func stringTable(for language: AppLanguage) -> [String: String] {
+        switch language {
+        case .en: return en()
+        case .ko: return ko()
+        case .ja: return ja()
+        case .system: return [:]
+        }
+    }
+
+    // swiftlint:disable:next function_body_length
+    private static func en() -> [String: String] {
+        return [
+            "common.cancel": "Cancel",
+            "common.clear": "Clear",
+            "common.ok": "OK",
+            "common.close": "Close",
+            "common.retry": "Retry",
+            "common.remove": "Remove",
+            "common.add": "Add",
+            "common.done": "Done",
+            "common.revealInFinder": "Reveal in Finder",
+            "fillin.title": "Fill In Fields",
+            "fillin.subtitle": "Complete the fields below, then insert.",
+            "fillin.insert": "Insert",
+            "fillin.include": "Include %@",
+            "search.placeholder": "Search snippets…",
+            "search.hint.navigate": "Navigate",
+            "search.hint.expand": "Expand",
+            "search.hint.jump": "Jump",
+            "search.hint.close": "Close",
+            "search.count": "%d of %d",
+            "search.empty.title": "No matching snippets",
+            "search.empty.subtitle": "Try a different search, or add a snippet in the manager.",
+            "snippets.empty.noMatch": "No snippets match “%@”",
+            "menu.manage": "Manage Snippets…",
+            "menu.preferences": "Preferences…",
+            "menu.import": "Import Snippets…",
+            "menu.export": "Export Snippets",
+            "menu.inlineSearch": "Inline Search",
+            "menu.recent": "Recent Expansions",
+            "menu.recent.empty": "No Recent Expansions",
+            "menu.openAtLogin": "Open at Login",
+            "menu.language": "Language",
+            "menu.recovery": "Permission Recovery…",
+            "menu.diagnoseSecure": "Diagnose Secure Input",
+            "menu.mute.front": "Mute Frontmost App",
+            "menu.mute.apps": "Muted Apps…",
+            "menu.quit": "Quit DevType",
+            "menu.textExpanderWarning": "TextExpander is running — disable it to avoid conflicts.",
+            "menu.espansoWarning": "Espanso is running — disable it to avoid conflicts.",
+            "manager.title": "Snippets",
+            "manager.subtitle": "Type less. Expand more.",
+            "manager.filter": "Filter",
+            "manager.import": "Import",
+            "manager.export": "Export",
+            "manager.stats.button": "Stats",
+            "manager.group.all": "All Snippets",
+            "manager.add": "New Snippet",
+            "manager.edit": "Edit",
+            "manager.delete": "Delete",
+            "manager.reset": "Reset Defaults",
+            "manager.stats": "%d active · %d total",
+            "manager.delete.confirm.title": "Delete Snippet?",
+            "manager.delete.confirm.message": "“%@” will be permanently removed.",
+            "manager.group.add": "New Group",
+            "manager.group.edit": "Edit Group…",
+            "manager.group.enable": "Enable Group",
+            "manager.group.disable": "Disable Group",
+            "manager.group.delete": "Delete Group…",
+            "manager.group.delete.title": "Delete Group?",
+            "manager.group.delete.message.one":
+                "“%@” contains %d snippet. Move it to another group, or delete everything.",
+            "manager.group.delete.message.other":
+                "“%@” contains %d snippets. Move them to another group, or delete everything.",
+            "manager.group.delete.move": "Move Snippets",
+            "manager.group.delete.last": "Keep at least one group in your library.",
+            "manager.group.delete.all": "Delete All",
+            "manager.duplicate": "Duplicate",
+            "manager.moveToGroup": "Move to Group",
+            "manager.empty.title": "No snippets yet",
+            "manager.empty.subtitle": "Create your first expansion — pick a trigger, type the rest.",
+            "manager.sort": "Sort",
+            "manager.sort.manual": "Manual Order",
+            "manager.sort.title": "Title",
+            "manager.sort.trigger": "Trigger",
+            "manager.sort.usage": "Most Used",
+            "manager.sort.recent": "Recently Used",
+            "manager.sort.updated": "Recently Edited",
+            "manager.sort.hint": "Drag to reorder is available in Manual Order only.",
+            "manager.undo.add": "Add Snippet",
+            "manager.undo.edit": "Edit Snippet",
+            "manager.undo.delete": "Delete Snippet",
+            "manager.undo.duplicate": "Duplicate Snippet",
+            "manager.undo.move": "Move Snippet",
+            "manager.undo.reorder": "Reorder Snippets",
+            "manager.undo.toggle": "Toggle Snippet",
+            "manager.undo.addGroup": "Add Group",
+            "manager.undo.editGroup": "Edit Group",
+            "manager.undo.deleteGroup": "Delete Group",
+            "manager.undo.toggleGroup": "Toggle Group",
+            "manager.undo.reorderGroups": "Reorder Groups",
+            "manager.undo.reset": "Reset Library",
+            "editor.group": "Group",
+            "editor.behavior": "Behavior",
+            "editor.plainText": "Plain Text",
+            "editor.macros": "Insert Macro",
+            "editor.macro.date": "Date / Time",
+            "editor.macro.cursor": "Cursor Position",
+            "editor.macro.clipboard": "Clipboard",
+            "editor.macro.filltext": "Fill-in: Single Line",
+            "editor.macro.fillarea": "Fill-in: Multi-line",
+            "editor.macro.fillpopup": "Fill-in: Popup",
+            "editor.macro.fillpart": "Optional Section",
+            "editor.macro.nested": "Nested Snippet",
+            "editor.macro.keyEnter": "Key: Return",
+            "editor.macro.keyTab": "Key: Tab",
+            "editor.image.attach": "Image…",
+            "editor.image.remove": "Remove",
+            "editor.image.attached": "Image attached — expands as a pasted image",
+            "editor.preview": "Preview",
+            "editor.chars": "%d characters",
+            "editor.fillins": "%d fill-ins",
+            "groupeditor.add": "New Group",
+            "groupeditor.edit": "Edit Group",
+            "groupeditor.name": "Name",
+            "groupeditor.icon": "Icon",
+            "groupeditor.color": "Color",
+            "groupeditor.enabled": "Enabled",
+            "groupeditor.save": "Save Group",
+            "groupeditor.error.emptyName": "Enter a name for this group.",
+            "groupeditor.error.duplicate": "A group named “%@” already exists.",
+            "editor.add": "New Snippet",
+            "editor.edit": "Edit Snippet",
+            "editor.name": "Title",
+            "editor.trigger": "Trigger",
+            "editor.replacement": "Replacement",
+            "editor.enabled": "Enabled",
+            "editor.caseSensitive": "Case Sensitive",
+            "editor.wordBoundary": "Word Boundary",
+            "editor.save": "Save Snippet",
+            "editor.error.emptyTrigger": "Enter a trigger to save this snippet.",
+            "editor.error.conflict": "“%@” conflicts with existing trigger “%@”.",
+
+            // §6.1: Edit menu (fallbacks — AppKit's own localized titles are tried first).
+            "edit.menu": "Edit",
+            "edit.undo": "Undo",
+            "edit.redo": "Redo",
+            "edit.cut": "Cut",
+            "edit.copy": "Copy",
+            "edit.paste": "Paste",
+            "edit.delete": "Delete",
+            "edit.selectAll": "Select All",
+
+            // §6.1: window titles (were hardcoded at AppDelegate.swift:715/740/776).
+            "window.snippets": "DevType — Snippets",
+            "window.recovery": "DevType — Permission Recovery",
+            "window.setup": "DevType — Setup",
+            "window.preferences": "DevType — Preferences",
+            "window.stats": "DevType — Statistics",
+            "window.lab": "DevType Inject Lab",
+
+            // §5.1: SF Symbol accessibility descriptions.
+            "ax.symbol.manage": "Manage snippets",
+            "ax.symbol.allSnippets": "All snippets",
+            "ax.symbol.search": "Search",
+            "ax.symbol.import": "Import",
+            "ax.symbol.export": "Export",
+            "ax.symbol.recent": "Recent",
+            "ax.symbol.pause": "Pause",
+            "ax.symbol.resume": "Resume",
+            "ax.symbol.openAtLogin": "Open at login",
+            "ax.symbol.language": "Language",
+            "ax.symbol.permissionRecovery": "Permission recovery",
+            "ax.symbol.secureInput": "Secure input",
+            "ax.symbol.mute": "Mute app",
+            "ax.symbol.mutedApps": "Muted apps",
+            "ax.symbol.quit": "Quit",
+            "ax.symbol.settings": "System Settings",
+            "ax.symbol.preferences": "Preferences",
+            "ax.symbol.add": "Add",
+            "ax.symbol.edit": "Edit",
+            "ax.symbol.delete": "Delete",
+            "ax.symbol.group": "Group",
+            "ax.symbol.newGroup": "New group",
+            "ax.symbol.duplicate": "Duplicate",
+            "ax.symbol.reset": "Reset",
+            "ax.symbol.relaunch": "Relaunch",
+            "ax.symbol.refresh": "Refresh",
+            "ax.symbol.testExpansion": "Test expansion",
+            "ax.symbol.request": "Request permission",
+            "ax.symbol.granted": "Granted",
+            "ax.symbol.copy": "Copy",
+            "ax.symbol.diagnostics": "Diagnostics",
+            "ax.symbol.binaryIdentity": "Binary identity",
+            "ax.symbol.accessibility": "Accessibility",
+            "ax.symbol.inputMonitoring": "Input monitoring",
+            "ax.symbol.postEvents": "Post events",
+            "ax.symbol.expand": "Expand snippet",
+            "ax.symbol.newSnippet": "New snippet",
+            "ax.symbol.statistics": "Statistics",
+            "ax.symbol.disclosureClosed": "Show more",
+            "ax.symbol.disclosureOpen": "Show less",
+            "ax.symbol.warning": "Warning",
+            "ax.symbol.close": "Close",
+            "ax.symbol.devtype": "DevType",
+
+            // §5.1: composite row / control labels.
+            "ax.enabled": "Enabled",
+            "ax.disabled": "Disabled",
+            "ax.status.item": "DevType status",
+            "ax.status.item.help": "DevType text expander. %@. Click for the DevType menu.",
+            "ax.menu.header": "DevType version %@, status %@",
+            "ax.searchResults": "Search results",
+            "ax.searchRow": "%@, %@, in group %@",
+            "ax.searchRow.disabled": "%@, %@, in group %@, disabled",
+            "ax.searchRow.help": "Press Return to expand. Press Command-%d to jump to this result.",
+            "ax.searchRow.helpNoJump": "Press Return to expand.",
+            "ax.searchRow.image": "image snippet",
+            "ax.snippetsTable": "Snippets",
+            "ax.groupsTable": "Snippet groups",
+            "ax.snippetRow": "%@, trigger %@",
+            "ax.snippetRow.help":
+                "Return to edit, Delete to remove, Command-D to duplicate. Used %d times.",
+            "ax.snippetRow.toggle": "Enable snippet %@",
+            "ax.groupRow": "Group %@",
+            "ax.groupRow.count": "%d snippets",
+            "ax.groupRow.help": "Return to edit this group. Delete to remove it.",
+            "ax.noTrigger": "no trigger",
+            "ax.preferences.tabs": "Preferences sections",
+
+            // §5.2: non-colour status channel.
+            "status.active": "Active",
+            "status.paused": "Paused",
+            "status.secure": "Secure Input",
+            "status.needsPermissions": "Needs Permissions",
+            "status.tapFailed": "Tap Failed",
+            "status.injectIssue": "Inject Issue",
+            "status.menu": "Status: %@",
+            "status.menu.attention": "Status: %@ ⚠",
+
+            // §4.8: consolidated alerts.
+            "alert.import.title": "Import Complete",
+            // §7.1: positional — ko/ja need the source name first, and mixing positional
+            // and sequential specifiers in one format string is undefined, so all three
+            // translations spell every argument out.
+            "alert.import.body": "Imported %1$d snippets in %2$d groups from %3$@.",
+            "alert.import.failed.title": "Import Failed",
+            "alert.import.prompt": "Import",
+            "alert.import.message":
+                "Choose a TextExpander settings folder, or an Espanso config folder, match directory, package, or .yml file",
+            "alert.import.summary": "Added %d · Updated %d · Unchanged %d",
+            "alert.tapFailed.title": "Event Tap Failed",
+            "alert.tapFailed.openRecovery": "Open Permission Recovery",
+            "alert.textExpander.title": "TextExpander Detected",
+            "alert.espanso.title": "Espanso Detected",
+            "alert.openAtLogin.title": "Open at Login",
+            "alert.openAtLogin.message":
+                "Could not update the login item: %@\n\nOpen at Login requires the packaged DevType.app bundle.",
+            "alert.secureInput.title": "Secure Input Diagnosis",
+            "alert.secureInput.enabled":
+                "Secure Input is currently ENABLED by macOS. Expansions are muted until the lock is released.\n\nmacOS 27+ removed the private Secure Input PID API, so DevType cannot identify the holding process.\n\nFrontmost app (context only — NOT the lock holder):\n• Name: %@\n• PID: %@\n• Path: %@\n\nLeave password or secure fields to release the lock.",
+            "alert.secureInput.disabled":
+                "Secure Input is currently DISABLED. Keyboard expansion is functioning normally.",
+            "alert.secureInput.unknown": "Unknown",
+            "alert.muteFrontmost.failed.title": "Mute Frontmost App",
+            "alert.muteFrontmost.failed.message":
+                "Could not determine the frontmost application bundle identifier.",
+            "alert.appMuted.title": "App Muted",
+            "alert.appMuted.message": "Expansions are disabled in:\n%@",
+            "alert.invalidSnippet.title": "Invalid Snippet",
+            "alert.reset.title": "Reset to Defaults?",
+            "alert.reset.message":
+                "This replaces every snippet in your library with the built-in defaults. Export first if you want a copy — this cannot be undone from disk.",
+            "alert.reset.confirm": "Reset",
+
+            // §0.3: library health.
+            "library.blocked.title": "Snippet Library Could Not Be Read",
+            "library.blocked.body":
+                "DevType did not replace your snippets. Saving is paused so nothing overwrites the file on disk.\n\n%@",
+            "library.blocked.banner": "Library unreadable — saving is paused.",
+            "library.reveal": "Reveal Backup",
+            "library.retryRead": "Retry",
+            "library.overwrite": "Replace with Defaults",
+            "library.overwrite.confirm.title": "Replace the Library with Defaults?",
+            "library.overwrite.confirm.message":
+                "The unreadable file stays on disk as a backup, but DevType will start again from the four built-in snippets.",
+            "library.retry.ok": "Library read successfully.",
+            "library.retry.failed": "Still unreadable: %@",
+            "library.corrupted.title": "Snippet File Unreadable",
+            "library.corrupted.body":
+                "Your snippets file could not be decoded. It was left in place and a backup was written to:\n%@",
+            "library.empty.title": "Snippet File Is Empty",
+            "library.empty.body":
+                "The library at %@ is a zero-byte file. DevType will not save over it until you choose what to do — restore from a backup, or replace it with defaults.",
+            "library.save.title": "Changes Were Not Saved",
+            "library.save.blockedRemote":
+                "Another device (or another copy of DevType) changed the file first. Reload to pick up the newer version, then re-apply your edit.",
+            "library.save.blockedSchema":
+                "The file on disk was written by a newer version of DevType. Update DevType before editing this library.",
+            "library.save.failed": "Writing the library failed: %@",
+            "library.save.banner": "Last change was not saved.",
+            "library.save.reload": "Reload From Disk",
+            "library.conflict.title": "iCloud Sync Conflict",
+            "library.conflict.body":
+                "iCloud reports %d unresolved version(s) of your snippet library. Choose which one wins.",
+            "library.conflict.banner": "iCloud conflict — %d unresolved version(s).",
+            "library.conflict.keepLocal": "Keep This Mac’s Copy",
+            "library.conflict.keepRemote": "Keep the Other Copy",
+            "library.banner.details": "Details…",
+            "library.banner.dismiss": "Dismiss",
+
+            // §0.4: export.
+            "export.title": "Export Snippets",
+            "export.prompt": "Export",
+            "export.format": "Format",
+            "export.json": "DevType JSON",
+            "export.json.file": "devtype-snippets.json",
+            "export.message": "Choose where to write the exported snippet library.",
+            "export.failed.title": "Export Failed",
+            "export.done.title": "Export Complete",
+            "export.done.body": "Wrote %d snippets to:\n%@",
+
+            // §4.1: preferences.
+            "prefs.title": "Preferences",
+            "prefs.tab.general": "General",
+            "prefs.tab.snippets": "Snippets",
+            "prefs.tab.hotkeys": "Hotkeys",
+            "prefs.tab.advanced": "Advanced",
+            "prefs.general.startup": "Startup",
+            "prefs.general.appearanceNote":
+                "DevType follows the system appearance and honours Reduce Motion, Reduce Transparency, Increase Contrast, and Differentiate Without Color.",
+            "prefs.general.language": "Language",
+            "prefs.general.languageNote": "Takes effect immediately. Restart is not required.",
+            "prefs.general.mutedApps": "Muted Apps",
+            "prefs.general.mutedApps.hint":
+                "Expansions never fire in these apps. Select one and click Remove to unmute.",
+            "prefs.general.mutedApps.empty": "No apps are muted.",
+            "prefs.general.muteFrontmost": "Mute Frontmost App",
+            "prefs.snippets.libraryPath": "Library: %@",
+            "prefs.snippets.conflicts": "Trigger Conflicts",
+            "prefs.snippets.conflicts.none": "No conflicting triggers.",
+            "prefs.snippets.conflict.empty": "Empty trigger — this snippet can never fire (%@).",
+            "prefs.snippets.conflict.duplicate": "“%@” is defined more than once — the first match wins (%@).",
+            "prefs.snippets.conflict.caseShadow":
+                "“%@” exists in both case-sensitive and case-insensitive forms — one is shadowed (%@).",
+            "prefs.snippets.rescan": "Re-scan",
+            "prefs.hotkeys.inlineSearch": "Inline Search",
+            "prefs.hotkeys.inlineSearch.hint":
+                "Opens the snippet palette. The default ⌘/ collides with Comment Line in most editors — rebind it here.",
+            "prefs.hotkeys.reset": "Use Default (⌘/)",
+            "prefs.hotkeys.apply": "Apply",
+            "prefs.hotkeys.macros": "Hotkey Macros",
+            "prefs.hotkeys.macros.hint":
+                "Bind a shortcut straight to text or a URL. These used to be readable only by hand-editing the devtype.hotkeyMacros defaults key.",
+            "prefs.hotkeys.macros.empty": "No hotkey macros yet.",
+            "prefs.hotkeys.macros.add": "Add Macro",
+            "prefs.hotkeys.macros.kind": "Action",
+            "prefs.hotkeys.macros.kind.insertText": "Insert Text",
+            "prefs.hotkeys.macros.kind.openURL": "Open URL",
+            "prefs.hotkeys.macros.argument": "Text or URL",
+            "prefs.hotkeys.macros.shortcut": "Shortcut",
+            "prefs.hotkeys.failed.title": "Shortcut Not Registered",
+            "prefs.hotkeys.failed.message":
+                "macOS refused the shortcut %@ (error %d). Another app has probably claimed it. Pick a different combination.",
+            "prefs.hotkeys.conflictWarning":
+                "⌘/ is Comment Line in Xcode, VS Code, and most editors. Consider ⌥Space or ⌃Space.",
+            "prefs.advanced.engine": "Engine",
+            "prefs.advanced.tapThread": "Run the event tap on a dedicated thread",
+            "prefs.advanced.tapThread.hint":
+                "Keeps the keystroke callback off the main thread. Takes effect at the next launch.",
+            "prefs.advanced.tapCounters": "Tap health",
+            "prefs.advanced.telemetry": "Inject telemetry",
+            "prefs.advanced.overlong": "Trigger length",
+            "prefs.advanced.overlong.none": "All triggers are within the 64-character match buffer.",
+            "prefs.advanced.maintenance": "Maintenance",
+            "prefs.advanced.orphans": "Clean Unused Images",
+            "prefs.advanced.orphans.none": "No orphaned images.",
+            "prefs.advanced.orphans.result": "Removed %d unused image file(s).",
+            "prefs.advanced.copyDiagnostics": "Copy Diagnostics",
+            "prefs.advanced.copied": "Copied to clipboard.",
+            "prefs.advanced.reset": "Reset Library to Defaults…",
+
+            // §4.2: shortcut recorder.
+            "shortcut.record": "Click to Record",
+            "shortcut.recording": "Press keys… (esc to cancel)",
+            "shortcut.none": "None",
+            "shortcut.clear": "Clear",
+            "shortcut.help": "Press a key combination with at least one modifier.",
+            "shortcut.needsModifier": "Add ⌘, ⌥, ⌃, or ⇧ to the key.",
+
+            // §4.5: statistics.
+            "stats.title": "Statistics",
+            "stats.subtitle": "Everything DevType has typed for you.",
+            "stats.totalExpansions": "Expansions",
+            "stats.charactersSaved": "Characters typed for you",
+            "stats.keystrokesSaved": "Keystrokes saved",
+            "stats.timeSaved": "Time saved",
+            "stats.timeSaved.hint": "Estimated at 200 characters per minute.",
+            "stats.top": "Most Used",
+            "stats.recent": "Recently Used",
+            "stats.empty": "No expansions recorded yet. Type a trigger and it shows up here.",
+            "stats.never": "never",
+            "stats.uses.one": "%d use",
+            "stats.uses.other": "%d uses",
+            "stats.refresh": "Refresh",
+
+            // §6.1: onboarding.
+            "onboarding.title": "DevType Setup",
+            "onboarding.subtitle": "Grant access to unlock instant expansion",
+            "onboarding.step": "Step %d of %d",
+            "onboarding.skip": "Skip for now",
+            "onboarding.continue": "Continue",
+            "onboarding.continueAXOnly": "Continue (AX-only)",
+            "onboarding.finish": "Finish",
+            "onboarding.request": "Request",
+            "onboarding.requestAccessibility": "Request Accessibility",
+            "onboarding.requestPostEvents": "Request Post Events",
+            "onboarding.openSettings": "Open Settings",
+            "onboarding.openAccessibility": "Open Accessibility",
+            "onboarding.relaunch": "Relaunch DevType",
+            "onboarding.testExpansion": "Test Expansion",
+            "onboarding.welcome.title": "Welcome",
+            "onboarding.welcome.body":
+                "DevType needs three separate capabilities: Input Monitoring (listen), Accessibility (context and AX inject), and Post Events (HID paste and backspace).\n\nRequest shows the macOS prompt. Open Settings only deep-links — it never registers the app for you.",
+            "onboarding.welcome.ok": "Packaged identity looks good — continue.",
+            "onboarding.welcome.unpackaged":
+                "Warning: unpackaged binary — prefer /Applications/DevType.app via install-app.sh. Continue is still allowed.",
+            "onboarding.welcome.siblings":
+                "Warning: other DevType copies detected — quit them for reliable TCC. Continue is still allowed.",
+            "onboarding.im.title": "Input Monitoring",
+            "onboarding.im.body":
+                "Click Request, answer the macOS prompt, then enable DevType under Input Monitoring (scroll, or use + if it is not listed).",
+            "onboarding.im.granted": "✓ Listen granted",
+            "onboarding.im.missing": "Missing Input Monitoring",
+            "onboarding.im.stillMissing":
+                "Still missing Input Monitoring — click Open Settings if the prompt was dismissed, then Relaunch.",
+            "onboarding.ax.title": "Accessibility + Post Events",
+            "onboarding.ax.body":
+                "Accessibility is required. Post Events is optional — without it DevType runs in degraded AX-only mode (no terminal paste, no HID cursor).\n\nRequest Accessibility first. Open Settings opens the Accessibility pane only; Post Events has no Settings list.",
+            "onboarding.ax.ok": "✓ Accessibility",
+            "onboarding.ax.missing": "✗ Accessibility",
+            "onboarding.ax.stillMissing":
+                "Still missing Accessibility — enable it in Settings, then Relaunch DevType.",
+            "onboarding.post.ok": "✓ Post Events",
+            "onboarding.post.optional": "○ Post Events (optional — AX-only without it)",
+            "onboarding.verify.title": "Verify",
+            "onboarding.verify.body.blocked":
+                "Accessibility is required to continue. Input Monitoring and a running event tap are needed for Active expansion, but they do not block Continue.\n\nUse Open Settings or Request, enable DevType for this exact binary, then Relaunch if needed.",
+            "onboarding.verify.body.ok":
+                "Accessibility granted — you can continue. Start the event tap if Input Monitoring is granted so the menu can show Active.\n\nIf Accessibility was just enabled but inject still fails, click Relaunch DevType.",
+            "onboarding.verify.listen.ok": "Listen: OK",
+            "onboarding.verify.listen.missing": "Listen: missing (needed for Active; does not block Continue)",
+            "onboarding.verify.ax.ok": "Accessibility: OK",
+            "onboarding.verify.ax.missing": "Accessibility: missing (required)",
+            "onboarding.verify.post.ok": "Post Events: OK",
+            "onboarding.verify.post.missing": "Post Events: missing (optional — AX-only)",
+            "onboarding.verify.tap.running": "Tap: running",
+            "onboarding.verify.tap.stopped": "Tap: not running (needed for Active; does not block Continue)",
+            "onboarding.verify.blocked": "Blocked: grant Accessibility before Continue. A relaunch may be required.",
+            "onboarding.verify.incomplete":
+                "Incomplete: Listen or tap not ready — Continue is allowed, but the menu will not show Active yet.",
+            "onboarding.verify.cannotContinue":
+                "Cannot continue — Accessibility is required. Listen or tap being incomplete does not block once AX is granted.",
+            "onboarding.done.title": "Done",
+            "onboarding.done.body.blocked":
+                "Setup cannot finish without Accessibility. Listen and a running tap are recommended for Active expansion but do not block Finish.\n\nTest Expansion runs a real inject into an in-app text view — it does not need Notes.",
+            "onboarding.done.body.pending":
+                "Finish is blocked until Accessibility is granted and the code signature hash has finished loading. Post Events stays optional.\n\nSample live trigger after Finish: :test",
+            "onboarding.done.body.ready":
+                "Ready to finish. DevType stores the completion flag plus this binary's hash and path, so Setup will not reappear.\n\nThe menu still needs Input Monitoring and a running tap to show Active. Permission Recovery (⌘⇧P) is always available.",
+            "onboarding.done.waitingHash": "Waiting for the code signature hash before Finish…",
+            "onboarding.done.noHash": "Code signature hash unavailable — Finish will not store a hash.",
+            "onboarding.done.blockedAX": "Blocked: Accessibility is required.",
+            "onboarding.done.incomplete":
+                "Incomplete: Listen or tap not ready — Finish is allowed, but the menu will not show Active.",
+            "onboarding.done.axOnly": "Finishing in AX-only degraded mode (Post Events optional).",
+            "onboarding.done.finishBlockedAX":
+                "Finish blocked: Accessibility is required. Listen or tap being incomplete does not block once AX is granted.",
+            "onboarding.done.finishBlockedHash": "Finish blocked: still loading the code signature hash…",
+            "onboarding.done.finishBlockedGeneric":
+                "Finish blocked: Accessibility is required (Post is optional; Listen and tap are not).",
+            "onboarding.identity.bundleID": "Bundle ID: %@",
+            "onboarding.identity.path": "Path: %@",
+            "onboarding.identity.cdHash": "CDHash: %@",
+            "onboarding.identity.loading": "(loading…)",
+            "onboarding.identity.unavailable": "(unavailable)",
+            "onboarding.hint.imThenAX":
+                "After enabling Input Monitoring, click Open Settings again for Accessibility.",
+            "onboarding.hint.postNoList":
+                "Post Events has no Settings list — use Request if the macOS prompt is still needed.",
+
+            // §6.1: permission recovery.
+            "recovery.title": "Permission Recovery",
+            "recovery.subtitle": "Capability split • Request ≠ Open Settings",
+            "recovery.tab.status": "Status & Fix",
+            "recovery.tab.diagnostics": "Diagnostics",
+            "recovery.cap.accessibility": "Accessibility",
+            "recovery.cap.inputMonitoring": "Input Monitoring",
+            "recovery.cap.postEvents": "Post Events",
+            "recovery.request": "Request",
+            "recovery.granted": "Granted",
+            "recovery.status.granted": "✓ Granted",
+            "recovery.status.missing": "⚠️ Missing",
+            "recovery.relaunch": "Relaunch DevType",
+            "recovery.relaunchRecommended": "Relaunch DevType (recommended)",
+            "recovery.recheck": "Re-check",
+            "recovery.testExpansion": "Test Expansion",
+            "recovery.more": "More troubleshooting",
+            "recovery.less": "Hide troubleshooting",
+            "recovery.summary.allGood": "✓ All capabilities · Tap running · Engine: %@",
+            "recovery.guidance.allGood": "You're set — text expansions are active for %@.",
+            "recovery.summary.degraded": "Tap running · Inject degraded · Engine: %@",
+            "recovery.summary.tapCreateFailed": "Listen+AX granted · Tap create failed · Engine: %@",
+            "recovery.summary.missing": "%@ · Tap %@ · Engine: %@",
+            "recovery.suffix.listenAXRequired": " · Listen+AX required for event tap",
+            "recovery.suffix.axReset": " · Accessibility reset",
+            "recovery.suffix.identityChanged": " · Binary identity changed",
+            "recovery.guidance.finishGranting": "Finish granting the missing capabilities above.",
+            "recovery.guidance.siblings":
+                "Quit other DevType copies (especially .build) so Settings toggles apply to %@.",
+            "recovery.tap.running": "running",
+            "recovery.tap.notRunning": "not running",
+            "recovery.inject.postedUnverified":
+                "The last expand posted the paste shortcut but DevType could not confirm the text landed. That is expected for Chrome, Electron, and similar apps. If the text appeared, the expand worked. Use Test Expansion to verify in a controlled AppKit field.",
+            "recovery.inject.refusedSummary": "Inject refused · Tap running · Engine: %@",
+            "recovery.inject.failedSummary": "Inject failed · Tap %@ · Engine: %@",
+            "recovery.inject.failedGuidance":
+                "The last expand erased the abbreviation but the paste did not land (or Post Events / HID failed). DevType tried to restore the trigger. Retry, or use Test Expansion in a plain text field. If it keeps happening, click Request Post Events then Re-check.",
+            "recovery.refuse.ax": "The last expand was blocked (%@). Fix Accessibility, then Re-check.",
+            "recovery.refuse.secureInput":
+                "The last expand was blocked by Secure Input. Typed abbreviations cannot expand in password fields — use ⌘/ (Inline Search) or a hotkey to paste instead.",
+            "recovery.refuse.secureField":
+                "The last expand was blocked in a password or secure field. Use ⌘/ (Inline Search) or a hotkey to paste — typing the abbreviation cannot work there.",
+            "recovery.refuse.ime":
+                "The last expand was blocked during IME composition. Finish or cancel the composition, then retry.",
+            "recovery.refuse.focus":
+                "The last expand was blocked because focus could not be verified. Click into a normal text field and retry once focus settles.",
+            "recovery.refuse.generic":
+                "The last expand was blocked (%@). Click into a normal text field (not a password field), then retry.",
+            "recovery.health.idle": "Inject health: idle",
+            "recovery.health.tapExpected": "Tap expected but not running — the UI will not show a stale Active.",
+            "recovery.health.full": "Inject path: full (AX + HID).",
+            "recovery.health.axOnly": "Inject path: AX-only (no HID paste or cursor).",
+            "recovery.health.refused": "Inject path: refused (Accessibility fail-closed).",
+            "recovery.health.last.succeeded": " · Last inject: succeeded",
+            "recovery.health.last.posted": " · Last inject: posted (unverified — the target app may not expose AX values)",
+            "recovery.health.last.refused": " · Last inject: refused — %@",
+            "recovery.health.last.degraded": " · Last inject: AX-only (degraded)",
+            "recovery.health.last.failed": " · Last inject: failed (the paste did not land)",
+            "recovery.stillMissing":
+                "Still missing — click Open Settings if the prompt was dismissed, then Relaunch DevType.",
+            "recovery.stillMissingPost":
+                "Still missing — click Request again; Post Events has no dedicated Settings list.",
+
+            // §6.1: diagnostics pane.
+            "diagnostics.identity.title": "Binary Identity",
+            "diagnostics.identity.hint":
+                "TCC grants are keyed to this exact binary. If the path or CDHash below is not the copy you toggled in System Settings, the grant landed on the other copy.",
+            "diagnostics.bundleID": "Bundle ID: %@",
+            "diagnostics.appPath": "App path: %@",
+            "diagnostics.cdHash": "CDHash: %@",
+            "diagnostics.cdHash.loading": "CDHash: (loading…)",
+            "diagnostics.requirement": "Requirement: %@",
+            "diagnostics.siblings": "Other copies running:",
+            "diagnostics.logs.title": "Diagnostic Logs",
+            "diagnostics.logs.hint":
+                "Copy Logs puts identity, capabilities, expand-gate state, and recent OSLog on the clipboard — paste it into chat or an issue.",
+            "diagnostics.logs.idle": "The report builds when you open this tab.",
+            "diagnostics.logs.loading": "Loading diagnostic report…",
+            "diagnostics.logs.building": "Building diagnostic report…",
+            "diagnostics.logs.refreshing": "Refreshing diagnostic logs…",
+            "diagnostics.logs.busy": "Still building the report — try Copy Logs again in a moment.",
+            "diagnostics.logs.ready": "Diagnostic ready (%d characters). Click Copy Logs, or select the text below.",
+            "diagnostics.logs.copied": "Copied %d characters to the clipboard. Paste anywhere (⌘V).",
+            "diagnostics.logs.copyFailed":
+                "Could not write to the pasteboard — select the text in the preview and copy manually.",
+            "diagnostics.copy": "Copy Logs",
+            "diagnostics.copied": "Copied!",
+            "diagnostics.refresh": "Refresh",
+
+            // §6.1: test expansion lab.
+            "lab.refused.title": "Test Expansion — Refused",
+            "lab.refused.body":
+                "Inject was not attempted — the planner refused.\n\nTrigger: %@\nPlan: %@\nReason: %@\n\nListen=%@ AX=%@ Post=%@ Tap=%@\n\nGrant Accessibility (and Post Events if needed), then retry. Live typing in another app is separate from this lab.",
+            "lab.caption": "Controlled text view — inject runs into this field, not into another app. Plan: %@",
+            "lab.focusing": "Focusing lab field…",
+            "lab.injecting": "Injecting into lab field…",
+            "lab.ok": "✓ Lab inject %@ — text delivered to the text view",
+            "lab.mismatch": "✗ Lab inject %@ — the field did not receive the expected text (AX focus may have missed the lab)",
+            "lab.plan.axhid": "AX+HID",
+            "lab.plan.axonly": "AX-only (degraded)",
+            "lab.plan.refused": "refused — %@",
+            "lab.outcome.succeeded": "succeeded",
+            "lab.outcome.posted": "posted/unverified",
+            "lab.outcome.degraded": "AX-only (degraded)",
+            "lab.outcome.failed": "failed (silent HID)",
+            "lab.outcome.refused": "refused — %@",
+            "lab.outcome.unknown": "unknown",
+            "lab.yes": "OK",
+            "lab.no": "no",
+            "lab.tap.running": "running",
+            "lab.tap.stopped": "stopped"
+        ]
+    }
+
+    // swiftlint:disable:next function_body_length
+    private static func ko() -> [String: String] {
+        return [
+            "common.cancel": "취소",
+            "common.clear": "지우기",
+            "common.ok": "확인",
+            "common.close": "닫기",
+            "common.retry": "다시 시도",
+            "common.remove": "제거",
+            "common.add": "추가",
+            "common.done": "완료",
+            "common.revealInFinder": "Finder에서 보기",
+            "fillin.title": "입력 필드",
+            "fillin.subtitle": "아래 필드를 입력한 후 삽입하세요.",
+            "fillin.insert": "삽입",
+            "fillin.include": "%@ 포함",
+            "search.placeholder": "스니펫 검색…",
+            "search.hint.navigate": "이동",
+            "search.hint.expand": "확장",
+            "search.hint.jump": "바로가기",
+            "search.hint.close": "닫기",
+            "search.count": "%d / %d",
+            "search.empty.title": "일치하는 스니펫 없음",
+            "search.empty.subtitle": "다른 검색어를 입력하거나 관리자에서 스니펫을 추가하세요.",
+            "snippets.empty.noMatch": "“%@”와 일치하는 스니펫이 없습니다",
+            "menu.manage": "스니펫 관리…",
+            "menu.preferences": "환경설정…",
+            "menu.import": "스니펫 가져오기…",
+            "menu.export": "스니펫 내보내기",
+            "menu.inlineSearch": "인라인 검색",
+            "menu.recent": "최근 확장",
+            "menu.recent.empty": "최근 확장 없음",
+            "menu.openAtLogin": "로그인 시 열기",
+            "menu.language": "언어",
+            "menu.recovery": "권한 복구…",
+            "menu.diagnoseSecure": "보안 입력 진단",
+            "menu.mute.front": "최상위 앱 음소거",
+            "menu.mute.apps": "음소거된 앱…",
+            "menu.quit": "DevType 종료",
+            "menu.textExpanderWarning": "TextExpander가 실행 중입니다 — 충돌을 피하려면 비활성화하세요.",
+            "menu.espansoWarning": "Espanso가 실행 중입니다 — 충돌을 피하려면 비활성화하세요.",
+            "manager.title": "스니펫",
+            "manager.subtitle": "적게 입력하고, 더 많이 확장하세요.",
+            "manager.filter": "필터",
+            "manager.import": "가져오기",
+            "manager.export": "내보내기",
+            "manager.stats.button": "통계",
+            "manager.group.all": "모든 스니펫",
+            "manager.add": "새 스니펫",
+            "manager.edit": "편집",
+            "manager.delete": "삭제",
+            "manager.reset": "기본값 재설정",
+            "manager.stats": "%d개 활성 · 전체 %d개",
+            "manager.delete.confirm.title": "스니펫을 삭제할까요?",
+            "manager.delete.confirm.message": "“%@”이(가) 영구적으로 삭제됩니다.",
+            "manager.group.add": "새 그룹",
+            "manager.group.edit": "그룹 편집…",
+            "manager.group.enable": "그룹 활성화",
+            "manager.group.disable": "그룹 비활성화",
+            "manager.group.delete": "그룹 삭제…",
+            "manager.group.delete.title": "그룹을 삭제할까요?",
+            "manager.group.delete.message.other":
+                "“%@”에 스니펫 %d개가 있습니다. 다른 그룹으로 옮기거나 모두 삭제할 수 있습니다.",
+            "manager.group.delete.move": "스니펫 이동",
+            "manager.group.delete.last": "라이브러리에 그룹을 하나 이상 유지해야 합니다.",
+            "manager.group.delete.all": "모두 삭제",
+            "manager.duplicate": "복제",
+            "manager.moveToGroup": "그룹으로 이동",
+            "manager.empty.title": "스니펫이 없습니다",
+            "manager.empty.subtitle": "첫 번째 확장을 만들어 보세요 — 트리거를 정하고 내용을 입력하면 됩니다.",
+            "manager.sort": "정렬",
+            "manager.sort.manual": "수동 순서",
+            "manager.sort.title": "제목",
+            "manager.sort.trigger": "트리거",
+            "manager.sort.usage": "많이 사용한 순",
+            "manager.sort.recent": "최근 사용한 순",
+            "manager.sort.updated": "최근 편집한 순",
+            "manager.sort.hint": "끌어서 순서를 바꾸는 기능은 수동 순서에서만 사용할 수 있습니다.",
+            "manager.undo.add": "스니펫 추가",
+            "manager.undo.edit": "스니펫 편집",
+            "manager.undo.delete": "스니펫 삭제",
+            "manager.undo.duplicate": "스니펫 복제",
+            "manager.undo.move": "스니펫 이동",
+            "manager.undo.reorder": "스니펫 순서 변경",
+            "manager.undo.toggle": "스니펫 전환",
+            "manager.undo.addGroup": "그룹 추가",
+            "manager.undo.editGroup": "그룹 편집",
+            "manager.undo.deleteGroup": "그룹 삭제",
+            "manager.undo.toggleGroup": "그룹 전환",
+            "manager.undo.reorderGroups": "그룹 순서 변경",
+            "manager.undo.reset": "라이브러리 재설정",
+            "editor.group": "그룹",
+            "editor.behavior": "동작",
+            "editor.plainText": "일반 텍스트",
+            "editor.macros": "매크로 삽입",
+            "editor.macro.date": "날짜 / 시간",
+            "editor.macro.cursor": "커서 위치",
+            "editor.macro.clipboard": "클립보드",
+            "editor.macro.filltext": "입력 필드: 한 줄",
+            "editor.macro.fillarea": "입력 필드: 여러 줄",
+            "editor.macro.fillpopup": "입력 필드: 팝업",
+            "editor.macro.fillpart": "선택적 섹션",
+            "editor.macro.nested": "중첩 스니펫",
+            "editor.macro.keyEnter": "키: Return",
+            "editor.macro.keyTab": "키: Tab",
+            "editor.image.attach": "이미지…",
+            "editor.image.remove": "제거",
+            "editor.image.attached": "이미지 첨부됨 — 이미지로 붙여넣기 됩니다",
+            "editor.preview": "미리보기",
+            "editor.chars": "%d자",
+            "editor.fillins": "입력 필드 %d개",
+            "groupeditor.add": "새 그룹",
+            "groupeditor.edit": "그룹 편집",
+            "groupeditor.name": "이름",
+            "groupeditor.icon": "아이콘",
+            "groupeditor.color": "색상",
+            "groupeditor.enabled": "활성화",
+            "groupeditor.save": "그룹 저장",
+            "groupeditor.error.emptyName": "그룹 이름을 입력하세요.",
+            "groupeditor.error.duplicate": "“%@” 그룹이 이미 있습니다.",
+            "editor.add": "새 스니펫",
+            "editor.edit": "스니펫 편집",
+            "editor.name": "제목",
+            "editor.trigger": "트리거",
+            "editor.replacement": "대체 텍스트",
+            "editor.enabled": "활성화",
+            "editor.caseSensitive": "대소문자 구분",
+            "editor.wordBoundary": "단어 경계",
+            "editor.save": "스니펫 저장",
+            "editor.error.emptyTrigger": "저장하려면 트리거를 입력하세요.",
+            "editor.error.conflict": "“%@”이(가) 기존 트리거 “%@”와(과) 충돌합니다.",
+
+            "edit.menu": "편집",
+            "edit.undo": "실행 취소",
+            "edit.redo": "다시 실행",
+            "edit.cut": "오려두기",
+            "edit.copy": "복사하기",
+            "edit.paste": "붙여넣기",
+            "edit.delete": "삭제",
+            "edit.selectAll": "전체 선택",
+
+            "window.snippets": "DevType — 스니펫",
+            "window.recovery": "DevType — 권한 복구",
+            "window.setup": "DevType — 설정",
+            "window.preferences": "DevType — 환경설정",
+            "window.stats": "DevType — 통계",
+            "window.lab": "DevType 삽입 테스트",
+
+            "ax.symbol.manage": "스니펫 관리",
+            "ax.symbol.allSnippets": "모든 스니펫",
+            "ax.symbol.search": "검색",
+            "ax.symbol.import": "가져오기",
+            "ax.symbol.export": "내보내기",
+            "ax.symbol.recent": "최근 항목",
+            "ax.symbol.pause": "일시정지",
+            "ax.symbol.resume": "재개",
+            "ax.symbol.openAtLogin": "로그인 시 열기",
+            "ax.symbol.language": "언어",
+            "ax.symbol.permissionRecovery": "권한 복구",
+            "ax.symbol.secureInput": "보안 입력",
+            "ax.symbol.mute": "앱 음소거",
+            "ax.symbol.mutedApps": "음소거된 앱",
+            "ax.symbol.quit": "종료",
+            "ax.symbol.settings": "시스템 설정",
+            "ax.symbol.preferences": "환경설정",
+            "ax.symbol.add": "추가",
+            "ax.symbol.edit": "편집",
+            "ax.symbol.delete": "삭제",
+            "ax.symbol.group": "그룹",
+            "ax.symbol.newGroup": "새 그룹",
+            "ax.symbol.duplicate": "복제",
+            "ax.symbol.reset": "재설정",
+            "ax.symbol.relaunch": "다시 실행",
+            "ax.symbol.refresh": "새로 고침",
+            "ax.symbol.testExpansion": "확장 테스트",
+            "ax.symbol.request": "권한 요청",
+            "ax.symbol.granted": "허용됨",
+            "ax.symbol.copy": "복사",
+            "ax.symbol.diagnostics": "진단",
+            "ax.symbol.binaryIdentity": "바이너리 식별 정보",
+            "ax.symbol.accessibility": "손쉬운 사용",
+            "ax.symbol.inputMonitoring": "입력 모니터링",
+            "ax.symbol.postEvents": "이벤트 전송",
+            "ax.symbol.expand": "스니펫 확장",
+            "ax.symbol.newSnippet": "새 스니펫",
+            "ax.symbol.statistics": "통계",
+            "ax.symbol.disclosureClosed": "더 보기",
+            "ax.symbol.disclosureOpen": "간략히 보기",
+            "ax.symbol.warning": "경고",
+            "ax.symbol.close": "닫기",
+            "ax.symbol.devtype": "DevType",
+
+            "ax.enabled": "활성화됨",
+            "ax.disabled": "비활성화됨",
+            "ax.status.item": "DevType 상태",
+            "ax.status.item.help": "DevType 텍스트 확장기. %@. 클릭하면 DevType 메뉴가 열립니다.",
+            "ax.menu.header": "DevType 버전 %@, 상태 %@",
+            "ax.searchResults": "검색 결과",
+            "ax.searchRow": "%@, %@, 그룹 %@",
+            "ax.searchRow.disabled": "%@, %@, 그룹 %@, 비활성화됨",
+            "ax.searchRow.help": "Return을 눌러 확장합니다. Command-%d로 이 결과로 이동합니다.",
+            "ax.searchRow.helpNoJump": "Return을 눌러 확장합니다.",
+            "ax.searchRow.image": "이미지 스니펫",
+            "ax.snippetsTable": "스니펫",
+            "ax.groupsTable": "스니펫 그룹",
+            "ax.snippetRow": "%@, 트리거 %@",
+            "ax.snippetRow.help": "Return으로 편집, Delete로 삭제, Command-D로 복제합니다. %d회 사용됨.",
+            "ax.snippetRow.toggle": "스니펫 %@ 활성화",
+            "ax.groupRow": "그룹 %@",
+            "ax.groupRow.count": "스니펫 %d개",
+            "ax.groupRow.help": "Return으로 이 그룹을 편집하고 Delete로 삭제합니다.",
+            "ax.noTrigger": "트리거 없음",
+            "ax.preferences.tabs": "환경설정 섹션",
+
+            "status.active": "활성",
+            "status.paused": "일시정지",
+            "status.secure": "보안 입력",
+            "status.needsPermissions": "권한 필요",
+            "status.tapFailed": "탭 실패",
+            "status.injectIssue": "삽입 문제",
+            "status.menu": "상태: %@",
+            "status.menu.attention": "상태: %@ ⚠",
+
+            "alert.import.title": "가져오기 완료",
+            // §7.1: was "%@에서 %d개의 스니펫을 %d개 그룹으로 …" — the call site passes
+            // (Int, Int, String), so the leading %@ consumed an Int as an object pointer.
+            "alert.import.body": "%3$@에서 %1$d개의 스니펫을 %2$d개 그룹으로 가져왔습니다.",
+            "alert.import.failed.title": "가져오기 실패",
+            "alert.import.prompt": "가져오기",
+            "alert.import.message":
+                "TextExpander 설정 폴더 또는 Espanso 설정 폴더, match 디렉터리, 패키지, .yml 파일을 선택하세요",
+            "alert.import.summary": "추가 %d · 갱신 %d · 변경 없음 %d",
+            "alert.tapFailed.title": "이벤트 탭 실패",
+            "alert.tapFailed.openRecovery": "권한 복구 열기",
+            "alert.textExpander.title": "TextExpander 감지됨",
+            "alert.espanso.title": "Espanso 감지됨",
+            "alert.openAtLogin.title": "로그인 시 열기",
+            "alert.openAtLogin.message":
+                "로그인 항목을 업데이트할 수 없습니다: %@\n\n로그인 시 열기는 패키징된 DevType.app 번들이 필요합니다.",
+            "alert.secureInput.title": "보안 입력 진단",
+            "alert.secureInput.enabled":
+                "현재 macOS에서 보안 입력이 활성화되어 있습니다. 잠금이 해제될 때까지 확장이 중지됩니다.\n\nmacOS 27 이상에서는 보안 입력 PID를 조회하는 비공개 API가 제거되어 어떤 프로세스가 잠갔는지 확인할 수 없습니다.\n\n최상위 앱 (참고용 — 잠금 소유자가 아님):\n• 이름: %@\n• PID: %@\n• 경로: %@\n\n암호 또는 보안 입력 필드에서 벗어나면 잠금이 해제됩니다.",
+            "alert.secureInput.disabled": "보안 입력이 비활성화되어 있습니다. 확장이 정상 작동합니다.",
+            "alert.secureInput.unknown": "알 수 없음",
+            "alert.muteFrontmost.failed.title": "최상위 앱 음소거",
+            "alert.muteFrontmost.failed.message": "최상위 앱의 번들 식별자를 확인할 수 없습니다.",
+            "alert.appMuted.title": "앱 음소거됨",
+            "alert.appMuted.message": "다음 앱에서 확장이 비활성화됩니다:\n%@",
+            "alert.invalidSnippet.title": "잘못된 스니펫",
+            "alert.reset.title": "기본값으로 재설정할까요?",
+            "alert.reset.message":
+                "라이브러리의 모든 스니펫이 기본 제공 항목으로 대체됩니다. 사본이 필요하면 먼저 내보내세요 — 디스크에서는 되돌릴 수 없습니다.",
+            "alert.reset.confirm": "재설정",
+
+            "library.blocked.title": "스니펫 라이브러리를 읽을 수 없습니다",
+            "library.blocked.body":
+                "DevType는 스니펫을 대체하지 않았습니다. 디스크의 파일을 덮어쓰지 않도록 저장이 일시 중지되었습니다.\n\n%@",
+            "library.blocked.banner": "라이브러리를 읽을 수 없음 — 저장이 일시 중지되었습니다.",
+            "library.reveal": "백업 보기",
+            "library.retryRead": "다시 시도",
+            "library.overwrite": "기본값으로 대체",
+            "library.overwrite.confirm.title": "라이브러리를 기본값으로 대체할까요?",
+            "library.overwrite.confirm.message":
+                "읽을 수 없는 파일은 백업으로 남지만, DevType는 기본 제공 스니펫 4개로 다시 시작합니다.",
+            "library.retry.ok": "라이브러리를 정상적으로 읽었습니다.",
+            "library.retry.failed": "여전히 읽을 수 없습니다: %@",
+            "library.corrupted.title": "스니펫 파일을 읽을 수 없습니다",
+            "library.corrupted.body":
+                "스니펫 파일을 디코딩할 수 없습니다. 파일은 그대로 두고 백업을 다음 위치에 저장했습니다:\n%@",
+            "library.empty.title": "스니펫 파일이 비어 있습니다",
+            "library.empty.body":
+                "%@ 파일의 크기가 0바이트입니다. 백업에서 복원할지 기본값으로 대체할지 선택하기 전까지 DevType는 덮어쓰지 않습니다.",
+            "library.save.title": "변경 사항이 저장되지 않았습니다",
+            "library.save.blockedRemote":
+                "다른 기기(또는 다른 DevType 사본)가 파일을 먼저 변경했습니다. 새로 불러온 뒤 편집을 다시 적용하세요.",
+            "library.save.blockedSchema":
+                "디스크의 파일이 더 새로운 DevType 버전으로 작성되었습니다. 이 라이브러리를 편집하기 전에 DevType를 업데이트하세요.",
+            "library.save.failed": "라이브러리 쓰기에 실패했습니다: %@",
+            "library.save.banner": "마지막 변경 사항이 저장되지 않았습니다.",
+            "library.save.reload": "디스크에서 다시 불러오기",
+            "library.conflict.title": "iCloud 동기화 충돌",
+            "library.conflict.body":
+                "iCloud에 해결되지 않은 스니펫 라이브러리 버전이 %d개 있습니다. 어느 쪽을 사용할지 선택하세요.",
+            "library.conflict.banner": "iCloud 충돌 — 해결되지 않은 버전 %d개.",
+            "library.conflict.keepLocal": "이 Mac의 사본 유지",
+            "library.conflict.keepRemote": "다른 사본 유지",
+            "library.banner.details": "자세히…",
+            "library.banner.dismiss": "닫기",
+
+            "export.title": "스니펫 내보내기",
+            "export.prompt": "내보내기",
+            "export.format": "형식",
+            "export.json": "DevType JSON",
+            "export.json.file": "devtype-snippets.json",
+            "export.message": "내보낸 스니펫 라이브러리를 저장할 위치를 선택하세요.",
+            "export.failed.title": "내보내기 실패",
+            "export.done.title": "내보내기 완료",
+            "export.done.body": "스니펫 %d개를 다음 위치에 저장했습니다:\n%@",
+
+            "prefs.title": "환경설정",
+            "prefs.tab.general": "일반",
+            "prefs.tab.snippets": "스니펫",
+            "prefs.tab.hotkeys": "단축키",
+            "prefs.tab.advanced": "고급",
+            "prefs.general.startup": "시작",
+            "prefs.general.appearanceNote":
+                "DevType는 시스템 화면 모드를 따르며 동작 줄이기, 투명도 줄이기, 대비 높이기, 색상 없이 구분하기 설정을 존중합니다.",
+            "prefs.general.language": "언어",
+            "prefs.general.languageNote": "즉시 적용됩니다. 재시작이 필요하지 않습니다.",
+            "prefs.general.mutedApps": "음소거된 앱",
+            "prefs.general.mutedApps.hint": "이 앱에서는 확장이 실행되지 않습니다. 항목을 선택하고 제거를 누르세요.",
+            "prefs.general.mutedApps.empty": "음소거된 앱이 없습니다.",
+            "prefs.general.muteFrontmost": "최상위 앱 음소거",
+            "prefs.snippets.libraryPath": "라이브러리: %@",
+            "prefs.snippets.conflicts": "트리거 충돌",
+            "prefs.snippets.conflicts.none": "충돌하는 트리거가 없습니다.",
+            "prefs.snippets.conflict.empty": "트리거가 비어 있어 이 스니펫은 실행될 수 없습니다 (%@).",
+            "prefs.snippets.conflict.duplicate": "“%@”이(가) 중복 정의되어 첫 번째 항목만 적용됩니다 (%@).",
+            "prefs.snippets.conflict.caseShadow":
+                "“%@”이(가) 대소문자 구분/비구분 양쪽에 존재하여 하나가 가려집니다 (%@).",
+            "prefs.snippets.rescan": "다시 검사",
+            "prefs.hotkeys.inlineSearch": "인라인 검색",
+            "prefs.hotkeys.inlineSearch.hint":
+                "스니펫 팔레트를 엽니다. 기본값 ⌘/는 대부분의 편집기에서 주석 처리와 충돌하므로 여기서 변경하세요.",
+            "prefs.hotkeys.reset": "기본값 사용 (⌘/)",
+            "prefs.hotkeys.apply": "적용",
+            "prefs.hotkeys.macros": "단축키 매크로",
+            "prefs.hotkeys.macros.hint":
+                "단축키를 텍스트나 URL에 직접 연결합니다. 이전에는 devtype.hotkeyMacros 기본 설정 키를 직접 편집해야 했습니다.",
+            "prefs.hotkeys.macros.empty": "단축키 매크로가 없습니다.",
+            "prefs.hotkeys.macros.add": "매크로 추가",
+            "prefs.hotkeys.macros.kind": "동작",
+            "prefs.hotkeys.macros.kind.insertText": "텍스트 삽입",
+            "prefs.hotkeys.macros.kind.openURL": "URL 열기",
+            "prefs.hotkeys.macros.argument": "텍스트 또는 URL",
+            "prefs.hotkeys.macros.shortcut": "단축키",
+            "prefs.hotkeys.failed.title": "단축키를 등록하지 못했습니다",
+            "prefs.hotkeys.failed.message":
+                "macOS가 단축키 %@을(를) 거부했습니다 (오류 %d). 다른 앱이 이미 사용 중일 수 있습니다. 다른 조합을 선택하세요.",
+            "prefs.hotkeys.conflictWarning":
+                "⌘/는 Xcode, VS Code 등 대부분의 편집기에서 주석 처리 단축키입니다. ⌥Space 또는 ⌃Space를 고려하세요.",
+            "prefs.advanced.engine": "엔진",
+            "prefs.advanced.tapThread": "이벤트 탭을 전용 스레드에서 실행",
+            "prefs.advanced.tapThread.hint": "키 입력 콜백을 메인 스레드에서 분리합니다. 다음 실행 시 적용됩니다.",
+            "prefs.advanced.tapCounters": "탭 상태",
+            "prefs.advanced.telemetry": "삽입 원격 측정",
+            "prefs.advanced.overlong": "트리거 길이",
+            "prefs.advanced.overlong.none": "모든 트리거가 64자 매칭 버퍼 안에 있습니다.",
+            "prefs.advanced.maintenance": "유지 관리",
+            "prefs.advanced.orphans": "사용하지 않는 이미지 정리",
+            "prefs.advanced.orphans.none": "사용하지 않는 이미지가 없습니다.",
+            "prefs.advanced.orphans.result": "사용하지 않는 이미지 파일 %d개를 삭제했습니다.",
+            "prefs.advanced.copyDiagnostics": "진단 정보 복사",
+            "prefs.advanced.copied": "클립보드에 복사되었습니다.",
+            "prefs.advanced.reset": "라이브러리를 기본값으로 재설정…",
+
+            "shortcut.record": "클릭하여 기록",
+            "shortcut.recording": "키를 누르세요… (esc로 취소)",
+            "shortcut.none": "없음",
+            "shortcut.clear": "지우기",
+            "shortcut.help": "조합 키를 하나 이상 포함하여 눌러 주세요.",
+            "shortcut.needsModifier": "키에 ⌘, ⌥, ⌃ 또는 ⇧를 추가하세요.",
+
+            "stats.title": "통계",
+            "stats.subtitle": "DevType가 대신 입력한 모든 내용입니다.",
+            "stats.totalExpansions": "확장 횟수",
+            "stats.charactersSaved": "대신 입력한 문자 수",
+            "stats.keystrokesSaved": "절약한 타이핑",
+            "stats.timeSaved": "절약한 시간",
+            "stats.timeSaved.hint": "분당 200자 기준 추정치입니다.",
+            "stats.top": "많이 사용함",
+            "stats.recent": "최근 사용함",
+            "stats.empty": "아직 기록된 확장이 없습니다. 트리거를 입력하면 여기에 표시됩니다.",
+            "stats.never": "없음",
+            "stats.uses.other": "%d회 사용",
+            "stats.refresh": "새로 고침",
+
+            "onboarding.title": "DevType 설정",
+            "onboarding.subtitle": "권한을 허용하여 즉시 확장을 사용하세요",
+            "onboarding.step": "%d / %d 단계",
+            "onboarding.skip": "나중에 하기",
+            "onboarding.continue": "계속",
+            "onboarding.continueAXOnly": "계속 (AX 전용)",
+            "onboarding.finish": "완료",
+            "onboarding.request": "요청",
+            "onboarding.requestAccessibility": "손쉬운 사용 요청",
+            "onboarding.requestPostEvents": "이벤트 전송 요청",
+            "onboarding.openSettings": "설정 열기",
+            "onboarding.openAccessibility": "손쉬운 사용 열기",
+            "onboarding.relaunch": "DevType 다시 실행",
+            "onboarding.testExpansion": "확장 테스트",
+            "onboarding.welcome.title": "환영합니다",
+            "onboarding.welcome.body":
+                "DevType에는 세 가지 권한이 필요합니다: 입력 모니터링(수신), 손쉬운 사용(컨텍스트 및 AX 삽입), 이벤트 전송(HID 붙여넣기 및 백스페이스).\n\n요청을 누르면 macOS 프롬프트가 표시됩니다. 설정 열기는 링크만 열 뿐 앱을 등록하지 않습니다.",
+            "onboarding.welcome.ok": "패키징된 식별 정보가 정상입니다 — 계속하세요.",
+            "onboarding.welcome.unpackaged":
+                "경고: 패키징되지 않은 바이너리입니다 — install-app.sh로 /Applications/DevType.app를 사용하는 것이 좋습니다. 계속할 수는 있습니다.",
+            "onboarding.welcome.siblings":
+                "경고: 다른 DevType 사본이 감지되었습니다 — TCC 신뢰성을 위해 종료하세요. 계속할 수는 있습니다.",
+            "onboarding.im.title": "입력 모니터링",
+            "onboarding.im.body":
+                "요청을 누르고 macOS 프롬프트에 응답한 뒤, 입력 모니터링에서 DevType를 활성화하세요(목록에 없으면 + 버튼을 사용하세요).",
+            "onboarding.im.granted": "✓ 수신 권한 허용됨",
+            "onboarding.im.missing": "입력 모니터링 권한 없음",
+            "onboarding.im.stillMissing":
+                "입력 모니터링 권한이 아직 없습니다 — 프롬프트를 닫았다면 설정 열기를 누른 뒤 다시 실행하세요.",
+            "onboarding.ax.title": "손쉬운 사용 + 이벤트 전송",
+            "onboarding.ax.body":
+                "손쉬운 사용은 필수입니다. 이벤트 전송은 선택 사항이며, 없으면 AX 전용 축소 모드로 동작합니다(터미널 붙여넣기 및 HID 커서 불가).\n\n먼저 손쉬운 사용을 요청하세요. 설정 열기는 손쉬운 사용 패널만 엽니다.",
+            "onboarding.ax.ok": "✓ 손쉬운 사용",
+            "onboarding.ax.missing": "✗ 손쉬운 사용",
+            "onboarding.ax.stillMissing": "손쉬운 사용 권한이 아직 없습니다 — 설정에서 활성화한 뒤 다시 실행하세요.",
+            "onboarding.post.ok": "✓ 이벤트 전송",
+            "onboarding.post.optional": "○ 이벤트 전송 (선택 사항 — 없으면 AX 전용)",
+            "onboarding.verify.title": "확인",
+            "onboarding.verify.body.blocked":
+                "계속하려면 손쉬운 사용이 필요합니다. 입력 모니터링과 실행 중인 이벤트 탭은 활성 상태에 필요하지만 계속을 막지는 않습니다.\n\n설정 열기 또는 요청으로 이 바이너리에 대해 DevType를 활성화한 뒤 필요하면 다시 실행하세요.",
+            "onboarding.verify.body.ok":
+                "손쉬운 사용이 허용되었습니다 — 계속할 수 있습니다. 입력 모니터링이 허용되어 있으면 이벤트 탭을 시작해 메뉴에 활성으로 표시되게 하세요.\n\n손쉬운 사용을 방금 활성화했는데도 삽입이 실패하면 DevType 다시 실행을 누르세요.",
+            "onboarding.verify.listen.ok": "수신: 정상",
+            "onboarding.verify.listen.missing": "수신: 없음 (활성 상태에 필요하지만 계속을 막지 않음)",
+            "onboarding.verify.ax.ok": "손쉬운 사용: 정상",
+            "onboarding.verify.ax.missing": "손쉬운 사용: 없음 (필수)",
+            "onboarding.verify.post.ok": "이벤트 전송: 정상",
+            "onboarding.verify.post.missing": "이벤트 전송: 없음 (선택 사항 — AX 전용)",
+            "onboarding.verify.tap.running": "탭: 실행 중",
+            "onboarding.verify.tap.stopped": "탭: 실행 중 아님 (활성 상태에 필요하지만 계속을 막지 않음)",
+            "onboarding.verify.blocked": "차단됨: 계속하기 전에 손쉬운 사용을 허용하세요. 다시 실행이 필요할 수 있습니다.",
+            "onboarding.verify.incomplete":
+                "미완료: 수신 또는 탭이 준비되지 않았습니다 — 계속할 수 있지만 메뉴에 아직 활성으로 표시되지 않습니다.",
+            "onboarding.verify.cannotContinue":
+                "계속할 수 없습니다 — 손쉬운 사용이 필요합니다. AX가 허용되면 수신/탭 미완료는 문제가 되지 않습니다.",
+            "onboarding.done.title": "완료",
+            "onboarding.done.body.blocked":
+                "손쉬운 사용 없이는 설정을 완료할 수 없습니다. 수신과 실행 중인 탭은 권장되지만 완료를 막지는 않습니다.\n\n확장 테스트는 앱 내 텍스트 뷰에 실제 삽입을 실행하며 다른 앱이 필요하지 않습니다.",
+            "onboarding.done.body.pending":
+                "손쉬운 사용이 허용되고 코드 서명 해시 로딩이 끝날 때까지 완료가 차단됩니다. 이벤트 전송은 선택 사항입니다.\n\n완료 후 사용해 볼 트리거: :test",
+            "onboarding.done.body.ready":
+                "완료할 준비가 되었습니다. DevType는 완료 플래그와 이 바이너리의 해시 및 경로를 저장하므로 설정이 다시 나타나지 않습니다.\n\n메뉴에 활성으로 표시되려면 입력 모니터링과 실행 중인 탭이 필요합니다. 권한 복구(⌘⇧P)는 언제든 사용할 수 있습니다.",
+            "onboarding.done.waitingHash": "완료 전에 코드 서명 해시를 기다리는 중…",
+            "onboarding.done.noHash": "코드 서명 해시를 사용할 수 없습니다 — 완료 시 해시가 저장되지 않습니다.",
+            "onboarding.done.blockedAX": "차단됨: 손쉬운 사용이 필요합니다.",
+            "onboarding.done.incomplete":
+                "미완료: 수신 또는 탭이 준비되지 않았습니다 — 완료할 수 있지만 메뉴에 활성으로 표시되지 않습니다.",
+            "onboarding.done.axOnly": "AX 전용 축소 모드로 완료합니다 (이벤트 전송은 선택 사항).",
+            "onboarding.done.finishBlockedAX":
+                "완료 차단됨: 손쉬운 사용이 필요합니다. AX가 허용되면 수신/탭 미완료는 문제가 되지 않습니다.",
+            "onboarding.done.finishBlockedHash": "완료 차단됨: 코드 서명 해시를 아직 불러오는 중…",
+            "onboarding.done.finishBlockedGeneric":
+                "완료 차단됨: 손쉬운 사용이 필요합니다 (이벤트 전송은 선택 사항, 수신/탭은 필수 아님).",
+            "onboarding.identity.bundleID": "번들 ID: %@",
+            "onboarding.identity.path": "경로: %@",
+            "onboarding.identity.cdHash": "CDHash: %@",
+            "onboarding.identity.loading": "(불러오는 중…)",
+            "onboarding.identity.unavailable": "(사용 불가)",
+            "onboarding.hint.imThenAX": "입력 모니터링을 활성화한 뒤 설정 열기를 다시 눌러 손쉬운 사용을 설정하세요.",
+            "onboarding.hint.postNoList":
+                "이벤트 전송은 설정 목록이 없습니다 — macOS 프롬프트가 필요하면 요청을 사용하세요.",
+
+            "recovery.title": "권한 복구",
+            "recovery.subtitle": "권한 구분 • 요청 ≠ 설정 열기",
+            "recovery.tab.status": "상태 및 해결",
+            "recovery.tab.diagnostics": "진단",
+            "recovery.cap.accessibility": "손쉬운 사용",
+            "recovery.cap.inputMonitoring": "입력 모니터링",
+            "recovery.cap.postEvents": "이벤트 전송",
+            "recovery.request": "요청",
+            "recovery.granted": "허용됨",
+            "recovery.status.granted": "✓ 허용됨",
+            "recovery.status.missing": "⚠️ 없음",
+            "recovery.relaunch": "DevType 다시 실행",
+            "recovery.relaunchRecommended": "DevType 다시 실행 (권장)",
+            "recovery.recheck": "다시 확인",
+            "recovery.testExpansion": "확장 테스트",
+            "recovery.more": "추가 문제 해결",
+            "recovery.less": "문제 해결 숨기기",
+            "recovery.summary.allGood": "✓ 모든 권한 · 탭 실행 중 · 엔진: %@",
+            "recovery.guidance.allGood": "준비되었습니다 — %@에서 텍스트 확장이 활성화되어 있습니다.",
+            "recovery.summary.degraded": "탭 실행 중 · 삽입 축소됨 · 엔진: %@",
+            "recovery.summary.tapCreateFailed": "수신+AX 허용됨 · 탭 생성 실패 · 엔진: %@",
+            "recovery.summary.missing": "%@ · 탭 %@ · 엔진: %@",
+            "recovery.suffix.listenAXRequired": " · 이벤트 탭에는 수신+AX 필요",
+            "recovery.suffix.axReset": " · 손쉬운 사용 재설정됨",
+            "recovery.suffix.identityChanged": " · 바이너리 식별 정보 변경됨",
+            "recovery.guidance.finishGranting": "위에서 부족한 권한을 마저 허용하세요.",
+            "recovery.guidance.siblings": "설정 토글이 %@에 적용되도록 다른 DevType 사본(특히 .build)을 종료하세요.",
+            "recovery.tap.running": "실행 중",
+            "recovery.tap.notRunning": "실행 중 아님",
+            "recovery.inject.postedUnverified":
+                "마지막 확장에서 붙여넣기 단축키를 전송했지만 텍스트가 입력되었는지 확인할 수 없습니다. Chrome, Electron 등에서는 정상입니다. 텍스트가 보였다면 정상 작동한 것입니다. 확장 테스트로 확인해 보세요.",
+            "recovery.inject.refusedSummary": "삽입 거부됨 · 탭 실행 중 · 엔진: %@",
+            "recovery.inject.failedSummary": "삽입 실패 · 탭 %@ · 엔진: %@",
+            "recovery.inject.failedGuidance":
+                "마지막 확장에서 약어는 지워졌지만 붙여넣기가 적용되지 않았습니다(또는 이벤트 전송/HID 실패). DevType가 트리거 복원을 시도했습니다. 다시 시도하거나 일반 텍스트 필드에서 확장 테스트를 사용하세요. 계속되면 이벤트 전송 요청 후 다시 확인하세요.",
+            "recovery.refuse.ax": "마지막 확장이 차단되었습니다 (%@). 손쉬운 사용을 해결한 뒤 다시 확인하세요.",
+            "recovery.refuse.secureInput":
+                "마지막 확장이 보안 입력으로 차단되었습니다. 암호 필드에서는 약어 확장이 불가능하므로 ⌘/(인라인 검색)이나 단축키를 사용하세요.",
+            "recovery.refuse.secureField":
+                "마지막 확장이 암호/보안 필드에서 차단되었습니다. ⌘/(인라인 검색)이나 단축키로 붙여넣으세요.",
+            "recovery.refuse.ime": "마지막 확장이 IME 조합 중에 차단되었습니다. 조합을 완료하거나 취소한 뒤 다시 시도하세요.",
+            "recovery.refuse.focus":
+                "포커스를 확인할 수 없어 마지막 확장이 차단되었습니다. 일반 텍스트 필드를 클릭하고 포커스가 안정된 뒤 다시 시도하세요.",
+            "recovery.refuse.generic":
+                "마지막 확장이 차단되었습니다 (%@). 암호 필드가 아닌 일반 텍스트 필드를 클릭한 뒤 다시 시도하세요.",
+            "recovery.health.idle": "삽입 상태: 유휴",
+            "recovery.health.tapExpected": "탭이 필요하지만 실행 중이 아닙니다 — 오래된 활성 상태는 표시되지 않습니다.",
+            "recovery.health.full": "삽입 경로: 전체 (AX + HID).",
+            "recovery.health.axOnly": "삽입 경로: AX 전용 (HID 붙여넣기/커서 없음).",
+            "recovery.health.refused": "삽입 경로: 거부됨 (손쉬운 사용 미허용).",
+            "recovery.health.last.succeeded": " · 마지막 삽입: 성공",
+            "recovery.health.last.posted": " · 마지막 삽입: 전송됨 (확인 불가 — 대상 앱이 AX 값을 노출하지 않을 수 있음)",
+            "recovery.health.last.refused": " · 마지막 삽입: 거부됨 — %@",
+            "recovery.health.last.degraded": " · 마지막 삽입: AX 전용 (축소)",
+            "recovery.health.last.failed": " · 마지막 삽입: 실패 (붙여넣기 미적용)",
+            "recovery.stillMissing": "아직 없습니다 — 프롬프트를 닫았다면 설정 열기를 누른 뒤 DevType를 다시 실행하세요.",
+            "recovery.stillMissingPost": "아직 없습니다 — 다시 요청하세요. 이벤트 전송에는 전용 설정 목록이 없습니다.",
+
+            "diagnostics.identity.title": "바이너리 식별 정보",
+            "diagnostics.identity.hint":
+                "TCC 권한은 정확히 이 바이너리에 연결됩니다. 아래 경로나 CDHash가 시스템 설정에서 켠 사본과 다르면 권한이 다른 사본에 적용된 것입니다.",
+            "diagnostics.bundleID": "번들 ID: %@",
+            "diagnostics.appPath": "앱 경로: %@",
+            "diagnostics.cdHash": "CDHash: %@",
+            "diagnostics.cdHash.loading": "CDHash: (불러오는 중…)",
+            "diagnostics.requirement": "요구 사항: %@",
+            "diagnostics.siblings": "실행 중인 다른 사본:",
+            "diagnostics.logs.title": "진단 로그",
+            "diagnostics.logs.hint":
+                "로그 복사는 식별 정보, 권한, 확장 게이트 상태, 최근 OSLog를 클립보드에 담습니다 — 대화나 이슈에 붙여넣으세요.",
+            "diagnostics.logs.idle": "이 탭을 열면 보고서가 생성됩니다.",
+            "diagnostics.logs.loading": "진단 보고서를 불러오는 중…",
+            "diagnostics.logs.building": "진단 보고서를 생성하는 중…",
+            "diagnostics.logs.refreshing": "진단 로그를 새로 고치는 중…",
+            "diagnostics.logs.busy": "보고서를 아직 생성 중입니다 — 잠시 후 다시 로그 복사를 누르세요.",
+            "diagnostics.logs.ready": "진단 준비 완료 (%d자). 로그 복사를 누르거나 아래 텍스트를 선택하세요.",
+            "diagnostics.logs.copied": "%d자를 클립보드에 복사했습니다. 어디서든 붙여넣으세요 (⌘V).",
+            "diagnostics.logs.copyFailed": "클립보드에 쓸 수 없습니다 — 미리보기에서 텍스트를 선택해 직접 복사하세요.",
+            "diagnostics.copy": "로그 복사",
+            "diagnostics.copied": "복사됨!",
+            "diagnostics.refresh": "새로 고침",
+
+            "lab.refused.title": "확장 테스트 — 거부됨",
+            "lab.refused.body":
+                "플래너가 거부하여 삽입을 시도하지 않았습니다.\n\n트리거: %@\n계획: %@\n사유: %@\n\n수신=%@ AX=%@ 전송=%@ 탭=%@\n\n손쉬운 사용(필요하면 이벤트 전송도)을 허용한 뒤 다시 시도하세요.",
+            "lab.caption": "제어된 텍스트 뷰 — 삽입이 다른 앱이 아닌 이 필드로 실행됩니다. 계획: %@",
+            "lab.focusing": "테스트 필드에 포커스 중…",
+            "lab.injecting": "테스트 필드에 삽입 중…",
+            "lab.ok": "✓ 테스트 삽입 %@ — 텍스트가 전달되었습니다",
+            "lab.mismatch": "✗ 테스트 삽입 %@ — 예상한 텍스트가 전달되지 않았습니다 (AX 포커스가 빗나갔을 수 있음)",
+            "lab.plan.axhid": "AX+HID",
+            "lab.plan.axonly": "AX 전용 (축소)",
+            "lab.plan.refused": "거부됨 — %@",
+            "lab.outcome.succeeded": "성공",
+            "lab.outcome.posted": "전송됨/확인 불가",
+            "lab.outcome.degraded": "AX 전용 (축소)",
+            "lab.outcome.failed": "실패 (HID 무응답)",
+            "lab.outcome.refused": "거부됨 — %@",
+            "lab.outcome.unknown": "알 수 없음",
+            "lab.yes": "정상",
+            "lab.no": "없음",
+            "lab.tap.running": "실행 중",
+            "lab.tap.stopped": "중지됨"
+        ]
+    }
+
+    // swiftlint:disable:next function_body_length
+    private static func ja() -> [String: String] {
+        return [
+            "common.cancel": "キャンセル",
+            "common.clear": "クリア",
+            "common.ok": "OK",
+            "common.close": "閉じる",
+            "common.retry": "再試行",
+            "common.remove": "削除",
+            "common.add": "追加",
+            "common.done": "完了",
+            "common.revealInFinder": "Finder で表示",
+            "fillin.title": "入力フィールド",
+            "fillin.subtitle": "以下のフィールドに入力して挿入してください。",
+            "fillin.insert": "挿入",
+            "fillin.include": "%@ を含める",
+            "search.placeholder": "スニペットを検索…",
+            "search.hint.navigate": "移動",
+            "search.hint.expand": "展開",
+            "search.hint.jump": "ジャンプ",
+            "search.hint.close": "閉じる",
+            "search.count": "%d / %d",
+            "search.empty.title": "一致するスニペットなし",
+            "search.empty.subtitle": "別の検索語を試すか、マネージャーでスニペットを追加してください。",
+            "snippets.empty.noMatch": "「%@」に一致するスニペットがありません",
+            "menu.manage": "スニペット管理…",
+            "menu.preferences": "環境設定…",
+            "menu.import": "スニペットをインポート…",
+            "menu.export": "スニペットを書き出す",
+            "menu.inlineSearch": "インライン検索",
+            "menu.recent": "最近の展開",
+            "menu.recent.empty": "最近の展開なし",
+            "menu.openAtLogin": "ログイン時に開く",
+            "menu.language": "言語",
+            "menu.recovery": "権限の復旧…",
+            "menu.diagnoseSecure": "セキュア入力を診断",
+            "menu.mute.front": "最前面のアプリをミュート",
+            "menu.mute.apps": "ミュート中のアプリ…",
+            "menu.quit": "DevType を終了",
+            "menu.textExpanderWarning": "TextExpander が実行中です — 競合を避けるには無効にしてください。",
+            "menu.espansoWarning": "Espanso が実行中です — 競合を避けるには無効にしてください。",
+            "manager.title": "スニペット",
+            "manager.subtitle": "少ない入力で、より多くを展開。",
+            "manager.filter": "フィルター",
+            "manager.import": "インポート",
+            "manager.export": "書き出す",
+            "manager.stats.button": "統計",
+            "manager.group.all": "すべてのスニペット",
+            "manager.add": "新規スニペット",
+            "manager.edit": "編集",
+            "manager.delete": "削除",
+            "manager.reset": "デフォルトに戻す",
+            "manager.stats": "%d 件有効 · 全 %d 件",
+            "manager.delete.confirm.title": "スニペットを削除しますか？",
+            "manager.delete.confirm.message": "「%@」は完全に削除されます。",
+            "manager.group.add": "新規グループ",
+            "manager.group.edit": "グループを編集…",
+            "manager.group.enable": "グループを有効化",
+            "manager.group.disable": "グループを無効化",
+            "manager.group.delete": "グループを削除…",
+            "manager.group.delete.title": "グループを削除しますか？",
+            "manager.group.delete.message.other":
+                "「%@」には %d 件のスニペットがあります。別のグループへ移動するか、すべて削除できます。",
+            "manager.group.delete.move": "スニペットを移動",
+            "manager.group.delete.last": "ライブラリには少なくとも 1 つのグループが必要です。",
+            "manager.group.delete.all": "すべて削除",
+            "manager.duplicate": "複製",
+            "manager.moveToGroup": "グループへ移動",
+            "manager.empty.title": "スニペットがありません",
+            "manager.empty.subtitle": "最初の展開を作成しましょう — トリガーを決めて内容を入力するだけです。",
+            "manager.sort": "並べ替え",
+            "manager.sort.manual": "手動の順序",
+            "manager.sort.title": "タイトル",
+            "manager.sort.trigger": "トリガー",
+            "manager.sort.usage": "使用回数順",
+            "manager.sort.recent": "最近使った順",
+            "manager.sort.updated": "最近編集した順",
+            "manager.sort.hint": "ドラッグでの並べ替えは手動の順序でのみ使えます。",
+            "manager.undo.add": "スニペットを追加",
+            "manager.undo.edit": "スニペットを編集",
+            "manager.undo.delete": "スニペットを削除",
+            "manager.undo.duplicate": "スニペットを複製",
+            "manager.undo.move": "スニペットを移動",
+            "manager.undo.reorder": "スニペットを並べ替え",
+            "manager.undo.toggle": "スニペットを切り替え",
+            "manager.undo.addGroup": "グループを追加",
+            "manager.undo.editGroup": "グループを編集",
+            "manager.undo.deleteGroup": "グループを削除",
+            "manager.undo.toggleGroup": "グループを切り替え",
+            "manager.undo.reorderGroups": "グループを並べ替え",
+            "manager.undo.reset": "ライブラリをリセット",
+            "editor.group": "グループ",
+            "editor.behavior": "動作",
+            "editor.plainText": "プレーンテキスト",
+            "editor.macros": "マクロを挿入",
+            "editor.macro.date": "日付 / 時刻",
+            "editor.macro.cursor": "カーソル位置",
+            "editor.macro.clipboard": "クリップボード",
+            "editor.macro.filltext": "入力: 単一行",
+            "editor.macro.fillarea": "入力: 複数行",
+            "editor.macro.fillpopup": "入力: ポップアップ",
+            "editor.macro.fillpart": "オプションセクション",
+            "editor.macro.nested": "ネストされたスニペット",
+            "editor.macro.keyEnter": "キー: Return",
+            "editor.macro.keyTab": "キー: Tab",
+            "editor.image.attach": "画像…",
+            "editor.image.remove": "削除",
+            "editor.image.attached": "画像が添付されました — 画像として貼り付けます",
+            "editor.preview": "プレビュー",
+            "editor.chars": "%d 文字",
+            "editor.fillins": "%d 件の入力フィールド",
+            "groupeditor.add": "新規グループ",
+            "groupeditor.edit": "グループを編集",
+            "groupeditor.name": "名前",
+            "groupeditor.icon": "アイコン",
+            "groupeditor.color": "カラー",
+            "groupeditor.enabled": "有効",
+            "groupeditor.save": "グループを保存",
+            "groupeditor.error.emptyName": "グループ名を入力してください。",
+            "groupeditor.error.duplicate": "「%@」というグループは既に存在します。",
+            "editor.add": "新規スニペット",
+            "editor.edit": "スニペットを編集",
+            "editor.name": "タイトル",
+            "editor.trigger": "トリガー",
+            "editor.replacement": "置換テキスト",
+            "editor.enabled": "有効",
+            "editor.caseSensitive": "大文字小文字を区別",
+            "editor.wordBoundary": "単語境界",
+            "editor.save": "スニペットを保存",
+            "editor.error.emptyTrigger": "保存するにはトリガーを入力してください。",
+            "editor.error.conflict": "「%@」は既存のトリガー「%@」と競合しています。",
+
+            "edit.menu": "編集",
+            "edit.undo": "取り消す",
+            "edit.redo": "やり直す",
+            "edit.cut": "カット",
+            "edit.copy": "コピー",
+            "edit.paste": "ペースト",
+            "edit.delete": "削除",
+            "edit.selectAll": "すべてを選択",
+
+            "window.snippets": "DevType — スニペット",
+            "window.recovery": "DevType — 権限の復旧",
+            "window.setup": "DevType — セットアップ",
+            "window.preferences": "DevType — 環境設定",
+            "window.stats": "DevType — 統計",
+            "window.lab": "DevType 挿入ラボ",
+
+            "ax.symbol.manage": "スニペットを管理",
+            "ax.symbol.allSnippets": "すべてのスニペット",
+            "ax.symbol.search": "検索",
+            "ax.symbol.import": "インポート",
+            "ax.symbol.export": "書き出す",
+            "ax.symbol.recent": "最近の項目",
+            "ax.symbol.pause": "一時停止",
+            "ax.symbol.resume": "再開",
+            "ax.symbol.openAtLogin": "ログイン時に開く",
+            "ax.symbol.language": "言語",
+            "ax.symbol.permissionRecovery": "権限の復旧",
+            "ax.symbol.secureInput": "セキュア入力",
+            "ax.symbol.mute": "アプリをミュート",
+            "ax.symbol.mutedApps": "ミュート中のアプリ",
+            "ax.symbol.quit": "終了",
+            "ax.symbol.settings": "システム設定",
+            "ax.symbol.preferences": "環境設定",
+            "ax.symbol.add": "追加",
+            "ax.symbol.edit": "編集",
+            "ax.symbol.delete": "削除",
+            "ax.symbol.group": "グループ",
+            "ax.symbol.newGroup": "新規グループ",
+            "ax.symbol.duplicate": "複製",
+            "ax.symbol.reset": "リセット",
+            "ax.symbol.relaunch": "再起動",
+            "ax.symbol.refresh": "更新",
+            "ax.symbol.testExpansion": "展開をテスト",
+            "ax.symbol.request": "権限をリクエスト",
+            "ax.symbol.granted": "許可済み",
+            "ax.symbol.copy": "コピー",
+            "ax.symbol.diagnostics": "診断",
+            "ax.symbol.binaryIdentity": "バイナリ識別情報",
+            "ax.symbol.accessibility": "アクセシビリティ",
+            "ax.symbol.inputMonitoring": "入力監視",
+            "ax.symbol.postEvents": "イベント送信",
+            "ax.symbol.expand": "スニペットを展開",
+            "ax.symbol.newSnippet": "新規スニペット",
+            "ax.symbol.statistics": "統計",
+            "ax.symbol.disclosureClosed": "詳細を表示",
+            "ax.symbol.disclosureOpen": "詳細を隠す",
+            "ax.symbol.warning": "警告",
+            "ax.symbol.close": "閉じる",
+            "ax.symbol.devtype": "DevType",
+
+            "ax.enabled": "有効",
+            "ax.disabled": "無効",
+            "ax.status.item": "DevType の状態",
+            "ax.status.item.help": "DevType テキストエキスパンダ。%@。クリックすると DevType メニューが開きます。",
+            "ax.menu.header": "DevType バージョン %@、状態 %@",
+            "ax.searchResults": "検索結果",
+            "ax.searchRow": "%@、%@、グループ %@",
+            "ax.searchRow.disabled": "%@、%@、グループ %@、無効",
+            "ax.searchRow.help": "Return で展開します。Command-%d でこの結果にジャンプします。",
+            "ax.searchRow.helpNoJump": "Return で展開します。",
+            "ax.searchRow.image": "画像スニペット",
+            "ax.snippetsTable": "スニペット",
+            "ax.groupsTable": "スニペットグループ",
+            "ax.snippetRow": "%@、トリガー %@",
+            "ax.snippetRow.help": "Return で編集、Delete で削除、Command-D で複製します。%d 回使用。",
+            "ax.snippetRow.toggle": "スニペット %@ を有効にする",
+            "ax.groupRow": "グループ %@",
+            "ax.groupRow.count": "スニペット %d 件",
+            "ax.groupRow.help": "Return でこのグループを編集、Delete で削除します。",
+            "ax.noTrigger": "トリガーなし",
+            "ax.preferences.tabs": "環境設定のセクション",
+
+            "status.active": "動作中",
+            "status.paused": "一時停止",
+            "status.secure": "セキュア入力",
+            "status.needsPermissions": "権限が必要",
+            "status.tapFailed": "タップ失敗",
+            "status.injectIssue": "挿入の問題",
+            "status.menu": "状態: %@",
+            "status.menu.attention": "状態: %@ ⚠",
+
+            "alert.import.title": "インポート完了",
+            // §7.1: same fix as ko — the call site passes (Int, Int, String).
+            "alert.import.body": "%3$@ から %1$d 件のスニペットを %2$d グループにインポートしました。",
+            "alert.import.failed.title": "インポートに失敗しました",
+            "alert.import.prompt": "インポート",
+            "alert.import.message":
+                "TextExpander の設定フォルダ、または Espanso の設定フォルダ・match ディレクトリ・パッケージ・.yml ファイルを選択してください",
+            "alert.import.summary": "追加 %d · 更新 %d · 変更なし %d",
+            "alert.tapFailed.title": "イベントタップに失敗しました",
+            "alert.tapFailed.openRecovery": "権限の復旧を開く",
+            "alert.textExpander.title": "TextExpander を検出",
+            "alert.espanso.title": "Espanso を検出",
+            "alert.openAtLogin.title": "ログイン時に開く",
+            "alert.openAtLogin.message":
+                "ログイン項目を更新できませんでした: %@\n\nログイン時に開くにはパッケージ化された DevType.app が必要です。",
+            "alert.secureInput.title": "セキュア入力の診断",
+            "alert.secureInput.enabled":
+                "現在 macOS のセキュア入力が有効です。ロックが解除されるまで展開は停止します。\n\nmacOS 27 以降ではセキュア入力の PID を取得する非公開 API が削除されたため、どのプロセスがロックしているかは特定できません。\n\n最前面のアプリ（参考情報 — ロック保持者ではありません）:\n• 名前: %@\n• PID: %@\n• パス: %@\n\nパスワードやセキュアフィールドから離れるとロックが解除されます。",
+            "alert.secureInput.disabled": "セキュア入力は無効です。展開は正常に動作しています。",
+            "alert.secureInput.unknown": "不明",
+            "alert.muteFrontmost.failed.title": "最前面のアプリをミュート",
+            "alert.muteFrontmost.failed.message": "最前面のアプリのバンドル ID を特定できませんでした。",
+            "alert.appMuted.title": "アプリをミュートしました",
+            "alert.appMuted.message": "次のアプリで展開が無効になります:\n%@",
+            "alert.invalidSnippet.title": "無効なスニペット",
+            "alert.reset.title": "デフォルトに戻しますか？",
+            "alert.reset.message":
+                "ライブラリのすべてのスニペットが組み込みのデフォルトに置き換わります。控えが必要な場合は先に書き出してください — ディスク上では元に戻せません。",
+            "alert.reset.confirm": "リセット",
+
+            "library.blocked.title": "スニペットライブラリを読み込めません",
+            "library.blocked.body":
+                "DevType はスニペットを置き換えていません。ディスク上のファイルを上書きしないよう保存を一時停止しています。\n\n%@",
+            "library.blocked.banner": "ライブラリを読み込めません — 保存を一時停止中です。",
+            "library.reveal": "バックアップを表示",
+            "library.retryRead": "再試行",
+            "library.overwrite": "デフォルトで置き換える",
+            "library.overwrite.confirm.title": "ライブラリをデフォルトで置き換えますか？",
+            "library.overwrite.confirm.message":
+                "読み込めないファイルはバックアップとして残りますが、DevType は組み込みの 4 件のスニペットから再開します。",
+            "library.retry.ok": "ライブラリを正常に読み込みました。",
+            "library.retry.failed": "まだ読み込めません: %@",
+            "library.corrupted.title": "スニペットファイルを読み込めません",
+            "library.corrupted.body":
+                "スニペットファイルをデコードできませんでした。ファイルはそのまま残し、バックアップを次の場所に書き出しました:\n%@",
+            "library.empty.title": "スニペットファイルが空です",
+            "library.empty.body":
+                "%@ のファイルは 0 バイトです。バックアップから復元するかデフォルトで置き換えるかを選ぶまで、DevType は上書きしません。",
+            "library.save.title": "変更が保存されませんでした",
+            "library.save.blockedRemote":
+                "別のデバイス（または別の DevType）が先にファイルを変更しました。読み込み直してから編集をやり直してください。",
+            "library.save.blockedSchema":
+                "ディスク上のファイルはより新しい DevType で書き込まれています。編集する前に DevType を更新してください。",
+            "library.save.failed": "ライブラリの書き込みに失敗しました: %@",
+            "library.save.banner": "直前の変更は保存されていません。",
+            "library.save.reload": "ディスクから再読み込み",
+            "library.conflict.title": "iCloud 同期の競合",
+            "library.conflict.body":
+                "iCloud にスニペットライブラリの未解決バージョンが %d 件あります。どちらを採用するか選んでください。",
+            "library.conflict.banner": "iCloud の競合 — 未解決バージョン %d 件。",
+            "library.conflict.keepLocal": "この Mac のコピーを使う",
+            "library.conflict.keepRemote": "もう一方のコピーを使う",
+            "library.banner.details": "詳細…",
+            "library.banner.dismiss": "閉じる",
+
+            "export.title": "スニペットを書き出す",
+            "export.prompt": "書き出す",
+            "export.format": "フォーマット",
+            "export.json": "DevType JSON",
+            "export.json.file": "devtype-snippets.json",
+            "export.message": "書き出したスニペットライブラリの保存先を選んでください。",
+            "export.failed.title": "書き出しに失敗しました",
+            "export.done.title": "書き出し完了",
+            "export.done.body": "%d 件のスニペットを次の場所に書き出しました:\n%@",
+
+            "prefs.title": "環境設定",
+            "prefs.tab.general": "一般",
+            "prefs.tab.snippets": "スニペット",
+            "prefs.tab.hotkeys": "ショートカット",
+            "prefs.tab.advanced": "詳細",
+            "prefs.general.startup": "起動",
+            "prefs.general.appearanceNote":
+                "DevType はシステムの外観に従い、視差効果を減らす・透明度を下げる・コントラストを上げる・カラーなしで区別 の各設定を尊重します。",
+            "prefs.general.language": "言語",
+            "prefs.general.languageNote": "すぐに反映されます。再起動は不要です。",
+            "prefs.general.mutedApps": "ミュート中のアプリ",
+            "prefs.general.mutedApps.hint":
+                "これらのアプリでは展開が実行されません。項目を選んで削除を押すと解除できます。",
+            "prefs.general.mutedApps.empty": "ミュート中のアプリはありません。",
+            "prefs.general.muteFrontmost": "最前面のアプリをミュート",
+            "prefs.snippets.libraryPath": "ライブラリ: %@",
+            "prefs.snippets.conflicts": "トリガーの競合",
+            "prefs.snippets.conflicts.none": "競合するトリガーはありません。",
+            "prefs.snippets.conflict.empty": "トリガーが空のため、このスニペットは実行されません (%@)。",
+            "prefs.snippets.conflict.duplicate": "「%@」が複数定義されています — 最初の一致が優先されます (%@)。",
+            "prefs.snippets.conflict.caseShadow":
+                "「%@」が大文字小文字を区別する形と区別しない形の両方にあり、一方が隠れています (%@)。",
+            "prefs.snippets.rescan": "再スキャン",
+            "prefs.hotkeys.inlineSearch": "インライン検索",
+            "prefs.hotkeys.inlineSearch.hint":
+                "スニペットパレットを開きます。デフォルトの ⌘/ は多くのエディタでコメント切り替えと競合するため、ここで変更できます。",
+            "prefs.hotkeys.reset": "デフォルトに戻す (⌘/)",
+            "prefs.hotkeys.apply": "適用",
+            "prefs.hotkeys.macros": "ショートカットマクロ",
+            "prefs.hotkeys.macros.hint":
+                "ショートカットをテキストや URL に直接割り当てます。以前は devtype.hotkeyMacros を手作業で編集する必要がありました。",
+            "prefs.hotkeys.macros.empty": "ショートカットマクロはありません。",
+            "prefs.hotkeys.macros.add": "マクロを追加",
+            "prefs.hotkeys.macros.kind": "動作",
+            "prefs.hotkeys.macros.kind.insertText": "テキストを挿入",
+            "prefs.hotkeys.macros.kind.openURL": "URL を開く",
+            "prefs.hotkeys.macros.argument": "テキストまたは URL",
+            "prefs.hotkeys.macros.shortcut": "ショートカット",
+            "prefs.hotkeys.failed.title": "ショートカットを登録できませんでした",
+            "prefs.hotkeys.failed.message":
+                "macOS がショートカット %@ を拒否しました（エラー %d）。他のアプリが使用している可能性があります。別の組み合わせを選んでください。",
+            "prefs.hotkeys.conflictWarning":
+                "⌘/ は Xcode や VS Code などでコメント切り替えに割り当てられています。⌥Space や ⌃Space をご検討ください。",
+            "prefs.advanced.engine": "エンジン",
+            "prefs.advanced.tapThread": "イベントタップを専用スレッドで実行",
+            "prefs.advanced.tapThread.hint": "キー入力コールバックをメインスレッドから分離します。次回起動時に反映されます。",
+            "prefs.advanced.tapCounters": "タップの状態",
+            "prefs.advanced.telemetry": "挿入テレメトリ",
+            "prefs.advanced.overlong": "トリガーの長さ",
+            "prefs.advanced.overlong.none": "すべてのトリガーが 64 文字のマッチバッファに収まっています。",
+            "prefs.advanced.maintenance": "メンテナンス",
+            "prefs.advanced.orphans": "未使用の画像を整理",
+            "prefs.advanced.orphans.none": "未使用の画像はありません。",
+            "prefs.advanced.orphans.result": "未使用の画像ファイルを %d 件削除しました。",
+            "prefs.advanced.copyDiagnostics": "診断情報をコピー",
+            "prefs.advanced.copied": "クリップボードにコピーしました。",
+            "prefs.advanced.reset": "ライブラリをデフォルトに戻す…",
+
+            "shortcut.record": "クリックして記録",
+            "shortcut.recording": "キーを押してください…（esc でキャンセル）",
+            "shortcut.none": "なし",
+            "shortcut.clear": "クリア",
+            "shortcut.help": "修飾キーを 1 つ以上含む組み合わせを押してください。",
+            "shortcut.needsModifier": "キーに ⌘、⌥、⌃、⇧ のいずれかを加えてください。",
+
+            "stats.title": "統計",
+            "stats.subtitle": "DevType が代わりに入力した内容です。",
+            "stats.totalExpansions": "展開回数",
+            "stats.charactersSaved": "代わりに入力した文字数",
+            "stats.keystrokesSaved": "節約したキー入力",
+            "stats.timeSaved": "節約した時間",
+            "stats.timeSaved.hint": "1 分あたり 200 文字として計算しています。",
+            "stats.top": "よく使う項目",
+            "stats.recent": "最近使った項目",
+            "stats.empty": "まだ展開の記録がありません。トリガーを入力するとここに表示されます。",
+            "stats.never": "なし",
+            "stats.uses.other": "%d 回使用",
+            "stats.refresh": "更新",
+
+            "onboarding.title": "DevType セットアップ",
+            "onboarding.subtitle": "アクセスを許可して即時展開を有効にします",
+            "onboarding.step": "ステップ %d / %d",
+            "onboarding.skip": "あとで行う",
+            "onboarding.continue": "続ける",
+            "onboarding.continueAXOnly": "続ける（AX のみ）",
+            "onboarding.finish": "完了",
+            "onboarding.request": "リクエスト",
+            "onboarding.requestAccessibility": "アクセシビリティをリクエスト",
+            "onboarding.requestPostEvents": "イベント送信をリクエスト",
+            "onboarding.openSettings": "設定を開く",
+            "onboarding.openAccessibility": "アクセシビリティを開く",
+            "onboarding.relaunch": "DevType を再起動",
+            "onboarding.testExpansion": "展開をテスト",
+            "onboarding.welcome.title": "ようこそ",
+            "onboarding.welcome.body":
+                "DevType には 3 つの権限が必要です: 入力監視（受信）、アクセシビリティ（コンテキストと AX 挿入）、イベント送信（HID ペーストと削除）。\n\nリクエストは macOS のダイアログを表示します。設定を開くはリンクを開くだけで、アプリを登録しません。",
+            "onboarding.welcome.ok": "パッケージ化された識別情報は問題ありません — 続けてください。",
+            "onboarding.welcome.unpackaged":
+                "警告: パッケージ化されていないバイナリです — install-app.sh で /Applications/DevType.app を使うことを推奨します。続行は可能です。",
+            "onboarding.welcome.siblings":
+                "警告: 別の DevType のコピーを検出しました — TCC を安定させるため終了してください。続行は可能です。",
+            "onboarding.im.title": "入力監視",
+            "onboarding.im.body":
+                "リクエストを押して macOS のダイアログに応答し、入力監視で DevType を有効にしてください（一覧にない場合は + を使います）。",
+            "onboarding.im.granted": "✓ 受信が許可されています",
+            "onboarding.im.missing": "入力監視がありません",
+            "onboarding.im.stillMissing":
+                "入力監視がまだありません — ダイアログを閉じた場合は設定を開くを押し、その後再起動してください。",
+            "onboarding.ax.title": "アクセシビリティ + イベント送信",
+            "onboarding.ax.body":
+                "アクセシビリティは必須です。イベント送信は任意で、ない場合は AX のみの縮退モードになります（ターミナルへのペーストと HID カーソルは不可）。\n\nまずアクセシビリティをリクエストしてください。設定を開くはアクセシビリティのパネルのみを開きます。",
+            "onboarding.ax.ok": "✓ アクセシビリティ",
+            "onboarding.ax.missing": "✗ アクセシビリティ",
+            "onboarding.ax.stillMissing":
+                "アクセシビリティがまだありません — 設定で有効にしてから DevType を再起動してください。",
+            "onboarding.post.ok": "✓ イベント送信",
+            "onboarding.post.optional": "○ イベント送信（任意 — ない場合は AX のみ）",
+            "onboarding.verify.title": "確認",
+            "onboarding.verify.body.blocked":
+                "続けるにはアクセシビリティが必要です。入力監視と動作中のイベントタップは「動作中」表示に必要ですが、続けるを妨げません。\n\n設定を開くまたはリクエストでこのバイナリに対して DevType を有効にし、必要なら再起動してください。",
+            "onboarding.verify.body.ok":
+                "アクセシビリティが許可されました — 続けられます。入力監視が許可されていればイベントタップを開始し、メニューに動作中と表示されるようにしてください。\n\nアクセシビリティを有効にしたのに挿入が失敗する場合は DevType を再起動してください。",
+            "onboarding.verify.listen.ok": "受信: OK",
+            "onboarding.verify.listen.missing": "受信: なし（動作中表示に必要ですが続行は可能）",
+            "onboarding.verify.ax.ok": "アクセシビリティ: OK",
+            "onboarding.verify.ax.missing": "アクセシビリティ: なし（必須）",
+            "onboarding.verify.post.ok": "イベント送信: OK",
+            "onboarding.verify.post.missing": "イベント送信: なし（任意 — AX のみ）",
+            "onboarding.verify.tap.running": "タップ: 動作中",
+            "onboarding.verify.tap.stopped": "タップ: 停止中（動作中表示に必要ですが続行は可能）",
+            "onboarding.verify.blocked": "ブロック中: 続ける前にアクセシビリティを許可してください。再起動が必要な場合があります。",
+            "onboarding.verify.incomplete":
+                "未完了: 受信またはタップが未準備です — 続行できますが、メニューにはまだ動作中と表示されません。",
+            "onboarding.verify.cannotContinue":
+                "続行できません — アクセシビリティが必要です。AX が許可されていれば受信/タップの未完了は問題になりません。",
+            "onboarding.done.title": "完了",
+            "onboarding.done.body.blocked":
+                "アクセシビリティなしではセットアップを完了できません。受信と動作中のタップは推奨ですが完了を妨げません。\n\n展開のテストはアプリ内のテキストビューに実際の挿入を行います。他のアプリは不要です。",
+            "onboarding.done.body.pending":
+                "アクセシビリティが許可され、コード署名ハッシュの読み込みが終わるまで完了できません。イベント送信は任意です。\n\n完了後に試すトリガー: :test",
+            "onboarding.done.body.ready":
+                "完了の準備ができました。DevType は完了フラグとこのバイナリのハッシュ・パスを保存するため、セットアップは再表示されません。\n\nメニューに動作中と表示するには入力監視と動作中のタップが必要です。権限の復旧（⌘⇧P）はいつでも利用できます。",
+            "onboarding.done.waitingHash": "完了前にコード署名ハッシュを待っています…",
+            "onboarding.done.noHash": "コード署名ハッシュを取得できません — 完了時にハッシュは保存されません。",
+            "onboarding.done.blockedAX": "ブロック中: アクセシビリティが必要です。",
+            "onboarding.done.incomplete":
+                "未完了: 受信またはタップが未準備です — 完了できますが、メニューには動作中と表示されません。",
+            "onboarding.done.axOnly": "AX のみの縮退モードで完了します（イベント送信は任意）。",
+            "onboarding.done.finishBlockedAX":
+                "完了できません: アクセシビリティが必要です。AX が許可されていれば受信/タップの未完了は問題になりません。",
+            "onboarding.done.finishBlockedHash": "完了できません: コード署名ハッシュを読み込み中です…",
+            "onboarding.done.finishBlockedGeneric":
+                "完了できません: アクセシビリティが必要です（イベント送信は任意、受信/タップは必須ではありません）。",
+            "onboarding.identity.bundleID": "バンドル ID: %@",
+            "onboarding.identity.path": "パス: %@",
+            "onboarding.identity.cdHash": "CDHash: %@",
+            "onboarding.identity.loading": "（読み込み中…）",
+            "onboarding.identity.unavailable": "（利用できません）",
+            "onboarding.hint.imThenAX":
+                "入力監視を有効にしたあと、もう一度設定を開くを押してアクセシビリティを設定してください。",
+            "onboarding.hint.postNoList":
+                "イベント送信には設定の一覧がありません — macOS のダイアログが必要な場合はリクエストを使ってください。",
+
+            "recovery.title": "権限の復旧",
+            "recovery.subtitle": "権限の分離 • リクエスト ≠ 設定を開く",
+            "recovery.tab.status": "状態と修正",
+            "recovery.tab.diagnostics": "診断",
+            "recovery.cap.accessibility": "アクセシビリティ",
+            "recovery.cap.inputMonitoring": "入力監視",
+            "recovery.cap.postEvents": "イベント送信",
+            "recovery.request": "リクエスト",
+            "recovery.granted": "許可済み",
+            "recovery.status.granted": "✓ 許可済み",
+            "recovery.status.missing": "⚠️ 未許可",
+            "recovery.relaunch": "DevType を再起動",
+            "recovery.relaunchRecommended": "DevType を再起動（推奨）",
+            "recovery.recheck": "再確認",
+            "recovery.testExpansion": "展開をテスト",
+            "recovery.more": "詳しいトラブルシューティング",
+            "recovery.less": "トラブルシューティングを隠す",
+            "recovery.summary.allGood": "✓ すべての権限 · タップ動作中 · エンジン: %@",
+            "recovery.guidance.allGood": "準備完了です — %@ でテキスト展開が有効です。",
+            "recovery.summary.degraded": "タップ動作中 · 挿入が縮退 · エンジン: %@",
+            "recovery.summary.tapCreateFailed": "受信+AX 許可済み · タップ作成失敗 · エンジン: %@",
+            "recovery.summary.missing": "%@ · タップ %@ · エンジン: %@",
+            "recovery.suffix.listenAXRequired": " · イベントタップには受信+AX が必要",
+            "recovery.suffix.axReset": " · アクセシビリティがリセットされました",
+            "recovery.suffix.identityChanged": " · バイナリ識別情報が変わりました",
+            "recovery.guidance.finishGranting": "上に残っている権限を許可してください。",
+            "recovery.guidance.siblings":
+                "設定のトグルが %@ に適用されるよう、他の DevType のコピー（特に .build）を終了してください。",
+            "recovery.tap.running": "動作中",
+            "recovery.tap.notRunning": "停止中",
+            "recovery.inject.postedUnverified":
+                "直前の展開でペーストのショートカットは送信されましたが、テキストが入ったかを確認できませんでした。Chrome や Electron などでは正常です。テキストが表示されていれば展開は成功しています。展開のテストで確認できます。",
+            "recovery.inject.refusedSummary": "挿入を拒否 · タップ動作中 · エンジン: %@",
+            "recovery.inject.failedSummary": "挿入に失敗 · タップ %@ · エンジン: %@",
+            "recovery.inject.failedGuidance":
+                "直前の展開では略語は削除されましたがペーストが届きませんでした（またはイベント送信/HID が失敗）。DevType はトリガーの復元を試みました。再試行するか、プレーンなテキストフィールドで展開のテストを使ってください。続く場合はイベント送信をリクエストしてから再確認してください。",
+            "recovery.refuse.ax": "直前の展開がブロックされました (%@)。アクセシビリティを修正してから再確認してください。",
+            "recovery.refuse.secureInput":
+                "直前の展開はセキュア入力によってブロックされました。パスワードフィールドでは略語展開ができないため、⌘/（インライン検索）かショートカットを使ってください。",
+            "recovery.refuse.secureField":
+                "直前の展開はパスワード/セキュアフィールドでブロックされました。⌘/（インライン検索）かショートカットでペーストしてください。",
+            "recovery.refuse.ime":
+                "直前の展開は IME の変換中にブロックされました。変換を確定またはキャンセルしてから再試行してください。",
+            "recovery.refuse.focus":
+                "フォーカスを確認できなかったため直前の展開がブロックされました。通常のテキストフィールドをクリックし、フォーカスが落ち着いてから再試行してください。",
+            "recovery.refuse.generic":
+                "直前の展開がブロックされました (%@)。パスワードフィールドではない通常のテキストフィールドをクリックしてから再試行してください。",
+            "recovery.health.idle": "挿入の状態: アイドル",
+            "recovery.health.tapExpected": "タップが必要ですが動作していません — 古い動作中表示は行いません。",
+            "recovery.health.full": "挿入経路: フル（AX + HID）。",
+            "recovery.health.axOnly": "挿入経路: AX のみ（HID ペースト/カーソルなし）。",
+            "recovery.health.refused": "挿入経路: 拒否（アクセシビリティ未許可）。",
+            "recovery.health.last.succeeded": " · 直前の挿入: 成功",
+            "recovery.health.last.posted": " · 直前の挿入: 送信済み（未確認 — 対象アプリが AX 値を公開していない可能性）",
+            "recovery.health.last.refused": " · 直前の挿入: 拒否 — %@",
+            "recovery.health.last.degraded": " · 直前の挿入: AX のみ（縮退）",
+            "recovery.health.last.failed": " · 直前の挿入: 失敗（ペーストが届きませんでした）",
+            "recovery.stillMissing":
+                "まだ許可されていません — ダイアログを閉じた場合は設定を開くを押し、DevType を再起動してください。",
+            "recovery.stillMissingPost":
+                "まだ許可されていません — もう一度リクエストしてください。イベント送信には専用の設定一覧がありません。",
+
+            "diagnostics.identity.title": "バイナリ識別情報",
+            "diagnostics.identity.hint":
+                "TCC の許可はこのバイナリに厳密に紐づきます。下のパスや CDHash がシステム設定で切り替えたコピーと違う場合、許可は別のコピーに付いています。",
+            "diagnostics.bundleID": "バンドル ID: %@",
+            "diagnostics.appPath": "アプリのパス: %@",
+            "diagnostics.cdHash": "CDHash: %@",
+            "diagnostics.cdHash.loading": "CDHash:（読み込み中…）",
+            "diagnostics.requirement": "要件: %@",
+            "diagnostics.siblings": "動作中の他のコピー:",
+            "diagnostics.logs.title": "診断ログ",
+            "diagnostics.logs.hint":
+                "ログをコピーは、識別情報・権限・展開ゲートの状態・最近の OSLog をクリップボードに入れます — チャットや Issue に貼り付けてください。",
+            "diagnostics.logs.idle": "このタブを開くとレポートが生成されます。",
+            "diagnostics.logs.loading": "診断レポートを読み込み中…",
+            "diagnostics.logs.building": "診断レポートを生成中…",
+            "diagnostics.logs.refreshing": "診断ログを更新中…",
+            "diagnostics.logs.busy": "まだレポートを生成中です — 少し待ってからもう一度お試しください。",
+            "diagnostics.logs.ready": "診断の準備ができました（%d 文字）。ログをコピーを押すか、下のテキストを選択してください。",
+            "diagnostics.logs.copied": "%d 文字をクリップボードにコピーしました。どこにでもペーストできます（⌘V）。",
+            "diagnostics.logs.copyFailed":
+                "ペーストボードに書き込めませんでした — プレビューのテキストを選択して手動でコピーしてください。",
+            "diagnostics.copy": "ログをコピー",
+            "diagnostics.copied": "コピーしました！",
+            "diagnostics.refresh": "更新",
+
+            "lab.refused.title": "展開のテスト — 拒否",
+            "lab.refused.body":
+                "プランナーが拒否したため挿入は試行されませんでした。\n\nトリガー: %@\nプラン: %@\n理由: %@\n\n受信=%@ AX=%@ 送信=%@ タップ=%@\n\nアクセシビリティ（必要ならイベント送信も）を許可してから再試行してください。",
+            "lab.caption": "制御されたテキストビュー — 挿入は他のアプリではなくこのフィールドに実行されます。プラン: %@",
+            "lab.focusing": "ラボのフィールドにフォーカス中…",
+            "lab.injecting": "ラボのフィールドに挿入中…",
+            "lab.ok": "✓ ラボ挿入 %@ — テキストが届きました",
+            "lab.mismatch": "✗ ラボ挿入 %@ — 期待したテキストが届きませんでした（AX フォーカスが外れた可能性）",
+            "lab.plan.axhid": "AX+HID",
+            "lab.plan.axonly": "AX のみ（縮退）",
+            "lab.plan.refused": "拒否 — %@",
+            "lab.outcome.succeeded": "成功",
+            "lab.outcome.posted": "送信済み/未確認",
+            "lab.outcome.degraded": "AX のみ（縮退）",
+            "lab.outcome.failed": "失敗（HID 無反応）",
+            "lab.outcome.refused": "拒否 — %@",
+            "lab.outcome.unknown": "不明",
+            "lab.yes": "OK",
+            "lab.no": "なし",
+            "lab.tap.running": "動作中",
+            "lab.tap.stopped": "停止中"
+        ]
+    }
+}

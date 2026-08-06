@@ -6,26 +6,140 @@ import AppKit
 // glass. On macOS 26+ surfaces use NSGlassEffectView (Liquid Glass); older
 // systems fall back to NSVisualEffectView / solid tinted cards.
 
+/// §5.3: appearance test used by every dynamic colour below.
+extension NSAppearance {
+    /// True for Dark Aqua and its high-contrast variant.
+    var dtIsDark: Bool {
+        let darkNames: [NSAppearance.Name] = [
+            NSAppearance.Name.darkAqua,
+            NSAppearance.Name.accessibilityHighContrastDarkAqua
+        ]
+        guard let match = bestMatch(from: [
+            NSAppearance.Name.aqua,
+            NSAppearance.Name.darkAqua,
+            NSAppearance.Name.accessibilityHighContrastAqua,
+            NSAppearance.Name.accessibilityHighContrastDarkAqua
+        ]) else { return false }
+        return darkNames.contains(match)
+    }
+}
+
 enum DevTypeTheme {
-    // MARK: Palette — dark blood red over warm obsidian
+    // MARK: Palette — §5.3: dynamic, resolves per appearance
+    //
+    // These used to be fixed `calibratedRed:` literals, and `styleWindow` /
+    // `styleFloatingPanel` forced `NSAppearance(named: .darkAqua)` on every
+    // window — so a Light Mode user got a black window and Increase Contrast did
+    // nothing. Each colour is now an `NSColor(name:dynamicProvider:)` that picks
+    // a light or dark variant from the appearance in force.
+    //
+    // Caveat worth knowing at call sites: `.cgColor` on a dynamic colour resolves
+    // against `NSAppearance.current` at *access* time, so a layer that caches a
+    // CGColor freezes at the appearance it was built under. Views that need to
+    // track live should draw with NSColor, or rebuild on
+    // `viewDidChangeEffectiveAppearance`.
 
-    static let accent        = NSColor(calibratedRed: 0.86, green: 0.15, blue: 0.15, alpha: 1.0) // #DC2626
-    static let accentBright  = NSColor(calibratedRed: 0.95, green: 0.29, blue: 0.24, alpha: 1.0) // #F24A3D
-    static let accentDeep    = NSColor(calibratedRed: 0.48, green: 0.07, blue: 0.07, alpha: 1.0) // #7A1212
-    static let accentMid     = NSColor(calibratedRed: 0.68, green: 0.11, blue: 0.10, alpha: 1.0) // #AD1C1A
+    /// Builds a two-variant dynamic colour.
+    static func dynamic(_ name: String, light: NSColor, dark: NSColor) -> NSColor {
+        NSColor(name: NSColor.Name("devtype." + name)) { appearance in
+            appearance.dtIsDark ? dark : light
+        }
+    }
 
-    static let windowBackground = NSColor(calibratedRed: 0.055, green: 0.026, blue: 0.022, alpha: 1.0) // #0E0706
-    static let cardBackground   = NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 0.055)
-    static let cardBackgroundSolid = NSColor(calibratedRed: 0.125, green: 0.067, blue: 0.055, alpha: 1.0) // #20110E
-    static let hairline         = NSColor(calibratedWhite: 1, alpha: 0.10)
+    /// White-on-dark / black-on-light overlay at a given alpha.
+    /// Replaces the many hardcoded `NSColor.white.withAlphaComponent(…)` fills
+    /// that vanished entirely under a light appearance.
+    static func contrastOverlay(_ alpha: CGFloat) -> NSColor {
+        dynamic(
+            "overlay\(Int(alpha * 1000))",
+            light: NSColor(calibratedWhite: 0, alpha: alpha),
+            dark: NSColor(calibratedWhite: 1, alpha: alpha)
+        )
+    }
 
-    static let textPrimary   = NSColor(calibratedWhite: 1.0, alpha: 0.94)
-    static let textSecondary = NSColor(calibratedWhite: 1.0, alpha: 0.62)
-    static let textTertiary  = NSColor(calibratedWhite: 1.0, alpha: 0.40)
+    static let accent = dynamic(
+        "accent",
+        light: NSColor(calibratedRed: 0.73, green: 0.11, blue: 0.11, alpha: 1.0), // #BA1C1C — AA on white
+        dark: NSColor(calibratedRed: 0.86, green: 0.15, blue: 0.15, alpha: 1.0)   // #DC2626
+    )
+    static let accentBright = dynamic(
+        "accentBright",
+        light: NSColor(calibratedRed: 0.80, green: 0.13, blue: 0.11, alpha: 1.0),
+        dark: NSColor(calibratedRed: 0.95, green: 0.29, blue: 0.24, alpha: 1.0)   // #F24A3D
+    )
+    static let accentDeep = dynamic(
+        "accentDeep",
+        light: NSColor(calibratedRed: 0.40, green: 0.05, blue: 0.05, alpha: 1.0),
+        dark: NSColor(calibratedRed: 0.48, green: 0.07, blue: 0.07, alpha: 1.0)   // #7A1212
+    )
+    static let accentMid = dynamic(
+        "accentMid",
+        light: NSColor(calibratedRed: 0.58, green: 0.09, blue: 0.09, alpha: 1.0),
+        dark: NSColor(calibratedRed: 0.68, green: 0.11, blue: 0.10, alpha: 1.0)   // #AD1C1A
+    )
 
-    static let statusGreen   = NSColor(calibratedRed: 0.19, green: 0.82, blue: 0.35, alpha: 1.0) // #30D159
-    static let statusOrange  = NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.10, alpha: 1.0)
-    static let statusGray    = NSColor(calibratedWhite: 0.62, alpha: 1.0)
+    static let windowBackground = dynamic(
+        "windowBackground",
+        light: NSColor(calibratedRed: 0.968, green: 0.960, blue: 0.956, alpha: 1.0), // #F7F5F4
+        dark: NSColor(calibratedRed: 0.055, green: 0.026, blue: 0.022, alpha: 1.0)   // #0E0706
+    )
+    static let cardBackground = dynamic(
+        "cardBackground",
+        light: NSColor(calibratedWhite: 0, alpha: 0.045),
+        dark: NSColor(calibratedWhite: 1, alpha: 0.055)
+    )
+    static let cardBackgroundSolid = dynamic(
+        "cardBackgroundSolid",
+        light: NSColor(calibratedRed: 1.0, green: 0.995, blue: 0.99, alpha: 1.0),
+        dark: NSColor(calibratedRed: 0.125, green: 0.067, blue: 0.055, alpha: 1.0)   // #20110E
+    )
+    /// §5.2: Increase Contrast strengthens the rule instead of ignoring the setting.
+    static var hairline: NSColor {
+        DevTypeAccessibility.increaseContrast
+            ? contrastOverlay(0.34)
+            : contrastOverlay(0.10)
+    }
+
+    // §5.3: `textTertiary` was `white @ 0.40` over `#0E0706` ≈ 3:1 — below WCAG AA
+    // 4.5:1 at the 10–11pt sizes it is used at (search rows, footer hints, group
+    // counts). Raised to ~7:1 in both appearances.
+    static let textPrimary = dynamic(
+        "textPrimary",
+        light: NSColor(calibratedWhite: 0, alpha: 0.92),
+        dark: NSColor(calibratedWhite: 1, alpha: 0.96)
+    )
+    static let textSecondary = dynamic(
+        "textSecondary",
+        light: NSColor(calibratedWhite: 0, alpha: 0.70),
+        dark: NSColor(calibratedWhite: 1, alpha: 0.74)
+    )
+    static let textTertiary = dynamic(
+        "textTertiary",
+        light: NSColor(calibratedWhite: 0, alpha: 0.62),
+        dark: NSColor(calibratedWhite: 1, alpha: 0.60)
+    )
+
+    static let statusGreen = dynamic(
+        "statusGreen",
+        light: NSColor(calibratedRed: 0.09, green: 0.55, blue: 0.24, alpha: 1.0),
+        dark: NSColor(calibratedRed: 0.19, green: 0.82, blue: 0.35, alpha: 1.0)   // #30D159
+    )
+    static let statusOrange = dynamic(
+        "statusOrange",
+        light: NSColor(calibratedRed: 0.68, green: 0.40, blue: 0.02, alpha: 1.0),
+        dark: NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.10, alpha: 1.0)
+    )
+    static let statusGray = dynamic(
+        "statusGray",
+        light: NSColor(calibratedWhite: 0.42, alpha: 1.0),
+        dark: NSColor(calibratedWhite: 0.62, alpha: 1.0)
+    )
+    /// Blue used for the Secure Input state (was inlined in AppDelegate).
+    static let statusBlue = dynamic(
+        "statusBlue",
+        light: NSColor(calibratedRed: 0.06, green: 0.38, blue: 0.80, alpha: 1.0),
+        dark: NSColor(calibratedRed: 0.35, green: 0.65, blue: 1.0, alpha: 1.0)
+    )
 
     // MARK: Legacy aliases (kept so older call sites compile)
 
@@ -98,23 +212,34 @@ enum DevTypeTheme {
 
     // MARK: SF Symbols
 
+    /// §5.1: every symbol carries a real `accessibilityDescription`.
+    ///
+    /// This used to pass `accessibilityDescription: nil` for *every* symbol in the
+    /// app. Callers may override with `description:`; otherwise
+    /// `DevTypeAccessibility.symbolDescription(_:)` supplies a curated localized
+    /// label, falling back to a humanized form of the SF Symbol name.
     static func symbol(
         _ name: String,
         size: CGFloat = 13,
         weight: NSFont.Weight = .medium,
-        color: NSColor? = nil
+        color: NSColor? = nil,
+        description: String? = nil
     ) -> NSImage? {
         var config = NSImage.SymbolConfiguration(pointSize: size, weight: weight)
         if let color {
             config = config.applying(NSImage.SymbolConfiguration(paletteColors: [color]))
         }
-        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+        let label = description ?? DevTypeAccessibility.symbolDescription(name)
+        return NSImage(systemSymbolName: name, accessibilityDescription: label)?
             .withSymbolConfiguration(config)
     }
 
     /// Template symbol suitable for NSMenuItem images (adopts menu text color).
-    static func menuIcon(_ name: String) -> NSImage? {
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+    /// §5.1: labelled — a menu item image with no description is announced as
+    /// an unlabeled image next to the item title.
+    static func menuIcon(_ name: String, description: String? = nil) -> NSImage? {
+        let label = description ?? DevTypeAccessibility.symbolDescription(name)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: label)?
             .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
         image?.isTemplate = true
         return image
@@ -131,9 +256,12 @@ enum DevTypeTheme {
         _ name: String,
         size: CGFloat = 13,
         weight: NSFont.Weight = .medium,
-        color: NSColor
+        color: NSColor,
+        description: String? = nil
     ) -> NSImage? {
-        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+        // §5.1: real accessibility description instead of `nil`.
+        let label = description ?? DevTypeAccessibility.symbolDescription(name)
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: label)?
             .withSymbolConfiguration(.init(pointSize: size, weight: weight)) else { return nil }
         let image = NSImage(size: base.size, flipped: false) { rect in
             base.draw(in: rect)
@@ -142,6 +270,7 @@ enum DevTypeTheme {
             return true
         }
         image.isTemplate = false
+        image.accessibilityDescription = label
         return image
     }
 
@@ -182,12 +311,24 @@ enum DevTypeTheme {
     }
 
     /// Menu-bar icon: brand mark with a small engine-state dot in the corner.
-    static func statusItemImage(dotColor: NSColor?) -> NSImage {
+    ///
+    /// §5.2: the dot is no longer the only channel. `glyph` stamps a shape into
+    /// the badge (● active, ‖ paused, ! needs permissions, ✕ tap failed, ◍
+    /// secure) so the state survives greyscale, colour-blind vision, and a
+    /// user who turned on Differentiate Without Color. `accessibilityLabel`
+    /// carries the state for VoiceOver.
+    static func statusItemImage(
+        dotColor: NSColor?,
+        glyph: String? = nil,
+        accessibilityLabel: String? = nil
+    ) -> NSImage {
         let base = loadStatusIcon()
             ?? symbol("character.cursor.ibeam", size: 16, weight: .semibold)
             ?? NSImage()
-        let dotDiameter: CGFloat = 8
-        let size = NSSize(width: 22, height: 18)
+        // A glyph needs a slightly bigger badge to stay legible at menu-bar size.
+        let showGlyph = glyph != nil
+        let dotDiameter: CGFloat = showGlyph ? 10 : 8
+        let size = NSSize(width: showGlyph ? 24 : 22, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
             let baseRect = NSRect(
                 x: 0,
@@ -207,36 +348,60 @@ enum DevTypeTheme {
                 NSBezierPath(ovalIn: dotRect.insetBy(dx: -1.2, dy: -1.2)).fill()
                 dotColor.setFill()
                 NSBezierPath(ovalIn: dotRect).fill()
+                if let glyph, !glyph.isEmpty {
+                    let attributes: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: dotDiameter - 2.0, weight: .bold),
+                        .foregroundColor: NSColor(calibratedWhite: 0, alpha: 0.92)
+                    ]
+                    let text = glyph as NSString
+                    let textSize = text.size(withAttributes: attributes)
+                    text.draw(
+                        at: NSPoint(
+                            x: dotRect.midX - textSize.width / 2,
+                            y: dotRect.midY - textSize.height / 2
+                        ),
+                        withAttributes: attributes
+                    )
+                }
             }
             return true
         }
         image.isTemplate = false
+        if let accessibilityLabel { image.accessibilityDescription = accessibilityLabel }
         return image
     }
 
     // MARK: Window chrome
 
-    /// Unified, modern dark window: transparent title bar, full-size content,
-    /// warm obsidian background. Content should reserve ~34pt at the top for
-    /// the traffic-light strip.
+    /// Unified window chrome: transparent title bar, full-size content, themed
+    /// background. Content should reserve ~34pt at the top for the traffic-light
+    /// strip.
+    ///
+    /// §5.3: no longer forces `NSAppearance(named: .darkAqua)`. The window follows
+    /// the system appearance and the palette above resolves per appearance, so a
+    /// Light Mode user gets a light window instead of a black one.
     static func styleWindow(_ window: NSWindow, title: String) {
         window.title = title
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.backgroundColor = windowBackground
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = nil
         window.isMovableByWindowBackground = true
         window.toolbar = nil
+        // §5.1: the window is the AX container for its content; give it a real title
+        // even though `titleVisibility` hides the chrome text.
+        window.setAccessibilityTitle(title)
     }
 
     /// Chrome for floating borderless panels (search / fill-in): transparent,
     /// shadowed, rounded by the glass content view.
+    /// §5.3: appearance is inherited, not forced to dark.
     static func styleFloatingPanel(_ panel: NSPanel) {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.appearance = nil
         panel.isMovableByWindowBackground = true
         panel.level = .floating
         panel.hidesOnDeactivate = false
@@ -325,6 +490,21 @@ final class GlassContainerView: NSView {
         layer?.cornerRadius = cornerRadius
         layer?.masksToBounds = true
 
+        // §5.2: Reduce Transparency fallback. The whole theme is glass
+        // (NSGlassEffectView / NSVisualEffectView) with no opaque path — a user
+        // who turns the setting on previously got the blur anyway.
+        if DevTypeAccessibility.reduceTransparency {
+            layer?.backgroundColor = DevTypeTheme.cardBackgroundSolid.cgColor
+            contentView.frame = bounds
+            contentView.autoresizingMask = [.width, .height]
+            addSubview(contentView)
+            if showsBorder {
+                layer?.borderWidth = 1
+                layer?.borderColor = DevTypeTheme.accent.withAlphaComponent(0.45).cgColor
+            }
+            return
+        }
+
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView(frame: bounds)
             glass.cornerRadius = cornerRadius
@@ -381,6 +561,20 @@ final class GlassCardView: NSView {
         layer?.borderWidth = 1
         layer?.borderColor = DevTypeTheme.hairline.cgColor
 
+        // §5.2: Reduce Transparency → solid card, no vibrancy layer at all.
+        if DevTypeAccessibility.reduceTransparency {
+            layer?.backgroundColor = DevTypeTheme.cardBackgroundSolid.cgColor
+            contentView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(contentView)
+            NSLayoutConstraint.activate([
+                contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                contentView.topAnchor.constraint(equalTo: topAnchor),
+                contentView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            ])
+            return
+        }
+
         let effect = NSVisualEffectView()
         effect.material = .contentBackground
         effect.blendingMode = .withinWindow
@@ -427,6 +621,8 @@ final class CapsuleButton: NSButton {
 
     override var title: String {
         didSet {
+            // §5.1: keep the AX label in sync with the drawn title.
+            setAccessibilityLabel(title)
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
@@ -461,6 +657,10 @@ final class CapsuleButton: NSButton {
                 color: style == .primary ? .white : (style == .destructive ? DevTypeTheme.accentBright : DevTypeTheme.textPrimary)
             )
         }
+        // §5.1: `CapsuleButton` draws its own title, so AppKit has no text to
+        // report. Without an explicit label VoiceOver announces "button" only.
+        setAccessibilityRole(NSAccessibility.Role.button)
+        setAccessibilityLabel(title)
 
         setContentHuggingPriority(.required, for: .vertical)
         setContentHuggingPriority(.required, for: .horizontal)
@@ -535,9 +735,10 @@ final class CapsuleButton: NSButton {
                 path.fill()
             }
         case .secondary:
-            NSColor.white.withAlphaComponent(hovering ? 0.11 : 0.065).setFill()
+            // §5.3: white overlays were invisible under a light appearance.
+            DevTypeTheme.contrastOverlay(hovering ? 0.11 : 0.065).setFill()
             path.fill()
-            NSColor.white.withAlphaComponent(hovering ? 0.24 : 0.16).setStroke()
+            DevTypeTheme.contrastOverlay(hovering ? 0.28 : 0.20).setStroke()
             path.lineWidth = 1
             path.stroke()
         case .destructive:
@@ -664,6 +865,20 @@ final class PillBadgeView: NSView {
         label.stringValue = text
         tint = newTint
         applyTint()
+        // §5.1: the badge is a status affordance; expose its text as an AX value.
+        setAccessibilityValue(text)
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+    }
+
+    /// §4.7: attributed variant so search highlighting can reach the trigger pill.
+    /// `applyTint()` writes `label.textColor`, which would rebuild a plain string,
+    /// so the attributed value is assigned last.
+    func update(attributed: NSAttributedString, tint newTint: NSColor) {
+        tint = newTint
+        applyTint()
+        label.attributedStringValue = attributed
+        setAccessibilityValue(attributed.string)
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }
@@ -689,9 +904,10 @@ final class KeyCapView: NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
         layer?.cornerRadius = 5
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        // §5.3: dynamic overlays — the white fills disappeared in Light Mode.
+        layer?.backgroundColor = DevTypeTheme.contrastOverlay(0.07).cgColor
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+        layer?.borderColor = DevTypeTheme.contrastOverlay(0.20).cgColor
         addSubview(label)
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
@@ -699,6 +915,9 @@ final class KeyCapView: NSView {
             label.topAnchor.constraint(equalTo: topAnchor, constant: 1.5),
             label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1.5)
         ])
+        // §5.1: key caps are decorative hints — the enclosing row speaks for them.
+        dtApplyAccessibility(isElement: false)
+        label.setAccessibilityElement(false)
     }
 
     @available(*, unavailable)
@@ -750,6 +969,11 @@ final class IconBadgeView: NSView {
         symbolName = name
         tint = newTint
         imageView.image = DevTypeTheme.tintedSymbol(symbolName, size: pointSize, weight: .semibold, color: tint)
+        // §5.1: an icon chip is decoration next to a labelled title in every
+        // current call site — keep it out of the AX tree rather than announcing
+        // an unlabeled image.
+        imageView.setAccessibilityElement(false)
+        dtApplyAccessibility(isElement: false)
         applyTint()
     }
 
@@ -777,7 +1001,8 @@ final class RoundedSelectionRowView: NSTableRowView {
             path.lineWidth = 1
             path.stroke()
         } else {
-            NSColor.white.withAlphaComponent(0.10).setFill()
+            // §5.3: dynamic so unemphasized selection stays visible in Light Mode.
+            DevTypeTheme.contrastOverlay(0.12).setFill()
             path.fill()
         }
     }

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      §7.5 Hardened Runtime entitlements.
+
+      DevType is NOT sandboxed and cannot be: a CGEventTap that observes and
+      swallows keystrokes system wide is fundamentally incompatible with the App
+      Sandbox. The distribution path is therefore Developer ID plus notarization,
+      not the Mac App Store.
+
+      Notarization requires the Hardened Runtime (codesign option "runtime").
+      Under Hardened Runtime, Apple Events access is needed because
+      SettingsDeepLinker opens System Settings panes and the relaunch flow talks
+      to other processes.
+
+      Input Monitoring and Accessibility are TCC services, not entitlements. They
+      are granted by the user at runtime and must NOT be declared here. Do not add
+      com.apple.security.device.* keys; those are sandbox only and will cause
+      notarization or launch to fail.
+
+      Deliberately absent:
+        com.apple.security.app-sandbox (incompatible, see above)
+        com.apple.security.cs.allow-unsigned-executable-memory
+        com.apple.security.cs.disable-library-validation
+      Add the latter two only if a future dependency genuinely requires them. Each
+      one materially weakens the runtime and invites notarization scrutiny.
+    -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

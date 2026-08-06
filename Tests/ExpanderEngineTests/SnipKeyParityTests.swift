@@ -126,9 +126,24 @@ final class MacroParserParityTests: XCTestCase {
         XCTAssertEqual(tokens, [.fillText(name: "url", defaultValue: "https://example.com")])
     }
 
+    /// §3.6: `%clipboard` has no terminator, so the prefix match used to be greedy and
+    /// `%clipboardless` rendered as `<clipboard>less`. A word character after the keyword now
+    /// refuses the match — that text is almost certainly not a macro.
+    func testClipboardFollowedByWordCharacterIsNotAMacro() {
+        XCTAssertEqual(MacroParser.parse("x%clipboardy"), [.text("x%clipboardy")])
+        XCTAssertEqual(MacroParser.parse("%clipboardless"), [.text("%clipboardless")])
+        XCTAssertEqual(MacroParser.parse("%clipboard2"), [.text("%clipboard2")])
+        XCTAssertEqual(MacroParser.parse("%clipboard_id"), [.text("%clipboard_id")])
+    }
+
+    /// The TextExpander quirk still holds: `%clipboard` needs no trailing `%` when it is
+    /// followed by a non-word character or by the end of the string.
     func testClipboardNeedsNoTrailingPercent() {
-        let tokens = MacroParser.parse("x%clipboardy")
-        XCTAssertEqual(tokens, [.text("x"), .clipboard, .text("y")])
+        XCTAssertEqual(MacroParser.parse("%clipboard"), [.clipboard])
+        XCTAssertEqual(MacroParser.parse("x%clipboard"), [.text("x"), .clipboard])
+        XCTAssertEqual(MacroParser.parse("x%clipboard y"), [.text("x"), .clipboard, .text(" y")])
+        XCTAssertEqual(MacroParser.parse("(%clipboard)"), [.text("("), .clipboard, .text(")")])
+        XCTAssertEqual(MacroParser.parse("x%clipboard.y"), [.text("x"), .clipboard, .text(".y")])
     }
 
     func testMacroRendererDualPath() {
