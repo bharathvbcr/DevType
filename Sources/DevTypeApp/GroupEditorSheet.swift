@@ -1,0 +1,420 @@
+import AppKit
+import ExpanderEngine
+
+private final class GroupEditorKeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Values produced by the group editor (create & edit share the same shape).
+struct GroupDraft: Equatable {
+    var name: String
+    var symbol: String
+    var colorHex: String
+    var enabled: Bool
+}
+
+/// Glass sheet for creating / editing a snippet group: name, SF-symbol icon,
+/// color tag, and enable toggle. Validation errors render inline (crimson label).
+enum GroupEditorSheet {
+    private static var activePanel: NSPanel?
+    private static var activeController: GroupEditorController?
+
+    static func present(
+        from hostWindow: NSWindow?,
+        existing: SnippetGroup?,
+        loc: LocalizationManager = .shared,
+        validate: @escaping (_ name: String) -> String?,
+        completion: @escaping (GroupDraft?) -> Void
+    ) {
+        let panel = GroupEditorKeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 448),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        DevTypeTheme.styleFloatingPanel(panel)
+
+        let controller = GroupEditorController(
+            existing: existing,
+            loc: loc,
+            validate: validate,
+            onFinish: { result in
+                if let host = hostWindow, panel.isSheet {
+                    host.endSheet(panel)
+                }
+                panel.close()
+                activePanel = nil
+                activeController = nil
+                completion(result)
+            }
+        )
+        panel.contentView = controller.view
+
+        activePanel = panel
+        activeController = controller
+
+        if let hostWindow {
+            hostWindow.beginSheet(panel, completionHandler: nil)
+        } else {
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        controller.focusNameField()
+    }
+}
+
+// MARK: - Icon choice button
+
+/// One selectable SF-symbol cell in the icon picker grid.
+private final class IconChoiceButton: NSButton {
+    let symbolName: String
+
+    init(symbolName: String, target: AnyObject?, action: Selector?) {
+        self.symbolName = symbolName
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        isBordered = false
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        layer?.cornerRadius = 8
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.05).cgColor
+        image = DevTypeTheme.tintedSymbol(symbolName, size: 14, weight: .medium, color: DevTypeTheme.textSecondary)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 34),
+            heightAnchor.constraint(equalToConstant: 34)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setSelected(_ selected: Bool, tint: NSColor) {
+        if selected {
+            layer?.backgroundColor = tint.withAlphaComponent(0.22).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = tint.withAlphaComponent(0.65).cgColor
+            image = DevTypeTheme.tintedSymbol(symbolName, size: 14, weight: .semibold, color: tint)
+        } else {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.05).cgColor
+            layer?.borderWidth = 0
+            image = DevTypeTheme.tintedSymbol(symbolName, size: 14, weight: .medium, color: DevTypeTheme.textSecondary)
+        }
+    }
+
+}
+
+// MARK: - Color swatch button
+
+/// Round color swatch; empty hex = "no color" (accent default).
+private final class ColorSwatchButton: NSButton {
+    let colorHex: String
+
+    init(colorHex: String, target: AnyObject?, action: Selector?) {
+        self.colorHex = colorHex
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        isBordered = false
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        layer?.cornerRadius = 10
+        if let color = DevTypeTheme.colorFromHex(colorHex) {
+            layer?.backgroundColor = color.cgColor
+        } else {
+            // "No color" swatch: hollow circle with a diagonal slash.
+            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.borderWidth = 1.5
+            layer?.borderColor = DevTypeTheme.textTertiary.cgColor
+        }
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 20),
+            heightAnchor.constraint(equalToConstant: 20)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setSelected(_ selected: Bool) {
+        if selected {
+            layer?.borderWidth = 2
+            layer?.borderColor = NSColor.white.withAlphaComponent(0.9).cgColor
+        } else if DevTypeTheme.colorFromHex(colorHex) != nil {
+            layer?.borderWidth = 0
+        } else {
+            layer?.borderWidth = 1.5
+            layer?.borderColor = DevTypeTheme.textTertiary.cgColor
+        }
+    }
+}
+
+// MARK: - Controller
+
+private final class GroupEditorController: NSViewController {
+    private static let iconChoices: [String] = [
+        "folder.fill", "tag.fill", "star.fill", "bolt.fill", "envelope.fill",
+        "terminal.fill", "curlybraces", "doc.text.fill", "link", "person.fill",
+        "briefcase.fill", "bookmark.fill", "heart.fill", "wrench.and.screwdriver.fill"
+    ]
+
+    private let existing: SnippetGroup?
+    private let loc: LocalizationManager
+    private let validate: (String) -> String?
+    private let onFinish: (GroupDraft?) -> Void
+
+    private let nameField = GlassTextField()
+    private let enabledSwitch = NSSwitch()
+    private let errorLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11, .medium), color: DevTypeTheme.accentBright, wrapping: true)
+
+    private var selectedSymbol: String
+    private var selectedColorHex: String
+    private var iconButtons: [IconChoiceButton] = []
+    private var swatchButtons: [ColorSwatchButton] = []
+
+    init(
+        existing: SnippetGroup?,
+        loc: LocalizationManager,
+        validate: @escaping (String) -> String?,
+        onFinish: @escaping (GroupDraft?) -> Void
+    ) {
+        self.existing = existing
+        self.loc = loc
+        self.validate = validate
+        self.onFinish = onFinish
+        self.selectedSymbol = existing?.symbol ?? Self.iconChoices[0]
+        self.selectedColorHex = existing?.colorHex ?? ""
+        super.init(nibName: nil, bundle: nil)
+        if !Self.iconChoices.contains(selectedSymbol) {
+            selectedSymbol = Self.iconChoices[0]
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func loadView() {
+        let glass = GlassContainerView(
+            cornerRadius: DevTypeTheme.Radius.panel,
+            tint: DevTypeTheme.accent.withAlphaComponent(0.09),
+            material: .popover
+        )
+        glass.frame = NSRect(x: 0, y: 0, width: 400, height: 448)
+        let root = glass.contentView
+
+        // Header
+        let isNew = existing == nil
+        let badge = IconBadgeView(
+            symbol: isNew ? "folder.badge.plus" : "folder.fill",
+            tint: DevTypeTheme.accent,
+            size: 34,
+            pointSize: 15
+        )
+        let headerLabel = DevTypeTheme.makeLabel(
+            loc.s(isNew ? "groupeditor.add" : "groupeditor.edit"),
+            font: DevTypeTheme.font(15, .bold),
+            color: DevTypeTheme.textPrimary
+        )
+        headerLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(badge)
+        root.addSubview(headerLabel)
+
+        // Name
+        let nameCaption = caption(loc.s("groupeditor.name"))
+        nameField.placeholderAttributedString = NSAttributedString(
+            string: SnippetDocument.defaultGroupName,
+            attributes: [
+                .foregroundColor: DevTypeTheme.textTertiary,
+                .font: DevTypeTheme.font(13)
+            ]
+        )
+        nameField.stringValue = existing?.name ?? ""
+        root.addSubview(nameCaption)
+        root.addSubview(nameField)
+
+        // Icon grid (two rows of seven)
+        let iconCaption = caption(loc.s("groupeditor.icon"))
+        root.addSubview(iconCaption)
+        iconButtons = Self.iconChoices.map { symbol in
+            IconChoiceButton(symbolName: symbol, target: self, action: #selector(iconTapped(_:)))
+        }
+        let iconRowOne = NSStackView(views: Array(iconButtons.prefix(7)))
+        let iconRowTwo = NSStackView(views: Array(iconButtons.suffix(from: 7)))
+        for row in [iconRowOne, iconRowTwo] {
+            row.orientation = .horizontal
+            row.spacing = 8
+        }
+        let iconGrid = NSStackView(views: [iconRowOne, iconRowTwo])
+        iconGrid.orientation = .vertical
+        iconGrid.alignment = .leading
+        iconGrid.spacing = 8
+        iconGrid.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(iconGrid)
+
+        // Color swatches ("none" + palette)
+        let colorCaption = caption(loc.s("groupeditor.color"))
+        root.addSubview(colorCaption)
+        swatchButtons = ([""] + DevTypeTheme.groupColorPalette).map { hex in
+            ColorSwatchButton(colorHex: hex, target: self, action: #selector(colorTapped(_:)))
+        }
+        let swatchRow = NSStackView(views: swatchButtons)
+        swatchRow.orientation = .horizontal
+        swatchRow.spacing = 10
+        swatchRow.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(swatchRow)
+
+        // Enabled toggle
+        enabledSwitch.state = (existing?.enabled ?? true) ? .on : .off
+        enabledSwitch.controlSize = .small
+        enabledSwitch.translatesAutoresizingMaskIntoConstraints = false
+        let enabledLabel = DevTypeTheme.makeLabel(
+            loc.s("groupeditor.enabled"),
+            font: DevTypeTheme.font(11.5, .medium),
+            color: DevTypeTheme.textPrimary
+        )
+        enabledLabel.translatesAutoresizingMaskIntoConstraints = false
+        let toggleRow = NSStackView(views: [enabledSwitch, enabledLabel])
+        toggleRow.orientation = .horizontal
+        toggleRow.alignment = .centerY
+        toggleRow.spacing = 7
+        toggleRow.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(toggleRow)
+
+        // Inline error
+        errorLabel.translatesAutoresizingMaskIntoConstraints = false
+        errorLabel.isHidden = true
+        errorLabel.maximumNumberOfLines = 2
+        root.addSubview(errorLabel)
+
+        // Buttons
+        let hairline = DevTypeTheme.makeHairline()
+        root.addSubview(hairline)
+
+        let cancelButton = CapsuleButton(
+            title: loc.s("common.cancel"),
+            style: .secondary,
+            target: self,
+            action: #selector(cancelTapped)
+        )
+        cancelButton.keyEquivalent = "\u{1b}"
+        let saveButton = CapsuleButton(
+            title: loc.s("groupeditor.save"),
+            symbol: "checkmark",
+            style: .primary,
+            target: self,
+            action: #selector(saveTapped)
+        )
+        saveButton.keyEquivalent = "\r"
+        root.addSubview(cancelButton)
+        root.addSubview(saveButton)
+
+        NSLayoutConstraint.activate([
+            badge.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            badge.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            headerLabel.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 10),
+            headerLabel.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+
+            nameCaption.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 14),
+            nameCaption.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22),
+            nameField.topAnchor.constraint(equalTo: nameCaption.bottomAnchor, constant: 4),
+            nameField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            nameField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+
+            iconCaption.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 12),
+            iconCaption.leadingAnchor.constraint(equalTo: nameCaption.leadingAnchor),
+            iconGrid.topAnchor.constraint(equalTo: iconCaption.bottomAnchor, constant: 6),
+            iconGrid.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+
+            colorCaption.topAnchor.constraint(equalTo: iconGrid.bottomAnchor, constant: 12),
+            colorCaption.leadingAnchor.constraint(equalTo: nameCaption.leadingAnchor),
+            swatchRow.topAnchor.constraint(equalTo: colorCaption.bottomAnchor, constant: 8),
+            swatchRow.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+
+            toggleRow.topAnchor.constraint(equalTo: swatchRow.bottomAnchor, constant: 14),
+            toggleRow.leadingAnchor.constraint(equalTo: nameField.leadingAnchor, constant: 2),
+
+            errorLabel.topAnchor.constraint(equalTo: toggleRow.bottomAnchor, constant: 8),
+            errorLabel.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+            errorLabel.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
+
+            hairline.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            hairline.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            hairline.bottomAnchor.constraint(equalTo: cancelButton.topAnchor, constant: -12),
+
+            cancelButton.trailingAnchor.constraint(equalTo: saveButton.leadingAnchor, constant: -10),
+            cancelButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            saveButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            saveButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16)
+        ])
+
+        refreshPickers()
+        view = glass
+    }
+
+    private func caption(_ text: String) -> NSTextField {
+        let label = DevTypeTheme.makeLabel(text, font: DevTypeTheme.font(11, .semibold), color: DevTypeTheme.textSecondary)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }
+
+    private func refreshPickers() {
+        let tint = DevTypeTheme.tint(forGroupColorHex: selectedColorHex)
+        for button in iconButtons {
+            button.setSelected(button.symbolName == selectedSymbol, tint: tint)
+        }
+        for swatch in swatchButtons {
+            swatch.setSelected(swatch.colorHex == selectedColorHex)
+        }
+    }
+
+    func focusNameField() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.view.window?.makeFirstResponder(self.nameField)
+        }
+    }
+
+    @objc private func iconTapped(_ sender: IconChoiceButton) {
+        selectedSymbol = sender.symbolName
+        refreshPickers()
+    }
+
+    @objc private func colorTapped(_ sender: ColorSwatchButton) {
+        selectedColorHex = sender.colorHex
+        refreshPickers()
+    }
+
+    @objc private func cancelTapped() { onFinish(nil) }
+
+    @objc private func saveTapped() {
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            showError(loc.s("groupeditor.error.emptyName"))
+            return
+        }
+        if let conflict = validate(name) {
+            showError(conflict)
+            return
+        }
+        onFinish(GroupDraft(
+            name: name,
+            symbol: selectedSymbol,
+            colorHex: selectedColorHex,
+            enabled: enabledSwitch.state == .on
+        ))
+    }
+
+    private func showError(_ message: String) {
+        errorLabel.stringValue = message
+        errorLabel.isHidden = false
+        view.layoutSubtreeIfNeeded()
+        let animation = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        animation.values = [0, -6, 5, -3, 2, 0]
+        animation.duration = 0.32
+        nameField.wantsLayer = true
+        nameField.layer?.add(animation, forKey: "devtype.shake")
+    }
+}

@@ -1,0 +1,4 @@
+# Underscore-prefixed: not auto-loaded unless reached via imports.
+matches:
+  - trigger: ":secret"
+    replace: "imported private"

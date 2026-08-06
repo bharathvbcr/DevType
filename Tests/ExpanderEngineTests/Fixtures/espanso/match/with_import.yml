@@ -1,0 +1,5 @@
+imports:
+  - "./_private.yml"
+matches:
+  - trigger: ":public"
+    replace: "from importer"
