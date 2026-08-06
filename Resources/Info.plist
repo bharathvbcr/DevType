@@ -4,6 +4,15 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <!-- §6.2: declare shipped localizations so macOS does not treat the app as
+         English-only. LocalizationManager ships en/ko/ja tables; without this key
+         the system language submenu is the only way to switch. -->
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>ko</string>
+        <string>ja</string>
+    </array>
     <key>CFBundleExecutable</key>
     <string>DevType</string>
     <key>CFBundleIconFile</key>
@@ -16,10 +25,19 @@
     <string>DevType</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- §7.6: these are the SOURCE placeholders. Scripts/package-app.sh overwrites
+         both in the packaged bundle from `git describe`, so shipped builds carry a
+         real version and DiagnosticReport output can be mapped back to a commit. -->
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <!-- §7.5: Sparkle appcast. Update the URL when a release host exists; the
+         Sparkle framework is not yet embedded, so this is inert until it is. -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/bharath/DevType/releases/latest/download/appcast.xml</string>
+    <key>SUEnableInstallerLauncherService</key>
+    <false/>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

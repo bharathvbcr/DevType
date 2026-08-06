@@ -19,6 +19,14 @@ public enum EspansoImporter {
         public var skippedRegex: Int
         public var skippedEmptyTrigger: Int
         public var sourcePath: String
+        /// §3.8: `markdown:` matches imported as their literal Markdown source.
+        public var markdownAsPlainCount: Int = 0
+        /// §3.8: matches carrying `propagate_case` (case-insensitive matching preserved; the
+        /// output-case adaptation itself has no DevType equivalent).
+        public var propagateCaseCount: Int = 0
+        /// §3.8: matches scoped with `apps:` / `exclude_apps:` mapped onto
+        /// `SnippetModel.includeApps` / `excludeApps`.
+        public var appScopedCount: Int = 0
 
         public var totalSkipped: Int {
             skippedVars + skippedForm + skippedHtml + skippedMarkdown
@@ -237,11 +245,9 @@ public enum EspansoImporter {
             return
         }
         if match["html"] != nil {
+            // HTML is a rendered payload, not source text the user typed — importing the raw
+            // markup would inject angle brackets into plain-text fields.
             counters.skippedHtml += 1
-            return
-        }
-        if match["markdown"] != nil {
-            counters.skippedMarkdown += 1
             return
         }
         if let rawImagePath = match["image_path"] as? String, !rawImagePath.isEmpty {
@@ -260,8 +266,18 @@ public enum EspansoImporter {
             return
         }
 
-        guard let replace = match["replace"] as? String else {
-            // No static replace payload (and not already counted above).
+        // §3.8: `markdown:` is source text the user typed, so import it verbatim as plain text
+        // (the same downgrade the TextExpander importer applies to rich text) instead of
+        // dropping the match entirely.
+        var importedMarkdown = false
+        let payload: String
+        if let replace = match["replace"] as? String {
+            payload = replace
+        } else if let markdown = match["markdown"] as? String {
+            payload = markdown
+            importedMarkdown = true
+        } else {
+            // No static payload (and not already counted above).
             if match["form"] == nil && match["html"] == nil
                 && match["markdown"] == nil && match["image_path"] == nil {
                 counters.skippedVars += 1
@@ -269,8 +285,10 @@ public enum EspansoImporter {
             return
         }
 
-        // Never import untranslated Espanso {{var}} mustache (collides with DevType macros).
-        if replace.contains("{{") {
+        // §3.8: the old rule rejected the match on **any** `{{`, including literal braces the
+        // user wanted. Only an actual Espanso variable reference — `{{identifier}}` naming
+        // something DevType cannot resolve — is a reason to skip.
+        if containsUnresolvableEspansoVariable(payload) {
             counters.skippedVars += 1
             return
         }
@@ -282,11 +300,23 @@ public enum EspansoImporter {
         }
 
         let label = (match["label"] as? String) ?? ""
+        // §3.8: `word` / `left_word` / `right_word` → requireWordBoundary.
         let word = boolValue(match["word"])
         let leftWord = boolValue(match["left_word"])
         let rightWord = boolValue(match["right_word"])
         let requireWordBoundary = word || leftWord || rightWord
-        let replacement = replace.replacingOccurrences(of: "$|$", with: "{{cursor}}")
+        // §3.8: `propagate_case` implies case-insensitive matching. DevType has no equivalent for
+        // the output-case adaptation itself, so it is counted and reported rather than dropped
+        // silently.
+        let propagateCase = boolValue(match["propagate_case"])
+        if propagateCase { counters.propagateCaseCount += 1 }
+        // §3.8: `apps:` / `exclude_apps:` → SnippetModel.includeApps / excludeApps (§4.4).
+        let includeApps = stringList(match["apps"])
+        let excludeApps = stringList(match["exclude_apps"])
+        if !includeApps.isEmpty || !excludeApps.isEmpty { counters.appScopedCount += 1 }
+        // §3.8: `search_terms:` are exactly DevType tags.
+        let tags = stringList(match["search_terms"])
+        let replacement = payload.replacingOccurrences(of: "$|$", with: "{{cursor}}")
 
         var addedAny = false
         for trigger in triggers {
@@ -304,14 +334,60 @@ public enum EspansoImporter {
                 isCaseSensitive: false,
                 requireWordBoundary: requireWordBoundary,
                 isPlainText: true,
-                enabled: true
+                enabled: true,
+                tags: tags,
+                includeApps: includeApps,
+                excludeApps: excludeApps
             ))
             counters.snippetCount += 1
             addedAny = true
         }
-        if !addedAny {
-            // All triggers were empty.
+        if addedAny && importedMarkdown {
+            counters.markdownAsPlainCount += 1
         }
+    }
+
+    /// §3.8: Espanso variable syntax is `{{name}}` / `{{name.field}}` / `{{form.field}}`.
+    ///
+    /// Literal text such as `{{ hello }}`, `{{1}}`, or a Handlebars snippet the user is
+    /// deliberately expanding is **not** variable syntax and must survive the import. DevType's
+    /// own mustache tags are also fine — they resolve at expansion time.
+    static func containsUnresolvableEspansoVariable(_ text: String) -> Bool {
+        guard text.contains("{{"), let regex = espansoVariableRegex else { return false }
+        let ns = text as NSString
+        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
+        for match in matches where match.numberOfRanges >= 2 {
+            let identifier = ns.substring(with: match.range(at: 1)).lowercased()
+            let root = identifier.components(separatedBy: ".").first ?? identifier
+            if !devTypeResolvableTags.contains(root) { return true }
+        }
+        return false
+    }
+
+    /// Tags DevType's own template engine resolves (`DynamicTemplateEngine` / `MacroRenderer`).
+    private static let devTypeResolvableTags: Set<String> = [
+        "cursor", "clipboard", "date", "time", "calc", "snippet",
+        "uuid", "random", "counter", "upper", "lower", "title", "sentence",
+    ]
+
+    /// `{{ident}}` / `{{ident.field}}` / `{{ident:arg}}` — no spaces, identifier-shaped.
+    private static let espansoVariableRegex = try? NSRegularExpression(
+        pattern: "\\{\\{([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)*)(?::[^{}]*)?\\}\\}",
+        options: []
+    )
+
+    /// Accepts a YAML scalar or sequence and normalizes to a trimmed, non-empty string list.
+    private static func stringList(_ value: Any?) -> [String] {
+        if let single = value as? String {
+            let trimmed = single.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? [] : [trimmed]
+        }
+        if let list = value as? [Any] {
+            return list.compactMap { $0 as? String }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        return []
     }
 
     /// Imports an `image_path` match as an image snippet: the image file is copied
@@ -350,6 +426,11 @@ public enum EspansoImporter {
         let leftWord = boolValue(match["left_word"])
         let rightWord = boolValue(match["right_word"])
         let requireWordBoundary = word || leftWord || rightWord
+        // §3.8: same metadata translation as the text path.
+        let includeApps = stringList(match["apps"])
+        let excludeApps = stringList(match["exclude_apps"])
+        if !includeApps.isEmpty || !excludeApps.isEmpty { counters.appScopedCount += 1 }
+        let tags = stringList(match["search_terms"])
 
         for trigger in triggers {
             let trimmed = trigger.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -367,7 +448,10 @@ public enum EspansoImporter {
                 requireWordBoundary: requireWordBoundary,
                 isPlainText: true,
                 enabled: true,
-                imagePath: storedName
+                imagePath: storedName,
+                tags: tags,
+                includeApps: includeApps,
+                excludeApps: excludeApps
             ))
             counters.snippetCount += 1
         }
@@ -427,6 +511,15 @@ public enum EspansoImporter {
         return nil
     }
 
+    /// Directory names that carry no meaning for a user-facing group label.
+    private static let genericContainerDirectories: Set<String> = [
+        "match", "matches", "espanso", "config", "packages", ".config", "yml", "yaml",
+    ]
+
+    /// §3.8: the fallback used to be the bare file basename, so `match/work/base.yml` and
+    /// `match/home/base.yml` produced the same group name and merged — destructively, once
+    /// `SnippetStore.importGroups` replaced the same-named group wholesale (§1.10). Qualify the
+    /// name with the parent directory unless that directory is a generic container.
     private static func makeGroupName(for file: URL, packageRoot: URL?) -> String {
         if let packageRoot, let title = packageTitle(from: packageRoot) {
             return title
@@ -434,7 +527,16 @@ public enum EspansoImporter {
         if let packageRoot {
             return packageRoot.lastPathComponent
         }
-        return file.deletingPathExtension().lastPathComponent
+        let base = file.deletingPathExtension().lastPathComponent
+        let parent = file.deletingLastPathComponent().lastPathComponent
+        guard !parent.isEmpty,
+              parent != "/",
+              parent != base,
+              !genericContainerDirectories.contains(parent.lowercased())
+        else {
+            return base
+        }
+        return "\(parent)/\(base)"
     }
 
     private static func packageTitle(from packageRoot: URL) -> String? {
@@ -478,6 +580,10 @@ public enum EspansoImporter {
         var skippedImage = 0
         var skippedRegex = 0
         var skippedEmptyTrigger = 0
+        // §3.8
+        var markdownAsPlainCount = 0
+        var propagateCaseCount = 0
+        var appScopedCount = 0
 
         var totalSkipped: Int {
             skippedVars + skippedForm + skippedHtml + skippedMarkdown
@@ -504,7 +610,10 @@ public enum EspansoImporter {
                 skippedImage: skippedImage,
                 skippedRegex: skippedRegex,
                 skippedEmptyTrigger: skippedEmptyTrigger,
-                sourcePath: sourcePath
+                sourcePath: sourcePath,
+                markdownAsPlainCount: markdownAsPlainCount,
+                propagateCaseCount: propagateCaseCount,
+                appScopedCount: appScopedCount
             )
         }
     }

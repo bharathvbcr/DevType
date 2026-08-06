@@ -21,14 +21,35 @@ public final class SecureInputMonitor {
 
     private var monitorTimer: DispatchSourceTimer?
     private let monitorQueue = DispatchQueue(label: "com.devtype.secureinputmonitor", qos: .utility)
+    /// §1.11: `lastReportedLocked` is written by the timer handler (monitorQueue) and by
+    /// `start`/`stopMonitoring` (usually main). It was previously unsynchronized — an
+    /// `Optional<Bool>` torn between threads silently drops or duplicates lock transitions,
+    /// which is exactly the edge that decides whether DevType is muted in a password field.
+    private let stateLock = UnfairLock()
     /// Change-gate: only invoke onChange when lock state actually flips.
     private var lastReportedLocked: Bool?
 
     public init() {}
 
+    /// Reads-and-updates the change gate atomically. Returns `true` when the caller should notify.
+    private func shouldReport(_ isLocked: Bool) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        // Edge-triggered: notify only on first sample or when locked state changes.
+        guard lastReportedLocked == nil || lastReportedLocked != isLocked else { return false }
+        lastReportedLocked = isLocked
+        return true
+    }
+
+    private func clearReportedState() {
+        stateLock.lock()
+        lastReportedLocked = nil
+        stateLock.unlock()
+    }
+
     public func startMonitoring(interval: TimeInterval = 0.35, onChange: @escaping (LockStatus) -> Void) {
         stopMonitoring()
-        lastReportedLocked = nil
+        clearReportedState()
         DevTypeLog.secureInput.info(
             "[SecureInput] monitor started interval=\(interval, privacy: .public)s"
         )
@@ -38,10 +59,7 @@ public final class SecureInputMonitor {
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             let status = self.checkLockStatus()
-            let previous = self.lastReportedLocked
-            // Edge-triggered: notify only on first sample or when locked state changes.
-            guard previous == nil || previous != status.isLocked else { return }
-            self.lastReportedLocked = status.isLocked
+            guard self.shouldReport(status.isLocked) else { return }
             let app = status.holdingAppName ?? "nil"
             let pid = status.holdingPID.map { String($0) } ?? "nil"
             DevTypeLog.secureInput.info(
@@ -61,7 +79,7 @@ public final class SecureInputMonitor {
         }
         monitorTimer?.cancel()
         monitorTimer = nil
-        lastReportedLocked = nil
+        clearReportedState()
     }
 
     public func checkLockStatus() -> LockStatus {

@@ -127,8 +127,16 @@ enum InlineSearchPanel {
     }
 
     /// Subtle fade + settle presentation, like Spotlight.
+    ///
+    /// §5.2: this used to run unconditionally. It now honours Reduce Motion —
+    /// the panel simply appears at its final frame, fully opaque.
     private static func animateIn(_ panel: NSPanel) {
         let finalFrame = panel.frame
+        guard !DevTypeAccessibility.reduceMotion else {
+            panel.alphaValue = 1
+            panel.setFrame(finalFrame, display: true)
+            return
+        }
         let startFrame = finalFrame.insetBy(dx: 12, dy: 8).offsetBy(dx: 0, dy: -10)
         panel.setFrame(startFrame, display: false)
         panel.alphaValue = 0
@@ -203,22 +211,76 @@ private final class SearchHitCellView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(with hit: SearchHit, jumpNumber: Int?) {
-        triggerPill.update(
-            text: hit.snippet.triggerKeyword.isEmpty ? "·" : hit.snippet.triggerKeyword,
-            tint: hit.snippet.enabled ? DevTypeTheme.accent : DevTypeTheme.statusGray
-        )
-        triggerPill.toolTip = hit.snippet.triggerKeyword.isEmpty ? nil : hit.snippet.triggerKeyword
-        titleLabel.stringValue = hit.snippet.displayTitle
-        titleLabel.textColor = hit.snippet.enabled ? DevTypeTheme.textPrimary : DevTypeTheme.textTertiary
-        if hit.snippet.isImageSnippet {
-            previewLabel.stringValue = "🖼 \(hit.snippet.imagePath)"
+        let loc = LocalizationManager.shared
+        let tint = hit.snippet.enabled ? DevTypeTheme.accent : DevTypeTheme.statusGray
+        let triggerText = hit.snippet.triggerKeyword.isEmpty ? "·" : hit.snippet.triggerKeyword
+
+        // §4.7: `SearchHit.highlights` carries the matched ranges, so results can
+        // show *why* they matched instead of a flat string.
+        if let attributed = Self.highlighted(
+            triggerText,
+            field: .trigger,
+            in: hit,
+            font: DevTypeTheme.mono(11.5, .bold),
+            color: tint
+        ) {
+            triggerPill.update(attributed: attributed, tint: tint)
         } else {
-            let preview = MacroPreview.render(hit.snippet.replacementText)
+            triggerPill.update(text: triggerText, tint: tint)
+        }
+        triggerPill.toolTip = hit.snippet.triggerKeyword.isEmpty ? nil : hit.snippet.triggerKeyword
+
+        let titleColor = hit.snippet.enabled ? DevTypeTheme.textPrimary : DevTypeTheme.textTertiary
+        titleLabel.textColor = titleColor
+        if let attributed = Self.highlighted(
+            hit.snippet.displayTitle,
+            field: .title,
+            in: hit,
+            font: DevTypeTheme.font(13, .semibold),
+            color: titleColor
+        ) {
+            titleLabel.attributedStringValue = attributed
+        } else {
+            titleLabel.stringValue = hit.snippet.displayTitle
+        }
+
+        let previewText: String
+        if hit.snippet.isImageSnippet {
+            previewText = "🖼 \(hit.snippet.imagePath)"
+            previewLabel.stringValue = previewText
+        } else {
+            previewText = MacroPreview.render(hit.snippet.replacementText)
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespaces)
-            previewLabel.stringValue = preview
+            // Content ranges are offsets into `replacementText`, which the macro
+            // preview rewrites — so only highlight when the preview is unchanged.
+            if previewText == hit.snippet.replacementText,
+               let attributed = Self.highlighted(
+                   previewText,
+                   field: .content,
+                   in: hit,
+                   font: DevTypeTheme.font(11),
+                   color: DevTypeTheme.textSecondary
+               ) {
+                previewLabel.attributedStringValue = attributed
+            } else {
+                previewLabel.textColor = DevTypeTheme.textSecondary
+                previewLabel.stringValue = previewText
+            }
         }
-        groupLabel.stringValue = hit.groupName
+
+        if let attributed = Self.highlighted(
+            hit.groupName,
+            field: .group,
+            in: hit,
+            font: DevTypeTheme.font(10, .medium),
+            color: DevTypeTheme.textTertiary
+        ) {
+            groupLabel.attributedStringValue = attributed
+        } else {
+            groupLabel.textColor = DevTypeTheme.textTertiary
+            groupLabel.stringValue = hit.groupName
+        }
         groupLabel.toolTip = hit.groupName
 
         jumpCap?.removeFromSuperview()
@@ -232,6 +294,64 @@ private final class SearchHitCellView: NSView {
                 cap.centerYAnchor.constraint(equalTo: centerYAnchor)
             ])
         }
+
+        // §5.1: this is the app's PRIMARY keyboard surface and it announced
+        // "row 1" with no content — four bare NSTextFields plus a custom
+        // PillBadgeView in a plain NSView, none of them AX elements. Collapse the
+        // row into one labelled element with a spoken keyboard hint.
+        dtHideSubviewsFromAccessibility()
+        let spokenTrigger = hit.snippet.triggerKeyword.isEmpty
+            ? loc.s("ax.noTrigger")
+            : hit.snippet.triggerKeyword
+        let spokenDetail = hit.snippet.isImageSnippet ? loc.s("ax.searchRow.image") : previewText
+        let labelKey = hit.snippet.enabled ? "ax.searchRow" : "ax.searchRow.disabled"
+        dtApplyAccessibility(
+            role: NSAccessibility.Role.row,
+            label: loc.s(labelKey, spokenTrigger, hit.snippet.displayTitle, hit.groupName),
+            value: spokenDetail,
+            help: jumpNumber.map { loc.s("ax.searchRow.help", $0) }
+                ?? loc.s("ax.searchRow.helpNoJump")
+        )
+    }
+
+    /// §4.7: builds an `NSAttributedString` with the matched ranges emphasised.
+    /// Returns nil when the hit carries no highlight for `field` (legacy hits and
+    /// the empty-query listing), so callers fall back to a plain string.
+    private static func highlighted(
+        _ text: String,
+        field: SearchField,
+        in hit: SearchHit,
+        font: NSFont,
+        color: NSColor
+    ) -> NSAttributedString? {
+        guard !text.isEmpty,
+              let highlight = hit.highlights.first(where: { $0.field == field }),
+              !highlight.ranges.isEmpty else { return nil }
+        // `ranges` are grapheme offsets into the original field text; the engine
+        // ships the converter because NSAttributedString wants UTF-16.
+        let ranges = SnippetSearch.utf16Ranges(highlight.ranges, in: text)
+        guard !ranges.isEmpty else { return nil }
+
+        let attributed = NSMutableAttributedString(
+            string: text,
+            attributes: [.font: font, .foregroundColor: color]
+        )
+        let full = NSRange(location: 0, length: attributed.length)
+        let emphasis = DevTypeTheme.accentBright
+        let emphasisFont = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        // §5.2: weight + background, not colour alone, so the match is visible
+        // under Differentiate Without Color and in greyscale.
+        let attributes: [NSAttributedString.Key: Any] = [
+            .foregroundColor: emphasis,
+            .backgroundColor: emphasis.withAlphaComponent(0.18),
+            .font: emphasisFont
+        ]
+        for range in ranges {
+            let clamped = NSIntersectionRange(range, full)
+            guard clamped.length > 0 else { continue }
+            attributed.addAttributes(attributes, range: clamped)
+        }
+        return attributed
     }
 }
 
@@ -327,6 +447,11 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         tableView.target = self
         tableView.doubleAction = #selector(expandSelected)
         tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row")))
+        // §5.1: the results table and the query field are the two things a
+        // VoiceOver user needs named on this surface.
+        tableView.setAccessibilityLabel(loc.s("ax.searchResults"))
+        searchField.setAccessibilityLabel(loc.s("search.placeholder"))
+        magnifier.setAccessibilityElement(false)
         scrollView.documentView = tableView
         root.addSubview(scrollView)
 
@@ -473,7 +598,19 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
                 .prefix(50)
                 .map { $0 }
         } else {
-            hits = store.search(query, limit: 50)
+            // §4.7: rank by usage as well as match quality. The store paid the
+            // full cost of maintaining usage counts and `SnippetSearch` ignored
+            // them entirely — a `boost` closure fixes that without making the
+            // search module depend on the store.
+            hits = SnippetSearch.run(
+                query: query,
+                in: groups,
+                includeDisabled: false,
+                limit: 50,
+                boost: { [weak store] snippetID in
+                    store?.usageCount(forSnippetID: snippetID) ?? 0
+                }
+            )
         }
         selection = min(selection, max(0, hits.count - 1))
         tableView.reloadData()
@@ -506,9 +643,12 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
                 }
                 return event
             default:
+                // §4.7: this used to be `Int(event.charactersIgnoringModifiers ?? "")`,
+                // which fails on AZERTY (digits need ⇧), on Dvorak-like layouts,
+                // and on any layout where the top row is not 1–9. Key codes are
+                // layout-independent, which is the whole point of ⌘1–9.
                 if event.modifierFlags.contains(.command),
-                   let digit = Int(event.charactersIgnoringModifiers ?? ""),
-                   digit >= 1, digit <= 9,
+                   let digit = Self.digitKeyCodes[Int(event.keyCode)],
                    hits.indices.contains(digit - 1) {
                     self.onPick(self.hits[digit - 1].snippet)
                     return nil
@@ -517,6 +657,18 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             }
         }
     }
+
+    /// §4.7: virtual key code → jump index, main row and numeric keypad.
+    /// Note the hardware ordering quirk: `kVK_ANSI_6` sits *below* `kVK_ANSI_5`
+    /// but `kVK_ANSI_7` is above it, which is exactly why a literal table beats
+    /// arithmetic here.
+    private static let digitKeyCodes: [Int: Int] = [
+        kVK_ANSI_1: 1, kVK_ANSI_2: 2, kVK_ANSI_3: 3, kVK_ANSI_4: 4, kVK_ANSI_5: 5,
+        kVK_ANSI_6: 6, kVK_ANSI_7: 7, kVK_ANSI_8: 8, kVK_ANSI_9: 9,
+        kVK_ANSI_Keypad1: 1, kVK_ANSI_Keypad2: 2, kVK_ANSI_Keypad3: 3,
+        kVK_ANSI_Keypad4: 4, kVK_ANSI_Keypad5: 5, kVK_ANSI_Keypad6: 6,
+        kVK_ANSI_Keypad7: 7, kVK_ANSI_Keypad8: 8, kVK_ANSI_Keypad9: 9
+    ]
 
     private func moveSelection(_ delta: Int) {
         guard !hits.isEmpty else { return }

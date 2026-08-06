@@ -114,8 +114,18 @@ public enum SnippetImporter {
             if result.richTextCount > 0 {
                 notes.append("\(result.richTextCount) rich-text snippet(s) were imported as plain text.")
             }
+            // §3.8
+            if result.scriptCount > 0 {
+                notes.append("\(result.scriptCount) script snippet(s) were imported as literal text — DevType does not run scripts.")
+            }
             if result.skippedEmptyAbbrev > 0 {
                 notes.append("\(result.skippedEmptyAbbrev) snippet(s) without an abbreviation were skipped.")
+            }
+            if result.disabledGroupCount > 0 {
+                notes.append("\(result.disabledGroupCount) group(s) were disabled in TextExpander and were imported disabled.")
+            }
+            if result.wordBoundaryCount > 0 {
+                notes.append("\(result.wordBoundaryCount) snippet(s) expand only at a word boundary (TextExpander \"expand at delimiter\").")
             }
             return ImportResult(
                 kind: .textExpander,
@@ -135,10 +145,20 @@ public enum SnippetImporter {
             if result.skippedImage > 0 {
                 notes.append("\(result.skippedImage) image match(es) skipped (image file missing or unreadable).")
             }
+            // §3.8
+            if result.markdownAsPlainCount > 0 {
+                notes.append("\(result.markdownAsPlainCount) Markdown match(es) were imported as their literal Markdown text.")
+            }
+            if result.appScopedCount > 0 {
+                notes.append("\(result.appScopedCount) match(es) kept their app scoping (apps / exclude_apps).")
+            }
+            if result.propagateCaseCount > 0 {
+                notes.append("\(result.propagateCaseCount) match(es) used propagate_case — matching stays case-insensitive, but the expansion's case is not adapted.")
+            }
             let nonImageSkipped = result.skippedVars + result.skippedForm + result.skippedHtml
                 + result.skippedMarkdown + result.skippedRegex + result.skippedEmptyTrigger
             if nonImageSkipped > 0 {
-                notes.append("\(nonImageSkipped) match(es) skipped (vars/forms/html/markdown/regex/empty trigger).")
+                notes.append("\(nonImageSkipped) match(es) skipped (variables/forms/html/regex/empty trigger).")
             }
             return ImportResult(
                 kind: .espanso,

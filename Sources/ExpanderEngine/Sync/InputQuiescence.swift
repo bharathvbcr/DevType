@@ -26,7 +26,10 @@ public struct InputQuiescenceGuard: Equatable {
 }
 
 public final class InputClock: @unchecked Sendable {
-    private let lock = NSLock()
+    /// §2.4: `mark(at:)` runs inside the CGEventTap callback on every key event. `NSLock` does
+    /// not donate priority, so the user-interactive tap could block behind a lower-QoS thread
+    /// holding this lock. `UnfairLock` (os_unfair_lock) does.
+    private let lock = UnfairLock()
     private var last: TimeInterval?
     private let clock: () -> TimeInterval
 

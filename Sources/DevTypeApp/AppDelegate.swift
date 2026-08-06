@@ -13,6 +13,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionRecoveryMenuItem: NSMenuItem?
     private var openAtLoginMenuItem: NSMenuItem?
     private var menuHeaderStatusPill: PillBadgeView?
+    /// §5.1: the custom menu-header view whose AX label tracks the status pill.
+    private var menuHeaderAccessibilityHost: NSView?
+    private var menuHeaderVersion = "1.0.0"
     private var recentSubmenu: NSMenu?
     private var recentSnippets: [SnippetModel] = []
     private var lastTapStartFailed = false
@@ -21,10 +24,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingPresentationInFlight = false
     private let hotkeyManager = HotkeyManager()
     private let loc = LocalizationManager.shared
+    /// §5.2: token for the `accessibilityDisplayOptionsDidChange` observer.
+    private var accessibilityObserver: NSObjectProtocol?
+    /// §0.3: banner/alert state for an unreadable, unwritable, or conflicted library.
+    private var libraryHealthToken: UUID?
+    /// One launch-time escalation per run, not one per observer callback.
+    private var libraryAlertShown = false
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         installEditMenu()
+
+        // §4.5: one-time migration of the legacy per-snippet `usageCount` field
+        // into the coalesced sidecar the stats pane reads from.
+        SnippetStore.shared.migrateLegacyUsageCounts()
 
         let identity = ProcessIdentity.shared
         DevTypeLog.app.info(
@@ -36,7 +49,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         wireExpansionUsage()
         registerHotkeys()
         wireSecureClipboardPasteHint()
-        presentCorruptionAlertIfNeeded()
+        presentLibraryHealthIfNeeded()
         startSecureInputMonitoring()
         wireTapHealth()
 
@@ -45,7 +58,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            self?.installEditMenu(force: true)
             self?.rebuildMenu()
+        }
+
+        // §5.2: Differentiate Without Color / Reduce Motion / Reduce Transparency
+        // / Increase Contrast can all change while we run. Nothing in `Sources/`
+        // used to observe them at all.
+        accessibilityObserver = DevTypeAccessibility.observeDisplayOptions { [weak self] in
+            self?.refreshStatusItemUI()
         }
 
         PermissionCoordinator.shared.start(
@@ -79,23 +100,64 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// panels (snippet editor, group editor, fill-in). Installing a minimal
     /// main menu with a standard Edit submenu restores them app-wide — the
     /// menu bar itself stays hidden under the accessory policy.
-    private func installEditMenu() {
-        guard NSApp.mainMenu == nil || NSApp.mainMenu?.numberOfItems == 0 else { return }
+    private func installEditMenu(force: Bool = false) {
+        if !force {
+            guard NSApp.mainMenu == nil || NSApp.mainMenu?.numberOfItems == 0 else { return }
+        }
         let mainMenu = NSMenu()
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        // §6.1: these were English literals. Prefer AppKit's own already-localized
+        // menu titles (so they read exactly like every other Mac app in the user's
+        // language) and fall back to our tables when the lookup misses.
+        let editMenu = NSMenu(title: systemMenuTitle("Edit", fallback: loc.s("edit.menu")))
+        editMenu.addItem(
+            withTitle: systemMenuTitle("Undo", fallback: loc.s("edit.undo")),
+            action: Selector(("undo:")),
+            keyEquivalent: "z"
+        )
+        editMenu.addItem(
+            withTitle: systemMenuTitle("Redo", fallback: loc.s("edit.redo")),
+            action: Selector(("redo:")),
+            keyEquivalent: "Z"
+        )
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
+        editMenu.addItem(
+            withTitle: systemMenuTitle("Cut", fallback: loc.s("edit.cut")),
+            action: #selector(NSText.cut(_:)),
+            keyEquivalent: "x"
+        )
+        editMenu.addItem(
+            withTitle: systemMenuTitle("Copy", fallback: loc.s("edit.copy")),
+            action: #selector(NSText.copy(_:)),
+            keyEquivalent: "c"
+        )
+        editMenu.addItem(
+            withTitle: systemMenuTitle("Paste", fallback: loc.s("edit.paste")),
+            action: #selector(NSText.paste(_:)),
+            keyEquivalent: "v"
+        )
+        editMenu.addItem(
+            withTitle: systemMenuTitle("Delete", fallback: loc.s("edit.delete")),
+            action: #selector(NSText.delete(_:)),
+            keyEquivalent: ""
+        )
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(
+            withTitle: systemMenuTitle("Select All", fallback: loc.s("edit.selectAll")),
+            action: #selector(NSText.selectAll(_:)),
+            keyEquivalent: "a"
+        )
         editItem.submenu = editMenu
         NSApp.mainMenu = mainMenu
+    }
+
+    /// §6.1: AppKit ships localized menu-command strings. `localizedString(forKey:
+    /// value:table:)` returns `value` when the key is absent, so a miss quietly
+    /// falls through to DevType's own translation rather than to English.
+    private func systemMenuTitle(_ key: String, fallback: String) -> String {
+        guard let appKit = Bundle(identifier: "com.apple.AppKit") else { return fallback }
+        return appKit.localizedString(forKey: key, value: fallback, table: "Menus")
     }
 
     public func applicationDidBecomeActive(_ notification: Notification) {
@@ -231,6 +293,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem?.button {
             button.image = DevTypeTheme.statusItemImage(dotColor: DevTypeTheme.statusGray)
             button.imagePosition = .imageOnly
+            // §5.1: the app's only permanent affordance used to set image +
+            // imagePosition and nothing else — completely unlabeled over AX.
+            button.setAccessibilityRole(NSAccessibility.Role.menuButton)
+            button.setAccessibilityLabel(loc.s("ax.status.item"))
+            button.setAccessibilityHelp(loc.s("ax.status.item.help", loc.s("status.paused")))
         }
         statusItem?.menu = buildMenu()
         // Do not refresh here — Listen+AX can already be granted while the tap is not
@@ -285,6 +352,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             pill.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
             pill.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 8)
         ])
+        // §5.1: a custom `NSMenuItem.view` is AX-invisible unless it is labelled.
+        // Collapse the lockup into one utterance carrying version + status.
+        wrapper.dtHideSubviewsFromAccessibility()
+        wrapper.dtApplyAccessibility(
+            role: NSAccessibility.Role.group,
+            label: loc.s("ax.menu.header", version, loc.s("status.active"))
+        )
+        menuHeaderAccessibilityHost = wrapper
+        menuHeaderVersion = version
         return wrapper
     }
 
@@ -310,9 +386,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return menuItem
         }
 
-        menu.addItem(item(loc.s("menu.manage"), "square.stack.3d.up", #selector(openSnippetManager(_:)), key: ","))
-        menu.addItem(item(loc.s("menu.inlineSearch"), "magnifyingglass", #selector(toggleInlineSearch(_:)), key: "/"))
+        // §4.1: ⌘, is the platform convention for settings. It used to open the
+        // snippet manager; the manager moves to ⌘⇧M.
+        menu.addItem(item(loc.s("menu.preferences"), "slider.horizontal.3", #selector(openPreferences(_:)), key: ","))
+        menu.addItem(item(
+            loc.s("menu.manage"),
+            "square.stack.3d.up",
+            #selector(openSnippetManager(_:)),
+            key: "M",
+            modifiers: [.command, .shift]
+        ))
+        menu.addItem(item(
+            loc.s("menu.inlineSearch"),
+            "magnifyingglass",
+            #selector(toggleInlineSearch(_:)),
+            key: hotkeyMenuKeyEquivalent(),
+            modifiers: hotkeyMenuModifiers()
+        ))
         menu.addItem(item(loc.s("menu.import"), "square.and.arrow.down", #selector(importSnippets(_:))))
+        // §0.4: export — JSON, Espanso YAML, CSV — next to the existing import.
+        menu.addItem(item(loc.s("menu.export"), "square.and.arrow.up", #selector(exportSnippets(_:))))
 
         // Recent expansions submenu.
         let recentItem = NSMenuItem(title: loc.s("menu.recent"), action: nil, keyEquivalent: "")
@@ -325,28 +418,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        let toggleItem = item("Status: Active", "pause.circle", #selector(toggleEngine(_:)))
+        let toggleItem = item(loc.s("status.menu", loc.s("status.active")), "pause.circle", #selector(toggleEngine(_:)))
         menu.addItem(toggleItem)
         statusToggleMenuItem = toggleItem
 
-        let openAtLoginItem = item(loc.s("menu.openAtLogin"), "sunrise", #selector(toggleOpenAtLogin(_:)))
-        menu.addItem(openAtLoginItem)
-        openAtLoginMenuItem = openAtLoginItem
-        refreshOpenAtLoginMenuItem()
-
-        // Language submenu.
-        let languageItem = NSMenuItem(title: loc.s("menu.language"), action: nil, keyEquivalent: "")
-        languageItem.image = DevTypeTheme.menuIcon("globe")
-        let languageMenu = NSMenu()
-        for language in AppLanguage.allCases {
-            let entry = NSMenuItem(title: language.endonym, action: #selector(selectLanguage(_:)), keyEquivalent: "")
-            entry.target = self
-            entry.representedObject = language.rawValue
-            entry.state = loc.language == language ? .on : .off
-            languageMenu.addItem(entry)
-        }
-        languageItem.submenu = languageMenu
-        menu.addItem(languageItem)
+        // §4.1: Open at Login, Language, and Muted Apps moved into Preferences.
+        // `openAtLoginMenuItem` stays declared so `refreshOpenAtLoginMenuItem()`
+        // keeps working for any caller that still holds it; it is simply nil now.
+        openAtLoginMenuItem = nil
 
         menu.addItem(NSMenuItem.separator())
 
@@ -358,6 +437,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Muting the frontmost app is contextual, so it stays in the menu bar.
+        // The *list* of muted apps is a list, so it lives in Preferences (§4.8).
         menu.addItem(item(loc.s("menu.mute.front"), "speaker.slash", #selector(muteFrontmostApp(_:))))
         menu.addItem(item(loc.s("menu.mute.apps"), "speaker.slash.fill", #selector(showMutedApps(_:))))
 
@@ -365,6 +446,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(item(loc.s("menu.quit"), "power", #selector(quitApp(_:)), key: "q"))
         return menu
+    }
+
+    /// §4.2: the menu hint follows the user's recorded shortcut instead of
+    /// claiming ⌘/ forever. Only single-character keys can be menu equivalents;
+    /// anything else shows no hint (the Carbon hotkey still works).
+    private func hotkeyMenuKeyEquivalent() -> String {
+        let name = DevTypeShortcut.keyName(for: hotkeyManager.inlineSearchShortcut.keyCode)
+        return name.count == 1 ? name.lowercased() : ""
+    }
+
+    private func hotkeyMenuModifiers() -> NSEvent.ModifierFlags {
+        let carbon = hotkeyManager.inlineSearchShortcut.carbonModifiers
+        var flags: NSEvent.ModifierFlags = []
+        if carbon & UInt32(cmdKey) != 0 { flags.insert(.command) }
+        if carbon & UInt32(optionKey) != 0 { flags.insert(.option) }
+        if carbon & UInt32(controlKey) != 0 { flags.insert(.control) }
+        if carbon & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+        return flags
     }
 
     private func rebuildRecentMenu() {
@@ -445,6 +544,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.onOpenURL = { urlString in
             if let url = URL(string: urlString) {
                 NSWorkspace.shared.open(url)
+            }
+        }
+        // §4.2: `RegisterEventHotKey` failure used to be a log line and nothing
+        // else, so a shortcut another app had claimed just never worked.
+        hotkeyManager.onRegistrationFailed = { [weak self] label, status in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                // Preferences reports its own failure inline; don't double-alert.
+                if PreferencesWindowController.shared.window?.isVisible == true { return }
+                DevTypeAlert.present(
+                    title: self.loc.s("prefs.hotkeys.failed.title"),
+                    message: self.loc.s("prefs.hotkeys.failed.message", label, Int(status)),
+                    style: .warning,
+                    buttons: [self.loc.s("menu.preferences"), self.loc.s("common.ok")]
+                ) { index in
+                    if index == 0 { self.openPreferences(nil, tab: .hotkeys) }
+                }
             }
         }
         hotkeyManager.registerAll()
@@ -530,47 +646,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    /// Unified import: one panel, format auto-detected (TextExpander or Espanso).
+    /// §4.8 / §1.10: unified import — one panel, format auto-detected, `.merge`
+    /// mode, localized result. The duplicate copy in the manager now calls the
+    /// same flow.
     @objc private func importSnippets(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Import"
-        panel.message = "Choose a TextExpander settings folder, or an Espanso config folder, match directory, package, or .yml file"
+        SnippetImportFlow.present(from: nil)
+    }
 
-        if let first = SnippetImporter.detectedSources().first {
-            panel.directoryURL = first.kind == .textExpander
-                ? first.url.deletingLastPathComponent()
-                : first.url
-        }
+    /// §0.4: export — JSON / Espanso YAML / CSV via `NSSavePanel`.
+    @objc private func exportSnippets(_ sender: Any?) {
+        LibraryExporter.present(from: nil)
+    }
 
-        panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
-            do {
-                let result = try SnippetStore.shared.importSnippets(from: url)
-                let alert = NSAlert()
-                alert.messageText = "Import Complete"
-                var text = """
-                Imported \(result.snippetCount) snippets in \(result.groupCount) groups from \(result.kind.rawValue):
-                \(result.sourcePath)
-                """
-                if !result.notes.isEmpty {
-                    text += "\n\n" + result.notes.joined(separator: "\n")
-                }
-                alert.informativeText = text
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-            } catch {
-                let alert = NSAlert()
-                alert.messageText = "Import Failed"
-                alert.informativeText = error.localizedDescription
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-            }
-        }
+    /// §4.1: the settings window ⌘, now opens.
+    @objc private func openPreferences(_ sender: Any?) {
+        openPreferences(sender, tab: nil)
+    }
+
+    func openPreferences(_ sender: Any?, tab: PreferencesTab?) {
+        PreferencesWindowController.shared.show(tab: tab, hotkeyManager: hotkeyManager)
     }
 
     private func warnIfTextExpanderRunning() {
@@ -579,12 +673,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             RunningAppCheck.isTextExpander(bundleID: $0.bundleIdentifier, name: $0.localizedName)
         }
         guard teRunning else { return }
-        let alert = NSAlert()
-        alert.messageText = "TextExpander Detected"
-        alert.informativeText = loc.s("menu.textExpanderWarning")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        DevTypeAlert.warn(
+            title: loc.s("alert.textExpander.title"),
+            message: loc.s("menu.textExpanderWarning")
+        )
     }
 
     private func warnIfEspansoRunning() {
@@ -593,45 +685,54 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             RunningAppCheck.isEspanso(bundleID: $0.bundleIdentifier, name: $0.localizedName)
         }
         guard running else { return }
-        let alert = NSAlert()
-        alert.messageText = "Espanso Detected"
-        alert.informativeText = loc.s("menu.espansoWarning")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        DevTypeAlert.warn(
+            title: loc.s("alert.espanso.title"),
+            message: loc.s("menu.espansoWarning")
+        )
     }
 
-    private func presentCorruptionAlertIfNeeded() {
-        guard let issue = SnippetStore.shared.consumeLastLoadIssue() else { return }
-        if case .corrupted(let backupURL) = issue {
-            let alert = NSAlert()
-            alert.messageText = "Snippet File Recovered"
-            alert.informativeText = """
-            Your snippets.json could not be read and was replaced with defaults.
-            A backup was saved at:
-            \(backupURL.path)
-            """
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+    /// §0.3: this used to tell the user their library "was replaced with
+    /// defaults" — which the store no longer does, and which offered no recovery
+    /// path. `LibraryHealthMonitor` now owns the read/write/conflict state, and
+    /// the escalation offers Reveal Backup / Retry / Overwrite-with-defaults.
+    private func presentLibraryHealthIfNeeded() {
+        let monitor = LibraryHealthMonitor.shared
+        monitor.start()
+        libraryHealthToken = monitor.addObserver { [weak self] condition in
+            guard let self else { return }
+            self.refreshStatusItemUI()
+            guard let condition else { return }
+            // Only a hard read block interrupts at launch; save failures and
+            // iCloud conflicts ride the non-modal banner in the manager window.
+            switch condition {
+            case .readBlocked, .corrupted, .emptyFile:
+                guard !self.libraryAlertShown else { return }
+                self.libraryAlertShown = true
+                // Deferred: `addObserver` fires synchronously, and running a
+                // modal inside `applicationDidFinishLaunching` blocks launch.
+                DispatchQueue.main.async {
+                    LibraryHealthPresenter.present(condition, window: nil)
+                }
+            case .saveFailed, .conflicts:
+                break
+            }
         }
     }
 
     private func presentTapFailedAlert() {
-        let alert = NSAlert()
-        alert.messageText = "Event Tap Failed"
-        alert.informativeText = EngineDisplayStatus.tapFailedRecoveryGuidance
-        alert.alertStyle = .critical
-        alert.addButton(withTitle: "Open Permission Recovery")
-        alert.addButton(withTitle: "OK")
-        let response = alert.runModal()
-        DevTypeLog.eventTap.notice(
-            "[EventTap] Tap Failed alert dismissed openRecovery=\(response == .alertFirstButtonReturn, privacy: .public)"
-        )
-        if response == .alertFirstButtonReturn {
-            openPermissionRecovery(nil)
+        DevTypeAlert.present(
+            title: loc.s("alert.tapFailed.title"),
+            message: EngineDisplayStatus.tapFailedRecoveryGuidance,
+            style: .critical,
+            buttons: [loc.s("alert.tapFailed.openRecovery"), loc.s("common.ok")]
+        ) { [weak self] index in
+            guard let self else { return }
+            DevTypeLog.eventTap.notice(
+                "[EventTap] Tap Failed alert dismissed openRecovery=\(index == 0, privacy: .public)"
+            )
+            if index == 0 { self.openPermissionRecovery(nil) }
+            self.refreshStatusItemUI()
         }
-        refreshStatusItemUI()
     }
 
     private func startSecureInputMonitoring() {
@@ -646,11 +747,36 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         case .active:
             return urgent ? DevTypeTheme.statusOrange : DevTypeTheme.statusGreen
         case .secure:
-            return NSColor(calibratedRed: 0.35, green: 0.65, blue: 1.0, alpha: 1.0)
+            return DevTypeTheme.statusBlue
         case .paused:
             return DevTypeTheme.statusGray
         case .needsPermissions, .tapFailed:
             return DevTypeTheme.accent
+        }
+    }
+
+    /// §5.2: five engine states used to map onto dot colours only.
+    /// These three helpers add the non-colour channels: a glyph stamped into the
+    /// badge, a localized name spoken by VoiceOver, and an optional text title
+    /// beside the icon.
+    private func statusKind(for display: EngineDisplayStatus) -> EngineDisplayStatusKind {
+        switch display {
+        case .active: return .active
+        case .secure: return .secure
+        case .paused: return .paused
+        case .needsPermissions: return .needsPermissions
+        case .tapFailed: return .tapFailed
+        }
+    }
+
+    private func statusName(for display: EngineDisplayStatus, urgent: Bool) -> String {
+        if urgent, display == .active { return loc.s("status.injectIssue") }
+        switch display {
+        case .active: return loc.s("status.active")
+        case .secure: return loc.s("status.secure")
+        case .paused: return loc.s("status.paused")
+        case .needsPermissions: return loc.s("status.needsPermissions")
+        case .tapFailed: return loc.s("status.tapFailed")
         }
     }
 
@@ -676,23 +802,48 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 return false
             }
         }()
-        let color = statusColor(for: display, urgent: urgentInject || snapshot.isDegradedInject)
+        let urgent = urgentInject || snapshot.isDegradedInject
+        let color = statusColor(for: display, urgent: urgent)
+        let kind = statusKind(for: display)
+        let name = statusName(for: display, urgent: urgentInject)
+        let needsAttention = display.requiresAction || urgent
+        // §0.3: a blocked or conflicted library also deserves the attention state.
+        let libraryUnhealthy = LibraryHealthMonitor.shared.condition != nil
+
         if let button = statusItem?.button {
-            button.image = DevTypeTheme.statusItemImage(dotColor: color)
-            button.title = ""
+            // §5.2: shape channel inside the badge, so state survives greyscale
+            // and colour-blind vision.
+            button.image = DevTypeTheme.statusItemImage(
+                dotColor: color,
+                glyph: DevTypeAccessibility.statusGlyph(for: kind),
+                accessibilityLabel: name
+            )
+            // §5.2: text channel. Always on under Differentiate Without Color;
+            // otherwise only when something actually needs attention, so the menu
+            // bar stays quiet in the normal case.
+            let showsText = DevTypeAccessibility.differentiateWithoutColor
+                || needsAttention
+                || libraryUnhealthy
+            button.title = showsText ? " \(name)" : ""
+            button.imagePosition = showsText ? .imageLeading : .imageOnly
             button.toolTip = display.toolTip(snapshot: snapshot)
+            // §5.1: VoiceOver reads the state instead of an unlabeled image;
+            // tooltips are unreliable under VO.
+            button.setAccessibilityLabel(loc.s("ax.status.item"))
+            button.setAccessibilityValue(name)
+            button.setAccessibilityHelp(loc.s("ax.status.item.help", name))
         }
-        if urgentInject, display == .active {
-            statusToggleMenuItem?.title = "Status: Inject Issue ⚠"
-        } else {
-            statusToggleMenuItem?.title = display.menuTitleWithActionHint
-        }
+        statusToggleMenuItem?.title = needsAttention
+            ? loc.s("status.menu.attention", name)
+            : loc.s("status.menu", name)
         statusToggleMenuItem?.image = DevTypeTheme.menuIcon(
             display == .paused ? "play.circle" : "pause.circle"
         )
-        let shortStatus = display.menuTitle.replacingOccurrences(of: "Status: ", with: "")
-        menuHeaderStatusPill?.update(text: shortStatus, tint: color)
-        if display.requiresAction || snapshot.isDegradedInject || urgentInject {
+        menuHeaderStatusPill?.update(text: name, tint: color)
+        menuHeaderAccessibilityHost?.setAccessibilityLabel(
+            loc.s("ax.menu.header", menuHeaderVersion, name)
+        )
+        if needsAttention {
             permissionRecoveryMenuItem?.title = "\(loc.s("menu.recovery")) ⚠"
         } else {
             permissionRecoveryMenuItem?.title = loc.s("menu.recovery")
@@ -712,7 +863,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.setContentSize(NSSize(width: 920, height: 600))
             window.minSize = NSSize(width: 700, height: 460)
-            DevTypeTheme.styleWindow(window, title: "DevType — Snippets")
+            // §6.1: window titles were hardcoded English.
+            DevTypeTheme.styleWindow(window, title: loc.s("window.snippets"))
             window.center()
             window.isReleasedWhenClosed = false
             snippetWindowController = NSWindowController(window: window)
@@ -737,7 +889,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             let window = NSWindow(contentViewController: viewController)
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.setContentSize(NSSize(width: 640, height: 720))
-            DevTypeTheme.styleWindow(window, title: "DevType — Permission Recovery")
+            DevTypeTheme.styleWindow(window, title: loc.s("window.recovery"))
             window.center()
             window.isReleasedWhenClosed = false
             permissionWindowController = NSWindowController(window: window)
@@ -773,7 +925,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             let window = NSWindow(contentViewController: viewController)
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.setContentSize(NSSize(width: 620, height: 640))
-            DevTypeTheme.styleWindow(window, title: "DevType — Setup")
+            DevTypeTheme.styleWindow(window, title: loc.s("window.setup"))
             window.center()
             window.isReleasedWhenClosed = false
             NotificationCenter.default.addObserver(
@@ -816,6 +968,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshStatusItemUI()
     }
 
+    /// Kept as a shim: the Open at Login menu item moved into Preferences (§4.1)
+    /// but external callers / older menus may still reference this selector.
     @objc private func toggleOpenAtLogin(_ sender: NSMenuItem) {
         let service = SMAppService.mainApp
         do {
@@ -825,12 +979,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 try service.register()
             }
         } catch {
-            let alert = NSAlert()
-            alert.messageText = "Open at Login"
-            alert.informativeText = "Could not update login item: \(error.localizedDescription)\n\nOpen at Login requires the packaged DevType.app bundle."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+            DevTypeAlert.warn(
+                title: loc.s("alert.openAtLogin.title"),
+                message: loc.s("alert.openAtLogin.message", error.localizedDescription)
+            )
         }
         refreshOpenAtLoginMenuItem()
     }
@@ -840,69 +992,46 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         DevTypeLog.secureInput.info(
             "[SecureInput] diagnose locked=\(lockStatus.isLocked, privacy: .public) frontmost=\(lockStatus.holdingAppName ?? "nil", privacy: .public) frontmostPID=\(lockStatus.holdingPID.map(String.init) ?? "nil", privacy: .public)"
         )
-        let alert = NSAlert()
-        alert.messageText = "Secure Input Diagnosis"
+        // §6.1 / §4.8: was a hardcoded-English hand-built NSAlert.
+        let unknown = loc.s("alert.secureInput.unknown")
         if lockStatus.isLocked {
-            alert.alertStyle = .warning
-            alert.informativeText = """
-            Secure Input is currently ENABLED by macOS.
-            Expansions are muted until the lock is released.
-
-            Secure Input holder: unknown on macOS 27+ (the private Secure Input PID API was removed). DevType cannot identify which process holds the lock.
-
-            Frontmost app (NOT the Secure Input holder — context only):
-            • Name: \(lockStatus.holdingAppName ?? "Unknown")
-            • Frontmost PID: \(lockStatus.holdingPID.map { String($0) } ?? "Unknown")
-            • Path: \(lockStatus.holdingExecutablePath ?? "Unknown")
-
-            Resolution: Close or leave password / secure fields. Do not treat the frontmost PID as the lock holder.
-            """
+            DevTypeAlert.warn(
+                title: loc.s("alert.secureInput.title"),
+                message: loc.s(
+                    "alert.secureInput.enabled",
+                    lockStatus.holdingAppName ?? unknown,
+                    lockStatus.holdingPID.map { String($0) } ?? unknown,
+                    lockStatus.holdingExecutablePath ?? unknown
+                )
+            )
         } else {
-            alert.alertStyle = .informational
-            alert.informativeText = "Secure Input is currently DISABLED. Keyboard expansion is functioning normally."
+            DevTypeAlert.info(
+                title: loc.s("alert.secureInput.title"),
+                message: loc.s("alert.secureInput.disabled")
+            )
         }
-        alert.addButton(withTitle: "OK")
-        _ = alert.runModal()
     }
 
     @objc private func muteFrontmostApp(_ sender: NSMenuItem) {
         guard let bundleID = AppMuteStore.shared.muteFrontmost() else {
-            let alert = NSAlert()
-            alert.messageText = "Mute Frontmost App"
-            alert.informativeText = "Could not determine the frontmost application bundle identifier."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+            DevTypeAlert.warn(
+                title: loc.s("alert.muteFrontmost.failed.title"),
+                message: loc.s("alert.muteFrontmost.failed.message")
+            )
             return
         }
-        let alert = NSAlert()
-        alert.messageText = "App Muted"
-        alert.informativeText = "Expansions are disabled in:\n\(bundleID)"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        DevTypeAlert.info(
+            title: loc.s("alert.appMuted.title"),
+            message: loc.s("alert.appMuted.message", bundleID)
+        )
     }
 
+    /// §4.8: this used to add one alert button per muted app and decode the
+    /// choice with `response.rawValue - alertFirstButtonReturn.rawValue` — which
+    /// silently mis-selects past ~3 apps and cannot scroll. A list belongs in a
+    /// list view, so the menu item now opens the Muted Apps table in Preferences.
     @objc private func showMutedApps(_ sender: NSMenuItem) {
-        let muted = AppMuteStore.shared.allMuted()
-        let alert = NSAlert()
-        alert.messageText = "Muted Apps"
-        if muted.isEmpty {
-            alert.informativeText = "No apps are muted. Use “Mute Frontmost App” while the target app is active."
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-            return
-        }
-        alert.informativeText = muted.joined(separator: "\n") + "\n\nSelect an app below to unmute, or Close."
-        for id in muted {
-            alert.addButton(withTitle: "Unmute \(id)")
-        }
-        alert.addButton(withTitle: "Close")
-        let response = alert.runModal()
-        let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-        if index >= 0 && index < muted.count {
-            AppMuteStore.shared.unmute(muted[index])
-        }
+        openPreferences(sender, tab: .general)
     }
 
     @objc private func quitApp(_ sender: NSMenuItem) {
@@ -912,5 +1041,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         PermissionCoordinator.shared.cancelPendingWork()
         PermissionCoordinator.shared.stop()
         NSApplication.shared.terminate(nil)
+    }
+
+    /// §4.5: usage counters live in a coalesced sidecar now — flush the tail of
+    /// the current session so a quit does not lose the last few expansions.
+    public func applicationWillTerminate(_ notification: Notification) {
+        SnippetStore.shared.flushUsageStats()
+        EventTapEngine.shared.shutdownTapThread()
+        if let accessibilityObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver)
+        }
+        if let libraryHealthToken {
+            LibraryHealthMonitor.shared.removeObserver(libraryHealthToken)
+        }
+        DevTypeLog.app.info("[App] terminate — usage stats flushed")
     }
 }

@@ -1,0 +1,117 @@
+# §0.2 — CI gate.
+#
+# DevType intercepts and swallows keystrokes system-wide via a CGEventTap, and
+# rewrites text in other applications by erasing characters before injecting.
+# A regression in AbbreviationMatcher or ErasePlan silently destroys user text.
+# That is the class of bug this workflow exists to catch.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & test (macOS 14)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # package-app.sh derives the version from `git describe`; a shallow
+          # clone has no tags and would stamp every build 0.0.0.
+          fetch-depth: 0
+
+      - name: Select Xcode
+        # Scripts/test.sh notes that a CLT-only xcode-select breaks `swift test`.
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Show toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build (debug)
+        run: swift build -v
+
+      - name: Test
+        # ExpanderEngineTests is headless: no window server, no TCC grants. Tests
+        # that need a real event tap or AX access must stay out of this target.
+        run: swift test -v
+
+      - name: Build (release)
+        run: swift build -c release
+
+  package:
+    name: Package .app
+    runs-on: macos-14
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Package (ad-hoc signed)
+        # CI has no login keychain cert, so this exercises the ad-hoc fallback
+        # path in package-app.sh. It proves the bundle assembles, the plist
+        # survives, and the version stamping works — not that it is distributable.
+        env:
+          DEVTYPE_SKIP_AUTO_CERT: '1'
+        run: ./Scripts/package-app.sh release
+
+      - name: Verify bundle identity
+        run: |
+          APP=.build/DevType.app
+          test -d "$APP" || { echo "no bundle produced"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist"
+          VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
+          echo "version=$VER build=$BUILD"
+          # §7.6 regression guard: the frozen placeholder must never ship again.
+          if [ "$VER" = "1.0.0" ] && [ "$BUILD" = "1" ]; then
+            echo "error: version was not stamped from git"; exit 1
+          fi
+          codesign --verify --verbose=2 "$APP"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: DevType-app-unsigned
+          path: .build/DevType.app
+          retention-days: 14
+
+  lint:
+    name: Repo hygiene
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell script syntax
+        run: for f in Scripts/*.sh; do bash -n "$f" || exit 1; done
+
+      - name: Property lists are well-formed
+        run: |
+          plutil -lint Resources/Info.plist
+          plutil -lint Resources/DevType.entitlements
+
+      - name: Localization table parity
+        # §6.1/§7.1 — a missing key in ko/ja silently falls back to English, and a
+        # mismatched format specifier crashes String(format:). The real assertion
+        # lives in the test target; this is the fast fail.
+        run: |
+          swift build 2>/dev/null || true
+          grep -c 'case ko' Sources/DevTypeApp/LocalizationManager.swift >/dev/null

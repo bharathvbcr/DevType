@@ -19,13 +19,21 @@ final class PermissionOnboardingController: NSViewController {
     private let onFinished: () -> Void
     private var step: Step = .welcome
 
+    // §6.1: 746 lines with zero `loc.s` calls — the very first screen a new user
+    // sees, and it was English-only.
+    private let loc = LocalizationManager.shared
+
     private let titleLabel = NSTextField(labelWithString: "")
     private let bodyLabel = NSTextField(wrappingLabelWithString: "")
     private let identityLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private var primaryButton: CapsuleButton?
     private var secondaryButton: CapsuleButton?
-    private let tertiaryButton = NSButton(title: "Skip for now", target: nil, action: nil)
+    private let tertiaryButton = NSButton(
+        title: LocalizationManager.shared.s("onboarding.skip"),
+        target: nil,
+        action: nil
+    )
     private var stepPill: PillBadgeView?
     private var progressSegments: [NSView] = []
 
@@ -49,13 +57,16 @@ final class PermissionOnboardingController: NSViewController {
 
         // MARK: Header + step indicator
         let header = DevTypeTheme.makeBrandHeader(
-            title: "DevType Setup",
-            subtitle: "Grant access to unlock instant expansion",
+            title: loc.s("onboarding.title"),
+            subtitle: loc.s("onboarding.subtitle"),
             logoSize: 38
         )
         mainView.addSubview(header)
 
-        let pill = PillBadgeView(text: "Step 1 of 5", tint: DevTypeTheme.accent)
+        let pill = PillBadgeView(
+            text: loc.s("onboarding.step", 1, Step.allCases.count),
+            tint: DevTypeTheme.accent
+        )
         stepPill = pill
         mainView.addSubview(pill)
 
@@ -151,9 +162,19 @@ final class PermissionOnboardingController: NSViewController {
         ])
 
         // MARK: Buttons
-        let primary = CapsuleButton(title: "Continue", style: .primary, target: self, action: #selector(primaryAction))
+        let primary = CapsuleButton(
+            title: loc.s("onboarding.continue"),
+            style: .primary,
+            target: self,
+            action: #selector(primaryAction)
+        )
         primaryButton = primary
-        let secondary = CapsuleButton(title: "Open Settings", style: .secondary, target: self, action: #selector(secondaryAction))
+        let secondary = CapsuleButton(
+            title: loc.s("onboarding.openSettings"),
+            style: .secondary,
+            target: self,
+            action: #selector(secondaryAction)
+        )
         secondaryButton = secondary
 
         tertiaryButton.target = self
@@ -227,14 +248,15 @@ final class PermissionOnboardingController: NSViewController {
 
     private func updateStepIndicator() {
         stepPill?.update(
-            text: "Step \(step.rawValue + 1) of \(Step.allCases.count)",
+            text: loc.s("onboarding.step", step.rawValue + 1, Step.allCases.count),
             tint: DevTypeTheme.accent
         )
         for (index, segment) in progressSegments.enumerated() {
+            // §5.3: dynamic overlay — the white track vanished in Light Mode.
             segment.layer?.backgroundColor = (
                 index <= step.rawValue
                     ? DevTypeTheme.accent
-                    : NSColor.white.withAlphaComponent(0.10)
+                    : DevTypeTheme.contrastOverlay(0.14)
             ).cgColor
         }
     }
@@ -251,10 +273,13 @@ final class PermissionOnboardingController: NSViewController {
             siblingPaths: siblings
         )
         let runningIDs = NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)
+        let hashText = cdHashLoadFinished
+            ? (cdHash ?? loc.s("onboarding.identity.unavailable"))
+            : loc.s("onboarding.identity.loading")
         var identityLines = [
-            "Bundle ID: \(identity.bundleIdentifier)",
-            "Path: \(identity.bundlePath)",
-            "CDHash: \(cdHashLoadFinished ? (cdHash ?? "(unavailable)") : "(loading…)")",
+            loc.s("onboarding.identity.bundleID", identity.bundleIdentifier),
+            loc.s("onboarding.identity.path", identity.bundlePath),
+            loc.s("onboarding.identity.cdHash", hashText),
             PermissionCopy.livePreflightSummary(snapshot: snapshot)
         ]
         if let unpackaged = ProcessIdentity.unpackagedBinaryWarning(bundlePath: identity.bundlePath) {
@@ -287,80 +312,71 @@ final class PermissionOnboardingController: NSViewController {
         guard let primaryButton, let secondaryButton else { return }
         secondaryButton.isHidden = false
         tertiaryButton.isHidden = false
-        tertiaryButton.title = "Skip for now"
+        tertiaryButton.title = loc.s("onboarding.skip")
         primaryButton.isEnabled = true
 
         switch step {
         case .welcome:
             DevTypeLog.permission.debug("[Permission] onboarding step=welcome")
-            titleLabel.stringValue = "Welcome"
-            bodyLabel.stringValue = """
-            DevType needs three separate capabilities: Input Monitoring (listen), Accessibility (context + AX inject), and Post Events (HID paste/backspace). Request presents the macOS prompt; Open Settings is separate and never auto-runs after Request.
-            """
+            titleLabel.stringValue = loc.s("onboarding.welcome.title")
+            bodyLabel.stringValue = loc.s("onboarding.welcome.body")
             if identity.isPackaged && siblings.isEmpty {
-                statusLabel.stringValue = "Packaged identity looks good — continue."
+                statusLabel.stringValue = loc.s("onboarding.welcome.ok")
                 statusLabel.textColor = DevTypeTheme.greenStatus
             } else if !identity.isPackaged {
-                statusLabel.stringValue =
-                    "Warning: unpackaged binary — prefer /Applications/DevType.app via install-app.sh. Continue is still allowed."
+                statusLabel.stringValue = loc.s("onboarding.welcome.unpackaged")
                 statusLabel.textColor = DevTypeTheme.redBright
             } else {
-                statusLabel.stringValue =
-                    "Warning: sibling DevType copies detected — quit other copies for reliable TCC. Continue is still allowed."
-                statusLabel.textColor = .systemOrange
+                statusLabel.stringValue = loc.s("onboarding.welcome.siblings")
+                statusLabel.textColor = DevTypeTheme.statusOrange
             }
-            primaryButton.title = "Continue"
+            primaryButton.title = loc.s("onboarding.continue")
             secondaryButton.isHidden = true
             primaryButton.isEnabled = true
 
         case .inputMonitoring:
             DevTypeLog.permission.debug("[Permission] onboarding step=inputMonitoring")
-            titleLabel.stringValue = "Input Monitoring"
-            bodyLabel.stringValue = """
-            \(PermissionCopy.unlockDescription(for: .inputMonitoring))
-
-            Click Request, answer the macOS prompt, then enable DevType under Input Monitoring (scroll or + if needed). Open Settings only deep-links — it does not register the app.
-            """
+            titleLabel.stringValue = loc.s("onboarding.im.title")
+            bodyLabel.stringValue = PermissionCopy.unlockDescription(for: .inputMonitoring)
+                + "\n\n" + loc.s("onboarding.im.body")
             statusLabel.stringValue = snapshot.canListenTap
-                ? "✓ Listen granted"
-                : "Missing Input Monitoring"
+                ? loc.s("onboarding.im.granted")
+                : loc.s("onboarding.im.missing")
             statusLabel.textColor = snapshot.canListenTap ? DevTypeTheme.greenStatus : DevTypeTheme.redBright
-            primaryButton.title = snapshot.canListenTap ? "Continue" : "Request"
-            secondaryButton.title = "Open Settings"
+            primaryButton.title = snapshot.canListenTap
+                ? loc.s("onboarding.continue")
+                : loc.s("onboarding.request")
+            secondaryButton.title = loc.s("onboarding.openSettings")
             secondaryButton.isHidden = false
 
         case .accessibilityAndPost:
             DevTypeLog.permission.debug("[Permission] onboarding step=accessibilityAndPost")
-            titleLabel.stringValue = "Accessibility + Post Events"
-            bodyLabel.stringValue = """
-            \(PermissionCopy.unlockDescription(for: .accessibility))
-
-            \(PermissionCopy.unlockDescription(for: .postEvent))
-
-            Accessibility is required. Post Events is optional — without it DevType runs in degraded AX-only mode (no terminal paste / HID cursor). Request Accessibility first; Open Settings opens the Accessibility pane only (no Privacy_PostEvent list).
-            """
+            titleLabel.stringValue = loc.s("onboarding.ax.title")
+            bodyLabel.stringValue = PermissionCopy.unlockDescription(for: .accessibility)
+                + "\n\n" + PermissionCopy.unlockDescription(for: .postEvent)
+                + "\n\n" + loc.s("onboarding.ax.body")
             var bits: [String] = []
-            bits.append(snapshot.canUseAX ? "✓ Accessibility" : "✗ Accessibility")
-            bits.append(snapshot.canPostEvents ? "✓ Post Events" : "○ Post Events (optional — AX-only without it)")
+            bits.append(snapshot.canUseAX ? loc.s("onboarding.ax.ok") : loc.s("onboarding.ax.missing"))
+            bits.append(snapshot.canPostEvents ? loc.s("onboarding.post.ok") : loc.s("onboarding.post.optional"))
             statusLabel.stringValue = bits.joined(separator: " · ")
             statusLabel.textColor = snapshot.canUseAX
                 ? DevTypeTheme.greenStatus : DevTypeTheme.redBright
             if !snapshot.canUseAX {
-                primaryButton.title = "Request Accessibility"
+                primaryButton.title = loc.s("onboarding.requestAccessibility")
             } else if !snapshot.canPostEvents {
                 // Allow advance without Post (degraded AX-only per README).
-                primaryButton.title = "Continue (AX-only)"
+                primaryButton.title = loc.s("onboarding.continueAXOnly")
             } else {
-                primaryButton.title = "Continue"
+                primaryButton.title = loc.s("onboarding.continue")
             }
             secondaryButton.title = snapshot.canUseAX && !snapshot.canPostEvents
-                ? "Request Post Events"
-                : "Open Accessibility"
+                ? loc.s("onboarding.requestPostEvents")
+                : loc.s("onboarding.openAccessibility")
             secondaryButton.isHidden = false
 
         case .verify:
             DevTypeLog.permission.debug("[Permission] onboarding step=verify")
-            titleLabel.stringValue = "Verify"
+            titleLabel.stringValue = loc.s("onboarding.verify.title")
             PermissionCoordinator.shared.refresh(presentTapFailureAlert: false)
             let tap = EventTapEngine.shared.isTapRunning
             let canAdvance = ProcessIdentity.canAdvanceFromVerify(
@@ -369,43 +385,40 @@ final class PermissionOnboardingController: NSViewController {
                 canUseAX: snapshot.canUseAX
             )
             let listenTapIncomplete = !snapshot.canListenTap || !tap
-            if !snapshot.canUseAX {
-                bodyLabel.stringValue = """
-                Accessibility is required to continue. Input Monitoring (Listen) and a running event tap are needed for Active expansion, but they do not block Continue once Accessibility is granted.
-
-                Use Open Settings / Request, enable DevType for this exact binary, then Relaunch if needed. Post Events remains optional (AX-only degraded).
-                """
-            } else {
-                bodyLabel.stringValue = """
-                Accessibility granted — you can continue. Start the event tap if Input Monitoring is granted so the menu can show Active.
-
-                Open Settings targets the next missing Privacy pane (Input Monitoring or Accessibility). When only Post Events is missing, use Request Post Events + Open Accessibility.
-                If Accessibility was just enabled but inject still fails, click Relaunch DevType.
-                Degraded mode: AX without Post → AX-only expands (no terminal paste / HID cursor). Listen/tap incomplete → not Active until granted.
-                """
-            }
+            bodyLabel.stringValue = snapshot.canUseAX
+                ? loc.s("onboarding.verify.body.ok")
+                : loc.s("onboarding.verify.body.blocked")
             var lines: [String] = []
-            lines.append(snapshot.canListenTap ? "Listen: OK" : "Listen: missing (needed for Active; not required to Continue)")
-            lines.append(snapshot.canUseAX ? "Accessibility: OK" : "Accessibility: missing (required)")
-            lines.append(snapshot.canPostEvents ? "Post Events: OK" : "Post Events: missing (optional — AX-only)")
-            lines.append(tap ? "Tap: running" : "Tap: not running (needed for Active; not required to Continue)")
+            lines.append(snapshot.canListenTap
+                ? loc.s("onboarding.verify.listen.ok")
+                : loc.s("onboarding.verify.listen.missing"))
+            lines.append(snapshot.canUseAX
+                ? loc.s("onboarding.verify.ax.ok")
+                : loc.s("onboarding.verify.ax.missing"))
+            lines.append(snapshot.canPostEvents
+                ? loc.s("onboarding.verify.post.ok")
+                : loc.s("onboarding.verify.post.missing"))
+            lines.append(tap
+                ? loc.s("onboarding.verify.tap.running")
+                : loc.s("onboarding.verify.tap.stopped"))
             if snapshot.isDegradedInject {
                 lines.append(PermissionCopy.degradedInjectTooltip(snapshot: snapshot))
             }
             if !snapshot.canUseAX {
-                lines.append("Blocked: grant Accessibility before Continue. Relaunch may be required after enabling.")
+                lines.append(loc.s("onboarding.verify.blocked"))
             } else if listenTapIncomplete {
-                lines.append("Incomplete: Listen/tap not fully ready — Continue allowed; menu will not show Active yet.")
+                lines.append(loc.s("onboarding.verify.incomplete"))
             }
             statusLabel.stringValue = lines.joined(separator: "\n")
             statusLabel.textColor = canAdvance
-                ? (listenTapIncomplete || !snapshot.canPostEvents ? .systemOrange : DevTypeTheme.greenStatus)
+                ? (listenTapIncomplete || !snapshot.canPostEvents
+                    ? DevTypeTheme.statusOrange : DevTypeTheme.greenStatus)
                 : DevTypeTheme.redBright
 
             // Continue when AX is OK; Post optional; Listen/tap incomplete does not block.
-            primaryButton.title = canAdvance
-                ? (snapshot.canPostEvents ? "Continue" : "Continue (AX-only)")
-                : "Continue"
+            primaryButton.title = canAdvance && !snapshot.canPostEvents
+                ? loc.s("onboarding.continueAXOnly")
+                : loc.s("onboarding.continue")
             primaryButton.isEnabled = canAdvance
             if let missing = SettingsDeepLinker.preferredKindForMissingCapabilities(
                 canListenTap: snapshot.canListenTap,
@@ -413,18 +426,18 @@ final class PermissionOnboardingController: NSViewController {
                 canPostEvents: snapshot.canPostEvents
             ) {
                 secondaryButton.title = PermissionCopy.openSettingsButtonTitle(for: missing)
-                tertiaryButton.title = "Relaunch DevType"
+                tertiaryButton.title = loc.s("onboarding.relaunch")
                 tertiaryButton.isHidden = false
             } else {
-                secondaryButton.title = "Relaunch DevType"
-                tertiaryButton.title = "Skip for now"
+                secondaryButton.title = loc.s("onboarding.relaunch")
+                tertiaryButton.title = loc.s("onboarding.skip")
                 tertiaryButton.isHidden = false
             }
             secondaryButton.isHidden = false
 
         case .done:
             DevTypeLog.permission.debug("[Permission] onboarding step=done")
-            titleLabel.stringValue = "Done"
+            titleLabel.stringValue = loc.s("onboarding.done.title")
             PermissionCoordinator.shared.refresh(presentTapFailureAlert: false)
             let tap = EventTapEngine.shared.isTapRunning
             let canFinish = ProcessIdentity.canFinishOnboarding(
@@ -436,53 +449,41 @@ final class PermissionOnboardingController: NSViewController {
             )
             let listenTapIncomplete = !snapshot.canListenTap || !tap
             if !snapshot.canUseAX {
-                bodyLabel.stringValue = """
-                Setup cannot Finish without Accessibility. Listen + running tap are recommended for Active expansion but do not block Finish once Accessibility is granted.
-
-                Use Request / Open Settings on the earlier steps, then return here. Test Expansion opens an in-app NSTextView lab and runs a real inject (not Notes). Permission Recovery (⌘⇧P) is always available.
-                """
+                bodyLabel.stringValue = loc.s("onboarding.done.body.blocked")
             } else if !canFinish {
-                bodyLabel.stringValue = """
-                Finish is blocked until Accessibility is granted and CDHash has finished loading (Post Events optional). Listen/tap incomplete is warned below but does not block Finish.
-
-                Test Expansion opens an in-app inject lab (controlled NSTextView) — it does not require Notes. Sample live trigger after Finish: :test
-                """
+                bodyLabel.stringValue = loc.s("onboarding.done.body.pending")
             } else {
-                bodyLabel.stringValue = """
-                Ready to Finish. Finish stores onboardingCompleted + CDHash/path so Setup will not reappear. Menu Active still requires Listen + a running tap — use Permission Recovery if expansion is quiet.
-
-                Test Expansion opens an in-app NSTextView lab and runs a real inject. Sample live trigger in Notes/TextEdit: :test
-                Permission Recovery (⌘⇧P) is always available.
-                """
+                bodyLabel.stringValue = loc.s("onboarding.done.body.ready")
             }
             var doneLines = [snapshot.missingCapabilitiesSummary]
             if !cdHashLoadFinished {
-                doneLines.append("Waiting for CDHash before Finish…")
+                doneLines.append(loc.s("onboarding.done.waitingHash"))
             } else if cdHash == nil {
-                doneLines.append("CDHash unavailable — Finish will not store a hash.")
+                doneLines.append(loc.s("onboarding.done.noHash"))
             }
             if !canFinish {
                 if !snapshot.canUseAX {
-                    doneLines.append("Blocked: need Accessibility.")
+                    doneLines.append(loc.s("onboarding.done.blockedAX"))
                 }
             } else {
                 if listenTapIncomplete {
-                    doneLines.append("Incomplete: Listen/tap not ready — Finish allowed; menu will not show Active until both are OK.")
+                    doneLines.append(loc.s("onboarding.done.incomplete"))
                 }
                 if !snapshot.canPostEvents {
-                    doneLines.append("Finishing in AX-only degraded mode (Post Events optional).")
+                    doneLines.append(loc.s("onboarding.done.axOnly"))
                 }
             }
             statusLabel.stringValue = doneLines.joined(separator: "\n")
             statusLabel.textColor = canFinish
-                ? (snapshot.isFullyCapable && !listenTapIncomplete ? DevTypeTheme.greenStatus : .systemOrange)
+                ? (snapshot.isFullyCapable && !listenTapIncomplete
+                    ? DevTypeTheme.greenStatus : DevTypeTheme.statusOrange)
                 : DevTypeTheme.redBright
-            primaryButton.title = "Finish"
+            primaryButton.title = loc.s("onboarding.finish")
             primaryButton.isEnabled = canFinish
-            secondaryButton.title = "Test Expansion"
+            secondaryButton.title = loc.s("onboarding.testExpansion")
             secondaryButton.isHidden = false
             if snapshot.canListenTap && snapshot.canUseAX && !snapshot.canPostEvents {
-                tertiaryButton.title = "Request Post Events"
+                tertiaryButton.title = loc.s("onboarding.requestPostEvents")
                 tertiaryButton.isHidden = false
             } else if let missing = SettingsDeepLinker.preferredKindForMissingCapabilities(
                 canListenTap: snapshot.canListenTap,
@@ -519,9 +520,8 @@ final class PermissionOnboardingController: NSViewController {
                         DevTypeLog.permission.notice(
                             "[Permission] onboarding Input Monitoring still denied 1s after request"
                         )
-                        self.statusLabel.stringValue =
-                            "Still missing Input Monitoring — click Open Settings if the prompt was dismissed, then Relaunch."
-                        self.statusLabel.textColor = .systemOrange
+                        self.statusLabel.stringValue = self.loc.s("onboarding.im.stillMissing")
+                        self.statusLabel.textColor = DevTypeTheme.statusOrange
                     }
                     self.render()
                     PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
@@ -542,9 +542,8 @@ final class PermissionOnboardingController: NSViewController {
                         DevTypeLog.permission.notice(
                             "[Permission] onboarding Accessibility still denied 1s after request — relaunch may be required"
                         )
-                        self.statusLabel.stringValue =
-                            "Still missing Accessibility — enable in Settings, then Relaunch DevType."
-                        self.statusLabel.textColor = .systemOrange
+                        self.statusLabel.stringValue = self.loc.s("onboarding.ax.stillMissing")
+                        self.statusLabel.textColor = DevTypeTheme.statusOrange
                     }
                     self.render()
                     PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
@@ -565,8 +564,7 @@ final class PermissionOnboardingController: NSViewController {
                 DevTypeLog.permission.notice(
                     "[Permission] onboarding Verify blocked — Accessibility missing"
                 )
-                statusLabel.stringValue =
-                    "Cannot continue — Accessibility is required (Listen/tap incomplete does not block once AX is granted)."
+                statusLabel.stringValue = loc.s("onboarding.verify.cannotContinue")
                 statusLabel.textColor = DevTypeTheme.redBright
                 render()
                 return
@@ -588,13 +586,11 @@ final class PermissionOnboardingController: NSViewController {
                     "[Permission] onboarding Finish blocked — Accessibility missing or CDHash still loading"
                 )
                 if !latest.canUseAX {
-                    statusLabel.stringValue =
-                        "Finish blocked: Accessibility required. Listen/tap incomplete does not block Finish once AX is granted."
+                    statusLabel.stringValue = loc.s("onboarding.done.finishBlockedAX")
                 } else if !cdHashLoadFinished {
-                    statusLabel.stringValue = "Finish blocked: still loading CDHash…"
+                    statusLabel.stringValue = loc.s("onboarding.done.finishBlockedHash")
                 } else {
-                    statusLabel.stringValue =
-                        "Finish blocked: need Accessibility (Post optional; Listen/tap not required to Finish)."
+                    statusLabel.stringValue = loc.s("onboarding.done.finishBlockedGeneric")
                 }
                 statusLabel.textColor = DevTypeTheme.redBright
                 render()
@@ -712,7 +708,7 @@ final class PermissionOnboardingController: NSViewController {
                     "[Permission] onboarding Open Settings failed kind=\(DevTypeLog.kindName(kind), privacy: .public)"
                 )
                 self.statusLabel.stringValue = PermissionCopy.settingsOpenFailureMessage(for: kind)
-                self.statusLabel.textColor = .systemOrange
+                self.statusLabel.textColor = DevTypeTheme.statusOrange
             } else {
                 var hint = PermissionCopy.openSettingsWithoutRequestHint(
                     for: kind,
@@ -720,12 +716,12 @@ final class PermissionOnboardingController: NSViewController {
                 )
                 let snapshot = PermissionProbe().snapshot()
                 if kind == .inputMonitoring, !snapshot.canUseAX {
-                    hint += "\nAfter enabling Input Monitoring, click Open Settings again for Accessibility."
+                    hint += "\n" + self.loc.s("onboarding.hint.imThenAX")
                 } else if kind == .accessibility || kind == .postEvent {
-                    hint += "\nPost Events has no Settings list — use Request if the CG prompt is still needed."
+                    hint += "\n" + self.loc.s("onboarding.hint.postNoList")
                 }
                 self.statusLabel.stringValue = hint
-                self.statusLabel.textColor = .systemOrange
+                self.statusLabel.textColor = DevTypeTheme.statusOrange
             }
             PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
             self.render()

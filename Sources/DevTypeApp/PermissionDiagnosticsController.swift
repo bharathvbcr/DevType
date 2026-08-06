@@ -32,6 +32,9 @@ final class PermissionDiagnosticsController: NSViewController {
     private var isBuildingReport = false
     private var pendingEvidence: Evidence?
 
+    // §6.1: this file had zero `loc.s` calls.
+    private let loc = LocalizationManager.shared
+
     // MARK: - Layout
 
     override func loadView() {
@@ -63,16 +66,13 @@ final class PermissionDiagnosticsController: NSViewController {
 
         let badge = IconBadgeView(symbol: "number.square", tint: DevTypeTheme.accent, size: 30, pointSize: 13)
         let header = DevTypeTheme.makeLabel(
-            "Binary Identity",
+            loc.s("diagnostics.identity.title"),
             font: DevTypeTheme.font(13, .bold),
             color: DevTypeTheme.textPrimary
         )
         header.translatesAutoresizingMaskIntoConstraints = false
 
-        let hint = NSTextField(wrappingLabelWithString: """
-        TCC grants are keyed to this exact binary. If the path or CDHash below is not the copy \
-        you toggled in System Settings, the grant lands on the other copy.
-        """)
+        let hint = NSTextField(wrappingLabelWithString: loc.s("diagnostics.identity.hint"))
         hint.font = DevTypeTheme.font(11)
         hint.textColor = DevTypeTheme.textSecondary
         hint.preferredMaxLayoutWidth = 520
@@ -126,23 +126,20 @@ final class PermissionDiagnosticsController: NSViewController {
 
         let badge = IconBadgeView(symbol: "doc.text.magnifyingglass", tint: DevTypeTheme.accent, size: 30, pointSize: 13)
         let header = DevTypeTheme.makeLabel(
-            "Diagnostic Logs",
+            loc.s("diagnostics.logs.title"),
             font: DevTypeTheme.font(13, .bold),
             color: DevTypeTheme.textPrimary
         )
         header.translatesAutoresizingMaskIntoConstraints = false
 
-        let hint = NSTextField(wrappingLabelWithString: """
-        Copy Logs puts identity, capabilities, expand-gate, and recent OSLog on the clipboard — \
-        paste into chat or an issue.
-        """)
+        let hint = NSTextField(wrappingLabelWithString: loc.s("diagnostics.logs.hint"))
         hint.font = DevTypeTheme.font(11)
         hint.textColor = DevTypeTheme.textSecondary
         hint.preferredMaxLayoutWidth = 520
         hint.translatesAutoresizingMaskIntoConstraints = false
 
         let status = DevTypeTheme.makeLabel(
-            "Report builds when you open this tab.",
+            loc.s("diagnostics.logs.idle"),
             font: DevTypeTheme.font(11),
             color: DevTypeTheme.textSecondary
         )
@@ -174,7 +171,9 @@ final class PermissionDiagnosticsController: NSViewController {
         textView.importsGraphics = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
-        textView.string = "Loading diagnostic report…"
+        textView.string = loc.s("diagnostics.logs.loading")
+        // §5.1: the log preview is the thing a user is asked to copy — label it.
+        textView.setAccessibilityLabel(loc.s("diagnostics.logs.title"))
         textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -198,7 +197,7 @@ final class PermissionDiagnosticsController: NSViewController {
         ])
 
         let copyButton = CapsuleButton(
-            title: "Copy Logs",
+            title: loc.s("diagnostics.copy"),
             symbol: "doc.on.doc",
             style: .primary,
             target: self,
@@ -206,7 +205,7 @@ final class PermissionDiagnosticsController: NSViewController {
         )
         copyLogsButton = copyButton
         let refreshButton = CapsuleButton(
-            title: "Refresh",
+            title: loc.s("diagnostics.refresh"),
             symbol: "arrow.triangle.2.circlepath",
             style: .secondary,
             target: self,
@@ -259,23 +258,24 @@ final class PermissionDiagnosticsController: NSViewController {
     func apply(_ evidence: Evidence) {
         pendingEvidence = evidence
         guard isViewLoaded else { return }
-        bundleIDLabel.stringValue = "Bundle ID: \(evidence.bundleID)"
-        appPathLabel.stringValue = "App path: \(evidence.appPath)"
+        bundleIDLabel.stringValue = loc.s("diagnostics.bundleID", evidence.bundleID)
+        appPathLabel.stringValue = loc.s("diagnostics.appPath", evidence.appPath)
         if let cdHash = evidence.cdHash {
             let requirement = evidence.designatedRequirement
             if let requirement, !requirement.isEmpty {
-                cdHashLabel.stringValue = "CDHash: \(cdHash)\nRequirement: \(requirement)"
+                cdHashLabel.stringValue = loc.s("diagnostics.cdHash", cdHash)
+                    + "\n" + loc.s("diagnostics.requirement", requirement)
             } else {
-                cdHashLabel.stringValue = "CDHash: \(cdHash)"
+                cdHashLabel.stringValue = loc.s("diagnostics.cdHash", cdHash)
             }
         } else {
-            cdHashLabel.stringValue = "CDHash: (loading…)"
+            cdHashLabel.stringValue = loc.s("diagnostics.cdHash.loading")
         }
         if evidence.siblingPaths.isEmpty {
             siblingsLabel.stringValue = ""
             siblingsLabel.isHidden = true
         } else {
-            siblingsLabel.stringValue = "Other copies running:\n"
+            siblingsLabel.stringValue = loc.s("diagnostics.siblings") + "\n"
                 + evidence.siblingPaths.joined(separator: "\n")
             siblingsLabel.isHidden = false
         }
@@ -302,7 +302,7 @@ final class PermissionDiagnosticsController: NSViewController {
     private func reloadReport(copyToPasteboard: Bool) {
         guard !isBuildingReport else {
             if copyToPasteboard {
-                logsStatusLabel?.stringValue = "Still building report — try Copy Logs again in a moment."
+                logsStatusLabel?.stringValue = loc.s("diagnostics.logs.busy")
             }
             return
         }
@@ -310,8 +310,8 @@ final class PermissionDiagnosticsController: NSViewController {
         copyLogsButton?.isEnabled = false
         refreshLogsButton?.isEnabled = false
         logsStatusLabel?.stringValue = copyToPasteboard
-            ? "Building diagnostic report…"
-            : "Refreshing diagnostic logs…"
+            ? loc.s("diagnostics.logs.building")
+            : loc.s("diagnostics.logs.refreshing")
         logsStatusLabel?.textColor = DevTypeTheme.textSecondary
 
         DiagnosticReport.buildAsync(cdHash: pendingEvidence?.cdHash) { [weak self] report in
@@ -321,25 +321,23 @@ final class PermissionDiagnosticsController: NSViewController {
             self.refreshLogsButton?.isEnabled = true
             self.logsPreviewView?.string = report
             guard copyToPasteboard else {
-                self.logsStatusLabel?.stringValue =
-                    "Diagnostic ready (\(report.count) chars). Click Copy Logs or select text below."
+                self.logsStatusLabel?.stringValue = self.loc.s("diagnostics.logs.ready", report.count)
                 self.logsStatusLabel?.textColor = DevTypeTheme.textSecondary
                 return
             }
             if DiagnosticReport.copyToPasteboard(report) {
-                self.logsStatusLabel?.stringValue =
-                    "Copied \(report.count) characters to clipboard. Paste anywhere (⌘V)."
+                self.logsStatusLabel?.stringValue = self.loc.s("diagnostics.logs.copied", report.count)
                 self.logsStatusLabel?.textColor = DevTypeTheme.statusGreen
-                self.copyLogsButton?.title = "Copied!"
+                self.copyLogsButton?.title = self.loc.s("diagnostics.copied")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    self?.copyLogsButton?.title = "Copy Logs"
+                    guard let self else { return }
+                    self.copyLogsButton?.title = self.loc.s("diagnostics.copy")
                 }
                 DevTypeLog.permission.info(
                     "[Permission] UI Recovery copied diagnostic report chars=\(report.count, privacy: .public)"
                 )
             } else {
-                self.logsStatusLabel?.stringValue =
-                    "Could not write pasteboard — select text in the log preview and copy manually."
+                self.logsStatusLabel?.stringValue = self.loc.s("diagnostics.logs.copyFailed")
                 self.logsStatusLabel?.textColor = DevTypeTheme.accentBright
             }
         }

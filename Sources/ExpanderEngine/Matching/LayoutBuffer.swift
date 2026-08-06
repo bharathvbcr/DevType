@@ -16,12 +16,19 @@ public struct LayoutBuffer {
     private var keystrokes: [Keystroke]
     private let maxCount: Int
 
-    public init(maxCount: Int = 64) {
+    /// §3.9: hard cap on tracked keystrokes. A trigger longer than this can never fire; see
+    /// `AbbreviationMatcher.matchableTriggerLimit` and `EventTapEngine.overlongTriggerDiagnostics()`.
+    public static let defaultMaxCount = 64
+
+    public init(maxCount: Int = LayoutBuffer.defaultMaxCount) {
         self.keystrokes = []
         self.maxCount = maxCount
     }
 
     public var physical: String { String(keystrokes.map(\.physical)) }
+    /// §2.3: `[Character]` form for `AbbreviationMatcher.match(characters:)` — skips the
+    /// `String` round trip the matcher used to undo with `Array(buffer)`.
+    public var physicalCharacters: [Character] { keystrokes.map(\.physical) }
     public var composed: String { keystrokes.map(\.composed).joined() }
     public var isEmpty: Bool { keystrokes.isEmpty }
     public var count: Int { keystrokes.count }
@@ -87,13 +94,33 @@ public func isTwoSetKoreanSourceID(_ id: String) -> Bool {
 }
 
 public enum LayoutAwareMatcher {
+    /// String-based shim kept for existing callers and tests.
+    /// §2.3: prefer `decide(composedCharacters:…)` on the keystroke path.
     public static func decide(
         composedBuffer: String,
         layout: LayoutBuffer,
         matcher: AbbreviationMatcher,
         allowPhysicalFallback: Bool
     ) -> BufferMatchDecision? {
-        if let m = matcher.match(buffer: composedBuffer) {
+        decide(
+            composedCharacters: Array(composedBuffer),
+            layout: layout,
+            matcher: matcher,
+            allowPhysicalFallback: allowPhysicalFallback,
+            bundleID: nil
+        )
+    }
+
+    /// §2.3 / §4.4: allocation-free entry point for the tap callback.
+    /// `bundleID` is the cached frontmost app used to filter app-scoped snippets.
+    public static func decide(
+        composedCharacters: [Character],
+        layout: LayoutBuffer,
+        matcher: AbbreviationMatcher,
+        allowPhysicalFallback: Bool,
+        bundleID: String? = nil
+    ) -> BufferMatchDecision? {
+        if let m = matcher.match(characters: composedCharacters, bundleID: bundleID) {
             return BufferMatchDecision(
                 match: m, source: .composed,
                 backspaces: m.backspaces, terminator: m.terminator,
@@ -103,7 +130,8 @@ public enum LayoutAwareMatcher {
 
         guard allowPhysicalFallback else { return nil }
 
-        if !layout.isEmpty, let m = matcher.match(buffer: layout.physical) {
+        if !layout.isEmpty,
+           let m = matcher.match(characters: layout.physicalCharacters, bundleID: bundleID) {
             let visible = layout.visibleGraphemeCount(lastKeystrokes: m.backspaces)
             let terminator = m.terminator.isEmpty ? "" : layout.lastComposed()
             // The field shows composed Hangul, not the physical keys that matched — no text to verify.

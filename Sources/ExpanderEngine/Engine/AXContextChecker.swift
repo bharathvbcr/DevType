@@ -423,7 +423,62 @@ public final class AXContextChecker {
         return false
     }
 
-    /// Best-effort AX heuristic for integrated terminals (role/title/description).
+    /// §3.10: AX roles an integrated terminal can plausibly expose for its focused element.
+    /// Electron terminals report `AXTextArea` / `AXGroup` / `AXScrollArea`; some report nothing
+    /// useful at all, which is why the empty role is *not* in this set — a missing role is not
+    /// evidence of a terminal.
+    public static let terminalLikeAXRoles: Set<String> = [
+        "AXTextArea", "AXGroup", "AXScrollArea", "AXWebArea",
+    ]
+
+    /// §3.10: words that identify a terminal when they stand alone as a token.
+    private static let terminalTitleWords: Set<String> = [
+        "terminal", "terminals", "console", "shell", "powershell", "xterm",
+        "pty", "tty", "repl", "bash", "zsh", "fish",
+    ]
+
+    /// §3.10: filename-shaped titles are documents, not terminals. A VS Code tab named
+    /// `terminal.ts` and an Xcode file named `Console.swift` both tokenize to a terminal word,
+    /// so the extension is what tells them apart.
+    private static let documentFileExtensions: Set<String> = [
+        "swift", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rb", "go", "rs", "java", "kt",
+        "kts", "c", "h", "cc", "cpp", "hpp", "m", "mm", "cs", "php", "sh", "bash", "zsh", "fish",
+        "json", "yml", "yaml", "toml", "xml", "md", "markdown", "txt", "log", "html", "htm",
+        "css", "scss", "less", "vue", "svelte", "sql", "lua", "pl", "r", "scala", "dart", "ex",
+        "exs", "hs", "clj", "erl", "jl", "proto", "gradle", "plist", "cfg", "ini", "conf",
+    ]
+
+    /// §3.10: `true` when a title / description / identifier names a terminal.
+    ///
+    /// Pure and public so the heuristic can be tested without a window server. Deliberately
+    /// conservative: a false negative only means a normal paste into a terminal (safe), while a
+    /// false positive injects literal `ESC[200~` into the user's source file (not safe).
+    public static func axTitleLooksLikeTerminal(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        guard !lowered.isEmpty else { return false }
+
+        // Anything shaped like `name.ext` where `ext` is a source/document extension is a
+        // document title, never a terminal.
+        if let dot = lowered.lastIndex(of: "."), dot != lowered.startIndex {
+            let ext = String(lowered[lowered.index(after: dot)...])
+            if !ext.isEmpty, documentFileExtensions.contains(ext) { return false }
+        }
+
+        // Whole-token match. `terminal.ts` used to match on a bare `contains`.
+        let tokens = lowered.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        for token in tokens where terminalTitleWords.contains(String(token)) {
+            return true
+        }
+        return false
+    }
+
+    /// §3.10: best-effort AX heuristic for integrated terminals.
+    ///
+    /// This used to be a bare substring match for `terminal`/`console`/`shell`/`term`/`pty` over
+    /// the *joined* title + description + identifier + role, so a VS Code tab named `terminal.ts`
+    /// or an Xcode file named `Console.swift` was routed through bracketed paste and received
+    /// literal escape sequences. It now requires **both** a terminal-ish AX role and a
+    /// terminal-shaped title token.
     public func focusedElementLooksLikeTerminal(element: AXUIElement? = nil) -> Bool {
         let axElement: AXUIElement
         if let element {
@@ -441,28 +496,13 @@ public final class AXContextChecker {
         } else {
             role = ""
         }
+        guard Self.terminalLikeAXRoles.contains(role) else { return false }
 
-        var titleBits: [String] = []
         for attr in [kAXTitleAttribute as String, kAXDescriptionAttribute as String, kAXIdentifierAttribute as String] {
             var ref: CFTypeRef?
             if AXUIElementCopyAttributeValue(axElement, attr as CFString, &ref) == .success,
-               let s = ref as? String, !s.isEmpty {
-                titleBits.append(s)
-            }
-        }
-        let haystack = (titleBits.joined(separator: " ") + " " + role).lowercased()
-
-        if haystack.contains("terminal")
-            || haystack.contains("console")
-            || haystack.contains("shell")
-            || haystack.contains("powershell")
-            || haystack.contains("xterm") {
-            return true
-        }
-
-        // Electron terminals often expose AXGroup / AXTextArea titled "Terminal".
-        if role == "AXTextArea" || role == "AXGroup" || role == "AXScrollArea" {
-            if haystack.contains("term") || haystack.contains("pty") {
+               let s = ref as? String, !s.isEmpty,
+               Self.axTitleLooksLikeTerminal(s) {
                 return true
             }
         }
@@ -493,16 +533,37 @@ public final class AXContextChecker {
         let systemWideCopy = copyFocusedUIElement(from: systemWide)
         let systemWideMapped = mapFocusCopy(systemWideCopy)
 
+        // §2.2: the two fallback probes each cost up to `messagingTimeoutSeconds` (0.05 s) of AX
+        // IPC. When the system-wide probe already returned `.available` the winner is decided —
+        // the *only* remaining consumer of the losing probes is `debugLogFocusProbe`, which bails
+        // immediately unless `DebugTrace.isEnabled`. Shipping builds used to pay both probes on
+        // every keystroke-triggered focus resolution for nothing.
+        let primaryAvailable: Bool
+        if case .available = systemWideMapped {
+            primaryAvailable = true
+        } else {
+            primaryAvailable = false
+        }
+        let needsFallbackProbes = !primaryAvailable || DebugTrace.isEnabled
+
         var appScopedCopy = FocusAttributeCopy(error: .invalidUIElement, focusedRefNil: true)
         var appScopedMapped: FocusQueryResult = .missing
-        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
-            let appEl = AXUIElementCreateApplication(pid)
-            Self.applyMessagingTimeout(to: appEl)
-            appScopedCopy = copyFocusedUIElement(from: appEl)
-            appScopedMapped = mapFocusCopy(appScopedCopy)
+        var chain = FocusedApplicationChainResult(
+            mapped: .missing,
+            focusedAppError: .invalidUIElement,
+            uiKind: "skipped"
+        )
+
+        if needsFallbackProbes {
+            if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                let appEl = AXUIElementCreateApplication(pid)
+                Self.applyMessagingTimeout(to: appEl)
+                appScopedCopy = copyFocusedUIElement(from: appEl)
+                appScopedMapped = mapFocusCopy(appScopedCopy)
+            }
+            chain = copyFocusedElementViaFocusedApplicationChain()
         }
 
-        let chain = copyFocusedElementViaFocusedApplicationChain()
         let chainMapped = chain.mapped
 
         let mapped: FocusQueryResult
