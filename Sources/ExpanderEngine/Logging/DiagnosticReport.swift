@@ -1,0 +1,332 @@
+import AppKit
+import Foundation
+import OSLog
+
+/// Builds a pasteboard-friendly diagnostic dump for Permission Recovery support.
+public enum DiagnosticReport {
+    public static let defaultLogLookback: TimeInterval = 30 * 60
+    public static let defaultLogLineLimit = 200
+
+    /// Static / live state captured for the dump header (no OSLog I/O).
+    public struct Context: Equatable {
+        public var generatedAt: Date
+        public var bundleID: String
+        public var appPath: String
+        public var executablePath: String
+        public var cdHash: String?
+        public var designatedRequirement: String?
+        public var snapshot: PermissionSnapshot
+        public var tapRunning: Bool
+        public var engineEnabled: Bool
+        public var secureInputActive: Bool
+        public var displayStatus: String
+        public var lastInjectOutcome: String?
+        public var frontmostAppName: String?
+        public var frontmostBundleID: String?
+        public var frontmostPID: pid_t?
+        public var mutedApps: [String]
+        public var expandGate: ExpandGateSnapshot
+        /// Gate / frontmost captured when the last refuse was recorded (may differ from live gate).
+        public var expandGateAtLastRefuse: PermissionCoordinator.InjectRefuseProvenance?
+        public var siblingPaths: [String]
+        public var macOSVersion: String
+        public var appVersion: String?
+
+        public init(
+            generatedAt: Date = Date(),
+            bundleID: String,
+            appPath: String,
+            executablePath: String,
+            cdHash: String?,
+            designatedRequirement: String?,
+            snapshot: PermissionSnapshot,
+            tapRunning: Bool,
+            engineEnabled: Bool,
+            secureInputActive: Bool,
+            displayStatus: String,
+            lastInjectOutcome: String?,
+            frontmostAppName: String?,
+            frontmostBundleID: String?,
+            frontmostPID: pid_t?,
+            mutedApps: [String],
+            expandGate: ExpandGateSnapshot,
+            expandGateAtLastRefuse: PermissionCoordinator.InjectRefuseProvenance? = nil,
+            siblingPaths: [String],
+            macOSVersion: String,
+            appVersion: String?
+        ) {
+            self.generatedAt = generatedAt
+            self.bundleID = bundleID
+            self.appPath = appPath
+            self.executablePath = executablePath
+            self.cdHash = cdHash
+            self.designatedRequirement = designatedRequirement
+            self.snapshot = snapshot
+            self.tapRunning = tapRunning
+            self.engineEnabled = engineEnabled
+            self.secureInputActive = secureInputActive
+            self.displayStatus = displayStatus
+            self.lastInjectOutcome = lastInjectOutcome
+            self.frontmostAppName = frontmostAppName
+            self.frontmostBundleID = frontmostBundleID
+            self.frontmostPID = frontmostPID
+            self.mutedApps = mutedApps
+            self.expandGate = expandGate
+            self.expandGateAtLastRefuse = expandGateAtLastRefuse
+            self.siblingPaths = siblingPaths
+            self.macOSVersion = macOSVersion
+            self.appVersion = appVersion
+        }
+    }
+
+    /// Observability for the expand gate (does not use fail-closed defaults for diagnostics).
+    public struct ExpandGateSnapshot: Equatable {
+        public var canUseAX: Bool
+        public var axTrusted: Bool
+        public var focusedAvailable: Bool
+        public var isSecureField: Bool?
+        public var hasIMEMarkedText: Bool?
+        public var shouldBlockExpand: Bool
+        public var blockReason: String
+
+        public init(
+            canUseAX: Bool,
+            axTrusted: Bool,
+            focusedAvailable: Bool,
+            isSecureField: Bool?,
+            hasIMEMarkedText: Bool?,
+            shouldBlockExpand: Bool,
+            blockReason: String
+        ) {
+            self.canUseAX = canUseAX
+            self.axTrusted = axTrusted
+            self.focusedAvailable = focusedAvailable
+            self.isSecureField = isSecureField
+            self.hasIMEMarkedText = hasIMEMarkedText
+            self.shouldBlockExpand = shouldBlockExpand
+            self.blockReason = blockReason
+        }
+    }
+
+    /// Capture live app/engine state for the dump header.
+    public static func captureContext(
+        identity: ProcessIdentity = .shared,
+        cdHash: String? = nil,
+        snapshot: PermissionSnapshot? = nil,
+        mutedApps: [String]? = nil
+    ) -> Context {
+        let resolvedSnapshot = snapshot ?? PermissionProbe().snapshot()
+        let tapRunning = EventTapEngine.shared.isTapRunning
+        let secure = EventTapEngine.shared.isSecureInputActive
+        let enabled = EventTapEngine.shared.isEnabled
+        let display = EngineDisplayStatus.resolve(
+            snapshot: resolvedSnapshot,
+            isTapRunning: tapRunning,
+            isEnabled: enabled,
+            isSecureInputActive: secure
+        )
+        let front = NSWorkspace.shared.frontmostApplication
+        let outcome: String?
+        if let recorded = PermissionCoordinator.shared.lastRecordedInjectOutcome {
+            switch recorded {
+            case .succeeded: outcome = "succeeded"
+            case .postedUnverified: outcome = "postedUnverified"
+            case .refused(let reason): outcome = "refused — \(reason)"
+            case .degradedAXOnly: outcome = "degradedAXOnly"
+            case .failedSilent: outcome = "failedSilent"
+            }
+        } else {
+            outcome = nil
+        }
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        let appVersion: String?
+        if let version, let build {
+            appVersion = "\(version) (\(build))"
+        } else {
+            appVersion = version ?? build
+        }
+
+        return Context(
+            bundleID: identity.bundleIdentifier,
+            appPath: identity.bundlePath,
+            executablePath: identity.executablePath,
+            cdHash: cdHash ?? identity.cachedCodeDirectoryHash,
+            designatedRequirement: identity.cachedDesignatedRequirementString,
+            snapshot: resolvedSnapshot,
+            tapRunning: tapRunning,
+            engineEnabled: enabled,
+            secureInputActive: secure,
+            displayStatus: display.menuTitle,
+            lastInjectOutcome: outcome,
+            frontmostAppName: front?.localizedName,
+            frontmostBundleID: front?.bundleIdentifier,
+            frontmostPID: front?.processIdentifier,
+            mutedApps: mutedApps ?? AppMuteStore.shared.allMuted(),
+            expandGate: AXContextChecker.shared.expandGateSnapshot(
+                canUseAX: resolvedSnapshot.canUseAX,
+                canPostEvents: resolvedSnapshot.canPostEvents
+            ),
+            expandGateAtLastRefuse: PermissionCoordinator.shared.lastRecordedInjectRefuseProvenance,
+            siblingPaths: identity.siblingPaths(),
+            macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            appVersion: appVersion
+        )
+    }
+
+    public static func formatHeader(_ context: Context) -> String {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var lines: [String] = [
+            "=== DevType Diagnostic Report ===",
+            "Generated: \(iso.string(from: context.generatedAt))",
+            "macOS: \(context.macOSVersion)",
+            "App version: \(context.appVersion ?? "unknown")",
+            "",
+            "-- Identity --",
+            "Bundle ID: \(context.bundleID)",
+            "App path: \(context.appPath)",
+            "Executable: \(context.executablePath)",
+            "CDHash: \(context.cdHash ?? "(unknown)")",
+            "Requirement: \(context.designatedRequirement ?? "(unknown)")",
+            "",
+            "-- Capabilities --",
+            "LIVE: \(PermissionCopy.livePreflightSummary(snapshot: context.snapshot))",
+            "Tap running: \(context.tapRunning)",
+            "Engine enabled: \(context.engineEnabled)",
+            "Secure Input active: \(context.secureInputActive)",
+            "Display status: \(context.displayStatus)",
+            "Last inject: \(context.lastInjectOutcome ?? "(none)")",
+            "",
+            "-- Expand gate (live) --",
+        ]
+        lines.append(contentsOf: formatExpandGateLines(context.expandGate))
+        lines.append("")
+        lines.append("-- Expand gate at last refuse --")
+        if let refuse = context.expandGateAtLastRefuse {
+            lines.append("Refused at: \(iso.string(from: refuse.refusedAt))")
+            lines.append("Refuse reason: \(refuse.reason)")
+            lines.append("Frontmost name: \(refuse.frontmostAppName ?? "(none)")")
+            lines.append("Frontmost bundle ID: \(refuse.frontmostBundleID ?? "(none)")")
+            lines.append("Frontmost PID: \(refuse.frontmostPID.map(String.init) ?? "(none)")")
+            lines.append("AX error: \(refuse.axErrorRawValue.map(String.init) ?? "(none)")")
+            if let gate = refuse.gateSnapshot {
+                lines.append(contentsOf: formatExpandGateLines(gate))
+            } else {
+                lines.append("(gate snapshot not recorded)")
+            }
+        } else {
+            lines.append("(none)")
+        }
+        lines.append(contentsOf: [
+            "",
+            "-- Frontmost --",
+            "Name: \(context.frontmostAppName ?? "(none)")",
+            "Bundle ID: \(context.frontmostBundleID ?? "(none)")",
+            "PID: \(context.frontmostPID.map(String.init) ?? "(none)")",
+            "",
+            "-- Muted apps --",
+            context.mutedApps.isEmpty ? "(none)" : context.mutedApps.sorted().joined(separator: "\n"),
+            "",
+            "-- Sibling DevType paths --",
+            context.siblingPaths.isEmpty ? "(none)" : context.siblingPaths.joined(separator: "\n"),
+        ])
+        return lines.joined(separator: "\n")
+    }
+
+    private static func formatExpandGateLines(_ gate: ExpandGateSnapshot) -> [String] {
+        [
+            "canUseAX: \(gate.canUseAX)",
+            "AX trusted: \(gate.axTrusted)",
+            "Focused element: \(gate.focusedAvailable ? "available" : "missing")",
+            "Secure field: \(optionalBool(gate.isSecureField))",
+            "IME marked text: \(optionalBool(gate.hasIMEMarkedText))",
+            "Should block expand: \(gate.shouldBlockExpand)",
+            "Block reason: \(gate.blockReason)",
+        ]
+    }
+
+    public static func formatFullReport(context: Context, logLines: [String]) -> String {
+        var parts = [formatHeader(context), "", "-- Recent OSLog (subsystem \(DevTypeLog.subsystem)) --"]
+        if logLines.isEmpty {
+            parts.append("(no recent entries — OSLogStore empty or unavailable)")
+        } else {
+            parts.append(contentsOf: logLines)
+        }
+        parts.append("")
+        parts.append("=== End DevType Diagnostic Report ===")
+        return parts.joined(separator: "\n")
+    }
+
+    /// Fetch recent unified-log lines for this process / DevType subsystem.
+    public static func fetchRecentLogLines(
+        lookback: TimeInterval = defaultLogLookback,
+        limit: Int = defaultLogLineLimit
+    ) -> [String] {
+        do {
+            let store = try OSLogStore(scope: .currentProcessIdentifier)
+            let startDate = Date().addingTimeInterval(-lookback)
+            let position = store.position(date: startDate)
+            let predicate = NSPredicate(format: "subsystem == %@", DevTypeLog.subsystem)
+            let entries = try store.getEntries(at: position, matching: predicate)
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+            var lines: [String] = []
+            for entry in entries {
+                guard let log = entry as? OSLogEntryLog else { continue }
+                let level = levelLabel(log.level)
+                lines.append(
+                    "\(formatter.string(from: log.date)) [\(log.category)] \(level) \(log.composedMessage)"
+                )
+                if lines.count >= limit { break }
+            }
+            // Prefer newest-last for reading; OSLogStore usually returns oldest-first.
+            return lines
+        } catch {
+            return ["(OSLogStore error: \(error.localizedDescription))"]
+        }
+    }
+
+    /// Build the full report on a background queue, then deliver on the main queue.
+    public static func buildAsync(
+        cdHash: String? = nil,
+        lookback: TimeInterval = defaultLogLookback,
+        limit: Int = defaultLogLineLimit,
+        completion: @escaping (String) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let context = captureContext(cdHash: cdHash)
+            let logs = fetchRecentLogLines(lookback: lookback, limit: limit)
+            let report = formatFullReport(context: context, logLines: logs)
+            DispatchQueue.main.async {
+                completion(report)
+            }
+        }
+    }
+
+    /// Copy text to the general pasteboard as a plain string.
+    @discardableResult
+    public static func copyToPasteboard(_ text: String) -> Bool {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        return pasteboard.setString(text, forType: .string)
+    }
+
+    private static func optionalBool(_ value: Bool?) -> String {
+        guard let value else { return "(n/a — no focus)" }
+        return value ? "yes" : "no"
+    }
+
+    private static func levelLabel(_ level: OSLogEntryLog.Level) -> String {
+        switch level {
+        case .undefined: return "undef"
+        case .debug: return "debug"
+        case .info: return "info"
+        case .notice: return "notice"
+        case .error: return "error"
+        case .fault: return "fault"
+        @unknown default: return "level"
+        }
+    }
+}

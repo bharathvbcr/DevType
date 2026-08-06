@@ -1,0 +1,33 @@
+# Espanso Tier-A fixture: static, multiline, word, triggers[], cursor, and skipped vars.
+matches:
+  - trigger: ":hello"
+    replace: "Hello World"
+    label: Greeting
+
+  - trigger: ":multi"
+    replace: |
+      Line one
+      Line two
+
+  - trigger: ther
+    replace: there
+    word: true
+
+  - triggers:
+      - ":sig"
+      - ":signature"
+    replace: "Best regards"
+
+  - trigger: ":cursor"
+    replace: "code($|$);"
+
+  - trigger: ":now"
+    replace: "It's {{mytime}}"
+    vars:
+      - name: mytime
+        type: date
+        params:
+          format: "%H:%M"
+
+  - trigger: ":barevar"
+    replace: "Hello {{name}}"
