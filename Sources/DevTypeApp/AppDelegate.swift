@@ -433,6 +433,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(recoveryItem)
         permissionRecoveryMenuItem = recoveryItem
 
+        // Straight to the evidence tab — logs, identity, Copy Logs — without
+        // walking through Status & Fix first.
+        menu.addItem(item(
+            loc.s("menu.diagnostics"),
+            "waveform.path.ecg",
+            #selector(openDiagnostics(_:)),
+            key: "D",
+            modifiers: [.command, .shift]
+        ))
+
         menu.addItem(item(loc.s("menu.diagnoseSecure"), "lock.shield", #selector(diagnoseSecureInput(_:)), key: "s", modifiers: []))
 
         menu.addItem(NSMenuItem.separator())
@@ -878,6 +888,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// Menu-bar "Diagnostics…": same window as Recovery, pre-selected on the
+    /// Diagnostics tab so the OSLog dump is one click from the menu bar.
+    @objc private func openDiagnostics(_ sender: Any?) {
+        openPermissionRecovery(sender)
+        (permissionWindowController?.contentViewController as? PermissionRecoveryController)?
+            .showDiagnostics()
     }
 
     @objc func openPermissionRecovery(_ sender: Any?) {

@@ -789,7 +789,18 @@ final class CapsuleButton: NSButton {
                 width: imageSize.width,
                 height: imageSize.height
             )
-            symbolImage.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: alpha)
+            // `NSButton.isFlipped` is true, so this draws into a flipped context. The short
+            // `draw(in:from:operation:fraction:)` form ignores that and renders the glyph
+            // upside down (trash lid at the bottom, import/export arrows reversed) — the
+            // `respectFlipped:` overload is the only one that compensates.
+            symbolImage.draw(
+                in: imageRect,
+                from: .zero,
+                operation: .sourceOver,
+                fraction: alpha,
+                respectFlipped: true,
+                hints: nil
+            )
             x += imageSize.width + spacing
         }
         (title as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: attributes)
@@ -804,6 +815,23 @@ final class PillBadgeView: NSView {
     private let dot = NSView()
     private var tint: NSColor
     private let showsDot: Bool
+
+    /// Upper bound on the pill's width. A long trigger keyword truncates inside
+    /// the badge instead of shoving the row's title and preview off-screen.
+    var maximumWidth: CGFloat? {
+        didSet {
+            maxWidthConstraint?.isActive = false
+            maxWidthConstraint = nil
+            guard let maximumWidth else { return }
+            // Truncation has to be on, otherwise the capped label just clips.
+            label.lineBreakMode = .byTruncatingTail
+            let constraint = widthAnchor.constraint(lessThanOrEqualToConstant: maximumWidth)
+            constraint.isActive = true
+            maxWidthConstraint = constraint
+        }
+    }
+
+    private var maxWidthConstraint: NSLayoutConstraint?
 
     init(text: String, tint: NSColor, showsDot: Bool = false, font: NSFont? = nil, truncates: Bool = false) {
         self.tint = tint
@@ -831,6 +859,16 @@ final class PillBadgeView: NSView {
         addSubview(dot)
         addSubview(label)
 
+        // A pill sits next to flexible text in most of its callers. Without these
+        // priorities Auto Layout is free to satisfy a `<=` gap by squeezing the
+        // badge — the label inside collapses and the pill renders as a bare
+        // circle. Resisting compression above the default makes the *neighbour*
+        // truncate instead, which is the intended behaviour everywhere.
+        label.setContentCompressionResistancePriority(.defaultHigh + 1, for: .horizontal)
+        label.setContentHuggingPriority(.defaultHigh + 1, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultHigh + 1, for: .horizontal)
+        setContentHuggingPriority(.defaultHigh + 1, for: .horizontal)
+
         if showsDot {
             NSLayoutConstraint.activate([
                 dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
@@ -852,8 +890,19 @@ final class PillBadgeView: NSView {
         applyTint()
     }
 
+    /// `NSView` has no intrinsic content size, so the old
+    /// `cornerRadius = intrinsicContentSize.height / 2` evaluated to `-0.5`,
+    /// which Core Animation clamps to 0 — a square badge. `layout()` corrected it
+    /// afterwards, but only when a layout pass actually ran, so a re-`configure`d
+    /// table cell whose geometry had not changed kept the squared-off radius.
+    /// That is why some trigger pills rendered as pills and others as rectangles.
+    private func updateCornerRadius() {
+        let height = bounds.height > 0 ? bounds.height : fittingSize.height
+        layer?.cornerRadius = max(0, height / 2)
+    }
+
     private func applyTint() {
-        layer?.cornerRadius = (intrinsicContentSize.height) / 2
+        updateCornerRadius()
         layer?.backgroundColor = tint.withAlphaComponent(0.15).cgColor
         layer?.borderWidth = 1
         layer?.borderColor = tint.withAlphaComponent(0.40).cgColor
@@ -868,6 +917,7 @@ final class PillBadgeView: NSView {
         // §5.1: the badge is a status affordance; expose its text as an AX value.
         setAccessibilityValue(text)
         invalidateIntrinsicContentSize()
+        needsLayout = true
         needsDisplay = true
     }
 
@@ -880,12 +930,180 @@ final class PillBadgeView: NSView {
         label.attributedStringValue = attributed
         setAccessibilityValue(attributed.string)
         invalidateIntrinsicContentSize()
+        needsLayout = true
         needsDisplay = true
     }
 
     override func layout() {
         super.layout()
-        layer?.cornerRadius = bounds.height / 2
+        updateCornerRadius()
+    }
+}
+
+// MARK: - Marquee label
+
+/// Single-line label that scrolls its text right-to-left when the text is wider
+/// than the width it was handed, so a long replacement can be read in full
+/// without opening the editor.
+///
+/// Scrolling is opt-in per instance via `isScrolling` rather than automatic: the
+/// snippet list turns it on only for the row under the pointer. Fifty rows of
+/// simultaneously moving text would be unreadable, and animating every visible
+/// cell keeps the compositor busy for no benefit.
+///
+/// The seamless wrap comes from drawing the string twice — the second copy sits
+/// one `gap` past the end of the first, and the track slides by exactly
+/// `textWidth + gap` per cycle, which lands the copy precisely where the
+/// original started.
+final class MarqueeLabel: NSView {
+    /// Points travelled per second once the text starts moving.
+    private static let speed: CGFloat = 40
+    /// Blank run between the end of the text and the start of the repeat.
+    private static let gap: CGFloat = 56
+    /// Beat at the head of each pass, so the start of the text is readable
+    /// before it slides away.
+    private static let hold: CFTimeInterval = 0.9
+    private static let animationKey = "marquee"
+
+    private let track = NSView()
+    private let primary = NSTextField(labelWithString: "")
+    private let secondary = NSTextField(labelWithString: "")
+    private let lineHeight: CGFloat
+    /// Distance the currently-installed animation was built for, so `layout()`
+    /// can run as often as it likes without restarting (and visibly jumping) it.
+    private var animatedDistance: CGFloat = -1
+
+    /// Whether this label *wants* to scroll. It still only moves when the text
+    /// actually overflows and the user has not asked for reduced motion.
+    var isScrolling = false {
+        didSet {
+            guard isScrolling != oldValue else { return }
+            needsLayout = true
+        }
+    }
+
+    var stringValue: String {
+        get { primary.stringValue }
+        set {
+            guard newValue != primary.stringValue else { return }
+            primary.stringValue = newValue
+            secondary.stringValue = newValue
+            invalidateIntrinsicContentSize()
+            animatedDistance = -1
+            needsLayout = true
+        }
+    }
+
+    var textColor: NSColor? {
+        get { primary.textColor }
+        set {
+            primary.textColor = newValue
+            secondary.textColor = newValue
+        }
+    }
+
+    init(font: NSFont, color: NSColor) {
+        lineHeight = ceil(("Xg" as NSString).size(withAttributes: [.font: font]).height)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        // Without this the second copy and the overflowing text spill across the
+        // trigger pill — AppKit does not clip to bounds on its own.
+        layer?.masksToBounds = true
+
+        track.wantsLayer = true
+        for field in [primary, secondary] {
+            field.font = font
+            field.textColor = color
+            field.lineBreakMode = .byTruncatingTail
+            field.isSelectable = false
+            track.addSubview(field)
+        }
+        secondary.isHidden = true
+        addSubview(track)
+
+        // In a row this is the element that gives way: it clips rather than
+        // pushing the trigger pill or the title around.
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Honour the system Reduce Motion setting — the text still truncates and the
+    /// full string is available from the tooltip, so nothing is lost by holding
+    /// it still.
+    private static var prefersReducedMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    private var textWidth: CGFloat {
+        guard let font = primary.font else { return 0 }
+        return (primary.stringValue as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: ceil(textWidth), height: lineHeight)
+    }
+
+    override func layout() {
+        super.layout()
+        let full = ceil(textWidth)
+        let height = bounds.height
+        let overflows = full > bounds.width + 0.5
+        let moving = isScrolling && overflows && !Self.prefersReducedMotion
+
+        // A truncating tail would put an ellipsis in the middle of the scroll.
+        primary.lineBreakMode = moving ? .byClipping : .byTruncatingTail
+        track.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: moving ? full * 2 + Self.gap : bounds.width,
+            height: height
+        )
+        primary.frame = NSRect(x: 0, y: 0, width: moving ? full : bounds.width, height: height)
+        secondary.frame = NSRect(x: full + Self.gap, y: 0, width: full, height: height)
+        secondary.isHidden = !moving
+
+        syncAnimation(moving: moving, distance: full + Self.gap)
+    }
+
+    /// `transform.translation.x` rather than `position.x`: translation is
+    /// relative, so re-running `layout()` (which rewrites `track.frame`, and with
+    /// it the layer's position) cannot leave the animation's endpoints stale.
+    private func syncAnimation(moving: Bool, distance: CGFloat) {
+        guard moving, distance > 0 else {
+            track.layer?.removeAnimation(forKey: Self.animationKey)
+            animatedDistance = -1
+            return
+        }
+        let installed = track.layer?.animation(forKey: Self.animationKey) != nil
+        guard !installed || animatedDistance != distance else { return }
+        animatedDistance = distance
+
+        let travel = CFTimeInterval(distance / Self.speed)
+        let total = travel + Self.hold
+        let animation = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        animation.values = [0, 0, -distance]
+        animation.keyTimes = [0, NSNumber(value: Self.hold / total), 1]
+        animation.timingFunctions = [
+            CAMediaTimingFunction(name: .linear),
+            CAMediaTimingFunction(name: .linear)
+        ]
+        animation.duration = total
+        animation.repeatCount = .infinity
+        track.layer?.add(animation, forKey: Self.animationKey)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // A recycled cell that has left the hierarchy should not keep a repeating
+        // animation alive on its layer.
+        if window == nil {
+            isScrolling = false
+            track.layer?.removeAnimation(forKey: Self.animationKey)
+            animatedDistance = -1
+        }
     }
 }
 

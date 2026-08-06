@@ -76,21 +76,57 @@ enum SnippetSortMode: Int, CaseIterable {
 
 /// One snippet row: enable switch, title + preview, trigger pill, usage count.
 private final class SnippetRowView: NSView {
+    /// Longest trigger the pill may show before it truncates. Past this the row's
+    /// title and preview would be starved of space.
+    private static let maxPillWidth: CGFloat = 150
+
     let enableSwitch = NSSwitch()
     private let titleLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(13, .semibold), color: DevTypeTheme.textPrimary)
-    private let previewLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11), color: DevTypeTheme.textSecondary)
-    private let triggerPill = PillBadgeView(text: "", tint: DevTypeTheme.accent, font: DevTypeTheme.mono(11, .bold))
-    private let usageLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10, .medium), color: DevTypeTheme.textTertiary)
+    private let previewLabel = MarqueeLabel(font: DevTypeTheme.font(11), color: DevTypeTheme.textSecondary)
+    private let triggerPill = PillBadgeView(text: "", tint: DevTypeTheme.accent, font: DevTypeTheme.mono(11, .bold), truncates: true)
+    private let usageLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.mono(10, .medium), color: DevTypeTheme.textTertiary)
+    private let textStack = NSStackView()
+    private let metricsStack = NSStackView()
+
+    /// Kept on the row rather than read from the label, so a `configure` that
+    /// recycles the cell under a stationary pointer resumes the scroll instead of
+    /// waiting for the next mouse move.
+    private var isHovered = false
+    private var hoverTracking: NSTrackingArea?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         enableSwitch.translatesAutoresizingMaskIntoConstraints = false
         enableSwitch.controlSize = .small
         titleLabel.lineBreakMode = .byTruncatingTail
-        previewLabel.lineBreakMode = .byTruncatingTail
+        usageLabel.alignment = .right
+        triggerPill.maximumWidth = Self.maxPillWidth
+
+        // The title and preview are the only elastic things in the row: they give
+        // way first when a long replacement needs more room than there is.
+        // (`MarqueeLabel` sets its own compression resistance in `init`.)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        previewLabel.translatesAutoresizingMaskIntoConstraints = false
-        usageLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 1
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(previewLabel)
+
+        // Trailing metrics live in a stack so the usage counter can be *removed*
+        // from layout when it is zero. The old fixed 24pt reservation meant the
+        // trigger pills of counted and uncounted rows never lined up.
+        metricsStack.orientation = .horizontal
+        metricsStack.alignment = .centerY
+        metricsStack.spacing = 8
+        metricsStack.translatesAutoresizingMaskIntoConstraints = false
+        metricsStack.setContentCompressionResistancePriority(.defaultHigh + 1, for: .horizontal)
+        metricsStack.setContentHuggingPriority(.defaultHigh + 1, for: .horizontal)
+        metricsStack.addArrangedSubview(triggerPill)
+        metricsStack.addArrangedSubview(usageLabel)
 
         let separator = NSView()
         separator.wantsLayer = true
@@ -98,32 +134,25 @@ private final class SnippetRowView: NSView {
         separator.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(enableSwitch)
-        addSubview(titleLabel)
-        addSubview(previewLabel)
-        addSubview(triggerPill)
-        addSubview(usageLabel)
+        addSubview(textStack)
+        addSubview(metricsStack)
         addSubview(separator)
 
+        // The 1pt separator sits on the bottom edge, so everything centres against
+        // a half-point-shifted axis to stay optically centred inside the row.
+        let centreOffset: CGFloat = -0.5
         NSLayoutConstraint.activate([
             enableSwitch.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            enableSwitch.centerYAnchor.constraint(equalTo: centerYAnchor),
+            enableSwitch.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
 
-            titleLabel.leadingAnchor.constraint(equalTo: enableSwitch.trailingAnchor, constant: 12),
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: triggerPill.leadingAnchor, constant: -10),
+            textStack.leadingAnchor.constraint(equalTo: enableSwitch.trailingAnchor, constant: 12),
+            textStack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: metricsStack.leadingAnchor, constant: -12),
 
-            previewLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            previewLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 1),
-            previewLabel.trailingAnchor.constraint(lessThanOrEqualTo: triggerPill.leadingAnchor, constant: -10),
+            metricsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            metricsStack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
 
-            triggerPill.trailingAnchor.constraint(equalTo: usageLabel.leadingAnchor, constant: -10),
-            triggerPill.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            usageLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            usageLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            usageLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 24),
-
-            separator.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            separator.leadingAnchor.constraint(equalTo: textStack.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             separator.bottomAnchor.constraint(equalTo: bottomAnchor),
             separator.heightAnchor.constraint(equalToConstant: 1)
@@ -132,6 +161,38 @@ private final class SnippetRowView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    // MARK: Hover
+    //
+    // A truncated replacement scrolls only while the pointer is on its row, so
+    // the list stays still until you actually go looking at one.
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        // `.inVisibleRect` keeps the area correct as the table scrolls and as the
+        // cell is recycled at a different size, without recomputing the rect.
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        isHovered = true
+        previewLabel.isScrolling = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        isHovered = false
+        previewLabel.isScrolling = false
+    }
 
     /// §4.5: `usageCount` is passed in rather than read from `snippet.usageCount`
     /// — usage now lives in a coalesced sidecar and the model field is legacy.
@@ -144,11 +205,29 @@ private final class SnippetRowView: NSView {
             ? "🖼 \(snippet.imagePath)"
             : snippet.replacementText.replacingOccurrences(of: "\n", with: " ↵ ")
         previewLabel.stringValue = preview
+        previewLabel.textColor = snippet.enabled ? DevTypeTheme.textSecondary : DevTypeTheme.textTertiary
+        // Recycled cells inherit whatever the pointer is doing to *this* row now,
+        // not what it was doing to the snippet that used to live here.
+        previewLabel.isScrolling = isHovered
+
+        // A replacement long enough to truncate is the common case for address,
+        // degree, and paragraph snippets — surface the whole thing on hover
+        // instead of making the user open the editor to read it.
+        toolTip = snippet.isImageSnippet ? snippet.imagePath : snippet.replacementText
+
+        // An empty trigger used to render as "·", which the pill drew as a lone
+        // dot in a circle and read as a rendering glitch. An em dash in the muted
+        // tint reads as "nothing set here", which is what it means.
+        let hasTrigger = !snippet.triggerKeyword.isEmpty
         triggerPill.update(
-            text: snippet.triggerKeyword.isEmpty ? "·" : snippet.triggerKeyword,
-            tint: snippet.enabled ? DevTypeTheme.accent : DevTypeTheme.statusGray
+            text: hasTrigger ? snippet.triggerKeyword : "—",
+            tint: hasTrigger && snippet.enabled ? DevTypeTheme.accent : DevTypeTheme.statusGray
         )
+        triggerPill.toolTip = hasTrigger ? snippet.triggerKeyword : loc.s("ax.noTrigger")
+
         usageLabel.stringValue = usageCount > 0 ? "×\(usageCount)" : ""
+        usageLabel.isHidden = usageCount == 0
+        usageLabel.toolTip = usageCount > 0 ? loc.s("ax.snippetRow.help", usageCount) : nil
 
         // §5.1: the NSSwitch had no label at all, so VoiceOver said "switch, on"
         // with no indication of *which* snippet it toggles. The row itself was
@@ -158,9 +237,10 @@ private final class SnippetRowView: NSView {
             : snippet.triggerKeyword
         enableSwitch.setAccessibilityLabel(loc.s("ax.snippetRow.toggle", snippet.displayTitle))
         enableSwitch.setAccessibilityValue(loc.s(snippet.enabled ? "ax.enabled" : "ax.disabled"))
-        for label in [titleLabel, previewLabel, usageLabel] {
+        for label in [titleLabel, usageLabel] {
             label.setAccessibilityElement(false)
         }
+        previewLabel.setAccessibilityElement(false)
         triggerPill.setAccessibilityElement(false)
         setAccessibilityElement(true)
         setAccessibilityRole(NSAccessibility.Role.row)
@@ -291,19 +371,33 @@ private final class EmptyStateView: NSView {
         addSubview(subtitleLabel)
         addSubview(ctaButton)
 
+        // The vertical chain (badge.top … ctaButton.bottom) gives this view its height.
+        // Width comes from the `>=`/`<=` edge pairs below: centering alone leaves the
+        // width unconstrained, so the view collapsed to 0pt. Subviews still *drew*
+        // (AppKit does not clip to bounds) but `hitTest` rejects points outside the
+        // view's own bounds — so clicks on the CTA fell through to the table behind it
+        // and the button looked dead.
         NSLayoutConstraint.activate([
             badge.topAnchor.constraint(equalTo: topAnchor),
             badge.centerXAnchor.constraint(equalTo: centerXAnchor),
+            badge.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            badge.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
 
             titleLabel.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 12),
             titleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
 
             subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
             subtitleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
             subtitleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
+            subtitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
 
             ctaButton.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 16),
             ctaButton.centerXAnchor.constraint(equalTo: centerXAnchor),
+            ctaButton.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            ctaButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             ctaButton.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
     }

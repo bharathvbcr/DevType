@@ -35,8 +35,11 @@ final class PermissionRecoveryController: NSViewController {
     private var postEventRequestButton: CapsuleButton?
 
     private var statusPane = NSStackView()
+    private var statusScrollView: NSScrollView?
     private var tabControl: NSSegmentedControl?
     private let diagnostics = PermissionDiagnosticsController()
+    /// Menu-bar "Diagnostics…" asks for the evidence tab before the view exists.
+    private var pendingTab: Tab?
 
     private var cdHash: String?
     private var lastLoggedAccessibilityReset: Bool?
@@ -63,25 +66,9 @@ final class PermissionRecoveryController: NSViewController {
         mainView.wantsLayer = true
         mainView.layer?.backgroundColor = DevTypeTheme.windowBackground.cgColor
 
-        let scrollView = NSScrollView()
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-        scrollView.drawsBackground = false
-        mainView.addSubview(scrollView)
-
-        let document = FlippedDocumentView()
-        document.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = document
-
-        let stack = NSStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        document.addSubview(stack)
-
+        // Header + tab switcher stay pinned at the top; only the Status pane
+        // scrolls. The Diagnostics pane owns the rest of the window so its log
+        // view grows with the window instead of sitting in a fixed-height box.
         let headerView = DevTypeTheme.makeBrandHeader(
             title: loc.s("recovery.title"),
             subtitle: loc.s("recovery.subtitle"),
@@ -100,37 +87,71 @@ final class PermissionRecoveryController: NSViewController {
         tabs.setAccessibilityLabel(loc.s("recovery.title"))
         tabControl = tabs
 
-        addChild(diagnostics)
-        let diagnosticsPane = diagnostics.view
-        diagnosticsPane.isHidden = true
+        let paneContainer = NSView()
+        paneContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        statusScrollView = scrollView
+
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = document
 
         buildStatusPane()
+        document.addSubview(statusPane)
 
-        stack.addArrangedSubview(headerView)
-        stack.addArrangedSubview(tabs)
-        stack.addArrangedSubview(statusPane)
-        stack.addArrangedSubview(diagnosticsPane)
+        addChild(diagnostics)
+        let diagnosticsPane = diagnostics.view
+        diagnosticsPane.translatesAutoresizingMaskIntoConstraints = false
+        diagnosticsPane.isHidden = true
+
+        mainView.addSubview(headerView)
+        mainView.addSubview(tabs)
+        mainView.addSubview(paneContainer)
+        paneContainer.addSubview(scrollView)
+        paneContainer.addSubview(diagnosticsPane)
 
         NSLayoutConstraint.activate([
-            tabs.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            tabs.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            statusPane.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            statusPane.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            diagnosticsPane.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            diagnosticsPane.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            headerView.topAnchor.constraint(equalTo: mainView.topAnchor, constant: 46),
+            headerView.leadingAnchor.constraint(equalTo: mainView.leadingAnchor, constant: 22),
+            headerView.trailingAnchor.constraint(lessThanOrEqualTo: mainView.trailingAnchor, constant: -22),
 
-            scrollView.topAnchor.constraint(equalTo: mainView.topAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: mainView.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: mainView.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: mainView.bottomAnchor),
+            tabs.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: 14),
+            tabs.leadingAnchor.constraint(equalTo: mainView.leadingAnchor, constant: 22),
+            tabs.trailingAnchor.constraint(equalTo: mainView.trailingAnchor, constant: -22),
 
-            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 46),
-            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 22),
-            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -22),
-            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -22),
+            paneContainer.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 14),
+            paneContainer.leadingAnchor.constraint(equalTo: mainView.leadingAnchor),
+            paneContainer.trailingAnchor.constraint(equalTo: mainView.trailingAnchor),
+            paneContainer.bottomAnchor.constraint(equalTo: mainView.bottomAnchor),
 
-            document.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
+            scrollView.topAnchor.constraint(equalTo: paneContainer.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: paneContainer.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: paneContainer.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: paneContainer.bottomAnchor),
+
+            statusPane.topAnchor.constraint(equalTo: document.topAnchor, constant: 2),
+            statusPane.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 22),
+            statusPane.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -22),
+            statusPane.bottomAnchor.constraint(lessThanOrEqualTo: document.bottomAnchor, constant: -22),
+
+            document.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+
+            diagnosticsPane.topAnchor.constraint(equalTo: paneContainer.topAnchor),
+            diagnosticsPane.leadingAnchor.constraint(equalTo: paneContainer.leadingAnchor, constant: 22),
+            diagnosticsPane.trailingAnchor.constraint(equalTo: paneContainer.trailingAnchor, constant: -22),
+            diagnosticsPane.bottomAnchor.constraint(equalTo: paneContainer.bottomAnchor, constant: -16)
         ])
+        if let pendingTab {
+            self.pendingTab = nil
+            tabs.selectedSegment = pendingTab.rawValue
+            applyTab(pendingTab)
+        }
         self.view = mainView
     }
 
@@ -311,13 +332,28 @@ final class PermissionRecoveryController: NSViewController {
     }
 
     @objc private func tabChanged(_ sender: NSSegmentedControl) {
-        let tab = Tab(rawValue: sender.selectedSegment) ?? .status
-        statusPane.isHidden = tab != .status
-        diagnostics.view.isHidden = tab != .diagnostics
-        if tab == .diagnostics {
+        applyTab(Tab(rawValue: sender.selectedSegment) ?? .status)
+    }
+
+    private func applyTab(_ tab: Tab) {
+        let showDiagnostics = tab == .diagnostics
+        statusScrollView?.isHidden = showDiagnostics
+        diagnostics.view.isHidden = !showDiagnostics
+        if showDiagnostics {
             DevTypeLog.permission.info("[Permission] UI Recovery → Diagnostics tab")
             diagnostics.didBecomeVisible()
         }
+    }
+
+    /// Deep link for the menu-bar "Diagnostics…" item: open straight on the
+    /// evidence tab, regardless of which tab was showing last.
+    func showDiagnostics() {
+        guard isViewLoaded else {
+            pendingTab = .diagnostics
+            return
+        }
+        tabControl?.selectedSegment = Tab.diagnostics.rawValue
+        applyTab(.diagnostics)
     }
 
     @objc private func toggleExtendedGuidance() {

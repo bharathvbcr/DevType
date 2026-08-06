@@ -26,6 +26,9 @@ final class PermissionDiagnosticsController: NSViewController {
     private var refreshLogsButton: CapsuleButton?
     private var logsPreviewView: NSTextView?
     private var logsStatusLabel: NSTextField?
+    private var logFilterField: NSSearchField?
+    /// Last built report, kept so the filter field can re-slice without a rebuild.
+    private var lastReport = ""
 
     /// The report reads OSLogStore, so it is built on demand — opening Recovery
     /// or returning from System Settings must not pay for it.
@@ -38,21 +41,28 @@ final class PermissionDiagnosticsController: NSViewController {
     // MARK: - Layout
 
     override func loadView() {
-        let pane = NSStackView()
-        pane.orientation = .vertical
-        pane.alignment = .leading
-        pane.spacing = 14
-        pane.translatesAutoresizingMaskIntoConstraints = false
+        // Full-bleed, not a hugging stack: the host pins this view to the window
+        // edges and the logs card takes every spare point — identity stays a
+        // compact header, the log preview expands to full width *and* height.
+        let root = NSView()
+        root.translatesAutoresizingMaskIntoConstraints = false
 
         let identityCard = makeIdentityCard()
         let logsCard = makeLogsCard()
-        pane.addArrangedSubview(identityCard)
-        pane.addArrangedSubview(logsCard)
-        for card in [identityCard, logsCard] {
-            card.trailingAnchor.constraint(equalTo: pane.trailingAnchor).isActive = true
-        }
+        root.addSubview(identityCard)
+        root.addSubview(logsCard)
+        NSLayoutConstraint.activate([
+            identityCard.topAnchor.constraint(equalTo: root.topAnchor),
+            identityCard.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            identityCard.trailingAnchor.constraint(equalTo: root.trailingAnchor),
 
-        view = pane
+            logsCard.topAnchor.constraint(equalTo: identityCard.bottomAnchor, constant: 14),
+            logsCard.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            logsCard.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            logsCard.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+        ])
+
+        view = root
     }
 
     private func makeCard() -> GlassCardView {
@@ -146,6 +156,19 @@ final class PermissionDiagnosticsController: NSViewController {
         status.translatesAutoresizingMaskIntoConstraints = false
         logsStatusLabel = status
 
+        // Live filter — a full OSLog dump is long; substring filtering keeps the
+        // one interesting subsystem in view without scrolling.
+        let filter = NSSearchField()
+        filter.translatesAutoresizingMaskIntoConstraints = false
+        filter.placeholderString = loc.s("diagnostics.logs.filter")
+        filter.font = DevTypeTheme.font(11.5)
+        filter.sendsSearchStringImmediately = true
+        filter.sendsWholeSearchString = false
+        filter.target = self
+        filter.action = #selector(logFilterChanged(_:))
+        filter.setAccessibilityLabel(loc.s("diagnostics.logs.filter"))
+        logFilterField = filter
+
         let previewBlock = NSView()
         previewBlock.wantsLayer = true
         previewBlock.translatesAutoresizingMaskIntoConstraints = false
@@ -193,7 +216,9 @@ final class PermissionDiagnosticsController: NSViewController {
             logScroll.leadingAnchor.constraint(equalTo: previewBlock.leadingAnchor, constant: 4),
             logScroll.trailingAnchor.constraint(equalTo: previewBlock.trailingAnchor, constant: -4),
             logScroll.bottomAnchor.constraint(equalTo: previewBlock.bottomAnchor, constant: -4),
-            previewBlock.heightAnchor.constraint(equalToConstant: 240)
+            // Flexible: the card is stretched by the host, and this view is the
+            // only flexible element in the chain, so it absorbs the growth.
+            previewBlock.heightAnchor.constraint(greaterThanOrEqualToConstant: 160)
         ])
 
         let copyButton = CapsuleButton(
@@ -224,6 +249,7 @@ final class PermissionDiagnosticsController: NSViewController {
         content.addSubview(header)
         content.addSubview(hint)
         content.addSubview(status)
+        content.addSubview(filter)
         content.addSubview(previewBlock)
         content.addSubview(buttonRow)
         NSLayoutConstraint.activate([
@@ -240,16 +266,50 @@ final class PermissionDiagnosticsController: NSViewController {
             status.leadingAnchor.constraint(equalTo: hint.leadingAnchor),
             status.trailingAnchor.constraint(equalTo: hint.trailingAnchor),
 
-            previewBlock.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 10),
+            filter.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 8),
+            filter.leadingAnchor.constraint(equalTo: hint.leadingAnchor),
+            filter.trailingAnchor.constraint(equalTo: hint.trailingAnchor),
+
+            previewBlock.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 8),
             previewBlock.leadingAnchor.constraint(equalTo: hint.leadingAnchor),
             previewBlock.trailingAnchor.constraint(equalTo: hint.trailingAnchor),
 
             buttonRow.topAnchor.constraint(equalTo: previewBlock.bottomAnchor, constant: 12),
             buttonRow.leadingAnchor.constraint(equalTo: hint.leadingAnchor),
             buttonRow.trailingAnchor.constraint(equalTo: hint.trailingAnchor),
-            card.bottomAnchor.constraint(equalTo: buttonRow.bottomAnchor, constant: 14)
+            content.bottomAnchor.constraint(equalTo: buttonRow.bottomAnchor, constant: 14)
         ])
         return card
+    }
+
+    // MARK: - Log filter
+
+    @objc private func logFilterChanged(_ sender: NSSearchField) {
+        applyLogFilter(updateStatus: true)
+    }
+
+    /// Re-slices `lastReport` through the filter field. Cheap — substring match
+    /// over a few thousand lines, no report rebuild.
+    private func applyLogFilter(updateStatus: Bool) {
+        guard !lastReport.isEmpty, let preview = logsPreviewView else { return }
+        let query = logFilterField?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
+        guard !query.isEmpty else {
+            preview.string = lastReport
+            if updateStatus {
+                logsStatusLabel?.stringValue = loc.s("diagnostics.logs.ready", lastReport.count)
+                logsStatusLabel?.textColor = DevTypeTheme.textSecondary
+            }
+            return
+        }
+        let lines = lastReport.components(separatedBy: .newlines)
+        let matches = lines.filter {
+            $0.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+        preview.string = matches.joined(separator: "\n")
+        if updateStatus {
+            logsStatusLabel?.stringValue = loc.s("diagnostics.logs.filtered", matches.count, lines.count)
+            logsStatusLabel?.textColor = DevTypeTheme.textSecondary
+        }
     }
 
     // MARK: - Host hand-off
@@ -319,12 +379,14 @@ final class PermissionDiagnosticsController: NSViewController {
             self.isBuildingReport = false
             self.copyLogsButton?.isEnabled = true
             self.refreshLogsButton?.isEnabled = true
-            self.logsPreviewView?.string = report
+            self.lastReport = report
             guard copyToPasteboard else {
-                self.logsStatusLabel?.stringValue = self.loc.s("diagnostics.logs.ready", report.count)
-                self.logsStatusLabel?.textColor = DevTypeTheme.textSecondary
+                // applyLogFilter owns the status line here so an active filter
+                // keeps its "N of M lines" readout after a refresh.
+                self.applyLogFilter(updateStatus: true)
                 return
             }
+            self.applyLogFilter(updateStatus: false)
             if DiagnosticReport.copyToPasteboard(report) {
                 self.logsStatusLabel?.stringValue = self.loc.s("diagnostics.logs.copied", report.count)
                 self.logsStatusLabel?.textColor = DevTypeTheme.statusGreen
