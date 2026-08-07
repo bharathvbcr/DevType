@@ -148,4 +148,5 @@ jobs:
         # lives in the test target; this is the fast fail.
         run: |
           swift build 2>/dev/null || true
-          grep -c 'case ko' Sources/DevTypeApp/LocalizationManager.swift >/dev/null
+          grep -c 'case ko' Sources/ExpanderEngine/Localization/LocalizationManager.swift >/dev/null
+
