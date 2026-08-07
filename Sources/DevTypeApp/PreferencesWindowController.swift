@@ -779,6 +779,12 @@ final class PreferencesViewController: NSViewController,
                 lines.append(loc.s("prefs.snippets.conflict.duplicate", conflict.trigger, groups))
             case .caseShadow:
                 lines.append(loc.s("prefs.snippets.conflict.caseShadow", conflict.trigger, groups))
+            case .prefixShadow:
+                // snippetIDs[0] / groupNames[0] are the shadowing trigger; the rest are the
+                // triggers it makes unreachable. Name them — "some snippet is shadowed" is
+                // not actionable, "`slmabout can never fire" is.
+                let blocked = conflict.blockedTriggerSummary ?? groups
+                lines.append(loc.s("prefs.snippets.conflict.prefixShadow", conflict.trigger, blocked))
             }
         }
         conflictsLabel.stringValue = lines.joined(separator: "\n")

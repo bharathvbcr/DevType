@@ -524,8 +524,101 @@ public final class TextInjectionPipeline {
         lastExpansionLock.unlock()
     }
 
+    /// Characters the user may type after an expansion and still have undo work. Bounded so a
+    /// stale record can never authorise erasing an unbounded amount of text.
+    static let undoMaxTypedAfter = 16
+
+    /// Widens the undo to cover text typed *after* the expansion.
+    ///
+    /// The naive plan erases exactly `injectedText` from the caret backwards, which assumes the
+    /// caret is still where injection left it. Type one more character and the window shifts:
+    /// for an injected "ScholarLM" followed by a typed "l", the check reads "cholarLMl" and
+    /// refuses. Correct (erasing there would eat the wrong nine characters and strand an "S"),
+    /// but the user's undo silently does nothing.
+    ///
+    /// So locate the injected text at its real offset, allowing up to `undoMaxTypedAfter`
+    /// trailing characters, and undo the whole span — restoring the trigger *plus* what was
+    /// typed after it, which is exactly what the field would hold had the expansion never run.
+    ///
+    /// Returns `nil` when the field is unreadable or the injected text is not found, leaving the
+    /// caller on the original fail-closed path.
+    static func widenedUndo(
+        injectedText: String,
+        triggerText: String,
+        value: String?,
+        caretLocation: Int?,
+        maxTypedAfter: Int = undoMaxTypedAfter
+    ) -> (plan: ErasePlan, restore: String)? {
+        guard let value, let caret = caretLocation, caret >= 0 else { return nil }
+        let units = Array(value.utf16)
+        guard caret <= units.count else { return nil }
+        let injected = Array(injectedText.utf16)
+        guard !injected.isEmpty else { return nil }
+
+        // k == 0 is the untouched case and is handled by the normal plan; start at 1.
+        for k in 1...max(1, maxTypedAfter) {
+            let end = caret - k
+            let start = end - injected.count
+            guard start >= 0, end <= units.count else { break }
+            guard Array(units[start..<end]) == injected else { continue }
+
+            let tailSlice = Array(units[end..<caret])
+            let typedAfter = String(utf16CodeUnits: tailSlice, count: tailSlice.count)
+            // A newline may have submitted a form or moved focus; the text after it is not
+            // safely ours to re-type.
+            guard !typedAfter.contains(where: \.isNewline) else { return nil }
+            return (
+                plan: ErasePlan(text: injectedText + typedAfter),
+                restore: triggerText + typedAfter
+            )
+        }
+        return nil
+    }
+
+    /// Reads AXValue + caret for `widenedUndo`. Returns `(nil, nil)` when unreadable.
+    private func readFieldForUndo() -> (value: String?, caret: Int?) {
+        guard let element = AXContextChecker.shared.focusedElement() else { return (nil, nil) }
+        AXContextChecker.applyMessagingTimeout(to: element)
+
+        var value: String?
+        var valueRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success {
+            value = valueRef as? String
+        }
+        var caret: Int?
+        var rangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+           let rangeValue = rangeRef,
+           CFGetTypeID(rangeValue) == AXValueGetTypeID() {
+            var range = CFRange(location: 0, length: 0)
+            if AXValueGetValue(unsafeBitCast(rangeValue, to: AXValue.self), .cfRange, &range) {
+                caret = range.location
+            }
+        }
+        return (value, caret)
+    }
+
     private func performUndo(_ record: LastExpansion) {
-        let undoPlan = ErasePlan(text: record.injectedText)
+        var undoPlan = ErasePlan(text: record.injectedText)
+        var restoreText = record.triggerText
+
+        // If the plain plan would not verify, try widening over text typed since the expansion
+        // before giving up. Only ever widens on a positive match of the injected text.
+        if case .mismatch = eraser.evaluateErasePrecondition(plan: undoPlan, retryOnMismatch: false) {
+            let field = readFieldForUndo()
+            if let widened = Self.widenedUndo(
+                injectedText: record.injectedText,
+                triggerText: record.triggerText,
+                value: field.value,
+                caretLocation: field.caret
+            ) {
+                DevTypeLog.inject.info(
+                    "[Inject] §3.1 undo widened over \(widened.plan.utf16Count - undoPlan.utf16Count, privacy: .public) unit(s) typed after the expansion"
+                )
+                undoPlan = widened.plan
+                restoreText = widened.restore
+            }
+        }
         eraser.evaluateErasePrecondition(plan: undoPlan) { result in
             if case .mismatch(let why) = result {
                 DevTypeLog.inject.notice(
@@ -543,7 +636,7 @@ public final class TextInjectionPipeline {
             let bundle = record.bundleID ?? ""
             if !bundle.isEmpty, !TextInjectionPipeline.shouldSkipAXSelectedText(bundleID: bundle),
                self.ax.performAXRangeReplace(
-                   text: record.triggerText,
+                   text: restoreText,
                    eraseCount: undoPlan.utf16Count,
                    bundleID: record.bundleID
                ) == .replaced {
@@ -571,7 +664,7 @@ public final class TextInjectionPipeline {
                     return
                 }
                 if self.ax.attemptAXDirectInjection(
-                    text: record.triggerText,
+                    text: restoreText,
                     bundleID: record.bundleID
                 ) {
                     PermissionCoordinator.shared.recordInjectOutcome(
@@ -581,7 +674,7 @@ public final class TextInjectionPipeline {
                     )
                     return
                 }
-                self.clipboard.pasteViaClipboard(text: record.triggerText) { posted in
+                self.clipboard.pasteViaClipboard(text: restoreText) { posted in
                     PermissionCoordinator.shared.recordInjectOutcome(
                         posted ? .succeeded : .failedSilent,
                         refuseContext: nil,
