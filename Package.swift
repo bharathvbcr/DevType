@@ -32,9 +32,14 @@ let package = Package(
                 .linkedFramework("Carbon")
             ]
         ),
+        // ObjC-only: the `@try/@catch` trampoline Swift cannot express. See
+        // Sources/DevTypeSafety/include/DevTypeSafety.h.
+        .target(
+            name: "DevTypeSafety"
+        ),
         .executableTarget(
             name: "DevTypeApp",
-            dependencies: ["ExpanderEngine"],
+            dependencies: ["ExpanderEngine", "DevTypeSafety"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ServiceManagement")

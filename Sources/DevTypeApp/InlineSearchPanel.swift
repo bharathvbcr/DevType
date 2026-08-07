@@ -1,13 +1,37 @@
 import AppKit
 import Carbon.HIToolbox
+import DevTypeSafety
 import ExpanderEngine
 
-/// Spotlight-style glass palette for snippets, AI tools, and instant commands (⌘/ by default).
+/// Spotlight-style glass palette for snippets, AI tools, and instant commands (⌥/ by default).
 enum InlineSearchPanel {
     private final class KeyablePanel: NSPanel {
         override var canBecomeKey: Bool { true }
         override var canBecomeMain: Bool { true }
     }
+
+    // §8.7 — why opening the palette could abort the app, and why the fix is a `@catch`.
+    //
+    // Typing in the search field makes AppKit spin up two *out-of-process* text-input
+    // helpers and parent their `NSRemoteView`s onto this panel. Measured by walking the
+    // window tree after four keystrokes:
+    //
+    //     com.apple.SafariPlatformSupport.Helper  SPCompletionListServiceViewController
+    //     com.apple.TextInputUI.xpc.CursorUIViewService  TUICursorUIViewService
+    //
+    // Each registers for `_NSWindowWillBecomeVisible`, so every subsequent window
+    // ordering calls out to them via `-[NSRemoteView containingWindowWillOrderOnScreen:]`
+    // — the exact frame both crash reports abort in. `TUICursorUIViewService` is still
+    // reachable after the palette closes (3/3 runs), so the observer outlives the panel
+    // that provoked it and is waiting for the *next* open.
+    //
+    // Disabling the field editor's text traits looks like the tidy fix and is not one:
+    // with `isAutomaticTextCompletionEnabled = false` and `inlinePredictionType = .no`,
+    // both helpers were still created (measured, unchanged). These are the system's
+    // views on the system's schedule — we cannot decline them or unregister them.
+    //
+    // So the fix is not to avoid the callout but to survive it: see the
+    // `DTMakeKeyAndOrderFrontCatchingException` call in `open`.
 
     /// Result of committing a palette row.
     enum Pick {
@@ -80,8 +104,25 @@ enum InlineSearchPanel {
         positionNearTop(panel)
 
         NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        panel.orderFrontRegardless()
+
+        // §8.7: this is the line the crash reports die on. Ordering the panel posts
+        // `_NSWindowWillBecomeVisible`, and AppKit fans it out to every registered
+        // observer — including the out-of-process `NSRemoteView`s described above,
+        // which we neither created nor can unregister. When one of them raises, the
+        // exception unwinds into Swift, and that is an unconditional `abort()`.
+        //
+        // The palette is a global-hotkey surface reached from inside any app; a
+        // stranger's observer must not be able to take the process down with it.
+        if let raised = DTMakeKeyAndOrderFrontCatchingException(panel) {
+            DevTypeLog.app.error(
+                """
+                [Palette] window ordering raised \(raised.name.rawValue, privacy: .public): \
+                \(raised.reason ?? "(no reason)", privacy: .public)
+                \(raised.callStackSymbols.prefix(12).joined(separator: "\n"), privacy: .public)
+                """
+            )
+        }
+
         controller.focusSearch()
         animateIn(panel)
 
