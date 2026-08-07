@@ -49,6 +49,8 @@ enum SnippetTemplateCatalog {
         case .friendly: return ":fr"
         case .bulletize: return ":bul"
         case .promptEnhance: return ":pe"
+        case .translate: return ":tr"
+        case .refine: return ":rf"
         case .custom: return ":ai"
         }
     }
@@ -65,6 +67,8 @@ enum SnippetTemplateCatalog {
         case .friendly: label = "Make Friendly"
         case .bulletize: label = "Bullet List"
         case .promptEnhance: label = "Prompt Enhance"
+        case .translate: label = "Translate to English"
+        case .refine: label = "Refine Telugu / Hindi"
         case .custom: label = "Custom"
         }
         return "Select text, then type this trigger. DevType applies “\(label)” on-device (Preferences → AI)."

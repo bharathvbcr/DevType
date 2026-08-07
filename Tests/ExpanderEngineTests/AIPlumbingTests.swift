@@ -44,6 +44,86 @@ final class AIPlumbingTests: XCTestCase {
         XCTAssertFalse(AITransformKind.condense.isChunkSafe)
         XCTAssertFalse(AITransformKind.promptEnhance.isChunkSafe)
         XCTAssertFalse(AITransformKind.custom.isChunkSafe)
+        XCTAssertTrue(
+            AITransformKind.translate.isChunkSafe,
+            "A paragraph translated alone means the same as one translated in context."
+        )
+        XCTAssertTrue(AITransformKind.refine.isChunkSafe)
+    }
+
+    // MARK: - Telugu / Hindi (usually typed in English letters)
+
+    /// Both actions read a *guessed* source language and rewrite the text wholesale.
+    /// Direct injection would land a wrong-language guess in the field with no warning.
+    func testIndicKindsArePreviewedNotInjected() {
+        XCTAssertEqual(AITransformKind.translate.defaultOutputMode, .preview)
+        XCTAssertEqual(AITransformKind.refine.defaultOutputMode, .preview)
+    }
+
+    /// A creative temperature paraphrases instead of translating or correcting.
+    func testIndicKindsAreLowTemperature() {
+        XCTAssertLessThanOrEqual(AITransformKind.translate.temperature, 0.3)
+        XCTAssertLessThanOrEqual(AITransformKind.refine.temperature, 0.3)
+    }
+
+    /// Romanized Telugu / Hindi tokenizes badly, so the response budget must exceed input.
+    func testIndicKindsBudgetRoomForALongerOutput() {
+        XCTAssertGreaterThan(AITransformKind.translate.tokenBudgetMultiplier, 1.0)
+        XCTAssertGreaterThan(AITransformKind.refine.tokenBudgetMultiplier, 1.0)
+    }
+
+    func testTranslateCatalogDefaults() {
+        let kind = AITransformKind.translate
+        XCTAssertEqual(AITransformKind.named("translate"), kind)
+        XCTAssertEqual(AITransformKind.named("Translate"), kind)
+        XCTAssertEqual(kind.localizationKey, "ai.kind.translate")
+        XCTAssertTrue(AITransformKind.builtInPalette.contains(kind))
+    }
+
+    func testRefineCatalogDefaults() {
+        let kind = AITransformKind.refine
+        XCTAssertEqual(AITransformKind.named("refine"), kind)
+        XCTAssertEqual(AITransformKind.named("Refine"), kind)
+        XCTAssertEqual(kind.localizationKey, "ai.kind.refine")
+        XCTAssertTrue(AITransformKind.builtInPalette.contains(kind))
+    }
+
+    /// The instructions carry the whole feature: without the romanized framing the model
+    /// reads "nenu intiki veltunnanu" as broken English and hands it back unchanged.
+    func testTranslateInstructionsNameBothLanguagesAndEnglishOutput() {
+        let instructions = AITransformKind.translate.instructions.lowercased()
+        XCTAssertTrue(instructions.contains("telugu"))
+        XCTAssertTrue(instructions.contains("hindi"))
+        XCTAssertTrue(
+            instructions.contains("english letters"),
+            "The input is romanized, not native script — the model has to be told."
+        )
+        XCTAssertTrue(
+            instructions.contains("only"),
+            "The model must return the translation alone — no commentary or labels."
+        )
+    }
+
+    /// Refine's one failure mode is quietly becoming Translate. The instructions must
+    /// forbid that outright, or a Telugu grammar fix comes back as English.
+    func testRefineInstructionsForbidTranslating() {
+        let instructions = AITransformKind.refine.instructions.lowercased()
+        XCTAssertTrue(instructions.contains("telugu"))
+        XCTAssertTrue(instructions.contains("hindi"))
+        XCTAssertTrue(instructions.contains("same language"))
+        XCTAssertTrue(
+            instructions.contains("never translate"),
+            "Refine must keep the text in its own language."
+        )
+    }
+
+    /// Translate and Refine are opposites; identical instructions would mean one of the
+    /// two palette rows silently does the other one's job.
+    func testTranslateAndRefineDoNotShareInstructions() {
+        XCTAssertNotEqual(
+            AITransformKind.translate.instructions,
+            AITransformKind.refine.instructions
+        )
     }
 
     func testPromptEnhanceCatalogDefaults() {

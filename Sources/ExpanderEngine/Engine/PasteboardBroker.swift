@@ -137,17 +137,35 @@ public final class PasteboardBroker {
     // MARK: - Hold policy
 
     /// Decide the next step of the clipboard-hold loop. `pasteAttemptsCompleted` counts Cmd+V posts so far.
+    /// Consecutive `.failed` observations required before a retry is allowed.
+    ///
+    /// `DeliveryVerifier` reports `.failed` when the AXValue is *readable* and does not contain
+    /// the expected text. On hosts that return a readable-but-stale value straight after a paste
+    /// (WebKit, Electron), that is a false negative — and acting on it posts a second Cmd+V,
+    /// duplicating text the user already has. One re-read costs a settle delay; a wrong retry
+    /// corrupts the document.
+    public static let requiredFailureConfirmations = 2
+
     public static func decidePasteHold(
         delivery: DeliveryVerifier.TextDeliveryVerification,
         pasteAttemptsCompleted: Int,
         maxAttempts: Int = InjectTiming.pasteDeliveryMaxAttempts,
         elapsed: TimeInterval,
-        holdTimeout: TimeInterval = InjectTiming.pasteDeliveryHoldTimeout
+        holdTimeout: TimeInterval = InjectTiming.pasteDeliveryHoldTimeout,
+        /// How many times in a row `delivery` has been `.failed`, including this observation.
+        /// Defaults to "already confirmed" so callers that do not track it keep the old
+        /// behaviour; the live hold loop passes the real count.
+        consecutiveFailures: Int = .max
     ) -> PasteHoldDecision {
         switch delivery {
         case .delivered:
             return .succeed
         case .failed:
+            // A single `.failed` is not proof. Re-read before re-pasting, provided there is
+            // still time — a duplicate paste is worse than an unverified one.
+            if consecutiveFailures < requiredFailureConfirmations, elapsed < holdTimeout {
+                return .waitMore
+            }
             if pasteAttemptsCompleted < maxAttempts {
                 return .retryPaste
             }
@@ -293,6 +311,7 @@ public final class PasteboardBroker {
         holdTimeout: TimeInterval,
         ticket: ClipboardTicket,
         leaveClipboardOnFailure: Bool,
+        consecutiveFailures: Int = 0,
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteDeliverySettleDelay) {
@@ -301,11 +320,14 @@ public final class PasteboardBroker {
                 baseline: baseline
             )
             let elapsed = Date().timeIntervalSince(holdStarted)
+            // Reset on any non-failure so only an uninterrupted run of failures counts as proof.
+            let failures = (delivery == .failed) ? consecutiveFailures + 1 : 0
             let decision = PasteboardBroker.decidePasteHold(
                 delivery: delivery,
                 pasteAttemptsCompleted: pasteAttemptsCompleted,
                 elapsed: elapsed,
-                holdTimeout: holdTimeout
+                holdTimeout: holdTimeout,
+                consecutiveFailures: failures
             )
 
             switch decision {
@@ -352,6 +374,7 @@ public final class PasteboardBroker {
                         holdTimeout: holdTimeout,
                         ticket: ticket,
                         leaveClipboardOnFailure: leaveClipboardOnFailure,
+                        consecutiveFailures: 0,
                         completion: completion
                     )
                 }
@@ -366,6 +389,7 @@ public final class PasteboardBroker {
                     holdTimeout: holdTimeout,
                     ticket: ticket,
                     leaveClipboardOnFailure: leaveClipboardOnFailure,
+                    consecutiveFailures: failures,
                     completion: completion
                 )
             }

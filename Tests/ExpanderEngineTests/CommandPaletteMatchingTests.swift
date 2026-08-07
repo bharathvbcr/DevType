@@ -109,6 +109,69 @@ final class CommandPaletteMatchingTests: XCTestCase {
         XCTAssertTrue(hits.contains { $0.command.id == "ai.promptenhance" })
     }
 
+    /// The phrasings someone reaching for Telugu/Hindi → English would actually type.
+    func testTranslateIsReachableByItsEverydayPhrasings() {
+        for query in [
+            "translate", "translation", "to english", "telugu to english",
+            "hindi to english", "tenglish", "hinglish"
+        ] {
+            let hits = CommandPaletteCatalog.matchCommands(query: query, loc: .shared)
+            XCTAssertTrue(
+                hits.contains { $0.command.id == "ai.translate" },
+                "\(query) should surface the translate action."
+            )
+        }
+    }
+
+    func testRefineIsReachableByItsEverydayPhrasings() {
+        for query in [
+            "refine", "fix telugu", "fix hindi", "telugu grammar", "hindi grammar",
+            "correct telugu", "proofread hindi"
+        ] {
+            let hits = CommandPaletteCatalog.matchCommands(query: query, loc: .shared)
+            XCTAssertTrue(
+                hits.contains { $0.command.id == "ai.refine" },
+                "\(query) should surface the refine action."
+            )
+        }
+    }
+
+    /// A bare language name is ambiguous between the two, so both must be offered
+    /// rather than one of them being unreachable.
+    func testBareLanguageNameOffersBothTranslateAndRefine() {
+        for language in ["telugu", "hindi"] {
+            let ids = Set(
+                CommandPaletteCatalog.matchCommands(query: language, loc: .shared)
+                    .map(\.command.id)
+            )
+            XCTAssertTrue(ids.contains("ai.translate"), "\(language) should offer translate.")
+            XCTAssertTrue(ids.contains("ai.refine"), "\(language) should offer refine.")
+        }
+    }
+
+    /// "fix telugu" is a correction request, not a translation request — if translate
+    /// outranks refine here, the user's Telugu silently comes back as English.
+    func testFixTeluguRanksRefineAboveTranslate() {
+        let hits = CommandPaletteCatalog.matchCommands(query: "fix telugu", loc: .shared)
+        let refine = hits.firstIndex { $0.command.id == "ai.refine" }
+        let translate = hits.firstIndex { $0.command.id == "ai.translate" }
+        guard let refine else { return XCTFail("expected refine for 'fix telugu'") }
+        if let translate {
+            XCTAssertLessThan(refine, translate)
+        }
+    }
+
+    /// The mirror case: an explicit translation request must not surface refine first.
+    func testTeluguToEnglishRanksTranslateAboveRefine() {
+        let hits = CommandPaletteCatalog.matchCommands(query: "telugu to english", loc: .shared)
+        let translate = hits.firstIndex { $0.command.id == "ai.translate" }
+        let refine = hits.firstIndex { $0.command.id == "ai.refine" }
+        guard let translate else { return XCTFail("expected translate for 'telugu to english'") }
+        if let refine {
+            XCTAssertLessThan(translate, refine)
+        }
+    }
+
     func testTomorrowsDateSurfacesTomorrow() {
         let hits = CommandPaletteCatalog.matchCommands(
             query: "tomorrow's date",

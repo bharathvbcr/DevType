@@ -135,52 +135,121 @@ final class PrefixDebounceTests: XCTestCase {
 
     // MARK: - The held decision
 
-    private func decide(_ trigger: String, _ typedAfter: String) -> EventTapEngine.HeldExpansionDecision {
-        EventTapEngine.decideHeldExpansion(
-            trigger: trigger,
-            typedAfter: typedAfter,
-            prefixIndex: realLibrary
-        )
+    /// One keystroke against a fresh hold on `trigger`.
+    private func decide(_ trigger: String, _ typedNow: String) -> HeldExpansionState.Step {
+        HeldExpansionState(trigger: trigger)
+            .advance(typedNow: typedNow, isDelete: false, prefixIndex: realLibrary)
     }
 
     /// Typing toward the longer trigger keeps the hold alive, so `` `slmabout `` becomes reachable.
     func testTypingTowardTheLongerTriggerKeepsWaiting() {
-        XCTAssertEqual(decide("`slm", "a"), .keepWaiting)
-        XCTAssertEqual(decide("`slm", "abou"), .keepWaiting)
+        XCTAssertEqual(
+            decide("`slm", "a"),
+            .keepWaiting(HeldExpansionState(trigger: "`slm", typedAfter: "a"))
+        )
     }
 
     /// The regression this must not cause: a trigger followed by an ordinary character still
     /// expands, exactly as immediate firing would have done.
     func testDivergentCharacterFiresTheHeldTriggerWithTheCharacter() {
-        XCTAssertEqual(decide("`slm", "x"), .fireNow(suffix: "x"))
-        XCTAssertEqual(decide("`slm", " "), .fireNow(suffix: " "))
-        XCTAssertEqual(decide("`slm", "."), .fireNow(suffix: "."))
-    }
-
-    /// Reaching the full longer trigger is handled by the matcher, not here — but if this path
-    /// is reached the hold must not keep waiting forever.
-    func testCompletedLongerTriggerDoesNotKeepWaiting() {
-        XCTAssertEqual(decide("`slm", "about"), .fireNow(suffix: "about"))
+        XCTAssertEqual(decide("`slm", "x"), .fire(suffix: "x"))
+        XCTAssertEqual(decide("`slm", " "), .fire(suffix: " "))
+        XCTAssertEqual(decide("`slm", "."), .fire(suffix: "."))
     }
 
     /// Return and Tab end the word outright; nothing longer can follow, and waiting would leave
     /// the expansion stranded after the line was submitted.
     func testNewlineAndTabFireImmediately() {
-        XCTAssertEqual(decide("`slm", "\n"), .fireNow(suffix: "\n"))
-        XCTAssertEqual(decide("`slm", "\t"), .fireNow(suffix: "\t"))
-    }
-
-    /// Multi-character suffixes are preserved verbatim so the field ends up byte-identical to
-    /// what firing immediately would have produced.
-    func testSuffixIsPreservedVerbatim() {
-        guard case .fireNow(let suffix) = decide("`slm", "xy") else {
-            return XCTFail("Expected the held trigger to fire.")
-        }
-        XCTAssertEqual(suffix, "xy")
+        XCTAssertEqual(decide("`slm", "\n"), .fire(suffix: "\n"))
+        XCTAssertEqual(decide("`slm", "\t"), .fire(suffix: "\t"))
     }
 
     func testUnicodeSuffixSurvives() {
-        XCTAssertEqual(decide("`slm", "🎓"), .fireNow(suffix: "🎓"))
+        XCTAssertEqual(decide("`slm", "🎓"), .fire(suffix: "🎓"))
+    }
+
+    /// Backspace edits the trigger itself, so the record no longer describes the field.
+    /// The engine signals it via `isDelete` — a delete key contributes no characters.
+    func testBackspaceCancelsTheHold() {
+        XCTAssertEqual(
+            HeldExpansionState(trigger: "`slm")
+                .advance(typedNow: "", isDelete: true, prefixIndex: realLibrary),
+            .cancel
+        )
+        XCTAssertEqual(
+            HeldExpansionState(trigger: "`slm", typedAfter: "ab")
+                .advance(typedNow: "", isDelete: true, prefixIndex: realLibrary),
+            .cancel,
+            "Backspacing part-way toward `slmabout must drop the hold, not expand it."
+        )
+    }
+
+    /// A key that produced no characters (arrow, modifier chord) may have moved the caret;
+    /// expanding afterwards would erase whatever now sits in front of it.
+    func testKeystrokeWithNoCharactersCancelsTheHold() {
+        XCTAssertEqual(
+            HeldExpansionState(trigger: "`slm")
+                .advance(typedNow: "", isDelete: false, prefixIndex: realLibrary),
+            .cancel
+        )
+    }
+
+    // MARK: - Accumulating across keystrokes
+
+    /// Types `` `slm `` + `a`,`b`,`o`,`u`,`t` one keystroke at a time and returns each step.
+    private func typeAfterHold(_ trigger: String, _ characters: [String]) -> [HeldExpansionState.Step] {
+        var state = HeldExpansionState(trigger: trigger)
+        var steps: [HeldExpansionState.Step] = []
+        for character in characters {
+            let step = state.advance(typedNow: character, isDelete: false, prefixIndex: realLibrary)
+            steps.append(step)
+            if case .keepWaiting(let next) = step { state = next }
+        }
+        return steps
+    }
+
+    /// The bug this guards: the hold used to recover "what was typed since" from a ring-buffer
+    /// length delta. `CharacterRingBuffer` is fixed at 64 characters, so mid-paragraph the count
+    /// is pinned at capacity, every delta read zero, and `` `slm `` silently never expanded.
+    /// Accumulation must come from the keystrokes themselves.
+    func testTypedCharactersAccumulateAcrossKeystrokes() {
+        let steps = typeAfterHold("`slm", ["a", "b", "o", "u"])
+        XCTAssertEqual(steps, [
+            .keepWaiting(HeldExpansionState(trigger: "`slm", typedAfter: "a")),
+            .keepWaiting(HeldExpansionState(trigger: "`slm", typedAfter: "ab")),
+            .keepWaiting(HeldExpansionState(trigger: "`slm", typedAfter: "abo")),
+            .keepWaiting(HeldExpansionState(trigger: "`slm", typedAfter: "abou"))
+        ])
+    }
+
+    /// Diverging several characters in must still fire with every character typed meanwhile,
+    /// or the user loses text that was already on screen.
+    func testDivergingAfterSeveralKeystrokesFiresWithTheWholeSuffix() {
+        let steps = typeAfterHold("`slm", ["a", "b", "!"])
+        XCTAssertEqual(steps.last, .fire(suffix: "ab!"))
+    }
+
+    /// The debounce timer fires with no keystroke to add. It must still erase everything typed
+    /// during the hold — erasing only the trigger would leave the erase text mismatched against
+    /// the field and the expansion would be refused.
+    func testPendingSuffixCoversATimerFiredHold() {
+        var state = HeldExpansionState(trigger: "`slm")
+        XCTAssertEqual(state.pendingSuffix, "")
+        for character in ["a", "b"] {
+            guard case .keepWaiting(let next) = state.advance(
+                typedNow: character,
+                isDelete: false,
+                prefixIndex: realLibrary
+            ) else {
+                return XCTFail("`slm\(character) should still be on the way to `slmabout.")
+            }
+            state = next
+        }
+        XCTAssertEqual(
+            state.pendingSuffix,
+            "ab",
+            "A timer firing on `slmab must erase `slmab, not just `slm."
+        )
     }
 
     // MARK: - Ambiguity and the conflict report agree
