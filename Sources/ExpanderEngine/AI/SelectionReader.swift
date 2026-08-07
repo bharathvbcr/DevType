@@ -64,11 +64,18 @@ public enum SelectionReader {
 
         var candidates: [Candidate] = []
         var focusAvailable = false
+        var probeSummary = "skipped"
 
         // Skip the AX round-trips entirely when a hard block already applies — they would only
         // burn IPC time to produce a result `evaluate` is going to discard.
         if axTrusted, !secureInput {
-            let elements = checker.focusedElementCandidates()
+            // `activateManualAccessibilityIfEmpty`: a Chromium app that has never been asked for
+            // its accessibility tree answers every focus probe with nothing. Switching it on and
+            // re-probing is the difference between reading the selection and reporting that the
+            // user has not made one.
+            let probe = checker.probeFocusedElements(activateManualAccessibilityIfEmpty: true)
+            let elements = probe.candidates
+            probeSummary = probe.summary
             focusAvailable = !elements.isEmpty
 
             // This runs on the main thread before the palette can appear, so the total AX budget
@@ -120,6 +127,7 @@ public enum SelectionReader {
             bundleID: outcome.result?.bundleID ?? frontmostBundleID,
             candidateCount: candidates.count,
             characters: outcome.result?.text.count ?? 0,
+            probeSummary: probeSummary,
             at: now
         )
         return outcome

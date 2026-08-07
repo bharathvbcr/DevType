@@ -292,6 +292,13 @@ public final class SelectionMonitor {
             return
         }
 
+        // Ask a Chromium app to publish its accessibility tree *now*, on the app switch, rather
+        // than when the user is already waiting on a hotkey. Without the tree there is no
+        // focused element and no selection-changed notification to observe — the observer below
+        // would install successfully and then never fire. Once per pid; a non-Chromium app
+        // answers "unsupported" and costs one round-trip per launch.
+        AXContextChecker.shared.activateManualAccessibility(pid: pid)
+
         var observer: AXObserver?
         let createStatus = AXObserverCreate(pid, selectionObserverCallback, &observer)
         guard createStatus == .success, let observer else {
