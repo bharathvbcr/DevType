@@ -362,9 +362,13 @@ public enum CommandPaletteCatalog {
         if trimmed.isEmpty {
             let recent = CommandUsageStatsStore.shared.recentCommandIDs(limit: 10)
             var suggestedIDs: [String] = recent
+            // Shown when the palette opens with nothing typed. Registering a command is not
+            // enough to make it discoverable — anything missing here stays invisible until
+            // the user already knows its name.
             let fallback = [
                 "date.today", "date.tomorrow", "date.time", "tool.clipboard",
-                "ai.proofread", "ai.formal", "ai.promptenhance",
+                "ai.proofread", "ai.translate", "ai.totelugu", "ai.tohindi",
+                "ai.formal", "ai.promptenhance",
                 "nav.preferences", "nav.snippets", "tool.upper", "tool.uuid"
             ]
             for id in fallback where !suggestedIDs.contains(id) {
