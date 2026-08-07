@@ -180,6 +180,29 @@ public enum ErasePreconditionChecker {
             ? actual.lowercased() == expected.lowercased()
             : actual == expected
         guard matches else {
+            // §8.6: the slice depends on TWO reads agreeing — AXValue for the text and
+            // AXSelectedTextRange for where the caret is *within that text*. Electron hosts
+            // (field incident: Claude Desktop refusing `` `rtes `` because the slice read
+            // "round" — a fragment of unrelated prose) return the two in inconsistent
+            // coordinate spaces: the value is content-accurate, the caret indexes something
+            // else. A mismatch is therefore only trustworthy testimony when the
+            // position-independent read agrees the trigger is absent. If the value *does*
+            // contain the just-typed trigger, the geometry — not the field — is the liar:
+            // degrade to `.unavailable`, the same best-effort blind-erase baseline every
+            // AX-opaque host already uses. The backspaces operate at the app's real insertion
+            // point, which sits immediately after the trigger keystrokes the tap just
+            // observed, so the count remains well-founded.
+            //
+            // A mismatch with the trigger nowhere in the value keeps refusing — that is the
+            // genuine "field changed under us" signal this guard exists for.
+            let haystack = plan.caseInsensitive ? value.lowercased() : value
+            let needle = plan.caseInsensitive ? expected.lowercased() : expected
+            if DeliveryVerifier.boundedContains(needle, in: haystack, caretLocation: end) == true {
+                return .unavailable(
+                    "caret slice reads \(debugQuote(actual)) but the value does contain the"
+                        + " expected text — caret geometry untrusted, proceeding best-effort"
+                )
+            }
             return .mismatch("field holds \(debugQuote(actual)), expected \(debugQuote(expected))")
         }
         return .ok

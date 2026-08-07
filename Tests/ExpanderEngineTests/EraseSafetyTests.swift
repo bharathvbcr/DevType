@@ -9,6 +9,58 @@ import XCTest
 ///     selection and the remaining backspaces ate the user's preceding text.
 final class EraseSafetyTests: XCTestCase {
 
+    // MARK: - §8.6 caret-geometry corroboration (Claude Desktop incident, 2026-08-07)
+
+    /// The field incident, byte for byte: the user typed `` `rtes ``, and Electron returned a
+    /// content-accurate AXValue with a caret indexing a different coordinate space — the 5-unit
+    /// slice read "round" (the tail of "background") while the typed trigger sat elsewhere in
+    /// the value. A mismatch is only trustworthy when the position-independent read agrees the
+    /// trigger is absent; here it does not, so the gate must degrade to the AX-opaque
+    /// best-effort baseline instead of refusing the expansion.
+    func testMismatchedSliceWithTriggerPresentDegradesToUnavailable() {
+        let value = "type `rtes in the background"
+        let caret = value.utf16.count   // slice of the last 5 units reads "round"
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`rtes"),
+            value: value,
+            caretLocation: caret,
+            selectionLength: 0
+        )
+        guard case .unavailable(let why) = result else {
+            return XCTFail("Geometry is the liar, not the field — expected .unavailable, got \(result)")
+        }
+        XCTAssertTrue(why.contains("geometry"), "The reason must name the untrusted caret geometry.")
+    }
+
+    /// The refusal this guard exists for must survive the corroboration: trigger nowhere in the
+    /// value means the field genuinely changed — refuse, never blind-erase.
+    func testMismatchWithTriggerAbsentStillRefuses() {
+        let value = "completely different prose"
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`rtes"),
+            value: value,
+            caretLocation: value.utf16.count,
+            selectionLength: 0
+        )
+        guard case .mismatch = result else {
+            return XCTFail("Trigger absent from the value — the refusal must stand, got \(result)")
+        }
+    }
+
+    /// Case-insensitive plans corroborate with the same folding the slice comparison uses.
+    func testCaseInsensitiveCorroborationFoldsCase() {
+        let value = "note `RTES somewhere later words"
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`rtes", caseInsensitive: true),
+            value: value,
+            caretLocation: value.utf16.count,
+            selectionLength: 0
+        )
+        guard case .unavailable = result else {
+            return XCTFail("Folded corroboration must see `RTES, got \(result)")
+        }
+    }
+
     // MARK: - ErasePlan unit math
 
     func testASCIITriggerCountsAgreeInBothUnits() {
