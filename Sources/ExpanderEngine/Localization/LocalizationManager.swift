@@ -858,7 +858,8 @@ public final class LocalizationManager: ObservableObject {
             "ai.kind.bulletize": "Bullet List",
             "ai.kind.promptenhance": "Prompt Enhance",
             "ai.kind.translate": "Translate to English",
-            "ai.kind.refine": "Refine Telugu / Hindi",
+            "ai.kind.totelugu": "Translate to Telugu",
+            "ai.kind.tohindi": "Translate to Hindi",
             "ai.kind.custom": "Custom",
 
             "ai.palette.title": "AI Transform",
@@ -1789,7 +1790,8 @@ public final class LocalizationManager: ObservableObject {
             "ai.kind.bulletize": "글머리 기호",
             "ai.kind.promptenhance": "프롬프트 개선",
             "ai.kind.translate": "영어로 번역",
-            "ai.kind.refine": "텔루구어/힌디어 다듬기",
+            "ai.kind.totelugu": "텔루구어로 번역",
+            "ai.kind.tohindi": "힌디어로 번역",
             "ai.kind.custom": "사용자 지정",
 
             "ai.palette.title": "AI 변환",
@@ -2706,7 +2708,8 @@ public final class LocalizationManager: ObservableObject {
             "ai.kind.bulletize": "箇条書き",
             "ai.kind.promptenhance": "プロンプト強化",
             "ai.kind.translate": "英語に翻訳",
-            "ai.kind.refine": "テルグ語・ヒンディー語を校正",
+            "ai.kind.totelugu": "テルグ語に翻訳",
+            "ai.kind.tohindi": "ヒンディー語に翻訳",
             "ai.kind.custom": "カスタム",
 
             "ai.palette.title": "AI 変換",

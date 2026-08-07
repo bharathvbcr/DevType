@@ -155,11 +155,18 @@ public final class PasteboardBroker {
         /// How many times in a row `delivery` has been `.failed`, including this observation.
         /// Defaults to "already confirmed" so callers that do not track it keep the old
         /// behaviour; the live hold loop passes the real count.
-        consecutiveFailures: Int = .max
+        consecutiveFailures: Int = .max,
+        /// False when this app's AX cannot be believed about delivery (Electron / Chromium
+        /// virtualised views). Their AXValue is readable and never contains the pasted text, so
+        /// `.failed` is permanent and re-pasting duplicates the expansion every single time.
+        /// Such a paste is reported unverified and left alone rather than repeated.
+        trustFailureVerdict: Bool = true
     ) -> PasteHoldDecision {
         switch delivery {
         case .delivered:
             return .succeed
+        case .failed where !trustFailureVerdict:
+            return elapsed < holdTimeout ? .waitMore : .giveUpUnverified
         case .failed:
             // A single `.failed` is not proof. Re-read before re-pasting, provided there is
             // still time — a duplicate paste is worse than an unverified one.
@@ -322,12 +329,15 @@ public final class PasteboardBroker {
             let elapsed = Date().timeIntervalSince(holdStarted)
             // Reset on any non-failure so only an uninterrupted run of failures counts as proof.
             let failures = (delivery == .failed) ? consecutiveFailures + 1 : 0
+            // An app already condemned as AX-false-success cannot testify that a paste missed.
+            let trustFailure = bundleID.map { !AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: $0) } ?? true
             let decision = PasteboardBroker.decidePasteHold(
                 delivery: delivery,
                 pasteAttemptsCompleted: pasteAttemptsCompleted,
                 elapsed: elapsed,
                 holdTimeout: holdTimeout,
-                consecutiveFailures: failures
+                consecutiveFailures: failures,
+                trustFailureVerdict: trustFailure
             )
 
             switch decision {
