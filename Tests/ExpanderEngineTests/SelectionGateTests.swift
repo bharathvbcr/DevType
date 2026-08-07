@@ -405,6 +405,7 @@ final class SelectionGateTests: XCTestCase {
             .appMuted("com.apple.Safari"),
             .noFocusedElement,
             .emptySelection,
+            .selectionTooLarge(999_999),
         ]
         for language in AppLanguage.concreteCases {
             let table = LocalizationManager.stringTable(for: language)
@@ -544,19 +545,22 @@ final class SelectionGateTests: XCTestCase {
         )
     }
 
-    /// The live memo must actually memoize, or the poll loop runs on every hotkey press.
+    /// The memo must stop the *AX write* repeating, without ever being read as "the tree is
+    /// unavailable". `SelectionHardeningTests` covers the state machine; this holds the line
+    /// that a second call never re-reports `activatedNow`.
     func testActivateManualAccessibilityMemoizesAcrossCalls() {
         let checker = AXContextChecker()
         checker.resetManualAccessibilityMemoForTesting()
         let pid = ProcessInfo.processInfo.processIdentifier
 
         // The first call may or may not succeed (we are not a Chromium app); what must hold is
-        // that the second call is a no-op regardless of the first one's answer.
+        // that the second call never claims to have flipped the switch again.
         _ = checker.activateManualAccessibility(pid: pid)
         XCTAssertFalse(
             checker.activateManualAccessibility(pid: pid),
-            "Second activation for the same pid must short-circuit."
+            "Second activation for the same pid must not re-report activatedNow."
         )
+        XCTAssertNotEqual(checker.ensureManualAccessibility(pid: pid), .activatedNow)
 
         checker.resetManualAccessibilityMemoForTesting()
         _ = checker.activateManualAccessibility(pid: pid)

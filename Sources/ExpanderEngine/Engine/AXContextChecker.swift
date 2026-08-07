@@ -192,33 +192,61 @@ public final class AXContextChecker {
         /// Recorded verbatim in the diagnostic report — "no candidates" alone cannot tell a
         /// silent app apart from a timing out one.
         public let summary: String
-        /// True when `AXManualAccessibility` was switched on for the target during this call.
-        public let activatedManualAccessibility: Bool
+        /// Manual-accessibility state observed on the rescue attempt; `nil` when no rescue ran.
+        public let manualAccessibility: ManualAccessibilityState?
 
-        public init(candidates: [AXUIElement], summary: String, activatedManualAccessibility: Bool) {
+        /// True when `AXManualAccessibility` was switched on for the target during this call.
+        public var activatedManualAccessibility: Bool {
+            manualAccessibility == .activatedNow
+        }
+
+        public init(
+            candidates: [AXUIElement],
+            summary: String,
+            manualAccessibility: ManualAccessibilityState?
+        ) {
             self.candidates = candidates
             self.summary = summary
-            self.activatedManualAccessibility = activatedManualAccessibility
+            self.manualAccessibility = manualAccessibility
         }
     }
 
+    /// Resolve every focused-element candidate, waking a Chromium tree if nothing answered.
+    ///
+    /// - Parameters:
+    ///   - frontmostPID: the app to scope the probes to. **Pass this.** Resolving
+    ///     `NSWorkspace.frontmostApplication` separately inside each probe means a read taken
+    ///     while the window server is mid-switch can wake one app, probe a second, and be
+    ///     reported against a third.
+    ///   - deadline: caller's overall budget; the settle poll never runs past it.
     public func probeFocusedElements(
-        activateManualAccessibilityIfEmpty: Bool
+        activateManualAccessibilityIfEmpty: Bool,
+        frontmostPID: pid_t? = nil,
+        deadline: Date? = nil
     ) -> FocusProbeResult {
-        let first = runFocusProbes()
+        let pid = frontmostPID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let first = runFocusProbes(frontmostPID: pid)
         guard first.candidates.isEmpty, activateManualAccessibilityIfEmpty else {
             return FocusProbeResult(
                 candidates: first.candidates,
                 summary: first.summary,
-                activatedManualAccessibility: false
+                manualAccessibility: nil
             )
         }
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-              activateManualAccessibility(pid: pid) else {
+        guard let pid, pid > 0 else {
             return FocusProbeResult(
                 candidates: [],
-                summary: first.summary,
-                activatedManualAccessibility: false
+                summary: first.summary + " manualAX:noFrontmost",
+                manualAccessibility: nil
+            )
+        }
+
+        let state = ensureManualAccessibility(pid: pid)
+        guard Self.shouldSettlePollAfterManualAccessibility(state) else {
+            return FocusProbeResult(
+                candidates: [],
+                summary: first.summary + " manualAX:\(state.rawValue)",
+                manualAccessibility: state
             )
         }
 
@@ -226,17 +254,19 @@ public final class AXContextChecker {
         // read still answers nothing. Poll briefly rather than making the user press the hotkey
         // twice. Bounded, and only ever reached on an explicit gesture in an app that had no
         // focus at all.
-        let deadline = Date().addingTimeInterval(Self.manualAccessibilitySettleSeconds)
+        let settleDeadline = Self.settlePollDeadline(now: Date(), budget: deadline)
         var last = first
-        while Date() < deadline {
+        var polls = 0
+        while Date() < settleDeadline {
             Thread.sleep(forTimeInterval: Self.manualAccessibilityPollSeconds)
-            last = runFocusProbes()
+            polls += 1
+            last = runFocusProbes(frontmostPID: pid)
             if !last.candidates.isEmpty { break }
         }
         return FocusProbeResult(
             candidates: last.candidates,
-            summary: last.summary + " (manualAccessibility activated)",
-            activatedManualAccessibility: true
+            summary: last.summary + " manualAX:\(state.rawValue) polls:\(polls)",
+            manualAccessibility: state
         )
     }
 
@@ -245,7 +275,7 @@ public final class AXContextChecker {
         var summary: String
     }
 
-    private func runFocusProbes() -> FocusProbeRun {
+    private func runFocusProbes(frontmostPID: pid_t?) -> FocusProbeRun {
         var candidates: [AXUIElement] = []
         var parts: [String] = []
 
@@ -266,8 +296,8 @@ public final class AXContextChecker {
 
         append("systemWide", mapFocusCopy(copyFocusedUIElement(from: systemWideElement())))
 
-        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
-            let appElement = AXUIElementCreateApplication(pid)
+        if let frontmostPID, frontmostPID > 0 {
+            let appElement = AXUIElementCreateApplication(frontmostPID)
             Self.applyMessagingTimeout(to: appElement)
             append("appScoped", mapFocusCopy(copyFocusedUIElement(from: appElement)))
         } else {
@@ -299,8 +329,37 @@ public final class AXContextChecker {
     public static let manualAccessibilitySettleSeconds: TimeInterval = 0.30
     public static let manualAccessibilityPollSeconds: TimeInterval = 0.03
 
+    /// What asking an app to publish its accessibility tree actually achieved.
+    ///
+    /// The distinction that matters is `alreadyActive` vs everything else. This used to be a
+    /// plain `Bool` meaning "did I set the attribute *on this call*", and the rescue path in
+    /// `probeFocusedElements` read that as "is the tree available now". `SelectionMonitor` pokes
+    /// every app it registers on, i.e. every app the user switches to — so by the time the AI
+    /// hotkey ran, the answer was already `false`, the rescue bailed out before its settle poll,
+    /// and the whole Chromium wake-up was dead code in production. That is precisely the
+    /// `axCandidates=0 outcome=noFocus systemWide:noValue appScoped:noValue chain:noValue`
+    /// field report: the wake-up had worked and the code meant to wait for it never ran.
+    public enum ManualAccessibilityState: String, Equatable, Sendable {
+        /// The attribute was set successfully on this call.
+        case activatedNow
+        /// Set successfully earlier this session; the tree should already be published.
+        case alreadyActive
+        /// The app does not implement the attribute (any non-Chromium app). Memoized — the
+        /// answer cannot change for the life of the process.
+        case unsupported
+        /// A transient AX error (timeout, app still launching). **Never memoized**: one unlucky
+        /// round-trip must not disable the wake-up for that process forever.
+        case failed
+        /// Not a usable target.
+        case invalidPID
+
+        /// True when the tree is published, or should be shortly.
+        public var isLive: Bool { self == .activatedNow || self == .alreadyActive }
+    }
+
     private let manualAccessibilityLock = UnfairLock()
-    private var manualAccessibilityPIDs: Set<pid_t> = []
+    private var manualAccessibilityPIDs: [pid_t: ManualAccessibilityState] = [:]
+    private var manualAccessibilityTerminationObserver: NSObjectProtocol?
 
     /// Pure policy: a pid is worth poking once per process lifetime.
     ///
@@ -313,20 +372,59 @@ public final class AXContextChecker {
         pid > 0 && !alreadyActivated.contains(pid)
     }
 
-    /// Switch on `AXManualAccessibility` for `pid`, at most once per process.
+    /// Pure policy: map the AX status of the `AXManualAccessibility` write to a state.
     ///
-    /// Returns true when the attribute was set on this call. A non-Chromium app answers
-    /// `attributeUnsupported` and is simply recorded as done, so the cost is one round-trip
-    /// per app per launch and nothing else.
-    @discardableResult
-    public func activateManualAccessibility(pid: pid_t) -> Bool {
-        manualAccessibilityLock.lock()
-        let already = manualAccessibilityPIDs
-        manualAccessibilityLock.unlock()
-
-        guard Self.shouldActivateManualAccessibility(pid: pid, alreadyActivated: already) else {
-            return false
+    /// `attributeUnsupported` is a settled answer (this app is not Chromium). Everything else
+    /// that is not success is transient and must stay retryable — `.cannotComplete` in
+    /// particular is just an app that was busy launching when we asked.
+    public static func manualAccessibilityState(forSetStatus status: AXError) -> ManualAccessibilityState {
+        switch status {
+        case .success:
+            return .activatedNow
+        case .attributeUnsupported, .noValue:
+            return .unsupported
+        default:
+            return .failed
         }
+    }
+
+    /// Pure policy: should the caller wait for the tree after a wake-up attempt?
+    ///
+    /// Everything except an unusable pid earns the wait. `alreadyActive` above all: that is the
+    /// state a Chromium app is in for every hotkey press after the first, and skipping the wait
+    /// there is exactly the regression this enum exists to prevent. `unsupported` and `failed`
+    /// also poll — an AppKit app that answered *nothing* to all three focus probes is abnormal
+    /// (mid-window-transition, still launching), and the alternative is a false "no selection"
+    /// on a gesture that is about to fail anyway.
+    public static func shouldSettlePollAfterManualAccessibility(
+        _ state: ManualAccessibilityState
+    ) -> Bool {
+        state != .invalidPID
+    }
+
+    /// Pure: settle-poll deadline, never past the caller's overall read budget.
+    public static func settlePollDeadline(now: Date, budget: Date?) -> Date {
+        let natural = now.addingTimeInterval(manualAccessibilitySettleSeconds)
+        guard let budget else { return natural }
+        return min(natural, budget)
+    }
+
+    /// Ensure `AXManualAccessibility` is on for `pid`, reporting what was already true.
+    ///
+    /// Prefer this over `activateManualAccessibility(pid:)`: callers almost always want to know
+    /// whether the tree is *live*, not whether this particular call is the one that switched it on.
+    @discardableResult
+    public func ensureManualAccessibility(pid: pid_t) -> ManualAccessibilityState {
+        guard pid > 0 else { return .invalidPID }
+
+        manualAccessibilityLock.lock()
+        let remembered = manualAccessibilityPIDs[pid]
+        manualAccessibilityLock.unlock()
+        if let remembered {
+            return remembered == .activatedNow ? .alreadyActive : remembered
+        }
+
+        installManualAccessibilityTerminationObserverIfNeeded()
 
         let appElement = AXUIElementCreateApplication(pid)
         Self.applyMessagingTimeout(to: appElement)
@@ -335,23 +433,87 @@ public final class AXContextChecker {
             Self.manualAccessibilityAttribute as CFString,
             kCFBooleanTrue
         )
+        let state = Self.manualAccessibilityState(forSetStatus: status)
 
+        if state != .failed {
+            manualAccessibilityLock.lock()
+            manualAccessibilityPIDs[pid] = state
+            manualAccessibilityLock.unlock()
+        }
+
+        DevTypeLog.selection.info(
+            """
+            [Selection] AXManualAccessibility pid=\(pid, privacy: .public) \
+            state=\(state.rawValue, privacy: .public) ax=\(status.rawValue, privacy: .public)
+            """
+        )
+        return state
+    }
+
+    /// Legacy shim: true only when this call flipped the switch.
+    @discardableResult
+    public func activateManualAccessibility(pid: pid_t) -> Bool {
+        ensureManualAccessibility(pid: pid) == .activatedNow
+    }
+
+    /// Drop a remembered pid.
+    ///
+    /// macOS reuses pids. Without this, an Electron app that quits and is replaced by an AppKit
+    /// app on the same pid inherits `alreadyActive` — or, worse, the reverse: a Chromium app
+    /// launched onto a pid we recorded as `unsupported` never gets its tree switched on and
+    /// reports "no selection" for the rest of the session.
+    public func forgetManualAccessibility(pid: pid_t) {
         manualAccessibilityLock.lock()
-        manualAccessibilityPIDs.insert(pid)
+        let removed = manualAccessibilityPIDs.removeValue(forKey: pid)
         manualAccessibilityLock.unlock()
-
-        if status == .success {
-            DevTypeLog.eventTap.info(
-                "[AX] AXManualAccessibility enabled for pid \(pid, privacy: .public)"
+        if let removed {
+            DevTypeLog.selection.debug(
+                """
+                [Selection] AXManualAccessibility memo evicted pid=\(pid, privacy: .public) \
+                was=\(removed.rawValue, privacy: .public)
+                """
             )
         }
-        return status == .success
+    }
+
+    private func installManualAccessibilityTerminationObserverIfNeeded() {
+        manualAccessibilityLock.lock()
+        let needsInstall = manualAccessibilityTerminationObserver == nil
+        manualAccessibilityLock.unlock()
+        guard needsInstall else { return }
+
+        let observer = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication else { return }
+            self?.forgetManualAccessibility(pid: app.processIdentifier)
+        }
+
+        // Two threads can race to here; the loser removes its own duplicate rather than leaking
+        // a second subscription that would evict twice per quit.
+        manualAccessibilityLock.lock()
+        let won = manualAccessibilityTerminationObserver == nil
+        if won { manualAccessibilityTerminationObserver = observer }
+        manualAccessibilityLock.unlock()
+        if !won {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
     }
 
     /// Test hook — process-scoped memo, so a test that seeds a pid must be able to clear it.
     public func resetManualAccessibilityMemoForTesting() {
         manualAccessibilityLock.lock()
         manualAccessibilityPIDs.removeAll()
+        manualAccessibilityLock.unlock()
+    }
+
+    /// Test hook — seed a remembered state without an AX round-trip.
+    public func seedManualAccessibilityForTesting(pid: pid_t, state: ManualAccessibilityState) {
+        manualAccessibilityLock.lock()
+        manualAccessibilityPIDs[pid] = state
         manualAccessibilityLock.unlock()
     }
 

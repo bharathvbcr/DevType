@@ -10,6 +10,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionWindowController: NSWindowController?
     private var onboardingWindowController: NSWindowController?
     private var statusToggleMenuItem: NSMenuItem?
+    /// Shown only while `lastRecordedInjectOutcome` is a refuse/failure. See `refreshStatusItemUI`.
+    private var restartEngineMenuItem: NSMenuItem?
     private var permissionRecoveryMenuItem: NSMenuItem?
     private var openAtLoginMenuItem: NSMenuItem?
     private var menuHeaderStatusPill: PillBadgeView?
@@ -446,6 +448,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(toggleItem)
         statusToggleMenuItem = toggleItem
 
+        // Appears only after an expansion refused or failed silently: one click tears the
+        // engine down, clears the failure state, and brings the tap back up. Hidden the rest
+        // of the time so the menu stays quiet when nothing is wrong.
+        let restartItem = item(
+            loc.s("menu.restartEngine"),
+            "arrow.clockwise.circle",
+            #selector(restartEngine(_:))
+        )
+        restartItem.isHidden = true
+        menu.addItem(restartItem)
+        restartEngineMenuItem = restartItem
+
         // §4.1: Open at Login, Language, and Muted Apps moved into Preferences.
         // `openAtLoginMenuItem` stays declared so `refreshOpenAtLoginMenuItem()`
         // keeps working for any caller that still holds it; it is simply nil now.
@@ -471,6 +485,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Checked = feature on. Unchecking "Keyboard Shortcuts" unregisters every Carbon
+        // hotkey (inline search, AI palette, macros) without touching text expansion;
+        // unchecking "Trigger Conflict Warnings" silences duplicate/shadow reporting in the
+        // editor and library health without changing what the matcher does.
+        let shortcutsItem = item(
+            loc.s("menu.hotkeys.toggle"),
+            "keyboard",
+            #selector(toggleKeyboardShortcuts(_:))
+        )
+        shortcutsItem.state = HotkeyPreferences.shortcutsDisabled ? .off : .on
+        menu.addItem(shortcutsItem)
+
+        let conflictsItem = item(
+            loc.s("menu.conflicts.toggle"),
+            "exclamationmark.triangle",
+            #selector(toggleConflictDetection(_:))
+        )
+        conflictsItem.state = SnippetStore.isConflictDetectionEnabled ? .on : .off
+        menu.addItem(conflictsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         // Muting the frontmost app is contextual, so it stays in the menu bar.
         // The *list* of muted apps is a list, so it lives in Preferences (§4.8).
         menu.addItem(item(loc.s("menu.mute.front"), "speaker.slash", #selector(muteFrontmostApp(_:))))
@@ -486,6 +522,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// claiming ⌘/ forever. Only single-character keys can be menu equivalents;
     /// anything else shows no hint (the Carbon hotkey still works).
     private func hotkeyMenuKeyEquivalent() -> String {
+        // Advertising a chord that will not fire is worse than no hint.
+        guard !HotkeyPreferences.shortcutsDisabled else { return "" }
         let name = DevTypeShortcut.keyName(for: hotkeyManager.inlineSearchShortcut.keyCode)
         return name.count == 1 ? name.lowercased() : ""
     }
@@ -1087,6 +1125,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }()
         let urgent = urgentInject || snapshot.isDegradedInject
+        // The restart affordance tracks the failure state exactly: visible while the last
+        // expansion refused or failed, gone once one succeeds (or the user restarts).
+        restartEngineMenuItem?.isHidden = !urgentInject
         let color = statusColor(for: display, urgent: urgent)
         let kind = statusKind(for: display)
         let name = statusName(for: display, urgent: urgentInject)
@@ -1285,6 +1326,53 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         refreshStatusItemUI()
+    }
+
+    /// One-click recovery after a refused/failed expansion: full stop (tap + run-loop source
+    /// down), clear the recorded failure so the status item stops flagging it, then bring the
+    /// tap back up through the coordinator so cached snapshots and status handlers stay in
+    /// sync. A permission problem still routes to the recovery window instead of pretending
+    /// a restart fixed it.
+    @objc private func restartEngine(_ sender: NSMenuItem) {
+        DevTypeLog.app.notice("[App] user requested engine restart from status menu")
+        let engine = EventTapEngine.shared
+        engine.stop()
+        engine.isEnabled = true
+        PermissionCoordinator.shared.clearLastInjectOutcome()
+
+        let snapshot = PermissionProbe().snapshot()
+        if snapshot.blocksDefaultEventTap {
+            DevTypeLog.permission.notice(
+                "[Permission] restart blocked — \(DevTypeLog.snapshotSummary(snapshot), privacy: .public); opening recovery"
+            )
+            openPermissionRecovery(nil)
+        } else {
+            PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
+        }
+        refreshStatusItemUI()
+    }
+
+    /// Unchecking unregisters every Carbon hotkey; re-checking re-registers the persisted
+    /// bindings. The menu is rebuilt so the inline-search item stops advertising a key
+    /// equivalent that no longer fires.
+    @objc private func toggleKeyboardShortcuts(_ sender: NSMenuItem) {
+        HotkeyPreferences.shortcutsDisabled.toggle()
+        DevTypeLog.app.info(
+            "[App] keyboard shortcuts \(HotkeyPreferences.shortcutsDisabled ? "disabled" : "enabled", privacy: .public) from status menu"
+        )
+        hotkeyManager.registerAll()
+        rebuildMenu()
+    }
+
+    /// Silences duplicate/shadow trigger reporting everywhere it surfaces (editor validation,
+    /// library health). Matcher behaviour is unchanged — this is "stop warning me", not
+    /// "resolve my collisions differently".
+    @objc private func toggleConflictDetection(_ sender: NSMenuItem) {
+        SnippetStore.isConflictDetectionEnabled.toggle()
+        DevTypeLog.app.info(
+            "[App] trigger conflict warnings \(SnippetStore.isConflictDetectionEnabled ? "enabled" : "disabled", privacy: .public) from status menu"
+        )
+        rebuildMenu()
     }
 
     /// Kept as a shim: the Open at Login menu item moved into Preferences (§4.1)

@@ -173,9 +173,17 @@ public final class EraseExecutor {
     ///   verify it (Safari / Chromium / Electron report stale or virtualised AXValue right
     ///   after a real edit), so erasing and injecting again duplicates the expansion — the
     ///   `ScholarLMScholarLM` shape. Under this flag, unverifiable state refuses instead.
+    /// - Parameter onUnverifiableAfterWrite: invoked (with the reason) only when the refuse is
+    ///   the `afterPossibleWrite` + `.unavailable` combination — an attempted AX write against a
+    ///   field that still could not be read back *after* the settle retry. That signature is how
+    ///   Chromium / Electron shells present, and the caller can use it to learn the app's
+    ///   verdict so the next expansion skips the AX write instead of refusing forever. Never
+    ///   invoked for `.mismatch` (a readable field that disagrees — usually a moved caret, not a
+    ///   broken app).
     public func performGuardedErase(
         plan: ErasePlan,
         afterPossibleWrite: Bool = false,
+        onUnverifiableAfterWrite: ((String) -> Void)? = nil,
         completion: @escaping (Bool) -> Void
     ) {
         guard plan.backspaceCount > 0 else {
@@ -188,29 +196,69 @@ public final class EraseExecutor {
         let element = AXContextChecker.shared.focusedElement()
         ax.collapseSelectionToCaret(element: element)
         evaluateErasePrecondition(plan: plan, element: element) { result in
-            if afterPossibleWrite, case .unavailable(let why) = result {
-                DevTypeLog.inject.error(
-                    "[Inject] erase refused after an attempted AX write — cannot verify field (\(why, privacy: .public)). Proceeding would risk injecting twice."
-                )
-                completion(false)
+            if afterPossibleWrite, case .unavailable = result {
+                // Unverifiable after a write that reached the field is grounds to refuse — but
+                // not on the first read. The AX tree is routinely mid-transition right after an
+                // edit (the write itself can trigger a re-render), so give it one settle before
+                // concluding the field cannot be verified at all.
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + InjectTiming.erasePreconditionRetryDelay
+                ) {
+                    let second = self.evaluateErasePrecondition(
+                        plan: plan,
+                        element: nil,
+                        retryOnMismatch: false
+                    )
+                    self.finishGuardedErase(
+                        plan: plan,
+                        afterPossibleWrite: afterPossibleWrite,
+                        result: second,
+                        onUnverifiableAfterWrite: onUnverifiableAfterWrite,
+                        completion: completion
+                    )
+                }
                 return
             }
-            if case .mismatch(let why) = result {
-                DevTypeLog.inject.error(
-                    "[Inject] erase aborted before backspaces — \(why, privacy: .public)"
-                )
-                // #region agent log
-                TextInjectionPipeline.debugLogInject(
-                    hypothesisId: "M5",
-                    message: "guarded erase aborted",
-                    location: "EraseExecutor",
-                    data: ["why": why, "eraseBackspaces": plan.backspaceCount]
-                )
-                // #endregion
-                completion(false)
-                return
-            }
-            self.hid.sendBackspacesAsync(count: plan.backspaceCount) { completion(true) }
+            self.finishGuardedErase(
+                plan: plan,
+                afterPossibleWrite: afterPossibleWrite,
+                result: result,
+                onUnverifiableAfterWrite: onUnverifiableAfterWrite,
+                completion: completion
+            )
         }
+    }
+
+    private func finishGuardedErase(
+        plan: ErasePlan,
+        afterPossibleWrite: Bool,
+        result: ErasePreconditionResult,
+        onUnverifiableAfterWrite: ((String) -> Void)?,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if afterPossibleWrite, case .unavailable(let why) = result {
+            DevTypeLog.inject.error(
+                "[Inject] erase refused after an attempted AX write — cannot verify field (\(why, privacy: .public)). Proceeding would risk injecting twice."
+            )
+            onUnverifiableAfterWrite?(why)
+            completion(false)
+            return
+        }
+        if case .mismatch(let why) = result {
+            DevTypeLog.inject.error(
+                "[Inject] erase aborted before backspaces — \(why, privacy: .public)"
+            )
+            // #region agent log
+            TextInjectionPipeline.debugLogInject(
+                hypothesisId: "M5",
+                message: "guarded erase aborted",
+                location: "EraseExecutor",
+                data: ["why": why, "eraseBackspaces": plan.backspaceCount]
+            )
+            // #endregion
+            completion(false)
+            return
+        }
+        hid.sendBackspacesAsync(count: plan.backspaceCount) { completion(true) }
     }
 }

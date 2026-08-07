@@ -187,8 +187,10 @@ final class SourceContractTests: XCTestCase {
             text[text.index(text.startIndex, offsetBy: start)..<text.index(text.startIndex, offsetBy: end)]
         )
         XCTAssertTrue(
-            region.contains("SelectionReader.readSelection()"),
-            "presentFromHotkey must use readSelection() so the alert can name the real cause."
+            region.contains("SelectionReader.readSelection(allowClipboardFallback: true)"),
+            "presentFromHotkey must use readSelection so the alert can name the real cause, "
+                + "and it is the one path that opts into the brokered ⌘C fallback — the captured "
+                + "text is shown in the action panel before anything is written back."
         )
         XCTAssertFalse(
             region.contains("readSelectedText()"),

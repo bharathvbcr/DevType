@@ -634,24 +634,33 @@ public final class TextInjectionPipeline {
 
             // One transactional AX replace is the cleanest undo: no backspaces, no clipboard.
             let bundle = record.bundleID ?? ""
-            if !bundle.isEmpty, !TextInjectionPipeline.shouldSkipAXSelectedText(bundleID: bundle),
-               self.ax.performAXRangeReplace(
-                   text: restoreText,
-                   eraseCount: undoPlan.utf16Count,
-                   bundleID: record.bundleID
-               ) == .replaced {
-                DevTypeLog.inject.info("[Inject] §3.1 undo via AX range replace")
-                PermissionCoordinator.shared.recordInjectOutcome(
-                    .succeeded,
-                    refuseContext: nil,
-                    path: "undoAXRange"
+            var undoWriteMayHaveMutated = false
+            if !bundle.isEmpty, !TextInjectionPipeline.shouldSkipAXSelectedText(bundleID: bundle) {
+                let undoOutcome = self.ax.performAXRangeReplace(
+                    text: restoreText,
+                    eraseCount: undoPlan.utf16Count,
+                    bundleID: record.bundleID
                 )
-                return
+                if undoOutcome == .replaced {
+                    DevTypeLog.inject.info("[Inject] §3.1 undo via AX range replace")
+                    PermissionCoordinator.shared.recordInjectOutcome(
+                        .succeeded,
+                        refuseContext: nil,
+                        path: "undoAXRange"
+                    )
+                    return
+                }
+                // Same provenance rule as the expand path: only a write that actually reached
+                // the field makes unverifiable state a reason to abort the HID fallback.
+                undoWriteMayHaveMutated = undoOutcome.fieldMayHaveMutated
             }
 
             // HID fallback: the guarded erase re-verifies that the injected text is still sitting
             // left of the caret before a single backspace is posted.
-            self.eraser.performGuardedErase(plan: undoPlan, afterPossibleWrite: true) { erased in
+            self.eraser.performGuardedErase(
+                plan: undoPlan,
+                afterPossibleWrite: undoWriteMayHaveMutated
+            ) { erased in
                 guard erased else {
                     DevTypeLog.inject.notice(
                         "[Inject] §3.1 undo aborted — field no longer holds the injected text"
@@ -1038,7 +1047,7 @@ public final class TextInjectionPipeline {
             // A known-lying app has no fallback here, so this correctly refuses rather than
             // pretending the expand happened.
             let axOnlyOutcome = (shellLike || preferHID)
-                ? AXReplaceOutcome.unavailable(shellLike ? "shell-like context" : "weak AX app")
+                ? AXReplaceOutcome.notAttempted(shellLike ? "shell-like context" : "weak AX app")
                 : ax.performAXRangeReplace(
                     text: textToInject,
                     eraseCount: erasePlan.utf16Count,
@@ -1081,17 +1090,21 @@ public final class TextInjectionPipeline {
             break
         }
 
-        // Tracks whether an AX write was *attempted* against this field. A non-`.replaced`
-        // outcome does not prove nothing changed — some hosts mutate and then report a stale
-        // AXValue — so the HID fallback below must not erase on unverifiable state.
+        // Tracks whether a text write actually *reached* the field. A non-`.replaced` outcome
+        // does not prove nothing changed — some hosts mutate and then report a stale AXValue —
+        // so the HID fallback below must not erase on unverifiable state. But the outcome's own
+        // provenance decides: a `.notAttempted` return means the writer bailed before issuing
+        // any write (no focused element, learned skip, unreadable range), and treating *that*
+        // as "may have mutated" refused every expand in AX-opaque hosts — a Chrome PWA cannot
+        // verify the field either, so the guard tripped on a write that never happened.
         var attemptedAXWrite = false
         if !shellLike, !preferHID {
-            attemptedAXWrite = true
             let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
                 eraseCount: erasePlan.utf16Count,
                 bundleID: context.frontBundleID
             )
+            attemptedAXWrite = axOutcome.fieldMayHaveMutated
             if axOutcome == .replaced {
                 // #region agent log
                 TextInjectionPipeline.debugLogInject(
@@ -1134,7 +1147,36 @@ public final class TextInjectionPipeline {
         // The guarded erase collapses any stray selection and re-verifies the trigger is still left
         // of the caret, so a half-applied AX edit above cannot be swallowed by backspace #1 and turn
         // the remaining backspaces loose on the user's text.
-        eraser.performGuardedErase(plan: erasePlan, afterPossibleWrite: attemptedAXWrite) { erased in
+        eraser.performGuardedErase(
+            plan: erasePlan,
+            afterPossibleWrite: attemptedAXWrite,
+            onUnverifiableAfterWrite: { why in
+                // Self-healing: an attempted AX write left the field unreadable even after the
+                // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
+                // this on its very first expansion). Strikes escalate rather than condemn
+                // outright: a transient (focus stolen mid-inject) looks identical on one
+                // observation, and a wrong condemnation is effectively permanent. The second
+                // strike condemns, so a genuinely broken shell heals on the user's next retry
+                // and every expansion after that skips the AX write for the HID paste path.
+                // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
+                guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
+                switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
+                    bundleID: bundleID,
+                    role: focusedRole
+                ) {
+                case .struck(let count):
+                    DevTypeLog.inject.notice(
+                        "[Inject] unverifiable after AX write (\(why, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(bundleID, privacy: .public)"
+                    )
+                case .condemned:
+                    DevTypeLog.inject.notice(
+                        "[Inject] unverifiable after AX write (\(why, privacy: .public)) — verdict learned for \(bundleID, privacy: .public); this expansion is refused, the next uses HID paste"
+                    )
+                case .alreadyCondemned:
+                    break
+                }
+            }
+        ) { erased in
             guard erased else {
                 self.refuseInject(
                     "Erase precondition failed before paste — field no longer holds the trigger",

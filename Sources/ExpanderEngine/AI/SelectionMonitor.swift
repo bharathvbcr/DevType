@@ -21,6 +21,16 @@ public final class SelectionMonitor {
     /// Long enough to type a short trigger; single-use + same-element carry the safety.
     public static let defaultTTL: TimeInterval = 6.0
 
+    /// Minimum spacing between full-ladder cache refreshes.
+    ///
+    /// The monitor runs from an AX notification many apps fire on *every keystroke*, so the full
+    /// attribute ladder cannot run unconditionally. But primary-only means the cache is never
+    /// populated for Chromium or Electron — they answer `kAXSelectedText` with nothing and keep
+    /// the selection in the range / text-marker forms — so the cache fallback that is supposed
+    /// to rescue the hotkey path was empty in exactly the apps that need it. Rate-limiting bounds
+    /// the extra IPC to a handful of round-trips a second while making the cache real.
+    public static let fallbackLadderMinInterval: TimeInterval = 0.25
+
     public struct CachedSelection: Equatable {
         public let text: String
         public let bundleID: String
@@ -44,6 +54,8 @@ public final class SelectionMonitor {
     /// AX element that owned the cached text — used for same-element checks at expand time.
     private var cacheElement: AXUIElement?
     private var changeToken: UInt64 = 0
+    /// When the full attribute ladder last ran, for `shouldRunFallbackLadder`.
+    private var lastFallbackLadderAt: Date?
 
     private var axObserver: AXObserver?
     private var observedPID: pid_t = 0
@@ -297,7 +309,13 @@ public final class SelectionMonitor {
         // focused element and no selection-changed notification to observe — the observer below
         // would install successfully and then never fire. Once per pid; a non-Chromium app
         // answers "unsupported" and costs one round-trip per launch.
-        AXContextChecker.shared.activateManualAccessibility(pid: pid)
+        AXContextChecker.shared.ensureManualAccessibility(pid: pid)
+
+        // New app, new element: let the first refresh pay for the full ladder rather than
+        // inheriting the previous app's rate-limit window.
+        lock.lock()
+        lastFallbackLadderAt = nil
+        lock.unlock()
 
         var observer: AXObserver?
         let createStatus = AXObserverCreate(pid, selectionObserverCallback, &observer)
@@ -383,15 +401,48 @@ public final class SelectionMonitor {
         refreshCacheFromFocus(bundleID: bundleID)
     }
 
-    private func refreshCacheFromFocus(bundleID: String) {
+    /// Pure policy: may this refresh pay for the range / attributed / marker attributes?
+    ///
+    /// Only when the cheap primary attribute found nothing (the ladder cannot improve on a hit)
+    /// and the last ladder run is far enough back to keep per-keystroke cost bounded.
+    static func shouldRunFallbackLadder(
+        primaryFoundText: Bool,
+        lastLadderAt: Date?,
+        now: Date,
+        minInterval: TimeInterval = fallbackLadderMinInterval
+    ) -> Bool {
+        if primaryFoundText { return false }
+        guard let lastLadderAt else { return true }
+        let elapsed = now.timeIntervalSince(lastLadderAt)
+        // A backwards clock jump (NTP correction, sleep/wake) must not lock the ladder out until
+        // wall-clock catches up — that would be minutes of a silently non-functioning cache.
+        return elapsed < 0 || elapsed >= minInterval
+    }
+
+    private func refreshCacheFromFocus(bundleID: String, now: Date = Date()) {
         guard let element = AXContextChecker.shared.focusedElement() else {
             clearCache()
             return
         }
-        // Primary attribute only. This runs from an AX notification that many apps fire on every
-        // keystroke, and the fallback attributes would cost two extra IPC round-trips exactly
-        // when there is nothing selected. The explicit AI paths run the full ladder themselves.
-        let text = SelectionReader.copySelectedText(from: element, allowFallbackAttributes: false)
+        // Cheap attribute first: this runs from an AX notification that many apps fire on every
+        // keystroke, and the extra round-trips are wasted whenever the primary one answers.
+        let primary = SelectionReader.copySelectedText(from: element, allowFallbackAttributes: false)
+
+        lock.lock()
+        let lastLadderAt = lastFallbackLadderAt
+        lock.unlock()
+
+        var text = primary
+        if Self.shouldRunFallbackLadder(
+            primaryFoundText: !(primary?.isEmpty ?? true),
+            lastLadderAt: lastLadderAt,
+            now: now
+        ) {
+            lock.lock()
+            lastFallbackLadderAt = now
+            lock.unlock()
+            text = SelectionReader.copySelectedText(from: element, allowFallbackAttributes: true)
+        }
         applySelectionRefresh(text: text, bundleID: bundleID, element: element)
     }
 

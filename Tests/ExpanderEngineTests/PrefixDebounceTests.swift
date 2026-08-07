@@ -334,29 +334,32 @@ final class PrefixDebounceTests: XCTestCase {
         }
     }
 
-    // MARK: - Where holding is safe at all
+    // MARK: - Where holding is allowed
 
-    /// A hold leaves the trigger in the field while the user keeps typing, so the erase must be
-    /// *verifiable* when it finally runs. In an app whose AX cannot be believed the precondition
-    /// degrades to a blind count-based backspace, which would eat the characters typed during
-    /// the hold. Those apps must not debounce at all.
-    func testAXOpaqueAppsDoNotHold() {
+    /// Holding is universal: the hold guarantees its own erase count from observed keystrokes
+    /// (anything it cannot observe cancels it, and a timeout fire proves input quiescence), so
+    /// AX-opaque shells no longer need to be excluded. Before this, these apps kept the
+    /// pre-debounce behaviour and their longer triggers were unreachable — the field bug this
+    /// reverses: `armed=0` in a Chrome PWA while `` `slm `` kept shadowing `` `slmabout ``.
+    func testAXOpaqueAppsAlsoHold() {
         for bundleID in [
             "com.tinyspeck.slackmacgap",   // Slack
             "com.google.Chrome",
+            "com.google.Chrome.app.mjoklplbddabcmpepnokjaffbmgbkkgg", // Chrome PWA (GitHub)
             "com.microsoft.VSCode",
             "net.whatsapp.WhatsApp",
             "com.hnc.Discord",
             "com.anthropic.claudefordesktop"
         ] {
-            XCTAssertFalse(
+            XCTAssertTrue(
                 EventTapEngine.canHoldMatch(bundleID: bundleID),
-                "\(bundleID) cannot verify an erase, so it must not debounce."
+                "\(bundleID): debounce must be universal — the hold's integrity invariants,"
+                    + " not AX readability, are what make the erase safe."
             )
         }
     }
 
-    /// An app with no known AX problem keeps the feature.
+    /// An app with no known AX problem holds too, and additionally verifies the erase via AX.
     func testAXTrustworthyAppsHold() {
         XCTAssertTrue(EventTapEngine.canHoldMatch(bundleID: "com.apple.TextEdit"))
     }

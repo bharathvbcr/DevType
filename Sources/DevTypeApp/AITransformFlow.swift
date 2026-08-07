@@ -34,8 +34,12 @@ enum AITransformFlow {
 
         // Typed outcome, not `Result?`: the reason decides the message. "Select text first" is
         // actively misleading when the real cause is a revoked AX grant or Secure Input.
+        //
+        // Clipboard fallback on: this is the one explicit-gesture path where a brokered ⌘C as a
+        // last resort is right — the captured text is shown in the action panel before anything
+        // is written back, so a bad capture is visible and cancellable.
         let selection: SelectionReader.Result
-        switch SelectionReader.readSelection() {
+        switch SelectionReader.readSelection(allowClipboardFallback: true) {
         case .selection(let resolved):
             selection = resolved
         case .failure(let failure):

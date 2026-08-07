@@ -143,6 +143,56 @@ public final class HIDKeyPoster {
         return true
     }
 
+    // MARK: - Cmd+C
+
+    /// Physical ⌘C: Command down → C → Command up. The copy half of the clipboard-fallback
+    /// selection read (`PasteboardBroker.captureSelectionViaCopy`).
+    ///
+    /// Same shape as `postCmdVKeyEvents` for the same reasons: a flag-only chord fails under many
+    /// IMEs, and bailing between Command-down and the letter must still release the modifier or
+    /// it stays stuck down system-wide. Synchronous — the caller is already a bounded,
+    /// user-gesture-only path that polls the pasteboard right after.
+    @discardableResult
+    public func postCmdCKeyEvents() -> Bool {
+        guard CGPreflightPostEventAccess() else {
+            DevTypeLog.inject.error(
+                "[Inject] Cmd+C refused — CGPreflightPostEventAccess false at post time"
+            )
+            return false
+        }
+
+        let source = makeTaggedEventSource()
+        let command = CGKeyCode(kVK_Command)
+        let cKeyCode = virtualKeyCode(for: "c") ?? CGKeyCode(kVK_ANSI_C)
+
+        var commandIsDown = false
+        if let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: true) {
+            cmdDown.flags = .maskCommand
+            cmdDown.post(tap: .cghidEventTap)
+            commandIsDown = true
+        }
+        usleep(useconds_t(InjectTiming.cmdVModifierGap * 1_000_000))
+
+        guard let cDown = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: true),
+              let cUp = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: false) else {
+            DevTypeLog.inject.error(
+                "[Inject] Cmd+C CGEvent create failed — Post Events may be revoked or CG HID unavailable"
+            )
+            if commandIsDown {
+                releaseCommand(source: source, command: command)
+            }
+            return false
+        }
+        cDown.flags = .maskCommand
+        cUp.flags = .maskCommand
+        cDown.post(tap: .cghidEventTap)
+        cUp.post(tap: .cghidEventTap)
+        usleep(useconds_t(InjectTiming.cmdVModifierGap * 1_000_000))
+
+        releaseCommand(source: source, command: command)
+        return true
+    }
+
     /// §2.7: same key sequence, scheduled instead of slept. Removes 30 ms of hard main-thread
     /// block per paste (60 ms with the hold-loop retry). `completion` runs on main.
     public func postCmdVKeyEventsAsync(completion: @escaping (Bool) -> Void) {

@@ -1080,6 +1080,9 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     private func duplicateTriggerConflict(trigger: String, caseSensitive: Bool, excludingID: UUID?) -> String? {
+        // User preference: conflict warnings off means the editor validates nothing here —
+        // the save proceeds and the matcher's normal collision rules apply.
+        guard SnippetStore.isConflictDetectionEnabled else { return nil }
         for other in groups.flatMap(\.snippets) {
             if let excludingID, other.id == excludingID { continue }
             let collide: Bool

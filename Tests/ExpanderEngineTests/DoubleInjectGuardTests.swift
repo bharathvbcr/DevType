@@ -106,4 +106,82 @@ final class DoubleInjectGuardTests: XCTestCase {
         )
         XCTAssertEqual(result, .ok)
     }
+
+    // MARK: - Write provenance: the other half of the flag
+
+    /// The inverse bug, from a second field report: a Chrome PWA (GitHub) with no readable
+    /// focused element. `performAXRangeReplace` returned before issuing any write, the pipeline
+    /// still set `afterPossibleWrite`, the precondition read `.unavailable` for the same reason
+    /// the write never started — and a field that was provably untouched refused to expand.
+    /// The flag must come from the outcome's provenance, not from "we called the writer".
+    func testOnlyOutcomesThatReachedTheFieldCountAsPossibleWrites() {
+        XCTAssertFalse(
+            AXTextWriter.AXReplaceOutcome.notAttempted("no focused element").fieldMayHaveMutated,
+            "A writer that bailed before any set is not a write — treating it as one turns "
+                + "every AX-opaque host into a refused expand."
+        )
+        XCTAssertFalse(
+            AXTextWriter.AXReplaceOutcome
+                .notAttempted("learned false-success for x role AXTextArea").fieldMayHaveMutated
+        )
+        XCTAssertTrue(
+            AXTextWriter.AXReplaceOutcome.unavailable("setSelectedText failed (-25204)")
+                .fieldMayHaveMutated,
+            "A set that was issued and errored may still have landed; unverifiable state after "
+                + "it must keep refusing."
+        )
+        XCTAssertTrue(AXTextWriter.AXReplaceOutcome.replaced.fieldMayHaveMutated)
+        XCTAssertTrue(
+            AXTextWriter.AXReplaceOutcome.falseSuccess.fieldMayHaveMutated,
+            "falseSuccess means a set was issued; the value comparison says it did not stick, "
+                + "but the selection was widened and restored — stay conservative."
+        )
+    }
+
+    /// The pipeline must derive the flag from the outcome — a literal `afterPossibleWrite: true`
+    /// is the bug shape this section exists to prevent.
+    func testPipelineDerivesTheFlagFromWriteProvenance() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
+        let source = SourceContractTests.strippingComments(
+            try String(contentsOf: url, encoding: .utf8)
+        )
+        XCTAssertTrue(
+            source.contains("attemptedAXWrite = axOutcome.fieldMayHaveMutated"),
+            "The expand path must take the flag from the replace outcome."
+        )
+        XCTAssertFalse(
+            source.contains("afterPossibleWrite: true"),
+            "No caller may hardcode afterPossibleWrite — that collapses 'we called the writer' "
+                + "into 'the field may have changed' and refuses provably-safe expands."
+        )
+        XCTAssertTrue(
+            source.contains("recordUnverifiableAfterWrite"),
+            "The unverifiable-after-write refusal must feed the strike ledger, or an unknown "
+                + "broken shell refuses forever instead of healing on the second attempt."
+        )
+    }
+
+    /// The tap's app-switch observer must wake Chromium accessibility trees for the *inject*
+    /// path. `SelectionMonitor` does the same poke but only while the AI feature is enabled —
+    /// plain text expansion must not depend on an unrelated feature flag for its AX visibility.
+    func testEventTapWakesAccessibilityTreesOnAppSwitch() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/ExpanderEngine/Engine/EventTapEngine.swift")
+        let source = SourceContractTests.strippingComments(
+            try String(contentsOf: url, encoding: .utf8)
+        )
+        XCTAssertTrue(
+            source.contains("ensureManualAccessibility"),
+            "Without the app-switch wake-up, a Chromium app has no focused AX element at "
+                + "expand time: the erase precondition cannot verify the field and every "
+                + "expansion degrades to best-effort."
+        )
+    }
 }

@@ -44,6 +44,13 @@ final class HotkeyManager {
     func registerAll() {
         installHandlerIfNeeded()
         unregisterAll()
+        // The kill switch unregisters everything and registers nothing — checked here, at the
+        // single choke point, so a toggle mid-session takes effect on the next registerAll()
+        // and a rebind while disabled still persists without silently re-enabling.
+        guard !HotkeyPreferences.shortcutsDisabled else {
+            DevTypeLog.app.info("[App] hotkeys disabled by preference — nothing registered")
+            return
+        }
         registerInlineSearch()
         registerAIPalette()
         for macro in macros where macro.keyCode != 0 {

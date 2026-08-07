@@ -59,6 +59,14 @@ public final class AIDiagnosticsStore {
         /// `candidateCount: 0` alone cannot distinguish an app whose accessibility tree was
         /// never switched on from one that is timing out — and those need opposite fixes.
         public let probeSummary: String
+        /// `SelectionReader.ReadVia.rawValue` — which AX attribute answered.
+        ///
+        /// Tells an app that answers the plain attribute apart from one that is marker-only,
+        /// which is the difference between "works everywhere" and "works in AppKit apps".
+        public let via: String
+        /// Wall-clock cost of the read. A read that fails *and* took a second is a stalled app,
+        /// not a missing selection.
+        public let elapsedMilliseconds: Int
 
         public init(
             at: Date,
@@ -66,7 +74,9 @@ public final class AIDiagnosticsStore {
             bundleID: String?,
             candidateCount: Int,
             characters: Int,
-            probeSummary: String = ""
+            probeSummary: String = "",
+            via: String = "",
+            elapsedMilliseconds: Int = 0
         ) {
             self.at = at
             self.outcome = outcome
@@ -74,6 +84,8 @@ public final class AIDiagnosticsStore {
             self.candidateCount = candidateCount
             self.characters = characters
             self.probeSummary = probeSummary
+            self.via = via
+            self.elapsedMilliseconds = elapsedMilliseconds
         }
     }
 
@@ -116,6 +128,8 @@ public final class AIDiagnosticsStore {
         candidateCount: Int,
         characters: Int,
         probeSummary: String = "",
+        via: String = "",
+        elapsedMilliseconds: Int = 0,
         at date: Date = Date()
     ) {
         lock.lock()
@@ -126,7 +140,9 @@ public final class AIDiagnosticsStore {
                 bundleID: bundleID,
                 candidateCount: candidateCount,
                 characters: characters,
-                probeSummary: probeSummary
+                probeSummary: probeSummary,
+                via: via,
+                elapsedMilliseconds: elapsedMilliseconds
             )
         )
         if selectionReads.count > Self.capacity {
@@ -253,6 +269,8 @@ public final class AIDiagnosticsStore {
             "Last selection read: \(iso.string(from: last.at)) outcome=\(last.outcome) "
                 + "app=\(last.bundleID ?? "(unknown)") axCandidates=\(last.candidateCount) "
                 + "chars=\(last.characters)"
+                + (last.via.isEmpty ? "" : " via=\(last.via)")
+                + (last.elapsedMilliseconds > 0 ? " elapsedMs=\(last.elapsedMilliseconds)" : "")
         )
         if !last.probeSummary.isEmpty {
             lines.append("Last selection AX probes: \(last.probeSummary)")
@@ -266,6 +284,19 @@ public final class AIDiagnosticsStore {
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: " ")
         lines.append("Selection read breakdown: \(summary)")
+
+        // Which attribute answers, per app. This is the line that says "this app is marker-only"
+        // or "this app never answers anything", which no amount of outcome counting can.
+        let viaCounts = reads
+            .filter { !$0.via.isEmpty && $0.via != "unknown" }
+            .reduce(into: [String: Int]()) { $0[$1.via, default: 0] += 1 }
+        if !viaCounts.isEmpty {
+            let viaSummary = viaCounts
+                .sorted { ($0.value, $0.key) > ($1.value, $1.key) }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: " ")
+            lines.append("Selection read attributes: \(viaSummary)")
+        }
         return lines
     }
 }

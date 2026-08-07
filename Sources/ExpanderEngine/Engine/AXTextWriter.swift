@@ -12,13 +12,34 @@ public final class AXTextWriter {
     public static let shared = AXTextWriter()
 
     /// Outcome of an AX selected-text replace attempt.
+    ///
+    /// `notAttempted` vs `unavailable` is load-bearing for the erase guard downstream: after a
+    /// write that *may* have landed, an unverifiable field must refuse the expand (erasing and
+    /// injecting again duplicates it), but after a return that provably never issued a write the
+    /// field is untouched and the HID fallback is safe. Collapsing the two is exactly how a
+    /// Chrome PWA with no readable focused element turned into "Erase precondition failed" —
+    /// a refusal protecting against a write that never happened.
     public enum AXReplaceOutcome: Equatable {
         /// The field actually changed — inject is done.
         case replaced
         /// AX returned `.success` but the field is byte-identical. The app lies; condemn it.
         case falseSuccess
-        /// Could not attempt or could not judge (no focus, unreadable range, set failed).
+        /// Returned before any text write was issued — the field is provably untouched.
+        /// (No focused element, learned skip, unreadable/undecodable range, failed range set:
+        /// a failed `AXUIElementSetAttributeValue` leaves the selection unchanged.)
+        case notAttempted(String)
+        /// A `kAXSelectedText` write was issued but its effect cannot be judged. The field may
+        /// have mutated.
         case unavailable(String)
+
+        /// True when a text write reached the field, so downstream destructive steps must treat
+        /// unverifiable state as "may already contain the expansion".
+        public var fieldMayHaveMutated: Bool {
+            switch self {
+            case .notAttempted: return false
+            case .replaced, .falseSuccess, .unavailable: return true
+            }
+        }
     }
 
     private let verifier: DeliveryVerifier
@@ -77,7 +98,7 @@ public final class AXTextWriter {
                 data: ["ok": false, "fail": "noFocusedElement"]
             )
             // #endregion
-            return .unavailable("no focused element")
+            return .notAttempted("no focused element")
         }
 
         var roleRef: CFTypeRef?
@@ -100,7 +121,7 @@ public final class AXTextWriter {
                 data: ["ok": false, "fail": "learnedFalseSuccessForRole", "role": role]
             )
             // #endregion
-            return .unavailable("learned false-success for \(bundleID) role \(role)")
+            return .notAttempted("learned false-success for \(bundleID) role \(role)")
         }
 
         var rangeRef: CFTypeRef?
@@ -125,7 +146,7 @@ public final class AXTextWriter {
                 ]
             )
             // #endregion
-            return .unavailable("AXSelectedTextRange unreadable (\(rangeCopy.rawValue))")
+            return .notAttempted("AXSelectedTextRange unreadable (\(rangeCopy.rawValue))")
         }
 
         let axRangeValue = unsafeBitCast(rangeValue, to: AXValue.self)
@@ -139,7 +160,7 @@ public final class AXTextWriter {
                 data: ["ok": false, "fail": "rangeDecode", "role": role]
             )
             // #endregion
-            return .unavailable("AXSelectedTextRange undecodable")
+            return .notAttempted("AXSelectedTextRange undecodable")
         }
 
         // Caller falls back to HID backspace + paste when this returns false. That fallback assumes
@@ -170,7 +191,7 @@ public final class AXTextWriter {
         var expanded = CFRange(location: newLocation, length: newLength)
 
         guard let newRangeValue = AXValueCreate(.cfRange, &expanded) else {
-            return .unavailable("AXValueCreate failed for widened range")
+            return .notAttempted("AXValueCreate failed for widened range")
         }
         let setRange = AXUIElementSetAttributeValue(
             axElement,
@@ -195,7 +216,7 @@ public final class AXTextWriter {
             )
             // #endregion
             // Selection unchanged (the set failed), so there is nothing to roll back.
-            return .unavailable("setSelectedTextRange failed (\(setRange.rawValue))")
+            return .notAttempted("setSelectedTextRange failed (\(setRange.rawValue))")
         }
 
         let setResult = AXUIElementSetAttributeValue(axElement, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
@@ -245,7 +266,7 @@ public final class AXTextWriter {
                 AXWriteCapabilityStore.shared.recordTrusted(bundleID: bundleID, role: role)
             case .falseSuccess:
                 AXWriteCapabilityStore.shared.recordFalseSuccess(bundleID: bundleID, role: role)
-            case .unavailable:
+            case .notAttempted, .unavailable:
                 break
             }
         }
@@ -255,6 +276,7 @@ public final class AXTextWriter {
         switch outcome {
         case .replaced: failLabel = "none"
         case .falseSuccess: failLabel = "valueVerifyFailed"
+        case .notAttempted(let why): failLabel = why
         case .unavailable(let why): failLabel = why
         }
         TextInjectionPipeline.debugLogInject(
