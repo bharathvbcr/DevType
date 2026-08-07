@@ -93,6 +93,16 @@ public struct TypeAheadBuffer: Equatable {
         return replay
     }
 
+    /// The caret moved by some route this type never sees — a mouse click, a focus change, an
+    /// Escape handled before admission. Releases the hold without waiting for the expansion.
+    ///
+    /// This is not optional politeness. A click is not a `keyDown`, so it never reaches `admit`;
+    /// without an explicit flush the held characters are replayed *after* the click and land
+    /// wherever the user clicked. Passing them through unheld would at least have left them at
+    /// the old caret — holding them and replaying late actively moves the user's text, which is
+    /// a worse failure than the transposition this type exists to fix.
+    public mutating func flushForCaretChange() -> String { flush() }
+
     // MARK: - Admission
 
     /// Decide one keystroke.

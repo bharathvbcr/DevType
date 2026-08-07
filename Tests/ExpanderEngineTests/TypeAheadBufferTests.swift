@@ -178,6 +178,35 @@ final class TypeAheadBufferTests: XCTestCase {
         XCTAssertEqual(admit(&buffer, "x", pid: nil, at: 0.01), .swallow)
     }
 
+    // MARK: - Caret moves the tap sees, but `admit` never does
+
+    /// A mouse click is not a `keyDown`, so it never reaches `admit` — the engine has to flush
+    /// explicitly. Without this the held characters are replayed *after* the click, landing
+    /// wherever the user clicked instead of where they typed them. Passing them straight through
+    /// would at least have put them at the old caret; holding moves them, which is worse.
+    func testCaretChangeFlushesHeldKeys() {
+        var buffer = TypeAheadBuffer()
+        buffer.beginExpansion(focusPID: 42, now: t0)
+        _ = admit(&buffer, "a", at: 0.01)
+
+        XCTAssertEqual(
+            buffer.flushForCaretChange(), "a",
+            "a click during delivery must release held keys, not relocate them"
+        )
+        XCTAssertFalse(buffer.isHolding)
+        XCTAssertEqual(
+            buffer.endExpansion(), "",
+            "already-flushed keys must not be replayed a second time when the expansion ends"
+        )
+    }
+
+    func testCaretChangeWithNothingHeldIsHarmless() {
+        var buffer = TypeAheadBuffer()
+        XCTAssertEqual(buffer.flushForCaretChange(), "")
+        buffer.beginExpansion(focusPID: 42, now: t0)
+        XCTAssertEqual(buffer.flushForCaretChange(), "")
+    }
+
     // MARK: - Boundaries
 
     func testDeadlineIsExclusiveAtTheInstantItExpires() {
