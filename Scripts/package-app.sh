@@ -285,11 +285,21 @@ if packaged_binary_aligns_with_spm "${BINARY}" "${PACKAGED_EXE}"; then
 fi
 
 SKIP_RESIGN=0
+HARDENED_WANTED="${DEVTYPE_HARDENED_RUNTIME:-0}"
+HARDENED_PRESENT=0
+if codesign -d --verbose=2 "${APP_BUNDLE}" 2>&1 | grep -q "flags=.*runtime"; then
+  HARDENED_PRESENT=1
+fi
+
 if [[ "${BINARY_UNCHANGED}" -eq 1 \
    && "${IDENTITY_SUPPORT_UNCHANGED}" -eq 1 \
    && "${BINARY_ALIGN_OK}" -eq 1 ]] \
    && bundle_codesign_ok "${APP_BUNDLE}"; then
-  SKIP_RESIGN=1
+  if [[ "${HARDENED_WANTED}" == "1" && "${HARDENED_PRESENT}" -eq 0 ]]; then
+    SKIP_RESIGN=0
+  else
+    SKIP_RESIGN=1
+  fi
 elif [[ "${BINARY_UNCHANGED}" -eq 1 && "${IDENTITY_SUPPORT_UNCHANGED}" -eq 1 ]] \
    && ! packaged_binary_aligns_with_spm "${BINARY}" "${PACKAGED_EXE}"; then
   echo "==> packaged MacOS/DevType does not align with SPM product — will resign"
@@ -351,7 +361,7 @@ else
   fi
   # bash 3.2 (system /bin/bash) treats "${empty[@]}" as unbound under `set -u`, so the
   # default non-hardened path would abort here. The `+` expansion drops to nothing instead.
-  codesign --force --sign "${SIGN_ARG}" --identifier "${BUNDLE_ID}" \
+  codesign --force --deep --sign "${SIGN_ARG}" --identifier "${BUNDLE_ID}" \
     ${CODESIGN_EXTRA[@]+"${CODESIGN_EXTRA[@]}"} "${APP_BUNDLE}" >/dev/null
 fi
 
