@@ -48,49 +48,54 @@ final class AIPlumbingTests: XCTestCase {
             AITransformKind.translate.isChunkSafe,
             "A paragraph translated alone means the same as one translated in context."
         )
-        XCTAssertTrue(AITransformKind.refine.isChunkSafe)
+        XCTAssertTrue(AITransformKind.translateTelugu.isChunkSafe)
+        XCTAssertTrue(AITransformKind.translateHindi.isChunkSafe)
     }
 
     // MARK: - Telugu / Hindi (usually typed in English letters)
 
-    /// Both actions read a *guessed* source language and rewrite the text wholesale.
-    /// Direct injection would land a wrong-language guess in the field with no warning.
-    func testIndicKindsArePreviewedNotInjected() {
-        XCTAssertEqual(AITransformKind.translate.defaultOutputMode, .preview)
-        XCTAssertEqual(AITransformKind.refine.defaultOutputMode, .preview)
+    private var translateKinds: [AITransformKind] {
+        [.translate, .translateTelugu, .translateHindi]
     }
 
-    /// A creative temperature paraphrases instead of translating or correcting.
-    func testIndicKindsAreLowTemperature() {
-        XCTAssertLessThanOrEqual(AITransformKind.translate.temperature, 0.3)
-        XCTAssertLessThanOrEqual(AITransformKind.refine.temperature, 0.3)
+    /// Translation rewrites the text wholesale, and for romanized input the source
+    /// language is a guess — a wrong guess must not land in the field unannounced.
+    func testTranslateKindsArePreviewedNotInjected() {
+        for kind in translateKinds {
+            XCTAssertEqual(kind.defaultOutputMode, .preview, "\(kind)")
+        }
+    }
+
+    /// A creative temperature paraphrases instead of translating.
+    func testTranslateKindsAreLowTemperature() {
+        for kind in translateKinds {
+            XCTAssertLessThanOrEqual(kind.temperature, 0.3, "\(kind)")
+        }
     }
 
     /// Romanized Telugu / Hindi tokenizes badly, so the response budget must exceed input.
-    func testIndicKindsBudgetRoomForALongerOutput() {
-        XCTAssertGreaterThan(AITransformKind.translate.tokenBudgetMultiplier, 1.0)
-        XCTAssertGreaterThan(AITransformKind.refine.tokenBudgetMultiplier, 1.0)
+    func testTranslateKindsBudgetRoomForALongerOutput() {
+        for kind in translateKinds {
+            XCTAssertGreaterThan(kind.tokenBudgetMultiplier, 1.0, "\(kind)")
+        }
     }
 
     func testTranslateCatalogDefaults() {
-        let kind = AITransformKind.translate
-        XCTAssertEqual(AITransformKind.named("translate"), kind)
-        XCTAssertEqual(AITransformKind.named("Translate"), kind)
-        XCTAssertEqual(kind.localizationKey, "ai.kind.translate")
-        XCTAssertTrue(AITransformKind.builtInPalette.contains(kind))
-    }
-
-    func testRefineCatalogDefaults() {
-        let kind = AITransformKind.refine
-        XCTAssertEqual(AITransformKind.named("refine"), kind)
-        XCTAssertEqual(AITransformKind.named("Refine"), kind)
-        XCTAssertEqual(kind.localizationKey, "ai.kind.refine")
-        XCTAssertTrue(AITransformKind.builtInPalette.contains(kind))
+        XCTAssertEqual(AITransformKind.named("translate"), .translate)
+        XCTAssertEqual(AITransformKind.named("Translate"), .translate)
+        XCTAssertEqual(AITransformKind.named("totelugu"), .translateTelugu)
+        XCTAssertEqual(AITransformKind.named("tohindi"), .translateHindi)
+        XCTAssertEqual(AITransformKind.translate.localizationKey, "ai.kind.translate")
+        XCTAssertEqual(AITransformKind.translateTelugu.localizationKey, "ai.kind.totelugu")
+        XCTAssertEqual(AITransformKind.translateHindi.localizationKey, "ai.kind.tohindi")
+        for kind in translateKinds {
+            XCTAssertTrue(AITransformKind.builtInPalette.contains(kind), "\(kind)")
+        }
     }
 
     /// The instructions carry the whole feature: without the romanized framing the model
     /// reads "nenu intiki veltunnanu" as broken English and hands it back unchanged.
-    func testTranslateInstructionsNameBothLanguagesAndEnglishOutput() {
+    func testTranslateToEnglishInstructionsNameBothLanguages() {
         let instructions = AITransformKind.translate.instructions.lowercased()
         XCTAssertTrue(instructions.contains("telugu"))
         XCTAssertTrue(instructions.contains("hindi"))
@@ -104,26 +109,47 @@ final class AIPlumbingTests: XCTestCase {
         )
     }
 
-    /// Refine's one failure mode is quietly becoming Translate. The instructions must
-    /// forbid that outright, or a Telugu grammar fix comes back as English.
-    func testRefineInstructionsForbidTranslating() {
-        let instructions = AITransformKind.refine.instructions.lowercased()
+    /// Output goes back into the user's own field, where they type romanized — native
+    /// script would be unusable there, so the instructions must rule it out explicitly.
+    func testOutboundTranslationIsRomanizedNotNativeScript() {
+        let telugu = AITransformKind.translateTelugu.instructions.lowercased()
+        XCTAssertTrue(telugu.contains("english letters"))
+        XCTAssertTrue(telugu.contains("not telugu script"))
+        XCTAssertTrue(telugu.contains("never telugu script"))
+
+        let hindi = AITransformKind.translateHindi.instructions.lowercased()
+        XCTAssertTrue(hindi.contains("english letters"))
+        XCTAssertTrue(hindi.contains("not devanagari script"))
+        XCTAssertTrue(hindi.contains("never devanagari script"))
+    }
+
+    /// The three directions must not share a prompt, or a row silently does another's job.
+    func testEachTranslateDirectionHasItsOwnInstructions() {
+        let prompts = Set(translateKinds.map(\.instructions))
+        XCTAssertEqual(prompts.count, translateKinds.count)
+    }
+
+    // MARK: - Proofread keeps the text in its own language
+
+    /// Proofread is the Telugu / Hindi grammar fix too. Its one failure mode is quietly
+    /// becoming Translate — a Telugu correction coming back as English.
+    func testProofreadHandlesRomanizedIndicWithoutTranslating() {
+        let instructions = AITransformKind.proofread.instructions.lowercased()
         XCTAssertTrue(instructions.contains("telugu"))
         XCTAssertTrue(instructions.contains("hindi"))
-        XCTAssertTrue(instructions.contains("same language"))
+        XCTAssertTrue(instructions.contains("english letters"))
         XCTAssertTrue(
             instructions.contains("never translate"),
-            "Refine must keep the text in its own language."
+            "Proofread must return the text in the language it was written in."
         )
     }
 
-    /// Translate and Refine are opposites; identical instructions would mean one of the
-    /// two palette rows silently does the other one's job.
-    func testTranslateAndRefineDoNotShareInstructions() {
-        XCTAssertNotEqual(
-            AITransformKind.translate.instructions,
-            AITransformKind.refine.instructions
-        )
+    /// The original English contract still holds — this is an extension, not a rewrite.
+    func testProofreadStillOnlyFixesErrors() {
+        let instructions = AITransformKind.proofread.instructions.lowercased()
+        XCTAssertTrue(instructions.contains("spelling, grammar, and punctuation"))
+        XCTAssertTrue(instructions.contains("only fix errors"))
+        XCTAssertEqual(AITransformKind.proofread.defaultOutputMode, .direct)
     }
 
     func testPromptEnhanceCatalogDefaults() {

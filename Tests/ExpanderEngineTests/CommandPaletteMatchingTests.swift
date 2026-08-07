@@ -113,7 +113,7 @@ final class CommandPaletteMatchingTests: XCTestCase {
     func testTranslateIsReachableByItsEverydayPhrasings() {
         for query in [
             "translate", "translation", "to english", "telugu to english",
-            "hindi to english", "tenglish", "hinglish"
+            "hindi to english"
         ] {
             let hits = CommandPaletteCatalog.matchCommands(query: query, loc: .shared)
             XCTAssertTrue(
@@ -123,52 +123,85 @@ final class CommandPaletteMatchingTests: XCTestCase {
         }
     }
 
-    func testRefineIsReachableByItsEverydayPhrasings() {
+    func testOutboundTranslationIsReachableByItsEverydayPhrasings() {
+        for query in ["to telugu", "english to telugu", "say in telugu", "translate to telugu"] {
+            let hits = CommandPaletteCatalog.matchCommands(query: query, loc: .shared)
+            XCTAssertTrue(
+                hits.contains { $0.command.id == "ai.totelugu" },
+                "\(query) should surface translate-to-Telugu."
+            )
+        }
+        for query in ["to hindi", "english to hindi", "say in hindi", "translate to hindi"] {
+            let hits = CommandPaletteCatalog.matchCommands(query: query, loc: .shared)
+            XCTAssertTrue(
+                hits.contains { $0.command.id == "ai.tohindi" },
+                "\(query) should surface translate-to-Hindi."
+            )
+        }
+    }
+
+    /// Proofread absorbed the Telugu / Hindi grammar fix, so the phrasings that used to
+    /// reach a separate row must still land somewhere.
+    func testTeluguHindiGrammarFixesReachProofread() {
         for query in [
-            "refine", "fix telugu", "fix hindi", "telugu grammar", "hindi grammar",
+            "fix telugu", "fix hindi", "telugu grammar", "hindi grammar",
             "correct telugu", "proofread hindi"
         ] {
             let hits = CommandPaletteCatalog.matchCommands(query: query, loc: .shared)
             XCTAssertTrue(
-                hits.contains { $0.command.id == "ai.refine" },
-                "\(query) should surface the refine action."
+                hits.contains { $0.command.id == "ai.proofread" },
+                "\(query) should surface proofread."
             )
         }
     }
 
-    /// A bare language name is ambiguous between the two, so both must be offered
-    /// rather than one of them being unreachable.
-    func testBareLanguageNameOffersBothTranslateAndRefine() {
-        for language in ["telugu", "hindi"] {
+    /// "fix telugu" is a correction request. If a translate row outranks proofread here,
+    /// the user's Telugu silently comes back as English.
+    func testFixTeluguRanksProofreadAboveAnyTranslation() {
+        let hits = CommandPaletteCatalog.matchCommands(query: "fix telugu", loc: .shared)
+        guard let proofread = hits.firstIndex(where: { $0.command.id == "ai.proofread" }) else {
+            return XCTFail("expected proofread for 'fix telugu'")
+        }
+        for id in ["ai.translate", "ai.totelugu"] {
+            if let translation = hits.firstIndex(where: { $0.command.id == id }) {
+                XCTAssertLessThan(proofread, translation, "proofread should outrank \(id)")
+            }
+        }
+    }
+
+    // MARK: - Translation direction
+
+    /// "telugu to english" and "english to telugu" share every token — only word order
+    /// tells them apart, so the ranking has to read the phrase, not the token bag.
+    func testDirectionDecidesWhichTranslationWins() {
+        let inbound = CommandPaletteCatalog.matchCommands(query: "telugu to english", loc: .shared)
+        XCTAssertEqual(
+            inbound.first?.command.id,
+            "ai.translate",
+            "'telugu to english' must translate INTO English."
+        )
+
+        let outbound = CommandPaletteCatalog.matchCommands(query: "english to telugu", loc: .shared)
+        XCTAssertEqual(
+            outbound.first?.command.id,
+            "ai.totelugu",
+            "'english to telugu' must translate INTO Telugu."
+        )
+
+        let hindi = CommandPaletteCatalog.matchCommands(query: "english to hindi", loc: .shared)
+        XCTAssertEqual(hindi.first?.command.id, "ai.tohindi")
+    }
+
+    /// A bare language name does not say which way to go, so both directions must be
+    /// offered rather than one being unreachable.
+    func testBareLanguageNameOffersBothDirections() {
+        for (language, outbound) in [("telugu", "ai.totelugu"), ("hindi", "ai.tohindi")] {
             let ids = Set(
                 CommandPaletteCatalog.matchCommands(query: language, loc: .shared)
                     .map(\.command.id)
             )
-            XCTAssertTrue(ids.contains("ai.translate"), "\(language) should offer translate.")
-            XCTAssertTrue(ids.contains("ai.refine"), "\(language) should offer refine.")
-        }
-    }
-
-    /// "fix telugu" is a correction request, not a translation request — if translate
-    /// outranks refine here, the user's Telugu silently comes back as English.
-    func testFixTeluguRanksRefineAboveTranslate() {
-        let hits = CommandPaletteCatalog.matchCommands(query: "fix telugu", loc: .shared)
-        let refine = hits.firstIndex { $0.command.id == "ai.refine" }
-        let translate = hits.firstIndex { $0.command.id == "ai.translate" }
-        guard let refine else { return XCTFail("expected refine for 'fix telugu'") }
-        if let translate {
-            XCTAssertLessThan(refine, translate)
-        }
-    }
-
-    /// The mirror case: an explicit translation request must not surface refine first.
-    func testTeluguToEnglishRanksTranslateAboveRefine() {
-        let hits = CommandPaletteCatalog.matchCommands(query: "telugu to english", loc: .shared)
-        let translate = hits.firstIndex { $0.command.id == "ai.translate" }
-        let refine = hits.firstIndex { $0.command.id == "ai.refine" }
-        guard let translate else { return XCTFail("expected translate for 'telugu to english'") }
-        if let refine {
-            XCTAssertLessThan(translate, refine)
+            XCTAssertTrue(ids.contains("ai.translate"), "\(language) should offer → English.")
+            XCTAssertTrue(ids.contains(outbound), "\(language) should offer → \(language).")
         }
     }
 

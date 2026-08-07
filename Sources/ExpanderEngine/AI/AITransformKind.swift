@@ -28,10 +28,12 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     case friendly
     case bulletize
     case promptEnhance = "promptenhance"
-    /// Telugu / Hindi (usually typed in English letters) → English.
+    /// Anything (usually Telugu / Hindi typed in English letters) → English.
     case translate
-    /// Grammar and spelling correction that stays in Telugu / Hindi.
-    case refine
+    /// English → Telugu, written in English letters.
+    case translateTelugu = "totelugu"
+    /// English → Hindi, written in English letters.
+    case translateHindi = "tohindi"
     case custom
 
     /// Case-insensitive lookup used by snippet `aiTransform` and the action palette.
@@ -59,6 +61,18 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             You correct spelling, grammar, and punctuation in text the user supplies.
             Change nothing else: preserve the author's wording, tone, register, and line breaks.
             Do not rephrase, summarize, shorten, or answer the text. Only fix errors.
+
+            The text may be English, or Telugu or Hindi typed in English letters
+            (romanized) — for example "nenu ninna intiki vellanu" (Telugu) or
+            "main kal ghar gaya tha" (Hindi). Read such text phonetically as Telugu or
+            Hindi, not as misspelled English, and fix inconsistent romanized spelling,
+            wrong verb forms, and wrong gender or number agreement. Telugu and
+            Devanagari script are also accepted.
+
+            Always return the text in the language and script it was written in.
+            Never translate. Romanized Telugu comes back as romanized Telugu, romanized
+            Hindi comes back as romanized Hindi, and romanized text is never converted
+            into Telugu or Devanagari script.
             """
         case .rewrite:
             return """
@@ -122,25 +136,35 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             Return ONLY the English translation — no transliteration, romanization,
             commentary, labels, or notes.
             """
-        case .refine:
+        case .translateTelugu:
             return """
-            You correct grammar, spelling, and word choice in the user's text and
-            return it in THE SAME LANGUAGE it was written in.
+            You translate the user's text into Telugu written in English letters
+            (romanized Telugu) — the way Telugu is typed in chat, not Telugu script.
 
-            The input is usually Telugu or Hindi typed in English letters (romanized) —
-            for example "nenu ninna intiki vellanu" (Telugu) or "main kal ghar gaya tha"
-            (Hindi). Fix inconsistent romanized spelling, wrong verb forms, wrong gender
-            or number agreement, and awkward phrasing. Telugu and Devanagari script are
-            also accepted, and stay in their own script.
+            For example "I am going home" becomes "nenu intiki veltunnanu", and
+            "how are you" becomes "meeru ela unnaru". Use the common, natural romanized
+            spelling a Telugu speaker would type.
 
-            Never translate. Romanized Telugu comes back as romanized Telugu; romanized
-            Hindi comes back as romanized Hindi. Do not switch the text to English and do
-            not convert romanized text into Telugu or Devanagari script.
+            Preserve tone, register, and line-break structure. Leave names, numbers,
+            URLs, code, and @handles exactly as written.
 
-            Preserve meaning, tone, register, and line-break structure. Leave names,
-            numbers, URLs, code, and @handles exactly as written.
+            Return ONLY the romanized Telugu translation — never Telugu script, and no
+            English gloss, commentary, labels, or notes.
+            """
+        case .translateHindi:
+            return """
+            You translate the user's text into Hindi written in English letters
+            (romanized Hindi) — the way Hindi is typed in chat, not Devanagari script.
 
-            Return ONLY the corrected text — no translation, commentary, labels, or notes.
+            For example "I am going home" becomes "main ghar ja raha hoon", and
+            "how are you" becomes "aap kaise hain". Use the common, natural romanized
+            spelling a Hindi speaker would type.
+
+            Preserve tone, register, and line-break structure. Leave names, numbers,
+            URLs, code, and @handles exactly as written.
+
+            Return ONLY the romanized Hindi translation — never Devanagari script, and no
+            English gloss, commentary, labels, or notes.
             """
         case .custom:
             return """
@@ -161,9 +185,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .friendly: return 0.5
         case .bulletize: return 0.3
         case .promptEnhance: return 0.35
-        // Translating and correcting should be reproducible, not creative.
-        case .translate: return 0.2
-        case .refine: return 0.2
+        // Translation should be reproducible, not creative.
+        case .translate, .translateTelugu, .translateHindi: return 0.2
         case .custom: return 0.5
         }
     }
@@ -173,11 +196,10 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread:
             return .direct
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly, .bulletize,
-             .promptEnhance, .translate, .refine, .custom:
-            // Translate and refine both replace the text wholesale off a *guessed*
-            // source language, and the failure mode is silent (refine quietly
-            // translating to English). Preview by default; Preferences → AI can
-            // switch either to direct.
+             .promptEnhance, .translate, .translateTelugu, .translateHindi, .custom:
+            // Translation replaces the text wholesale, and for romanized input the
+            // source language is a guess — always worth a look before it lands.
+            // Preferences → AI can switch any of these to direct.
             return .preview
         }
     }
@@ -197,9 +219,10 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .promptEnhance: return 1.4
         // Romanized Telugu / Hindi is token-hostile (it splits into many sub-word
         // pieces), so the output can be longer in tokens than the input even when
-        // it is shorter in characters.
+        // it is shorter in characters. That cuts both ways, so both directions
+        // budget generously.
         case .translate: return 1.6
-        case .refine: return 1.5
+        case .translateTelugu, .translateHindi: return 2.0
         case .custom: return 1.5
         }
     }
@@ -208,9 +231,10 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     /// piece-wise. When `false`, the transformer must refuse rather than chunk.
     public var isChunkSafe: Bool {
         switch self {
-        // Both are local edits: a paragraph translated or corrected on its own says
-        // the same thing as one handled in context.
-        case .proofread, .formal, .friendly, .bulletize, .translate, .refine:
+        // All local edits: a paragraph translated or corrected on its own says the
+        // same thing as one handled in context.
+        case .proofread, .formal, .friendly, .bulletize,
+             .translate, .translateTelugu, .translateHindi:
             return true
         case .rewrite, .paraphrase, .expand, .condense, .promptEnhance, .custom:
             return false

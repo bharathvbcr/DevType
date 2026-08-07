@@ -100,6 +100,9 @@ public final class AXWriteCapabilityStore {
             if bundleID.hasPrefix("com.microsoft.VSCode") { return .falseSuccess }
             if bundleID.hasPrefix("com.visualstudio.code") { return .falseSuccess }
             if bundleID.hasPrefix("com.electron.") { return .falseSuccess }
+            // Electron, but not under any of the prefixes above. Its AXValue is readable and
+            // never contains pasted text, so delivery verification cannot judge it.
+            if bundleID == "com.anthropic.claudefordesktop" { return .falseSuccess }
             return .unknown
         }
     }

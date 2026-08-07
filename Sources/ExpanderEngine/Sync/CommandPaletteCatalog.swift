@@ -791,7 +791,8 @@ public enum CommandPaletteCatalog {
             boost += 60
         case .friendly where q.contains("friendly") || q.contains("casual") || q.contains("warm"):
             boost += 60
-        case .proofread where q.contains("proof") || q.contains("grammar") || q.contains("spelling"):
+        case .proofread where q.contains("proof") || q.contains("grammar")
+            || q.contains("spelling") || q.contains("correct") || q.contains("fix"):
             boost += 60
         case .promptEnhance where q.contains("prompt") || q.contains("enhance"):
             boost += 60
@@ -805,18 +806,16 @@ public enum CommandPaletteCatalog {
             boost += 40
         case .paraphrase where q.contains("paraphrase") || q.contains("reword"):
             boost += 50
-        case .translate where q.contains("translat") || q.contains("english")
-            || q.contains("meaning"):
-            boost += 60
-        // "fix telugu" / "telugu grammar" wants refine, not translate; a bare
-        // language name is ambiguous, so both rows get the lift and the alias
-        // scores decide the order.
-        case .translate where q.contains("telugu") || q.contains("hindi"):
-            boost += 40
-        case .refine where q.contains("grammar") || q.contains("correct")
-            || q.contains("fix") || q.contains("refine") || q.contains("polish"):
-            boost += 50
-        case .refine where q.contains("telugu") || q.contains("hindi"):
+        // Direction is carried by word order alone — "telugu to english" and
+        // "english to telugu" share every token — so these read the raw phrase
+        // rather than the tokens the scorer sees.
+        case .translate where q.contains("to english") || q.contains("in english"):
+            boost += 120
+        case .translateTelugu where q.contains("to telugu") || q.contains("in telugu"):
+            boost += 120
+        case .translateHindi where q.contains("to hindi") || q.contains("in hindi"):
+            boost += 120
+        case .translate where q.contains("translat") || q.contains("meaning"):
             boost += 40
         default:
             break
@@ -1030,7 +1029,12 @@ public enum CommandPaletteCatalog {
         case .proofread:
             return [
                 "proofread", "proof read", "proof-read", "fix spelling", "fix grammar",
-                "grammar", "spelling", "correct", "typo", "typos"
+                "grammar", "spelling", "correct", "typo", "typos",
+                // Proofread keeps the text in its own language, so it is also the
+                // Telugu / Hindi grammar fix.
+                "fix telugu", "fix hindi", "correct telugu", "correct hindi",
+                "telugu grammar", "hindi grammar", "proofread telugu", "proofread hindi",
+                "fix tenglish", "fix hinglish"
             ]
         case .rewrite:
             return ["rewrite", "re-write", "rephrase", "clarify", "make clearer", "improve writing"]
@@ -1064,12 +1068,15 @@ public enum CommandPaletteCatalog {
                 "tenglish", "hinglish", "romanized telugu", "romanized hindi",
                 "convert to english", "meaning in english", "what does this mean"
             ]
-        case .refine:
+        case .translateTelugu:
             return [
-                "refine", "polish", "fix telugu", "fix hindi", "correct telugu",
-                "correct hindi", "telugu grammar", "hindi grammar", "grammar telugu",
-                "grammar hindi", "proofread telugu", "proofread hindi",
-                "fix tenglish", "fix hinglish", "keep language", "same language"
+                "telugu", "to telugu", "in telugu", "english to telugu",
+                "translate to telugu", "say in telugu", "tenglish", "romanized telugu"
+            ]
+        case .translateHindi:
+            return [
+                "hindi", "to hindi", "in hindi", "english to hindi",
+                "translate to hindi", "say in hindi", "hinglish", "romanized hindi"
             ]
         case .custom:
             return ["custom"]

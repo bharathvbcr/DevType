@@ -122,6 +122,18 @@ public final class DeliveryVerifier {
             return .unavailable
         }
         guard containsExpected else {
+            // The expected text is absent — but absence is only *evidence of a missed paste* if
+            // the field is otherwise unchanged. If anything moved since the baseline, something
+            // landed, and reporting `.failed` here makes the hold loop post a second Cmd+V that
+            // duplicates it. Virtualised web views (Electron, Chromium) routinely report a
+            // readable AXValue that never contains what was just pasted, which is exactly the
+            // case that produced doubled expansions.
+            if let baseline {
+                let baselineValue = baseline.value
+                if baselineValue != value || baseline.selectedText != after.selectedText {
+                    return .unavailable
+                }
+            }
             return .failed
         }
         guard let baseline else {

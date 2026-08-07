@@ -177,3 +177,113 @@ final class PasteRetryConfirmationTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Untrusted hosts must never re-paste
+
+/// Confirmation alone was not enough. In Claude Desktop the AXValue is readable and *never*
+/// contains the pasted text, so `.failed` is permanent: it survives any number of confirming
+/// re-reads and then re-pastes, duplicating the expansion every single time.
+///
+/// Two independent guards now stop that — the verifier no longer calls a changed field
+/// `.failed`, and a host whose AX is condemned cannot authorise a retry at all.
+final class UntrustedPasteRetryTests: XCTestCase {
+
+    private func decide(
+        _ delivery: DeliveryVerifier.TextDeliveryVerification,
+        elapsed: TimeInterval = 0.05,
+        failures: Int = 99,
+        trust: Bool
+    ) -> PasteboardBroker.PasteHoldDecision {
+        PasteboardBroker.decidePasteHold(
+            delivery: delivery,
+            pasteAttemptsCompleted: 1,
+            elapsed: elapsed,
+            consecutiveFailures: failures,
+            trustFailureVerdict: trust
+        )
+    }
+
+    func testUntrustedHostNeverRetriesNoMatterHowManyFailures() {
+        for failures in [1, 2, 5, 50] {
+            XCTAssertNotEqual(
+                decide(.failed, failures: failures, trust: false),
+                .retryPaste,
+                "A host that cannot judge delivery must never authorise a re-paste (failures=\(failures))."
+            )
+        }
+    }
+
+    func testUntrustedHostEndsUnverifiedRatherThanFailed() {
+        XCTAssertEqual(
+            decide(.failed, elapsed: InjectTiming.pasteDeliveryHoldTimeout + 1, failures: 99, trust: false),
+            .giveUpUnverified,
+            "Unverifiable is the honest outcome — reporting failure would restore the trigger on "
+                + "top of text that actually landed."
+        )
+    }
+
+    func testTrustedHostRetainsRecovery() {
+        XCTAssertEqual(
+            decide(.failed, failures: PasteboardBroker.requiredFailureConfirmations, trust: true),
+            .retryPaste,
+            "The fix must not disable genuine recovery on apps whose AX can be believed."
+        )
+    }
+
+    func testClaudeDesktopIsSeededAsUnverifiable() {
+        XCTAssertTrue(
+            AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: "com.anthropic.claudefordesktop"),
+            "The app the duplicate expansions were reported in must be seeded as AX-false-success."
+        )
+    }
+
+    // MARK: - Verifier no longer calls a changed field a failure
+
+    /// The general guard: expected text absent, but the field moved — something landed, so
+    /// re-pasting would duplicate it.
+    func testChangedFieldWithoutExpectedTextIsUnverifiedNotFailed() {
+        let baseline = DeliveryVerifier.FocusedTextObservation(
+            value: "`slm", selectedText: nil, caretLocation: 4
+        )
+        // Field changed (the paste did something) but AX does not surface our text.
+        let after = DeliveryVerifier.FocusedTextObservation(
+            value: "something else", selectedText: nil, caretLocation: 14
+        )
+        XCTAssertEqual(
+            DeliveryVerifier.verifyTextDelivery(
+                expectedText: "ScholarLM", baseline: baseline, after: after
+            ),
+            .unavailable,
+            "A changed field is not evidence the paste missed."
+        )
+    }
+
+    /// The one case that still counts as failure: nothing moved at all.
+    func testTrulyUnchangedFieldIsStillFailed() {
+        let observation = DeliveryVerifier.FocusedTextObservation(
+            value: "`slm", selectedText: nil, caretLocation: 4
+        )
+        XCTAssertEqual(
+            DeliveryVerifier.verifyTextDelivery(
+                expectedText: "ScholarLM", baseline: observation, after: observation
+            ),
+            .failed,
+            "An untouched field is the only honest evidence that a paste missed."
+        )
+    }
+
+    func testChangedSelectionAloneAlsoBlocksTheFailureVerdict() {
+        let baseline = DeliveryVerifier.FocusedTextObservation(
+            value: "`slm", selectedText: nil, caretLocation: 4
+        )
+        let after = DeliveryVerifier.FocusedTextObservation(
+            value: "`slm", selectedText: "sel", caretLocation: 4
+        )
+        XCTAssertEqual(
+            DeliveryVerifier.verifyTextDelivery(
+                expectedText: "ScholarLM", baseline: baseline, after: after
+            ),
+            .unavailable
+        )
+    }
+}
