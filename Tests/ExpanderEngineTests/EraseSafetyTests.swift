@@ -252,7 +252,36 @@ final class EraseSafetyTests: XCTestCase {
         XCTAssertEqual(
             AXWriteCapabilityStore.seedVerdict(bundleID: "com.github.githubapp"), .falseSuccess
         )
+        XCTAssertEqual(
+            AXWriteCapabilityStore.seedVerdict(bundleID: "net.whatsapp.WhatsApp"), .falseSuccess,
+            "WhatsApp Desktop AXTextArea lies on selected-text write — seed HID paste"
+        )
+        XCTAssertEqual(
+            AXWriteCapabilityStore.seedVerdict(bundleID: "net.whatsapp.WhatsApp.beta"), .falseSuccess
+        )
         XCTAssertEqual(AXWriteCapabilityStore.seedVerdict(bundleID: "com.apple.Notes"), .unknown)
+    }
+
+    /// Role-keyed condemnation must be visible to the inject preferHID check when the same role is
+    /// focused — otherwise WhatsApp keeps taking AX direct after erase and can "succeed" empty.
+    func testRoleKeyedFalseSuccessIsHonouredWhenRoleIsKnown() {
+        let store = AXWriteCapabilityStore()
+        let learnedBundle = "com.example.RoleKeyedMessenger"
+        let role = "AXTextArea"
+        XCTAssertFalse(store.shouldSkipAXSelectedText(bundleID: learnedBundle))
+        store.recordFalseSuccess(bundleID: learnedBundle, role: role)
+        XCTAssertTrue(
+            store.shouldSkipAXSelectedText(bundleID: learnedBundle, role: role),
+            "composite (bundle|role) verdict must skip AX"
+        )
+        XCTAssertFalse(
+            store.shouldSkipAXSelectedText(bundleID: learnedBundle, role: nil),
+            "bundle-only query must not inherit a role-only condemnation"
+        )
+        XCTAssertFalse(
+            store.shouldSkipAXSelectedText(bundleID: learnedBundle, role: "AXTextField"),
+            "a different role stays eligible for AX"
+        )
     }
 
     /// An unknown app that lies once is condemned for the rest of the session — this is what makes

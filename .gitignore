@@ -1,5 +1,6 @@
 # SwiftPM / Xcode
 .build/
+.build-xcode/
 .swiftpm/
 *.xcodeproj/
 DerivedData/

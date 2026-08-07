@@ -21,12 +21,22 @@ public final class ProcessIdentity {
     /// Persisted inverse of `EventTapEngine.isEnabled` (user pause).
     public static let userPausedDefaultsKey = "devtype.engine.userPaused"
 
+    /// Ceiling for `codesign` identity probes. Healthy runs are tens of milliseconds; this only
+    /// bounds the pathological case (stalled network mount) that would otherwise strand Setup.
+    public static let codesignTimeout: TimeInterval = 5.0
+    /// Ceiling for Spotlight discovery. Shorter than `codesignTimeout` — a rebuilding index must
+    /// not delay a purely advisory dual-install warning.
+    public static let mdfindTimeout: TimeInterval = 3.0
+
     private let cacheLock = NSLock()
     private var cachedCDHash: String?
     private var cachedDesignatedRequirement: String?
     private var cachedCDHashPath: String?
     private var cdHashInFlight = false
     private var cdHashPendingCompletions: [(String?) -> Void] = []
+    private var cachedDevBundlePresent: Bool?
+    private var devBundleProbeInFlight = false
+    private var devBundlePendingCompletions: [(Bool) -> Void] = []
 
     public init() {}
 
@@ -116,6 +126,57 @@ public final class ProcessIdentity {
                 )
                 for callback in pending {
                     callback(hash)
+                }
+            }
+        }
+    }
+
+    /// Last resolved answer to "is a `.build/DevType.app` present?", or `false` until the first
+    /// async probe lands.
+    ///
+    /// Setup and Recovery re-render on every activation, button press, and post-request settle.
+    /// Resolving this synchronously meant spawning `mdfind` on the main thread on each of those,
+    /// so a slow Spotlight index beach-balled the very window the user opened to unstick
+    /// themselves. The warning it feeds is advisory, so showing nothing for the first few hundred
+    /// milliseconds is strictly better than blocking the run loop.
+    public var cachedDevelopmentBundlePresent: Bool {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cachedDevBundlePresent ?? false
+    }
+
+    /// Resolves dual-install presence off the main thread and caches it. Safe to call repeatedly;
+    /// concurrent callers coalesce onto one probe. `completion` runs on the main queue.
+    public func refreshDevelopmentBundlePresenceAsync(completion: ((Bool) -> Void)? = nil) {
+        let runningPath = bundlePath
+        let siblings = siblingPaths()
+
+        cacheLock.lock()
+        if let completion {
+            devBundlePendingCompletions.append(completion)
+        }
+        if devBundleProbeInFlight {
+            cacheLock.unlock()
+            return
+        }
+        devBundleProbeInFlight = true
+        cacheLock.unlock()
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let present = Self.developmentAppBundlePresentIncludingOnDisk(
+                runningPath: runningPath,
+                siblingPaths: siblings
+            )
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.cacheLock.lock()
+                self.cachedDevBundlePresent = present
+                self.devBundleProbeInFlight = false
+                let pending = self.devBundlePendingCompletions
+                self.devBundlePendingCompletions = []
+                self.cacheLock.unlock()
+                for callback in pending {
+                    callback(present)
                 }
             }
         }
@@ -264,6 +325,9 @@ public final class ProcessIdentity {
     }
 
     /// Convenience: development package present among running paths **or** on disk.
+    ///
+    /// Spawns `mdfind` when `spotlightPaths` is nil — blocking. UI callers must go through
+    /// `refreshDevelopmentBundlePresenceAsync` / `cachedDevelopmentBundlePresent` instead.
     public static func developmentAppBundlePresentIncludingOnDisk(
         runningPath: String,
         siblingPaths: [String],
@@ -285,22 +349,23 @@ public final class ProcessIdentity {
     }
 
     /// Spotlight discovery of installed DevType.app bundles (best-effort; may be empty).
+    ///
+    /// Blocking and process-spawning — never call from the main thread. UI reads the cached
+    /// result via `cachedDevelopmentBundlePresent`; see `refreshDevelopmentBundlePresenceAsync`.
     public static func mdfindDevTypeAppPaths() -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
-        process.arguments = ["kMDItemCFBundleIdentifier == '\(expectedBundleIdentifier)'"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
+        guard let result = BoundedProcess.run(
+            executable: "/usr/bin/mdfind",
+            arguments: ["kMDItemCFBundleIdentifier == '\(expectedBundleIdentifier)'"],
+            timeout: mdfindTimeout
+        ) else {
             return []
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        return output
+        if result.timedOut {
+            DevTypeLog.identity.notice(
+                "[Identity] mdfind timed out — dual-install detection falls back to seed paths only"
+            )
+        }
+        return result.output
             .split(whereSeparator: \.isNewline)
             .map { normalizedBundlePath(String($0)) }
             .filter { $0.hasSuffix(".app") }
@@ -388,6 +453,22 @@ public final class ProcessIdentity {
         return true
     }
 
+    /// Input Monitoring → Accessibility advance rule.
+    ///
+    /// Mirrors `canAdvanceFromVerify`: Listen is needed for Active expansion, but it must never be
+    /// a dead end. The step gated hard on `canListenTap`, so a user whose Input Monitoring grant
+    /// cannot be established (stale TCC record for a previous copy is the common one) could not
+    /// reach Verify — and therefore could never Finish — even though Verify and Done both treat a
+    /// missing Listen as non-blocking. Advancing after a real request attempt keeps the ordering
+    /// intact while letting such a user get to Accessibility and finish in the degraded mode the
+    /// later steps already support.
+    public static func canAdvanceFromInputMonitoring(
+        canListenTap: Bool,
+        didAttemptRequest: Bool
+    ) -> Bool {
+        canListenTap || didAttemptRequest
+    }
+
     /// Verify → Done advances when Accessibility is granted.
     /// Listen + tap may still be incomplete (surfaced in UI; not blocking).
     public static func canAdvanceFromVerify(
@@ -427,52 +508,36 @@ public final class ProcessIdentity {
     }
 
     public static func readCDHash(forPath path: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        process.arguments = ["-dvvv", path]
-        let pipe = Pipe()
-        process.standardError = pipe
-        process.standardOutput = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            DevTypeLog.identity.error(
-                "[Identity] codesign failed path=\(path, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-            )
+        // Bounded: a hung `codesign` used to leave `cdHashLoadFinished` false forever, which
+        // permanently disables Finish in the Setup wizard. See `BoundedProcess`.
+        guard let result = BoundedProcess.run(
+            executable: "/usr/bin/codesign",
+            arguments: ["-dvvv", path],
+            timeout: codesignTimeout,
+            mergeStandardError: true
+        ) else {
             return nil
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        let hash = parseCDHash(fromCodesignOutput: output)
+        let hash = parseCDHash(fromCodesignOutput: result.output)
         if hash == nil {
             DevTypeLog.identity.notice(
-                "[Identity] CDHash unavailable for path=\(path, privacy: .public) exit=\(process.terminationStatus, privacy: .public)"
+                "[Identity] CDHash unavailable for path=\(path, privacy: .public) exit=\(result.exitCode, privacy: .public) timedOut=\(result.timedOut, privacy: .public)"
             )
         }
         return hash
     }
 
     public static func readDesignatedRequirement(forPath path: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        process.arguments = ["-d", "-r-", path]
-        let pipe = Pipe()
         // Requirement text is written to stdout; some codesign versions also use stderr.
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            DevTypeLog.identity.error(
-                "[Identity] codesign -r failed path=\(path, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-            )
+        guard let result = BoundedProcess.run(
+            executable: "/usr/bin/codesign",
+            arguments: ["-d", "-r-", path],
+            timeout: codesignTimeout,
+            mergeStandardError: true
+        ) else {
             return nil
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        return parseDesignatedRequirement(fromCodesignRequirementOutput: output)
+        return parseDesignatedRequirement(fromCodesignRequirementOutput: result.output)
     }
 
     /// Remembers Accessibility grant bound to the current CDHash (not sticky forever).

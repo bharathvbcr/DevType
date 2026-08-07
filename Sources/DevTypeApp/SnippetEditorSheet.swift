@@ -46,7 +46,7 @@ enum SnippetEditorSheet {
     /// disagree. The extra height over the old 500×548 buys the new-snippet
     /// guide strip and a materially taller replacement editor.
     static let panelWidth: CGFloat = 520
-    static let panelHeight: CGFloat = 672
+    static let panelHeight: CGFloat = 690
 
     private static var activePanel: NSPanel?
     private static var activeController: SnippetEditorController?
@@ -54,6 +54,7 @@ enum SnippetEditorSheet {
     static func present(
         from hostWindow: NSWindow?,
         existing: SnippetModel?,
+        draft: SnippetModel? = nil,
         groups: [SnippetGroup],
         currentGroupID: UUID?,
         loc: LocalizationManager = .shared,
@@ -70,6 +71,7 @@ enum SnippetEditorSheet {
 
         let controller = SnippetEditorController(
             existing: existing,
+            draft: draft,
             groups: groups,
             currentGroupID: currentGroupID,
             loc: loc,
@@ -284,6 +286,112 @@ private final class ExpansionStageView: NSView {
     }
 }
 
+// MARK: - Composer pill
+
+/// Toolbar pill for the replacement composer — icon + label + an optional
+/// shortcut hint baked into the same capsule. Replaces the 18pt ghost buttons
+/// that used to hide in the caption row: bigger target, visible shortcut, and
+/// a hover wash, sitting where every chat/post composer has trained users to
+/// look for attachments and formatting.
+private final class ComposerPillButton: NSButton {
+    private let symbolName: String
+    private let shortcutHint: String?
+    private var hovering = false { didSet { needsDisplay = true } }
+
+    init(title: String, symbol: String, shortcut: String?, target: AnyObject?, action: Selector?) {
+        self.symbolName = symbol
+        self.shortcutHint = shortcut
+        super.init(frame: .zero)
+        self.title = title
+        self.target = target
+        self.action = action
+        isBordered = false
+        wantsLayer = true
+        focusRingType = .none
+        translatesAutoresizingMaskIntoConstraints = false
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setAccessibilityRole(NSAccessibility.Role.button)
+        setAccessibilityLabel(title)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private var titleFont: NSFont { DevTypeTheme.font(11, .semibold) }
+    private var hintFont: NSFont { DevTypeTheme.mono(9.5, .medium) }
+
+    override var intrinsicContentSize: NSSize {
+        var width: CGFloat = 12 + 11 + 5 // leading pad + icon + gap
+        width += (title as NSString).size(withAttributes: [.font: titleFont]).width
+        if let shortcutHint {
+            width += 8 + (shortcutHint as NSString).size(withAttributes: [.font: hintFont]).width
+        }
+        width += 12 // trailing pad
+        return NSSize(width: ceil(width), height: 24)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        DevTypeTheme.accent.withAlphaComponent(hovering ? 0.24 : 0.13).setFill()
+        path.fill()
+        DevTypeTheme.accent.withAlphaComponent(hovering ? 0.58 : 0.32).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        var x: CGFloat = 12
+        if let icon = DevTypeTheme.tintedSymbol(symbolName, size: 10, weight: .bold, color: DevTypeTheme.accentBright) {
+            icon.draw(
+                in: NSRect(x: x, y: (bounds.height - icon.size.height) / 2, width: icon.size.width, height: icon.size.height),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1.0,
+                respectFlipped: true,
+                hints: nil
+            )
+        }
+        x += 11 + 5
+
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: titleFont,
+            .foregroundColor: DevTypeTheme.accentBright
+        ]
+        let titleSize = (title as NSString).size(withAttributes: titleAttributes)
+        (title as NSString).draw(
+            at: NSPoint(x: x, y: (bounds.height - titleSize.height) / 2),
+            withAttributes: titleAttributes
+        )
+        x += titleSize.width
+
+        if let shortcutHint {
+            let hintAttributes: [NSAttributedString.Key: Any] = [
+                .font: hintFont,
+                .foregroundColor: hovering ? DevTypeTheme.textSecondary : DevTypeTheme.textTertiary
+            ]
+            let hintSize = (shortcutHint as NSString).size(withAttributes: hintAttributes)
+            (shortcutHint as NSString).draw(
+                at: NSPoint(x: x + 8, y: (bounds.height - hintSize.height) / 2),
+                withAttributes: hintAttributes
+            )
+        }
+    }
+}
+
 // MARK: - Toggle chip
 
 /// Capsule toggle used for snippet behavior flags — crimson when on, ghost when off.
@@ -339,7 +447,10 @@ private final class ToggleChip: NSButton {
         let textSize = (title as NSString).size(withAttributes: [
             .font: font ?? DevTypeTheme.font(11, .semibold)
         ])
-        return NSSize(width: ceil(textSize.width) + 40, height: 24)
+        // Padding covers the 10pt glyph + 5pt gap and still leaves ~10pt of
+        // breathing room per side. Any wider and the four chips stop fitting on
+        // one row inside the 480pt content width.
+        return NSSize(width: ceil(textSize.width) + 36, height: 24)
     }
 
     override func updateTrackingAreas() {
@@ -411,14 +522,20 @@ private final class ToggleChip: NSButton {
 
 private final class SnippetEditorController: NSViewController, NSTextViewDelegate, NSTextFieldDelegate {
     private let existing: SnippetModel?
+    /// Prefill for a new snippet (e.g. Add from Template). Never treated as an edit.
+    private let draft: SnippetModel?
     private let groups: [SnippetGroup]
     private let loc: LocalizationManager
     private let validate: (String, Bool) -> String?
     private let onFinish: (SnippetModel?, UUID?) -> Void
 
+    /// Values shown in the form: edit target, or template draft, or blank.
+    private var seed: SnippetModel? { existing ?? draft }
+
     private let titleField = GlassTextField()
     private let triggerField = GlassTextField()
     private let groupPopup = NSPopUpButton()
+    private let aiTransformPopup = NSPopUpButton()
     private let replacementView = NSTextView()
     private let stage = ExpansionStageView()
     private var enabledChip: ToggleChip!
@@ -444,16 +561,10 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     // §1: dismissible new-snippet guide.
     private var guideView: SnippetEditorGuideView?
     private var guideHeightConstraint: NSLayoutConstraint?
-    private var editorHeightConstraint: NSLayoutConstraint?
+    /// Collapses the inline error to zero height while there is nothing to say.
+    private var errorHeightConstraint: NSLayoutConstraint?
     private var helpButton: NSButton?
     private var guideVisible: Bool
-
-    /// Editor height with the guide showing; it grows by exactly the guide's
-    /// height when the guide is collapsed (or absent, i.e. when editing an
-    /// existing snippet), so the panel is one fixed size in every state.
-    /// Editing an existing snippet therefore gets 248pt of body — well over the
-    /// 110pt the editor used to be fixed at.
-    private static let editorHeightWithGuide: CGFloat = 132
 
     // §2: smart-insertion bookkeeping. Placeholder spans arrive as *data* on the
     // macro descriptor and are stored here as absolute ranges, then shifted by
@@ -471,6 +582,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
     init(
         existing: SnippetModel?,
+        draft: SnippetModel? = nil,
         groups: [SnippetGroup],
         currentGroupID: UUID?,
         loc: LocalizationManager,
@@ -478,12 +590,13 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         onFinish: @escaping (SnippetModel?, UUID?) -> Void
     ) {
         self.existing = existing
+        self.draft = draft
         self.groups = groups
         self.loc = loc
         self.validate = validate
         self.onFinish = onFinish
         self.initialGroupID = currentGroupID ?? groups.first?.id
-        self.attachedImagePath = existing?.imagePath ?? ""
+        self.attachedImagePath = (existing ?? draft)?.imagePath ?? ""
         // §1: never shown when editing an existing snippet, and the dismissal is
         // remembered across launches.
         self.guideVisible = (existing == nil) && !SnippetEditorGuideView.isDismissed
@@ -563,7 +676,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         // Title
         let nameCaption = caption(loc.s("editor.name"))
         titleField.placeholderAttributedString = placeholder(loc.s("editor.name"))
-        titleField.stringValue = existing?.title ?? ""
+        titleField.stringValue = seed?.title ?? ""
         // §4: the caption is a separate view, so VoiceOver cannot infer it.
         titleField.setAccessibilityLabel(loc.s("editor.name"))
         root.addSubview(nameCaption)
@@ -573,7 +686,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         let triggerCaption = caption(loc.s("editor.trigger"))
         triggerField.placeholderAttributedString = placeholder("e.g. :eml")
         triggerField.font = DevTypeTheme.mono(13, .medium)
-        triggerField.stringValue = existing?.triggerKeyword ?? ""
+        triggerField.stringValue = seed?.triggerKeyword ?? ""
         triggerField.delegate = self
         triggerField.setAccessibilityLabel(loc.s("editor.trigger"))
         triggerField.setAccessibilityHelp(loc.s("editor.trigger.hint"))
@@ -592,22 +705,25 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         root.addSubview(groupCaption)
         root.addSubview(groupPopup)
 
-        // Replacement + macro menu + image + char count
+        // Replacement — the macro palette and image picker live in the
+        // composer's own toolbar, so the caption line stays quiet apart from the
+        // AI Transform control, which is a property *of* the replacement and now
+        // rides on its header row instead of stacking under Group.
         let replacementCaption = caption(loc.s("editor.replacement"))
-        charCountLabel.translatesAutoresizingMaskIntoConstraints = false
-        let macroButton = makeMacroButton()
-        self.macroButton = macroButton
-        let imageButton = makeImageButton()
         let editorContainer = makeEditorContainer()
         self.editorContainer = editorContainer
         let imageBar = makeImagePreviewBar()
         self.imagePreviewBar = imageBar
         root.addSubview(replacementCaption)
-        root.addSubview(charCountLabel)
-        root.addSubview(macroButton)
-        root.addSubview(imageButton)
         root.addSubview(editorContainer)
         root.addSubview(imageBar)
+
+        let aiTransformRaw = seed?.aiTransform.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let aiCaption = caption(loc.s("editor.aiTransform"))
+        aiCaption.setContentCompressionResistancePriority(.required, for: .horizontal)
+        configureAITransformPopup(selectedRaw: aiTransformRaw)
+        root.addSubview(aiCaption)
+        root.addSubview(aiTransformPopup)
 
         // Behavior toggle chips
         let behaviorCaption = caption(loc.s("editor.behavior"))
@@ -615,19 +731,21 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
         enabledChip = ToggleChip(
             title: loc.s("editor.enabled"), symbol: "power",
-            isOn: existing?.enabled ?? true,
+            isOn: seed?.enabled ?? true,
             help: loc.s("editor.enabled.help"),
             target: self, action: #selector(chipTapped(_:))
         )
         caseChip = ToggleChip(
             title: loc.s("editor.caseSensitive"), symbol: "textformat",
-            isOn: existing?.isCaseSensitive ?? false,
+            // §5: default ON for new snippets — ":Hi" silently swallowing ":hi"
+            // was the most confusing matching behaviour a new user could hit.
+            isOn: seed?.isCaseSensitive ?? true,
             help: loc.s("editor.caseSensitive.help"),
             target: self, action: #selector(chipTapped(_:))
         )
         boundaryChip = ToggleChip(
             title: loc.s("editor.wordBoundary"), symbol: "paragraphsign",
-            isOn: existing?.requireWordBoundary ?? true,
+            isOn: seed?.requireWordBoundary ?? true,
             // §1: this is the toggle that changes the trigger rule the guide
             // explains, so its help text spells that rule out in full.
             help: loc.s("editor.wordBoundary.help"),
@@ -635,7 +753,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         )
         plainChip = ToggleChip(
             title: loc.s("editor.plainText"), symbol: "doc.plaintext",
-            isOn: existing?.isPlainText ?? true,
+            isOn: seed?.isPlainText ?? true,
             help: loc.s("editor.plainText.help"),
             target: self, action: #selector(chipTapped(_:))
         )
@@ -650,6 +768,11 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         errorLabel.translatesAutoresizingMaskIntoConstraints = false
         errorLabel.isHidden = true
         errorLabel.maximumNumberOfLines = 2
+        // Setting `maximumNumberOfLines` resets the wrapping label's break mode,
+        // which left long conflict messages clipped mid-word at the panel edge.
+        errorLabel.lineBreakMode = .byWordWrapping
+        errorLabel.cell?.wraps = true
+        errorLabel.cell?.isScrollable = false
         root.addSubview(errorLabel)
 
         // Buttons
@@ -702,19 +825,37 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
         let columnGap: CGFloat = 12
 
-        // §1 / §3: the guide and the replacement editor share one pool of
-        // vertical space — collapsing the guide grows the editor by exactly the
-        // same amount, so the panel is a fixed size in every state.
+        // §1 / §3: everything above the composer hangs off the top edge and
+        // everything below it hangs off the bottom edge, leaving the replacement
+        // editor as the single flexible row. Collapsing the guide — or hiding
+        // the inline error — therefore hands its space straight to the editor
+        // with no per-state height arithmetic to keep in sync, and no element
+        // can ever grow through the footer.
         let guideHeight = guide?.heightAnchor.constraint(
             equalToConstant: guideVisible ? SnippetEditorGuideView.preferredHeight : 0
         )
         guideHeightConstraint = guideHeight
-        let editorHeight = editorContainer.heightAnchor.constraint(
-            equalToConstant: guideVisible
-                ? Self.editorHeightWithGuide
-                : Self.editorHeightWithGuide + SnippetEditorGuideView.preferredHeight
+
+        // The error takes no space until there is something to say.
+        errorLabel.preferredMaxLayoutWidth = SnippetEditorSheet.panelWidth - 40
+        let errorHeight = errorLabel.heightAnchor.constraint(equalToConstant: 0)
+        errorHeightConstraint = errorHeight
+
+        // Floor for the flexible row, below required so a pathological state
+        // (very long error, very tall guide) degrades instead of logging a
+        // constraint conflict.
+        let editorMinHeight = editorContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 88)
+        editorMinHeight.priority = NSLayoutConstraint.Priority(999)
+
+        // The rule sentence spans the full width, so it has to clear BOTH
+        // columns. The required `>=` pair does that; this low-priority spring
+        // pulls it snug against whichever column ends lower (the popup, today)
+        // so the position stays unambiguous.
+        let ruleTopSpring = triggerRuleLabel.topAnchor.constraint(
+            equalTo: groupPopup.bottomAnchor,
+            constant: 6
         )
-        editorHeightConstraint = editorHeight
+        ruleTopSpring.priority = .defaultLow
 
         var extraConstraints: [NSLayoutConstraint] = []
         if let guide, let guideHeight {
@@ -736,6 +877,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
         NSLayoutConstraint.activate(extraConstraints)
         NSLayoutConstraint.activate([
+            editorMinHeight,
+            errorHeight,
+            ruleTopSpring,
             badge.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             badge.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
             headerLabel.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 10),
@@ -761,7 +905,10 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             triggerField.leadingAnchor.constraint(equalTo: titleField.leadingAnchor),
             triggerField.trailingAnchor.constraint(equalTo: root.centerXAnchor, constant: -columnGap / 2),
 
-            triggerRuleLabel.topAnchor.constraint(equalTo: triggerField.bottomAnchor, constant: 4),
+            // Sits below BOTH columns — as a half-width neighbour of the popup
+            // it used to be drawn straight through the AI Transform caption.
+            triggerRuleLabel.topAnchor.constraint(greaterThanOrEqualTo: triggerField.bottomAnchor, constant: 6),
+            triggerRuleLabel.topAnchor.constraint(greaterThanOrEqualTo: groupPopup.bottomAnchor, constant: 6),
             triggerRuleLabel.leadingAnchor.constraint(equalTo: nameCaption.leadingAnchor),
             triggerRuleLabel.trailingAnchor.constraint(equalTo: titleField.trailingAnchor),
 
@@ -771,27 +918,32 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             groupPopup.leadingAnchor.constraint(equalTo: root.centerXAnchor, constant: columnGap / 2),
             groupPopup.trailingAnchor.constraint(equalTo: titleField.trailingAnchor),
 
-            replacementCaption.topAnchor.constraint(equalTo: triggerRuleLabel.bottomAnchor, constant: 8),
+            // Composer header: caption on the left, AI Transform on the right.
+            aiTransformPopup.topAnchor.constraint(equalTo: triggerRuleLabel.bottomAnchor, constant: 12),
+            aiTransformPopup.trailingAnchor.constraint(equalTo: titleField.trailingAnchor),
+            aiTransformPopup.widthAnchor.constraint(equalToConstant: 136),
+            aiCaption.trailingAnchor.constraint(equalTo: aiTransformPopup.leadingAnchor, constant: -8),
+            aiCaption.centerYAnchor.constraint(equalTo: aiTransformPopup.centerYAnchor),
+
             replacementCaption.leadingAnchor.constraint(equalTo: nameCaption.leadingAnchor),
-            charCountLabel.centerYAnchor.constraint(equalTo: replacementCaption.centerYAnchor),
-            charCountLabel.trailingAnchor.constraint(equalTo: titleField.trailingAnchor),
-            imageButton.centerYAnchor.constraint(equalTo: replacementCaption.centerYAnchor),
-            imageButton.trailingAnchor.constraint(equalTo: charCountLabel.leadingAnchor, constant: -8),
-            macroButton.centerYAnchor.constraint(equalTo: replacementCaption.centerYAnchor),
-            macroButton.trailingAnchor.constraint(equalTo: imageButton.leadingAnchor, constant: -8),
-            editorContainer.topAnchor.constraint(equalTo: replacementCaption.bottomAnchor, constant: 4),
+            replacementCaption.centerYAnchor.constraint(equalTo: aiTransformPopup.centerYAnchor),
+            replacementCaption.trailingAnchor.constraint(lessThanOrEqualTo: aiCaption.leadingAnchor, constant: -10),
+
+            editorContainer.topAnchor.constraint(equalTo: aiTransformPopup.bottomAnchor, constant: 6),
             editorContainer.leadingAnchor.constraint(equalTo: titleField.leadingAnchor),
             editorContainer.trailingAnchor.constraint(equalTo: titleField.trailingAnchor),
-            editorHeight,
             imageBar.topAnchor.constraint(equalTo: editorContainer.topAnchor),
             imageBar.leadingAnchor.constraint(equalTo: editorContainer.leadingAnchor),
             imageBar.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor),
             imageBar.heightAnchor.constraint(equalTo: editorContainer.heightAnchor),
 
-            behaviorCaption.topAnchor.constraint(equalTo: editorContainer.bottomAnchor, constant: 12),
+            // Bottom half, anchored UP from the footer: the composer's bottom
+            // edge is whatever is left over.
+            editorContainer.bottomAnchor.constraint(equalTo: behaviorCaption.topAnchor, constant: -12),
             behaviorCaption.leadingAnchor.constraint(equalTo: nameCaption.leadingAnchor),
-            chipsRow.topAnchor.constraint(equalTo: behaviorCaption.bottomAnchor, constant: 7),
+            behaviorCaption.bottomAnchor.constraint(equalTo: chipsRow.topAnchor, constant: -7),
             chipsRow.leadingAnchor.constraint(equalTo: titleField.leadingAnchor),
+            chipsRow.bottomAnchor.constraint(equalTo: errorLabel.topAnchor, constant: -8),
 
             // §3: anchored UP from the divider rather than DOWN from the chips.
             // Top-anchored, a two-line error grew straight through the hairline
@@ -818,7 +970,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         // the trigger readout were inserted above the form.
         titleField.nextKeyView = triggerField
         triggerField.nextKeyView = groupPopup
-        groupPopup.nextKeyView = replacementView
+        groupPopup.nextKeyView = aiTransformPopup
+        aiTransformPopup.nextKeyView = replacementView
         replacementView.nextKeyView = enabledChip
         enabledChip.nextKeyView = caseChip
         caseChip.nextKeyView = boundaryChip
@@ -882,74 +1035,41 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         }
     }
 
+    private func configureAITransformPopup(selectedRaw: String) {
+        aiTransformPopup.translatesAutoresizingMaskIntoConstraints = false
+        aiTransformPopup.pullsDown = false
+        aiTransformPopup.font = DevTypeTheme.font(12, .medium)
+        aiTransformPopup.setAccessibilityLabel(loc.s("editor.aiTransform"))
+
+        let menu = NSMenu()
+        let none = NSMenuItem(title: loc.s("editor.aiTransform.none"), action: nil, keyEquivalent: "")
+        none.representedObject = ""
+        menu.addItem(none)
+        for kind in AITransformKind.allCases {
+            let item = NSMenuItem(title: loc.s(kind.localizationKey), action: nil, keyEquivalent: "")
+            item.representedObject = kind.rawValue
+            menu.addItem(item)
+        }
+        aiTransformPopup.menu = menu
+
+        let key = selectedRaw.lowercased()
+        if key.isEmpty {
+            aiTransformPopup.selectItem(at: 0)
+        } else if let kind = AITransformKind.named(key),
+                  let idx = AITransformKind.allCases.firstIndex(of: kind) {
+            aiTransformPopup.selectItem(at: idx + 1)
+        } else {
+            aiTransformPopup.selectItem(at: 0)
+        }
+    }
+
+    private var selectedAITransform: String {
+        (aiTransformPopup.selectedItem?.representedObject as? String) ?? ""
+    }
+
     private var selectedGroupID: UUID? {
         guard let raw = groupPopup.selectedItem?.representedObject as? String else { return groups.first?.id }
         return UUID(uuidString: raw) ?? groups.first?.id
-    }
-
-    /// Borderless "+" button that pops the macro insertion menu.
-    private func makeMacroButton() -> NSButton {
-        let button = NSButton()
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.isBordered = false
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 6
-        button.layer?.backgroundColor = DevTypeTheme.accent.withAlphaComponent(0.14).cgColor
-        button.layer?.borderWidth = 1
-        button.layer?.borderColor = DevTypeTheme.accent.withAlphaComponent(0.35).cgColor
-        button.image = DevTypeTheme.tintedSymbol("plus", size: 9, weight: .bold, color: DevTypeTheme.accentBright)
-        button.imagePosition = .imageLeading
-        button.attributedTitle = NSAttributedString(
-            string: loc.s("editor.macros"),
-            attributes: [
-                .font: DevTypeTheme.font(10, .semibold),
-                .foregroundColor: DevTypeTheme.accentBright
-            ]
-        )
-        button.target = self
-        button.action = #selector(showMacroMenu(_:))
-        // §3: ⌘/ is the documented "show me the macros" shortcut.
-        button.keyEquivalent = "/"
-        button.keyEquivalentModifierMask = [.command]
-        button.toolTip = loc.s("editor.hint.macros")
-        button.setAccessibilityRole(NSAccessibility.Role.button)
-        button.setAccessibilityLabel(loc.s("editor.macros"))
-        button.setAccessibilityHelp(loc.s("editor.hint.macros"))
-        NSLayoutConstraint.activate([
-            button.heightAnchor.constraint(equalToConstant: 18),
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64)
-        ])
-        return button
-    }
-
-    /// Small capsule next to the macro button that opens an image picker.
-    private func makeImageButton() -> NSButton {
-        let button = NSButton()
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.isBordered = false
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 6
-        button.layer?.backgroundColor = DevTypeTheme.accent.withAlphaComponent(0.14).cgColor
-        button.layer?.borderWidth = 1
-        button.layer?.borderColor = DevTypeTheme.accent.withAlphaComponent(0.35).cgColor
-        button.image = DevTypeTheme.tintedSymbol("photo", size: 9, weight: .bold, color: DevTypeTheme.accentBright)
-        button.imagePosition = .imageLeading
-        button.attributedTitle = NSAttributedString(
-            string: loc.s("editor.image.attach"),
-            attributes: [
-                .font: DevTypeTheme.font(10, .semibold),
-                .foregroundColor: DevTypeTheme.accentBright
-            ]
-        )
-        button.target = self
-        button.action = #selector(chooseImage(_:))
-        button.setAccessibilityRole(NSAccessibility.Role.button)
-        button.setAccessibilityLabel(loc.s("editor.image.attach"))
-        NSLayoutConstraint.activate([
-            button.heightAnchor.constraint(equalToConstant: 18),
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64)
-        ])
-        return button
     }
 
     /// Preview strip that replaces the text editor while an image is attached.
@@ -1029,6 +1149,10 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         return container
     }
 
+    /// Composer: text editor on top, toolbar (macro palette · image · character
+    /// count) along the bottom — the layout every chat/post composer trained
+    /// users to expect. The macro palette gets a real pill with its ⌘/ hint
+    /// baked in instead of an 18pt ghost button hidden in the caption row.
     private func makeEditorContainer() -> NSView {
         let container = NSView()
         container.wantsLayer = true
@@ -1050,7 +1174,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         replacementView.textColor = DevTypeTheme.textPrimary
         replacementView.backgroundColor = .clear
         replacementView.insertionPointColor = DevTypeTheme.accentBright
-        replacementView.string = existing?.replacementText ?? ""
+        replacementView.string = seed?.replacementText ?? ""
         replacementView.delegate = self
         replacementView.textContainerInset = NSSize(width: 6, height: 6)
         replacementView.minSize = NSSize(width: 0, height: 0)
@@ -1067,12 +1191,56 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         replacementView.setAccessibilityLabel(loc.s("ax.editor.replacement"))
         scroll.documentView = replacementView
 
+        let toolbarRule = DevTypeTheme.makeHairline()
+
+        let macro = ComposerPillButton(
+            title: loc.s("editor.macros"),
+            symbol: "curlybraces",
+            shortcut: "⌘/",
+            target: self,
+            action: #selector(showMacroMenu(_:))
+        )
+        // §3: ⌘/ is the documented "show me the macros" shortcut.
+        macro.keyEquivalent = "/"
+        macro.keyEquivalentModifierMask = [.command]
+        macro.toolTip = loc.s("editor.hint.macros")
+        macro.setAccessibilityHelp(loc.s("editor.hint.macros"))
+        macroButton = macro
+
+        let image = ComposerPillButton(
+            title: loc.s("editor.image.attach"),
+            symbol: "photo",
+            shortcut: nil,
+            target: self,
+            action: #selector(chooseImage(_:))
+        )
+
+        charCountLabel.translatesAutoresizingMaskIntoConstraints = false
+
         container.addSubview(scroll)
+        container.addSubview(toolbarRule)
+        container.addSubview(macro)
+        container.addSubview(image)
+        container.addSubview(charCountLabel)
+
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
-            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4)
+            scroll.bottomAnchor.constraint(equalTo: toolbarRule.topAnchor, constant: -2),
+
+            toolbarRule.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            toolbarRule.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            toolbarRule.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -35),
+
+            macro.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            macro.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6),
+
+            image.leadingAnchor.constraint(equalTo: macro.trailingAnchor, constant: 6),
+            image.centerYAnchor.constraint(equalTo: macro.centerYAnchor),
+
+            charCountLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            charCountLabel.centerYAnchor.constraint(equalTo: macro.centerYAnchor)
         ])
         return container
     }
@@ -1140,7 +1308,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             saveButton?.isEnabled = false
             triggerStatusLabel.stringValue = ""
             stage.setInvalid(false)
-            errorLabel.isHidden = true
+            setError(nil)
             setTriggerRule(loc.s("editor.trigger.hint"), isError: false)
             return
         }
@@ -1148,11 +1316,10 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             isTriggerValid = false
             saveButton?.isEnabled = false
             triggerStatusLabel.stringValue = ""
-            errorLabel.stringValue = loc.s("editor.error.tooLong", AbbreviationMatcher.matchableTriggerLimit)
-            errorLabel.isHidden = false
-            errorLabel.setAccessibilityValue(errorLabel.stringValue)
+            let message = loc.s("editor.error.tooLong", AbbreviationMatcher.matchableTriggerLimit)
+            setError(message)
             stage.setInvalid(true)
-            setTriggerRule(errorLabel.stringValue, isError: true)
+            setTriggerRule(message, isError: true)
             return
         }
         // Duplicate detection comes from the host's `validate` closure because it
@@ -1163,9 +1330,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             isTriggerValid = false
             saveButton?.isEnabled = false
             triggerStatusLabel.stringValue = ""
-            errorLabel.stringValue = conflict
-            errorLabel.isHidden = false
-            errorLabel.setAccessibilityValue(conflict)
+            setError(conflict)
             stage.setInvalid(true)
             setTriggerRule(loc.s("editor.error.duplicateLive"), isError: true)
         } else {
@@ -1175,7 +1340,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             triggerStatusLabel.textColor = DevTypeTheme.statusGreen
             triggerStatusLabel.setAccessibilityValue(loc.s("editor.trigger.available"))
             stage.setInvalid(false)
-            errorLabel.isHidden = true
+            setError(nil)
             // §1: the rule that only README ever stated, rendered against the
             // trigger the user actually typed.
             setTriggerRule(
@@ -1187,6 +1352,40 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
                 isError: false
             )
         }
+    }
+
+    /// Single entry point for the inline error slot. `nil` collapses it to zero
+    /// height so the space goes back to the composer; a message sizes the slot
+    /// to the wrapped text (up to two lines) instead of letting it grow into the
+    /// footer.
+    private func setError(_ message: String?) {
+        guard let message, !message.isEmpty else {
+            errorLabel.stringValue = ""
+            errorLabel.isHidden = true
+            errorHeightConstraint?.constant = 0
+            if isViewLoaded { view.layoutSubtreeIfNeeded() }
+            return
+        }
+        errorLabel.stringValue = message
+        errorLabel.isHidden = false
+        // §4: an error that only appears visually is invisible to VoiceOver.
+        errorLabel.setAccessibilityRole(NSAccessibility.Role.staticText)
+        errorLabel.setAccessibilityValue(message)
+        // Measured from the string, not `fittingSize` — the collapsing height
+        // constraint below is part of the label's own layout, so asking the view
+        // would just hand back whatever the constraint currently says.
+        let font = errorLabel.font ?? DevTypeTheme.font(11, .medium)
+        let bounds = (message as NSString).boundingRect(
+            with: NSSize(width: errorLabel.preferredMaxLayoutWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        // Two lines max, matching `maximumNumberOfLines`. The slack matters: the
+        // cell drops a line it cannot fit *entirely* rather than clipping it, so
+        // a slot measured exactly to `boundingRect` silently loses line two.
+        let lineCap = 2 * ceil(font.boundingRectForFont.height) + 6
+        errorHeightConstraint?.constant = min(lineCap, ceil(bounds.height) + 6)
+        if isViewLoaded { view.layoutSubtreeIfNeeded() }
     }
 
     private func setTriggerRule(_ text: String, isError: Bool) {
@@ -1201,10 +1400,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     // MARK: §1 — new-snippet guide
 
     private func applyGuideVisibility() {
+        // The composer is pinned top and bottom, so it absorbs the guide's
+        // height automatically — there is no second constant to keep in step.
         guideHeightConstraint?.constant = guideVisible ? SnippetEditorGuideView.preferredHeight : 0
-        editorHeightConstraint?.constant = guideVisible
-            ? Self.editorHeightWithGuide
-            : Self.editorHeightWithGuide + SnippetEditorGuideView.preferredHeight
         guideView?.isHidden = !guideVisible
         let key = guideVisible ? "guide.hide" : "guide.show"
         helpButton?.toolTip = loc.s(key)
@@ -1496,17 +1694,13 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         snippet.requireWordBoundary = boundaryChip.isOn
         snippet.isPlainText = plainChip.isOn
         snippet.enabled = enabledChip.isOn
+        snippet.aiTransform = selectedAITransform
         snippet.updatedAt = Date()
         onFinish(snippet, selectedGroupID)
     }
 
     private func showError(_ message: String) {
-        errorLabel.stringValue = message
-        errorLabel.isHidden = false
-        // §4: an error that only appears visually is invisible to VoiceOver.
-        errorLabel.setAccessibilityRole(NSAccessibility.Role.staticText)
-        errorLabel.setAccessibilityValue(message)
-        view.layoutSubtreeIfNeeded()
+        setError(message)
         guard !DevTypeAccessibility.reduceMotion else { return }
         // Brief attention shake on the trigger field.
         let animation = CAKeyframeAnimation(keyPath: "transform.translation.x")

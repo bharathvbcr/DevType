@@ -16,6 +16,22 @@ final class PermissionOnboardingController: NSViewController {
         case done
     }
 
+    /// Longest the wizard waits for `codesign` before it stops gating Finish on the hash.
+    ///
+    /// `BoundedProcess` already caps each `codesign` invocation, so this is the second line of
+    /// defence: whatever goes wrong upstream — saturated global queue, a completion that never
+    /// fires — the user must not end up staring at a permanently disabled Finish button with no
+    /// way to complete setup.
+    static let cdHashWatchdogInterval: TimeInterval = 15.0
+
+    /// Cadence for re-rendering while the window is open. Grants can land without the app ever
+    /// deactivating (a TCC prompt answered in place, `tccutil`, another window flipping a
+    /// toggle), and `applicationDidBecomeActive` never fires for those.
+    static let liveRefreshInterval: TimeInterval = 1.5
+
+    /// Settle before re-reading TCC after a Request — the daemon updates asynchronously.
+    static let requestSettleInterval: TimeInterval = 1.0
+
     private let onFinished: () -> Void
     private var step: Step = .welcome
 
@@ -34,11 +50,39 @@ final class PermissionOnboardingController: NSViewController {
         target: nil,
         action: nil
     )
+    private var backButton: CapsuleButton?
     private var stepPill: PillBadgeView?
     private var progressSegments: [NSView] = []
 
     private var cdHash: String?
     private var cdHashLoadFinished = false
+    private var cdHashWatchdog: DispatchWorkItem?
+
+    /// Single-flight for the post-Request settle. Double-clicking Request used to stack one
+    /// settle block per click, each calling `refresh(presentTapFailureAlert: true)` — which stacks
+    /// one modal Tap Failed alert per click on top of the wizard.
+    private var pendingRequestSettle: DispatchWorkItem?
+    private var requestInFlight = false
+
+    /// Set once the user has actually asked macOS for Input Monitoring. Lets that step advance
+    /// even when the grant never materialises — see `canAdvanceFromInputMonitoring`.
+    private var didAttemptInputMonitoringRequest = false
+
+    /// Live re-render while visible, plus the state fingerprint that decides whether a tick is
+    /// worth acting on. Re-rendering unconditionally would wipe the transient "still missing…"
+    /// hints a moment after they appear.
+    private var liveRefreshTimer: Timer?
+    private var lastRenderedSignature: String?
+
+    /// Advice that outlives a single `render()`.
+    ///
+    /// Every hint site set `statusLabel.stringValue` and then called `render()`, which
+    /// unconditionally reassigns that label from the step branch — so "Still missing Input
+    /// Monitoring…" and the whole Open Settings guidance block were written and erased in the same
+    /// turn of the run loop and never reached the screen. Holding the hint here lets `render()`
+    /// re-apply it, and lets a real state change clear it.
+    private var transientHint: (text: String, color: NSColor)?
+    private var lastAnnouncedStatus: String?
 
     init(onFinished: @escaping () -> Void) {
         self.onFinished = onFinished
@@ -177,6 +221,19 @@ final class PermissionOnboardingController: NSViewController {
         )
         secondaryButton = secondary
 
+        // Return activates the step's main action; Escape is Cancel, matching every other Mac
+        // wizard. Neither key did anything before, so keyboard-only users could not advance.
+        primary.keyEquivalent = "\r"
+        tertiaryButton.keyEquivalent = "\u{1b}"
+
+        let back = CapsuleButton(
+            title: loc.s("onboarding.back"),
+            style: .secondary,
+            target: self,
+            action: #selector(backAction)
+        )
+        backButton = back
+
         tertiaryButton.target = self
         tertiaryButton.action = #selector(skipAction)
         tertiaryButton.isBordered = false
@@ -184,9 +241,15 @@ final class PermissionOnboardingController: NSViewController {
         tertiaryButton.contentTintColor = DevTypeTheme.textTertiary
         tertiaryButton.translatesAutoresizingMaskIntoConstraints = false
 
+        let leftStack = NSStackView(views: [back, tertiaryButton])
+        leftStack.orientation = .horizontal
+        leftStack.alignment = .centerY
+        leftStack.spacing = 12
+        leftStack.translatesAutoresizingMaskIntoConstraints = false
+
         mainView.addSubview(primary)
         mainView.addSubview(secondary)
-        mainView.addSubview(tertiaryButton)
+        mainView.addSubview(leftStack)
 
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: mainView.topAnchor, constant: 44),
@@ -204,10 +267,11 @@ final class PermissionOnboardingController: NSViewController {
             scrollView.topAnchor.constraint(equalTo: progressStack.bottomAnchor, constant: 14),
             scrollView.leadingAnchor.constraint(equalTo: mainView.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: mainView.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: tertiaryButton.topAnchor, constant: -12),
+            scrollView.bottomAnchor.constraint(equalTo: leftStack.topAnchor, constant: -12),
 
-            tertiaryButton.leadingAnchor.constraint(equalTo: mainView.leadingAnchor, constant: 22),
-            tertiaryButton.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -18),
+            leftStack.leadingAnchor.constraint(equalTo: mainView.leadingAnchor, constant: 22),
+            leftStack.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -16),
+            leftStack.trailingAnchor.constraint(lessThanOrEqualTo: secondary.leadingAnchor, constant: -12),
 
             secondary.trailingAnchor.constraint(equalTo: primary.leadingAnchor, constant: -10),
             secondary.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -16),
@@ -221,8 +285,17 @@ final class PermissionOnboardingController: NSViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         ProcessIdentity.shared.refreshCDHashAsync { [weak self] hash in
-            self?.cdHash = hash
-            self?.cdHashLoadFinished = true
+            guard let self else { return }
+            self.cdHashWatchdog?.cancel()
+            self.cdHashWatchdog = nil
+            self.cdHash = hash
+            self.cdHashLoadFinished = true
+            self.render()
+        }
+        startCDHashWatchdog()
+        // Dual-install detection shells out to Spotlight — resolve it off-main and re-render
+        // when it lands rather than blocking every render on it.
+        ProcessIdentity.shared.refreshDevelopmentBundlePresenceAsync { [weak self] _ in
             self?.render()
         }
         render()
@@ -230,13 +303,80 @@ final class PermissionOnboardingController: NSViewController {
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        // Return should fire Continue the moment the window opens.
+        view.window?.makeFirstResponder(primaryButton)
         PermissionCoordinator.shared.refresh(presentTapFailureAlert: false)
         render()
+        startLiveRefresh()
     }
 
     override func viewDidDisappear() {
         super.viewDidDisappear()
         SettingsDeepLinker.shared.cancelPendingOpen()
+        stopLiveRefresh()
+        pendingRequestSettle?.cancel()
+        pendingRequestSettle = nil
+        requestInFlight = false
+        cdHashWatchdog?.cancel()
+        cdHashWatchdog = nil
+    }
+
+    /// Stops gating Finish on a hash that is never going to arrive. Setup can complete without
+    /// one — `markOnboardingCompleted` simply stores no hash, and the next launch backfills it.
+    private func startCDHashWatchdog() {
+        cdHashWatchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.cdHashLoadFinished else { return }
+            DevTypeLog.identity.error(
+                "[Identity] CDHash load exceeded \(Self.cdHashWatchdogInterval, privacy: .public)s — unblocking Finish without a hash"
+            )
+            self.cdHashLoadFinished = true
+            self.render()
+        }
+        cdHashWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.cdHashWatchdogInterval, execute: work)
+    }
+
+    private func startLiveRefresh() {
+        stopLiveRefresh()
+        let timer = Timer.scheduledTimer(
+            withTimeInterval: Self.liveRefreshInterval,
+            repeats: true
+        ) { [weak self] _ in
+            guard let self, self.view.window?.isVisible == true else { return }
+            // Only when something actually moved — an unconditional render would erase the
+            // transient hints ("Still missing Input Monitoring…") a second after they appear.
+            if self.currentRenderSignature() != self.lastRenderedSignature {
+                DevTypeLog.permission.debug("[Permission] onboarding live refresh — state changed")
+                // The hint described the state we just left; keeping it would contradict the
+                // freshly rendered status line.
+                self.transientHint = nil
+                self.render()
+            }
+        }
+        // The wizard is modal-feeling but not modal; keep ticking during menu tracking / drags.
+        RunLoop.main.add(timer, forMode: .common)
+        liveRefreshTimer = timer
+    }
+
+    private func stopLiveRefresh() {
+        liveRefreshTimer?.invalidate()
+        liveRefreshTimer = nil
+    }
+
+    /// Fingerprint of everything `render()` branches on.
+    private func currentRenderSignature() -> String {
+        let snapshot = PermissionProbe().snapshot()
+        return [
+            String(step.rawValue),
+            String(snapshot.canListenTap),
+            String(snapshot.canUseAX),
+            String(snapshot.canPostEvents),
+            String(EventTapEngine.shared.isTapRunning),
+            String(cdHashLoadFinished),
+            String(ProcessIdentity.shared.cachedDevelopmentBundlePresent),
+            String(requestInFlight)
+        ].joined(separator: "|")
     }
 
     /// Called from AppDelegate when returning from System Settings.
@@ -262,16 +402,16 @@ final class PermissionOnboardingController: NSViewController {
     }
 
     private func render() {
+        assertMainThread()
+        lastRenderedSignature = currentRenderSignature()
         updateStepIndicator()
         let identity = ProcessIdentity.shared
         let snapshot = PermissionProbe().snapshot()
         let siblings = identity.siblingPaths()
         let appsExists = FileManager.default.fileExists(atPath: ProcessIdentity.preferredInstalledAppPath)
-        // Include on-disk `.build/DevType.app` even when that copy is not running.
-        let buildPresent = ProcessIdentity.developmentAppBundlePresentIncludingOnDisk(
-            runningPath: identity.bundlePath,
-            siblingPaths: siblings
-        )
+        // Include on-disk `.build/DevType.app` even when that copy is not running. Read from the
+        // async cache — resolving it here would spawn `mdfind` on the main thread on every render.
+        let buildPresent = identity.cachedDevelopmentBundlePresent
         let runningIDs = NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)
         let hashText = cdHashLoadFinished
             ? (cdHash ?? loc.s("onboarding.identity.unavailable"))
@@ -311,9 +451,13 @@ final class PermissionOnboardingController: NSViewController {
 
         guard let primaryButton, let secondaryButton else { return }
         secondaryButton.isHidden = false
+        secondaryButton.isEnabled = true
         tertiaryButton.isHidden = false
         tertiaryButton.title = loc.s("onboarding.skip")
         primaryButton.isEnabled = true
+        // Welcome is the first step, and Done is past the point where re-answering an earlier
+        // step means anything — everything between them is revisitable.
+        backButton?.isHidden = (step == .welcome || step == .done)
 
         switch step {
         case .welcome:
@@ -339,13 +483,29 @@ final class PermissionOnboardingController: NSViewController {
             titleLabel.stringValue = loc.s("onboarding.im.title")
             bodyLabel.stringValue = PermissionCopy.unlockDescription(for: .inputMonitoring)
                 + "\n\n" + loc.s("onboarding.im.body")
-            statusLabel.stringValue = snapshot.canListenTap
-                ? loc.s("onboarding.im.granted")
-                : loc.s("onboarding.im.missing")
+            if snapshot.canListenTap {
+                statusLabel.stringValue = loc.s("onboarding.im.granted")
+            } else if didAttemptInputMonitoringRequest {
+                // Requested and refused — say that continuing is allowed and what it costs.
+                statusLabel.stringValue = loc.s("onboarding.im.missing")
+                    + "\n" + loc.s("onboarding.im.blocked")
+            } else {
+                statusLabel.stringValue = loc.s("onboarding.im.missing")
+            }
             statusLabel.textColor = snapshot.canListenTap ? DevTypeTheme.greenStatus : DevTypeTheme.redBright
-            primaryButton.title = snapshot.canListenTap
-                ? loc.s("onboarding.continue")
-                : loc.s("onboarding.request")
+            if snapshot.canListenTap {
+                primaryButton.title = loc.s("onboarding.continue")
+            } else if ProcessIdentity.canAdvanceFromInputMonitoring(
+                canListenTap: false,
+                didAttemptRequest: didAttemptInputMonitoringRequest
+            ) {
+                // Requested and still denied: offer to move on rather than trap the user here.
+                // Verify and Done already treat a missing Listen as non-blocking.
+                primaryButton.title = loc.s("onboarding.continueWithoutListen")
+            } else {
+                primaryButton.title = loc.s("onboarding.request")
+            }
+            primaryButton.isEnabled = !requestInFlight
             secondaryButton.title = loc.s("onboarding.openSettings")
             secondaryButton.isHidden = false
 
@@ -369,9 +529,11 @@ final class PermissionOnboardingController: NSViewController {
             } else {
                 primaryButton.title = loc.s("onboarding.continue")
             }
+            primaryButton.isEnabled = !requestInFlight
             secondaryButton.title = snapshot.canUseAX && !snapshot.canPostEvents
                 ? loc.s("onboarding.requestPostEvents")
                 : loc.s("onboarding.openAccessibility")
+            secondaryButton.isEnabled = !requestInFlight
             secondaryButton.isHidden = false
 
         case .verify:
@@ -496,6 +658,91 @@ final class PermissionOnboardingController: NSViewController {
                 tertiaryButton.isHidden = true
             }
         }
+
+        // Re-applied after the step branch, which owns `statusLabel` outright.
+        if let transientHint {
+            statusLabel.stringValue += "\n" + transientHint.text
+            statusLabel.textColor = transientHint.color
+        }
+        announceStatusIfNeeded()
+    }
+
+    /// VoiceOver gets nothing from a label whose text is swapped in place, so the step title and
+    /// current status are announced explicitly whenever they change.
+    private func announceStatusIfNeeded() {
+        let announcement = "\(titleLabel.stringValue). \(statusLabel.stringValue)"
+        guard announcement != lastAnnouncedStatus else { return }
+        lastAnnouncedStatus = announcement
+        guard let window = view.window, window.isVisible else { return }
+        NSAccessibility.post(
+            element: window,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: announcement,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue
+            ]
+        )
+    }
+
+    /// Shows advice that survives the next `render()`.
+    private func setTransientHint(_ text: String, color: NSColor) {
+        transientHint = (text, color)
+        render()
+    }
+
+    @objc private func backAction() {
+        guard let previous = Step(rawValue: step.rawValue - 1) else { return }
+        DevTypeLog.permission.info(
+            "[Permission] onboarding back \(String(describing: self.step), privacy: .public) → \(String(describing: previous), privacy: .public)"
+        )
+        pendingRequestSettle?.cancel()
+        pendingRequestSettle = nil
+        requestInFlight = false
+        transientHint = nil
+        step = previous
+        render()
+    }
+
+    /// Runs a TCC request and schedules exactly one settle pass.
+    ///
+    /// Single-flight matters here: each settle ends in
+    /// `refresh(presentTapFailureAlert: true)`, so N stacked settles meant N modal Tap Failed
+    /// alerts queued in front of the wizard from nothing worse than an impatient double-click.
+    private func performRequest(
+        logLabel: String,
+        request: () -> Void,
+        stillMissing: @escaping () -> Bool,
+        stillMissingHint: @escaping () -> String
+    ) {
+        guard !requestInFlight else {
+            DevTypeLog.permission.debug(
+                "[Permission] onboarding request already in flight — ignoring \(logLabel, privacy: .public)"
+            )
+            return
+        }
+        DevTypeLog.permission.info("[Permission] onboarding Request \(logLabel, privacy: .public)")
+        requestInFlight = true
+        pendingRequestSettle?.cancel()
+        transientHint = nil
+        request()
+        render()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingRequestSettle = nil
+            self.requestInFlight = false
+            if stillMissing() {
+                DevTypeLog.permission.notice(
+                    "[Permission] onboarding \(logLabel, privacy: .public) still denied \(Self.requestSettleInterval, privacy: .public)s after request"
+                )
+                self.setTransientHint(stillMissingHint(), color: DevTypeTheme.statusOrange)
+            } else {
+                self.render()
+            }
+            PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
+        }
+        pendingRequestSettle = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.requestSettleInterval, execute: work)
     }
 
     @objc private func primaryAction() {
@@ -506,48 +753,45 @@ final class PermissionOnboardingController: NSViewController {
         case .inputMonitoring:
             if snapshot.canListenTap {
                 step = .accessibilityAndPost
-            } else {
-                DevTypeLog.permission.info("[Permission] onboarding Request Input Monitoring")
-                let result = PermissionRequester.shared.requestInputMonitoring()
-                PermissionCoordinator.shared.noteListenRequestResult(
-                    preflightGranted: result.preflightGranted
+            } else if ProcessIdentity.canAdvanceFromInputMonitoring(
+                canListenTap: false,
+                didAttemptRequest: didAttemptInputMonitoringRequest
+            ) {
+                // Requested once and still denied — continue to Accessibility rather than dead-end.
+                // Verify/Done surface the missing Listen and the menu stays honest about it.
+                DevTypeLog.permission.notice(
+                    "[Permission] onboarding advancing past Input Monitoring without a grant (request already attempted)"
                 )
-                render()
-                // Offer Open after settle if still denied — do not auto-open.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard let self else { return }
-                    if !PermissionProbe().snapshot().canListenTap {
-                        DevTypeLog.permission.notice(
-                            "[Permission] onboarding Input Monitoring still denied 1s after request"
+                step = .accessibilityAndPost
+            } else {
+                didAttemptInputMonitoringRequest = true
+                performRequest(
+                    logLabel: "Input Monitoring",
+                    request: {
+                        let result = PermissionRequester.shared.requestInputMonitoring()
+                        PermissionCoordinator.shared.noteListenRequestResult(
+                            preflightGranted: result.preflightGranted
                         )
-                        self.statusLabel.stringValue = self.loc.s("onboarding.im.stillMissing")
-                        self.statusLabel.textColor = DevTypeTheme.statusOrange
-                    }
-                    self.render()
-                    PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
-                }
+                    },
+                    // Offer Open after settle if still denied — do not auto-open.
+                    stillMissing: { !PermissionProbe().snapshot().canListenTap },
+                    stillMissingHint: { [loc] in loc.s("onboarding.im.stillMissing") }
+                )
                 return
             }
         case .accessibilityAndPost:
             if !snapshot.canUseAX {
-                DevTypeLog.permission.info("[Permission] onboarding Request Accessibility")
-                let result = PermissionRequester.shared.requestAccessibility()
-                PermissionCoordinator.shared.noteAccessibilityRequestResult(
-                    preflightGranted: result.preflightGranted
-                )
-                render()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard let self else { return }
-                    if !PermissionProbe().snapshot().canUseAX {
-                        DevTypeLog.permission.notice(
-                            "[Permission] onboarding Accessibility still denied 1s after request — relaunch may be required"
+                performRequest(
+                    logLabel: "Accessibility",
+                    request: {
+                        let result = PermissionRequester.shared.requestAccessibility()
+                        PermissionCoordinator.shared.noteAccessibilityRequestResult(
+                            preflightGranted: result.preflightGranted
                         )
-                        self.statusLabel.stringValue = self.loc.s("onboarding.ax.stillMissing")
-                        self.statusLabel.textColor = DevTypeTheme.statusOrange
-                    }
-                    self.render()
-                    PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
-                }
+                    },
+                    stillMissing: { !PermissionProbe().snapshot().canUseAX },
+                    stillMissingHint: { [loc] in loc.s("onboarding.ax.stillMissing") }
+                )
                 return
             }
             // AX granted — advance even without Post (degraded AX-only).
@@ -564,9 +808,10 @@ final class PermissionOnboardingController: NSViewController {
                 DevTypeLog.permission.notice(
                     "[Permission] onboarding Verify blocked — Accessibility missing"
                 )
-                statusLabel.stringValue = loc.s("onboarding.verify.cannotContinue")
-                statusLabel.textColor = DevTypeTheme.redBright
-                render()
+                setTransientHint(
+                    loc.s("onboarding.verify.cannotContinue"),
+                    color: DevTypeTheme.redBright
+                )
                 return
             }
             step = .done
@@ -585,15 +830,15 @@ final class PermissionOnboardingController: NSViewController {
                 DevTypeLog.permission.notice(
                     "[Permission] onboarding Finish blocked — Accessibility missing or CDHash still loading"
                 )
+                let reason: String
                 if !latest.canUseAX {
-                    statusLabel.stringValue = loc.s("onboarding.done.finishBlockedAX")
+                    reason = loc.s("onboarding.done.finishBlockedAX")
                 } else if !cdHashLoadFinished {
-                    statusLabel.stringValue = loc.s("onboarding.done.finishBlockedHash")
+                    reason = loc.s("onboarding.done.finishBlockedHash")
                 } else {
-                    statusLabel.stringValue = loc.s("onboarding.done.finishBlockedGeneric")
+                    reason = loc.s("onboarding.done.finishBlockedGeneric")
                 }
-                statusLabel.textColor = DevTypeTheme.redBright
-                render()
+                setTransientHint(reason, color: DevTypeTheme.redBright)
                 return
             }
             if hash == nil {
@@ -612,6 +857,9 @@ final class PermissionOnboardingController: NSViewController {
             view.window?.close()
             return
         }
+        // Only reached on a successful step transition — the previous step's advice no longer
+        // describes what is on screen.
+        transientHint = nil
         render()
         PermissionCoordinator.shared.refresh()
     }
@@ -624,12 +872,7 @@ final class PermissionOnboardingController: NSViewController {
             return
         case .accessibilityAndPost:
             if snapshot.canUseAX && !snapshot.canPostEvents {
-                DevTypeLog.permission.info("[Permission] onboarding Request Post Events (optional)")
-                _ = PermissionRequester.shared.requestPostEvent()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    self?.render()
-                    PermissionCoordinator.shared.refresh()
-                }
+                requestPostEvents()
                 return
             }
             presentOpenSettings(for: .accessibility)
@@ -674,12 +917,7 @@ final class PermissionOnboardingController: NSViewController {
         if step == .done {
             let snapshot = PermissionProbe().snapshot()
             if snapshot.canListenTap && snapshot.canUseAX && !snapshot.canPostEvents {
-                DevTypeLog.permission.info("[Permission] onboarding Done Request Post Events")
-                _ = PermissionRequester.shared.requestPostEvent()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    self?.render()
-                    PermissionCoordinator.shared.refresh()
-                }
+                requestPostEvents()
                 return
             }
             if let missing = SettingsDeepLinker.preferredKindForMissingCapabilities(
@@ -697,46 +935,56 @@ final class PermissionOnboardingController: NSViewController {
         view.window?.close()
     }
 
+    /// Post Events is the one optional capability and has no Settings list of its own, so the
+    /// only remedy is re-Requesting — which makes it the easiest button to hammer.
+    private func requestPostEvents() {
+        performRequest(
+            logLabel: "Post Events",
+            request: { _ = PermissionRequester.shared.requestPostEvent() },
+            stillMissing: { !PermissionProbe().snapshot().canPostEvents },
+            stillMissingHint: { [loc] in loc.s("onboarding.post.stillMissing") }
+        )
+    }
+
     private func presentOpenSettings(for kind: PermissionKind) {
         DevTypeLog.permission.info(
             "[Permission] onboarding Open Settings kind=\(DevTypeLog.kindName(kind), privacy: .public)"
         )
         SettingsDeepLinker.shared.open(for: kind) { [weak self] result in
             guard let self else { return }
+            let hint: String
             if !result.didOpen {
                 DevTypeLog.permission.error(
                     "[Permission] onboarding Open Settings failed kind=\(DevTypeLog.kindName(kind), privacy: .public)"
                 )
-                self.statusLabel.stringValue = PermissionCopy.settingsOpenFailureMessage(for: kind)
-                self.statusLabel.textColor = DevTypeTheme.statusOrange
+                hint = PermissionCopy.settingsOpenFailureMessage(for: kind)
             } else {
-                var hint = PermissionCopy.openSettingsWithoutRequestHint(
+                var text = PermissionCopy.openSettingsWithoutRequestHint(
                     for: kind,
                     bundleID: ProcessIdentity.shared.bundleIdentifier
                 )
                 let snapshot = PermissionProbe().snapshot()
                 if kind == .inputMonitoring, !snapshot.canUseAX {
-                    hint += "\n" + self.loc.s("onboarding.hint.imThenAX")
+                    text += "\n" + self.loc.s("onboarding.hint.imThenAX")
                 } else if kind == .accessibility || kind == .postEvent {
-                    hint += "\n" + self.loc.s("onboarding.hint.postNoList")
+                    text += "\n" + self.loc.s("onboarding.hint.postNoList")
                 }
-                self.statusLabel.stringValue = hint
-                self.statusLabel.textColor = DevTypeTheme.statusOrange
+                hint = text
             }
             PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
-            self.render()
+            // Via `setTransientHint`, not `statusLabel` directly: the `render()` that follows
+            // reassigns that label from the step branch and would erase this guidance outright.
+            self.setTransientHint(hint, color: DevTypeTheme.statusOrange)
         }
     }
 
     private func relaunchApp() {
         DevTypeLog.app.info("[App] relaunch from onboarding")
-        let url = Bundle.main.bundleURL
-        let config = NSWorkspace.OpenConfiguration()
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
-            DispatchQueue.main.async {
-                PermissionCoordinator.shared.cancelPendingWork()
-                NSApp.terminate(nil)
-            }
+        // A failed spawn must not become an unrequested quit — say so and stay in the wizard.
+        guard AppRelauncher.relaunch() else {
+            statusLabel.stringValue = loc.s("onboarding.relaunchFailed")
+            statusLabel.textColor = DevTypeTheme.redBright
+            return
         }
     }
 }

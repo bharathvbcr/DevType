@@ -98,6 +98,7 @@ enum DevTypeAccessibility {
         "speaker.slash.fill": "ax.symbol.mutedApps",
         "power": "ax.symbol.quit",
         "gearshape": "ax.symbol.settings",
+        "sparkles": "ax.symbol.ai",
         "slider.horizontal.3": "ax.symbol.preferences",
         "plus": "ax.symbol.add",
         "pencil": "ax.symbol.edit",

@@ -53,10 +53,44 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
+  # A4 / AI_PLAN Milestone 1 — compile the real FoundationModels path.
+  # macos-14 keeps canImport(FoundationModels) false (stub + .macOS(.v14) guard);
+  # macos-26 makes it true so AITextTransformer is actually built and tested.
+  test-macos26:
+    name: Build & test (macOS 26)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Show toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          # Distinct from macos-14: SDK/ABI differ when FoundationModels is present.
+          key: spm-${{ runner.os }}-macos26-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-macos26-
+
+      - name: Build (debug)
+        run: swift build -v
+
+      - name: Test
+        run: swift test -v
+
+      - name: Build (release)
+        run: swift build -c release
+
   package:
     name: Package .app
     runs-on: macos-14
-    needs: test
+    needs: [test, test-macos26]
     steps:
       - uses: actions/checkout@v4
         with:

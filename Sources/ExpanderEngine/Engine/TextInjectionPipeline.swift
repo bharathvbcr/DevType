@@ -212,6 +212,12 @@ public final class TextInjectionPipeline {
         AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID)
     }
 
+    /// §3.3: role-aware skip so a condemned `AXTextArea` does not force HID on the same app's
+    /// native fields — and so a role learned mid-inject is honoured for the AX-direct step.
+    public static func shouldSkipAXSelectedText(bundleID: String, role: String?) -> Bool {
+        AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID, role: role)
+    }
+
     /// Next restore generation token. Pure helper for tests; production uses `beginRestoreGeneration()`.
     public static func nextRestoreGeneration(current: UInt64) -> UInt64 {
         PasteboardBroker.nextRestoreGeneration(current: current)
@@ -564,7 +570,10 @@ public final class TextInjectionPipeline {
                     )
                     return
                 }
-                if self.ax.attemptAXDirectInjection(text: record.triggerText) {
+                if self.ax.attemptAXDirectInjection(
+                    text: record.triggerText,
+                    bundleID: record.bundleID
+                ) {
                     PermissionCoordinator.shared.recordInjectOutcome(
                         .succeeded,
                         refuseContext: nil,
@@ -899,16 +908,24 @@ public final class TextInjectionPipeline {
         )
         // #endregion
 
-        // Skip the AX selected-text write when this app is known — seeded, learned this session, or
-        // persisted from an earlier launch — to report success without mutating. Computed before
-        // the plan switch so the AX-only path gets the same protection as the AX+HID path.
-        let preferHID = TextInjectionPipeline.shouldSkipAXSelectedText(bundleID: frontBundle)
+        // Skip the AX selected-text write when this app/role is known — seeded, learned this
+        // session, or persisted from an earlier launch — to report success without mutating.
+        // Role-aware: WhatsApp's AXTextArea can be condemned without affecting other roles.
+        let focusedRole = AXContextChecker.shared.focusedElementRole()
+        var preferHID = TextInjectionPipeline.shouldSkipAXSelectedText(
+            bundleID: frontBundle,
+            role: focusedRole
+        )
         // #region agent log
         if preferHID {
             TextInjectionPipeline.debugLogInject(
                 hypothesisId: "M3",
                 message: "skip AX range — weak selected-text app",
-                data: ["frontmostBundle": frontBundle, "preferHID": true]
+                data: [
+                    "frontmostBundle": frontBundle,
+                    "preferHID": true,
+                    "role": focusedRole ?? ""
+                ]
             )
         }
         // #endregion
@@ -971,35 +988,48 @@ public final class TextInjectionPipeline {
             break
         }
 
-        if !shellLike, !preferHID,
-           ax.performAXRangeReplace(
-               text: textToInject,
-               eraseCount: erasePlan.utf16Count,
-               bundleID: context.frontBundleID
-           ) == .replaced {
-            // #region agent log
-            TextInjectionPipeline.debugLogInject(
-                hypothesisId: "M3",
-                message: "inject path",
-                data: ["frontmostBundle": frontBundle, "path": "axRange", "outcome": "succeeded"]
-            )
-            // #endregion
-            positionCursorIfNeeded(
+        if !shellLike, !preferHID {
+            let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
-                cursorOffset: cursorOffset,
-                totalUTF16Length: totalUTF16,
-                allowHID: true
-            ) {
-                self.hid.postTrailingKeys(keysToPress)
-                self.finishSucceeded(
-                    outcome: .succeeded,
-                    path: "axRange",
-                    context: context,
-                    injectedText: textToInject,
-                    completion: completion
+                eraseCount: erasePlan.utf16Count,
+                bundleID: context.frontBundleID
+            )
+            if axOutcome == .replaced {
+                // #region agent log
+                TextInjectionPipeline.debugLogInject(
+                    hypothesisId: "M3",
+                    message: "inject path",
+                    data: ["frontmostBundle": frontBundle, "path": "axRange", "outcome": "succeeded"]
                 )
+                // #endregion
+                positionCursorIfNeeded(
+                    text: textToInject,
+                    cursorOffset: cursorOffset,
+                    totalUTF16Length: totalUTF16,
+                    allowHID: true
+                ) {
+                    self.hid.postTrailingKeys(keysToPress)
+                    self.finishSucceeded(
+                        outcome: .succeeded,
+                        path: "axRange",
+                        context: context,
+                        injectedText: textToInject,
+                        completion: completion
+                    )
+                }
+                return
             }
-            return
+            // Range replace did not apply. If this call just condemned the control (falseSuccess)
+            // or the role was already marked weak, skip AX direct after erase — that path can
+            // report succeeded after deleting the trigger when verification is unverifiable.
+            if case .falseSuccess = axOutcome {
+                preferHID = true
+            } else if TextInjectionPipeline.shouldSkipAXSelectedText(
+                bundleID: frontBundle,
+                role: focusedRole
+            ) {
+                preferHID = true
+            }
         }
 
         // Fallback: HID backspaces then AX set or paste.
@@ -1069,7 +1099,11 @@ public final class TextInjectionPipeline {
             }
 
             // Weak-AX apps: skip direct AX set (same false-success class as range replace).
-            if !preferHID, self.ax.attemptAXDirectInjection(text: textToInject) {
+            if !preferHID,
+               self.ax.attemptAXDirectInjection(
+                   text: textToInject,
+                   bundleID: context.frontBundleID
+               ) {
                 // #region agent log
                 TextInjectionPipeline.debugLogInject(
                     hypothesisId: "M3",
@@ -1367,7 +1401,7 @@ public final class TextInjectionPipeline {
         swallowed: SwallowedKey
     ) {
         if let text = erasePlan.expectedText, !text.isEmpty {
-            if ax.attemptAXDirectInjection(text: text) {
+            if ax.attemptAXDirectInjection(text: text, bundleID: nil) {
                 if swallowed.mustReinjectOnRefuse {
                     _ = reinjectSwallowedKey(swallowed)
                 }
@@ -1537,8 +1571,8 @@ public final class TextInjectionPipeline {
         ax.performAXRangeReplace(text: text, eraseCount: eraseCount, bundleID: bundleID)
     }
 
-    public func attemptAXDirectInjection(text: String) -> Bool {
-        ax.attemptAXDirectInjection(text: text)
+    public func attemptAXDirectInjection(text: String, bundleID: String? = nil) -> Bool {
+        ax.attemptAXDirectInjection(text: text, bundleID: bundleID)
     }
 
     @discardableResult

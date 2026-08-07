@@ -23,6 +23,12 @@ struct DevTypeShortcut: Equatable, Codable {
         carbonModifiers: UInt32(cmdKey)
     )
 
+    /// Default AI palette: ⌘⌥A (avoids the ⌘/ Comment Line clash).
+    static let aiPaletteDefault = DevTypeShortcut(
+        keyCode: UInt32(kVK_ANSI_A),
+        carbonModifiers: UInt32(cmdKey | optionKey)
+    )
+
     /// A shortcut with no modifier would swallow a plain key system-wide.
     var hasModifier: Bool { carbonModifiers != 0 }
 
@@ -91,6 +97,8 @@ struct DevTypeShortcut: Equatable, Codable {
 
     /// True for the default ⌘/ so Preferences can warn about the editor clash.
     var isDefaultInlineSearch: Bool { self == Self.inlineSearchDefault }
+
+    var isDefaultAIPalette: Bool { self == Self.aiPaletteDefault }
 }
 
 // MARK: - Persistence
@@ -99,6 +107,7 @@ struct DevTypeShortcut: Equatable, Codable {
 /// defaults key of its own.
 enum HotkeyPreferences {
     static let inlineSearchKey = "devtype.hotkey.inlineSearch"
+    static let aiPaletteKey = "devtype.hotkey.aiPalette"
     static let macrosKey = "devtype.hotkeyMacros"
 
     static var inlineSearchShortcut: DevTypeShortcut {
@@ -118,6 +127,25 @@ enum HotkeyPreferences {
 
     static func resetInlineSearchShortcut() {
         UserDefaults.standard.removeObject(forKey: inlineSearchKey)
+    }
+
+    static var aiPaletteShortcut: DevTypeShortcut {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: aiPaletteKey),
+                  let decoded = try? JSONDecoder().decode(DevTypeShortcut.self, from: data),
+                  decoded.hasModifier else {
+                return .aiPaletteDefault
+            }
+            return decoded
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            UserDefaults.standard.set(data, forKey: aiPaletteKey)
+        }
+    }
+
+    static func resetAIPaletteShortcut() {
+        UserDefaults.standard.removeObject(forKey: aiPaletteKey)
     }
 
     /// §4.3: the macro list was readable only by hand-crafting JSON into

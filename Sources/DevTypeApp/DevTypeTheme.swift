@@ -807,6 +807,240 @@ final class CapsuleButton: NSButton {
     }
 }
 
+// MARK: - Split capsule (primary + disclosure)
+
+/// Primary capsule with a trailing chevron segment. Main click runs `primaryAction`;
+/// hovering/clicking the chevron is separate — used for “Add from Template”.
+final class SplitCapsuleButton: NSView {
+    private enum Zone {
+        case none
+        case primary
+        case disclosure
+    }
+
+    private let primaryTitle: String
+    private let disclosureTooltip: String
+    private let symbolImage: NSImage?
+    private weak var target: AnyObject?
+    private let primaryAction: Selector
+    private let disclosureAction: Selector
+
+    private var hoverZone: Zone = .none {
+        didSet {
+            needsDisplay = true
+            toolTip = hoverZone == .disclosure ? disclosureTooltip : nil
+        }
+    }
+    private var pressZone: Zone = .none { didSet { needsDisplay = true } }
+
+    private let disclosureWidth: CGFloat = 22
+
+    init(
+        title: String,
+        symbol: String? = "plus",
+        disclosureTooltip: String,
+        target: AnyObject?,
+        primaryAction: Selector,
+        disclosureAction: Selector
+    ) {
+        self.primaryTitle = title
+        self.disclosureTooltip = disclosureTooltip
+        self.target = target
+        self.primaryAction = primaryAction
+        self.disclosureAction = disclosureAction
+        if let symbol {
+            symbolImage = DevTypeTheme.tintedSymbol(symbol, size: 12, weight: .semibold, color: .white)
+        } else {
+            symbolImage = nil
+        }
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(title)
+        setAccessibilityHelp(disclosureTooltip)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var intrinsicContentSize: NSSize {
+        let textSize = (primaryTitle as NSString).size(withAttributes: [
+            .font: DevTypeTheme.font(13, .semibold)
+        ])
+        var width = textSize.width + 30 + disclosureWidth
+        if symbolImage != nil { width += 18 }
+        return NSSize(width: max(66, ceil(width)), height: 26)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        hoverZone = zone(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hoverZone = zone(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hoverZone = .none
+        pressZone = .none
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        pressZone = zone(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let zone = zone(at: convert(event.locationInWindow, from: nil))
+        let pressed = pressZone
+        pressZone = .none
+        guard zone == pressed else { return }
+        fire(zone)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        fire(.primary)
+        return true
+    }
+
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        [
+            NSAccessibilityCustomAction(name: disclosureTooltip) { [weak self] in
+                self?.fire(.disclosure)
+                return true
+            }
+        ]
+    }
+
+    private func fire(_ zone: Zone) {
+        switch zone {
+        case .primary:
+            _ = target?.perform(primaryAction)
+        case .disclosure:
+            _ = target?.perform(disclosureAction)
+        case .none:
+            break
+        }
+    }
+
+    private func zone(at point: NSPoint) -> Zone {
+        guard bounds.contains(point) else { return .none }
+        if point.x >= bounds.maxX - disclosureWidth { return .disclosure }
+        return .primary
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let radius = rect.height / 2
+        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = DevTypeTheme.accent.withAlphaComponent(0.45)
+        shadow.shadowBlurRadius = 7
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
+        let gradient = NSGradient(colors: [DevTypeTheme.accentBright, DevTypeTheme.accentDeep])
+        gradient?.draw(in: path, angle: 90)
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSGraphicsContext.saveGraphicsState()
+        DevTypeTheme.accentBright.withAlphaComponent(0.55).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let splitX = bounds.maxX - disclosureWidth
+        if hoverZone == .primary || pressZone == .primary {
+            let overlay = NSBezierPath(
+                roundedRect: NSRect(x: rect.minX, y: rect.minY, width: max(0, splitX - rect.minX), height: rect.height),
+                xRadius: radius,
+                yRadius: radius
+            )
+            NSColor.black.withAlphaComponent(pressZone == .primary ? 0.18 : 0.08).setFill()
+            overlay.fill()
+        }
+        if hoverZone == .disclosure || pressZone == .disclosure {
+            let overlay = NSBezierPath(
+                roundedRect: NSRect(x: splitX, y: rect.minY, width: rect.maxX - splitX, height: rect.height),
+                xRadius: radius,
+                yRadius: radius
+            )
+            NSColor.black.withAlphaComponent(pressZone == .disclosure ? 0.18 : 0.08).setFill()
+            overlay.fill()
+        }
+
+        DevTypeTheme.accentDeep.withAlphaComponent(0.35).setStroke()
+        let divider = NSBezierPath()
+        divider.move(to: NSPoint(x: splitX, y: rect.minY + 5))
+        divider.line(to: NSPoint(x: splitX, y: rect.maxY - 5))
+        divider.lineWidth = 1
+        divider.stroke()
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: DevTypeTheme.font(13, .semibold),
+            .foregroundColor: NSColor.white
+        ]
+        let textSize = (primaryTitle as NSString).size(withAttributes: attributes)
+        let imageSize = symbolImage?.size ?? .zero
+        let spacing: CGFloat = symbolImage == nil ? 0 : 6
+        let combined = textSize.width + (symbolImage == nil ? 0 : imageSize.width + spacing)
+        let primaryWidth = bounds.width - disclosureWidth
+        var x = (primaryWidth - combined) / 2
+        let y = (bounds.height - textSize.height) / 2
+
+        if let symbolImage {
+            let imageRect = NSRect(
+                x: x,
+                y: (bounds.height - imageSize.height) / 2,
+                width: imageSize.width,
+                height: imageSize.height
+            )
+            symbolImage.draw(
+                in: imageRect,
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1,
+                respectFlipped: true,
+                hints: nil
+            )
+            x += imageSize.width + spacing
+        }
+        (primaryTitle as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: attributes)
+
+        if let chevron = DevTypeTheme.tintedSymbol("chevron.down", size: 9, weight: .bold, color: .white) {
+            let cx = bounds.maxX - disclosureWidth / 2 - chevron.size.width / 2
+            let cy = (bounds.height - chevron.size.height) / 2
+            chevron.draw(
+                in: NSRect(x: cx, y: cy, width: chevron.size.width, height: chevron.size.height),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1,
+                respectFlipped: true,
+                hints: nil
+            )
+        }
+    }
+}
+
 // MARK: - Pill badge
 
 /// Small rounded badge: tinted fill + optional status dot + label.
@@ -911,6 +1145,9 @@ final class PillBadgeView: NSView {
     }
 
     func update(text: String, tint newTint: NSColor) {
+        // Runs AutoLayout via `invalidateIntrinsicContentSize()` / `applyTint()`; off-main
+        // this aborts the process inside CoreAutoLayout. Fail here instead, in debug.
+        assertMainThread()
         label.stringValue = text
         tint = newTint
         applyTint()

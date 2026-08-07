@@ -87,6 +87,10 @@ public final class AXWriteCapabilityStore {
              "com.google.Chrome.dev", "com.brave.Browser", "com.microsoft.edgemac",
              "company.thebrowser.Browser", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
              "com.tinyspeck.slackmacgap", "com.hnc.Discord", "com.facebook.archon",
+             // WhatsApp Desktop: Electron AXTextArea reports selected-text write success without
+             // mutating. Paying that first expand duplicates/eats text or erases the trigger and
+             // then "succeeds" via unverifiable AX direct with nothing pasted.
+             "net.whatsapp.WhatsApp", "net.whatsapp.WhatsApp.beta",
              "com.microsoft.teams2", "com.microsoft.teams", "com.apple.Safari",
              "com.github.githubapp", "com.github.GitHubClient":
             return .falseSuccess

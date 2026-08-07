@@ -311,6 +311,10 @@ final class PermissionRecoveryController: NSViewController {
             self?.cdHash = hash
             self?.refreshPermissions()
         }
+        // Spotlight-backed dual-install detection resolves off-main; re-render when it lands.
+        ProcessIdentity.shared.refreshDevelopmentBundlePresenceAsync { [weak self] _ in
+            self?.refreshPermissions()
+        }
         refreshPermissions()
     }
 
@@ -445,11 +449,11 @@ final class PermissionRecoveryController: NSViewController {
 
         let siblings = identity.siblingPaths()
         let appsExists = FileManager.default.fileExists(atPath: ProcessIdentity.preferredInstalledAppPath)
-        // Include on-disk `.build/DevType.app` even when that copy is not running.
-        let buildPresent = ProcessIdentity.developmentAppBundlePresentIncludingOnDisk(
-            runningPath: appPath,
-            siblingPaths: siblings
-        )
+        // Include on-disk `.build/DevType.app` even when that copy is not running. Read from the
+        // async cache — resolving it inline would spawn `mdfind` on the main thread on every
+        // re-check, and this window re-checks on activation, on every Request, and on every
+        // post-request settle.
+        let buildPresent = identity.cachedDevelopmentBundlePresent
         let runningIDs = NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)
         var warningBits: [String] = []
         if let unpackaged = ProcessIdentity.unpackagedBinaryWarning(bundlePath: appPath) {
@@ -969,13 +973,11 @@ final class PermissionRecoveryController: NSViewController {
 
     @objc private func relaunchApp() {
         DevTypeLog.app.info("[App] relaunch from Permission Recovery")
-        let url = Bundle.main.bundleURL
-        let config = NSWorkspace.OpenConfiguration()
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
-            DispatchQueue.main.async {
-                PermissionCoordinator.shared.cancelPendingWork()
-                NSApp.terminate(nil)
-            }
+        // A failed spawn must not become an unrequested quit — say so and stay running.
+        guard AppRelauncher.relaunch() else {
+            guidanceLabel.stringValue = loc.s("recovery.relaunchFailed")
+            guidanceLabel.textColor = DevTypeTheme.redBright
+            return
         }
     }
 
