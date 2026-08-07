@@ -505,15 +505,15 @@ final class GlassContainerView: NSView {
             return
         }
 
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView(frame: bounds)
-            glass.cornerRadius = cornerRadius
-            glass.tintColor = tint
+        if #available(macOS 26.0, *), let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
+            let glass = glassClass.init(frame: bounds)
+            glass.setValue(cornerRadius, forKey: "cornerRadius")
+            glass.setValue(tint, forKey: "tintColor")
             glass.autoresizingMask = [.width, .height]
             addSubview(glass)
             contentView.frame = bounds
             contentView.autoresizingMask = [.width, .height]
-            glass.contentView = contentView
+            glass.setValue(contentView, forKey: "contentView")
         } else {
             let effect = NSVisualEffectView(frame: bounds)
             effect.material = material
