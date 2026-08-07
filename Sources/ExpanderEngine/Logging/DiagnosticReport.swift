@@ -41,6 +41,10 @@ public enum DiagnosticReport {
         public var injectTelemetryLines: [String]
         /// §3.9: triggers longer than the match buffer, which can never fire.
         public var overlongTriggerLines: [String]
+        /// On-device AI state + recent transform outcomes. An AI failure was previously
+        /// invisible here, so a guardrail refusal left no trace in the artifact people
+        /// actually paste. Contains no user text — see `AIDiagnosticsStore`.
+        public var aiLines: [String]
 
         public init(
             generatedAt: Date = Date(),
@@ -66,7 +70,8 @@ public enum DiagnosticReport {
             appVersion: String?,
             tapDisableSummary: String? = nil,
             injectTelemetryLines: [String] = [],
-            overlongTriggerLines: [String] = []
+            overlongTriggerLines: [String] = [],
+            aiLines: [String] = []
         ) {
             self.generatedAt = generatedAt
             self.bundleID = bundleID
@@ -92,6 +97,7 @@ public enum DiagnosticReport {
             self.tapDisableSummary = tapDisableSummary
             self.injectTelemetryLines = injectTelemetryLines
             self.overlongTriggerLines = overlongTriggerLines
+            self.aiLines = aiLines
         }
     }
 
@@ -192,7 +198,46 @@ public enum DiagnosticReport {
             // report cannot otherwise answer.
             tapDisableSummary: EventTapEngine.shared.tapDisableCounters.summaryLine,
             injectTelemetryLines: PermissionCoordinator.shared.injectTelemetrySummaryLines(),
-            overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics()
+            overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics(),
+            aiLines: captureAILines()
+        )
+    }
+
+    /// On-device AI state for the report. Keeps every FoundationModels detail behind
+    /// `AITextTransformSupport` / `AILocaleSupport`, which already compile on macOS 14.
+    ///
+    /// Never includes the user's selected text or any model output — only the transform
+    /// kind and Apple's own diagnostic string.
+    static func captureAILines(
+        store: AIDiagnosticsStore = .shared,
+        enabled: Bool = AIPreferences.isEnabled
+    ) -> [String] {
+        let availability: String
+        switch AITextTransformSupport.availability {
+        case .available:
+            availability = "available"
+        case .unavailable(let reason):
+            switch reason {
+            case .unsupportedOS:
+                availability = "unavailable — unsupportedOS (needs macOS 26+ with FoundationModels)"
+            case .deviceNotEligible:
+                availability = "unavailable — deviceNotEligible"
+            case .appleIntelligenceNotEnabled:
+                availability = "unavailable — appleIntelligenceNotEnabled"
+            case .modelNotReady:
+                availability = "unavailable — modelNotReady (assets still downloading)"
+            }
+        }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        // `disabledReason` returns a localized string when the current locale is unsupported.
+        let localeNote = AILocaleSupport.disabledReason().map { "unsupported — \($0)" }
+            ?? "supported (\(Locale.current.identifier))"
+        return store.diagnosticLines(
+            enabled: enabled,
+            availability: availability,
+            localeNote: localeNote,
+            iso: iso
         )
     }
 
@@ -268,6 +313,16 @@ public enum DiagnosticReport {
             lines.append("(none)")
         } else {
             lines.append(contentsOf: context.injectTelemetryLines)
+        }
+
+        // An AI guardrail refusal used to leave no trace here at all, so the one artifact
+        // people paste when the model refuses said nothing about the model.
+        lines.append("")
+        lines.append("-- On-device AI --")
+        if context.aiLines.isEmpty {
+            lines.append("(not captured)")
+        } else {
+            lines.append(contentsOf: context.aiLines)
         }
 
         // §3.9: triggers past the 64-character match buffer can never fire and nothing said so.
