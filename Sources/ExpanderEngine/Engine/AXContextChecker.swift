@@ -182,24 +182,177 @@ public final class AXContextChecker {
     /// Costs up to three AX round-trips, so this is for explicit user gestures (AI hotkey,
     /// palette) and never for the per-keystroke gate.
     public func focusedElementCandidates() -> [AXUIElement] {
-        var candidates: [AXUIElement] = []
+        probeFocusedElements(activateManualAccessibilityIfEmpty: false).candidates
+    }
 
-        func append(_ result: FocusQueryResult) {
-            guard case .available(let element) = result else { return }
-            guard !candidates.contains(where: { CFEqual($0, element) }) else { return }
-            candidates.append(element)
+    /// Focus probe with the per-probe outcome kept, and an optional Chromium wake-up.
+    public struct FocusProbeResult {
+        public let candidates: [AXUIElement]
+        /// Per-probe status in probe order, e.g. `systemWide:noValue appScoped:noValue chain:noValue`.
+        /// Recorded verbatim in the diagnostic report — "no candidates" alone cannot tell a
+        /// silent app apart from a timing out one.
+        public let summary: String
+        /// True when `AXManualAccessibility` was switched on for the target during this call.
+        public let activatedManualAccessibility: Bool
+
+        public init(candidates: [AXUIElement], summary: String, activatedManualAccessibility: Bool) {
+            self.candidates = candidates
+            self.summary = summary
+            self.activatedManualAccessibility = activatedManualAccessibility
+        }
+    }
+
+    public func probeFocusedElements(
+        activateManualAccessibilityIfEmpty: Bool
+    ) -> FocusProbeResult {
+        let first = runFocusProbes()
+        guard first.candidates.isEmpty, activateManualAccessibilityIfEmpty else {
+            return FocusProbeResult(
+                candidates: first.candidates,
+                summary: first.summary,
+                activatedManualAccessibility: false
+            )
+        }
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              activateManualAccessibility(pid: pid) else {
+            return FocusProbeResult(
+                candidates: [],
+                summary: first.summary,
+                activatedManualAccessibility: false
+            )
         }
 
-        append(mapFocusCopy(copyFocusedUIElement(from: systemWideElement())))
+        // Chromium builds the tree asynchronously after the switch is flipped, so the very next
+        // read still answers nothing. Poll briefly rather than making the user press the hotkey
+        // twice. Bounded, and only ever reached on an explicit gesture in an app that had no
+        // focus at all.
+        let deadline = Date().addingTimeInterval(Self.manualAccessibilitySettleSeconds)
+        var last = first
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: Self.manualAccessibilityPollSeconds)
+            last = runFocusProbes()
+            if !last.candidates.isEmpty { break }
+        }
+        return FocusProbeResult(
+            candidates: last.candidates,
+            summary: last.summary + " (manualAccessibility activated)",
+            activatedManualAccessibility: true
+        )
+    }
+
+    private struct FocusProbeRun {
+        var candidates: [AXUIElement]
+        var summary: String
+    }
+
+    private func runFocusProbes() -> FocusProbeRun {
+        var candidates: [AXUIElement] = []
+        var parts: [String] = []
+
+        func append(_ label: String, _ result: FocusQueryResult) {
+            switch result {
+            case .available(let element):
+                parts.append("\(label):available")
+                guard !candidates.contains(where: { CFEqual($0, element) }) else { return }
+                candidates.append(element)
+            case .missing:
+                parts.append("\(label):noValue")
+            case .axFailure(let error):
+                parts.append("\(label):err\(error.rawValue)")
+            case .untrusted:
+                parts.append("\(label):untrusted")
+            }
+        }
+
+        append("systemWide", mapFocusCopy(copyFocusedUIElement(from: systemWideElement())))
 
         if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
             let appElement = AXUIElementCreateApplication(pid)
             Self.applyMessagingTimeout(to: appElement)
-            append(mapFocusCopy(copyFocusedUIElement(from: appElement)))
+            append("appScoped", mapFocusCopy(copyFocusedUIElement(from: appElement)))
+        } else {
+            parts.append("appScoped:noFrontmost")
         }
 
-        append(copyFocusedElementViaFocusedApplicationChain().mapped)
-        return candidates
+        append("chain", copyFocusedElementViaFocusedApplicationChain().mapped)
+        return FocusProbeRun(candidates: candidates, summary: parts.joined(separator: " "))
+    }
+
+    // MARK: - Chromium / Electron manual accessibility
+
+    /// Chromium's opt-in switch for publishing its accessibility tree to a client.
+    ///
+    /// Chromium keeps the tree off until an assistive client asks for it, because building and
+    /// maintaining it is expensive. Until then the app answers *every* focus query with nothing,
+    /// which is exactly the `axCandidates=0 outcome=noFocus` a Claude Desktop selection produced:
+    /// not an empty selection, not a timeout — an accessibility tree that was never turned on.
+    /// This affects every Electron app (Claude Desktop, Slack, Discord, VS Code, …) and Chrome
+    /// itself, i.e. much of where people want to enhance a prompt.
+    ///
+    /// VoiceOver instead relies on `AXEnhancedUserInterface`, which we deliberately do **not**
+    /// set: several AppKit apps treat it as "a screen reader is running" and rearrange or resize
+    /// their windows in response. `AXManualAccessibility` exists precisely so a non-VoiceOver
+    /// client can opt in without that blast radius.
+    public static let manualAccessibilityAttribute = "AXManualAccessibility"
+
+    /// How long to wait for the tree after switching it on, and the poll step.
+    public static let manualAccessibilitySettleSeconds: TimeInterval = 0.30
+    public static let manualAccessibilityPollSeconds: TimeInterval = 0.03
+
+    private let manualAccessibilityLock = UnfairLock()
+    private var manualAccessibilityPIDs: Set<pid_t> = []
+
+    /// Pure policy: a pid is worth poking once per process lifetime.
+    ///
+    /// Repeating it is not harmful but is not free either — it is an AX round-trip on a path the
+    /// user is waiting on, and the answer cannot change once the tree is up.
+    public static func shouldActivateManualAccessibility(
+        pid: pid_t,
+        alreadyActivated: Set<pid_t>
+    ) -> Bool {
+        pid > 0 && !alreadyActivated.contains(pid)
+    }
+
+    /// Switch on `AXManualAccessibility` for `pid`, at most once per process.
+    ///
+    /// Returns true when the attribute was set on this call. A non-Chromium app answers
+    /// `attributeUnsupported` and is simply recorded as done, so the cost is one round-trip
+    /// per app per launch and nothing else.
+    @discardableResult
+    public func activateManualAccessibility(pid: pid_t) -> Bool {
+        manualAccessibilityLock.lock()
+        let already = manualAccessibilityPIDs
+        manualAccessibilityLock.unlock()
+
+        guard Self.shouldActivateManualAccessibility(pid: pid, alreadyActivated: already) else {
+            return false
+        }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        Self.applyMessagingTimeout(to: appElement)
+        let status = AXUIElementSetAttributeValue(
+            appElement,
+            Self.manualAccessibilityAttribute as CFString,
+            kCFBooleanTrue
+        )
+
+        manualAccessibilityLock.lock()
+        manualAccessibilityPIDs.insert(pid)
+        manualAccessibilityLock.unlock()
+
+        if status == .success {
+            DevTypeLog.eventTap.info(
+                "[AX] AXManualAccessibility enabled for pid \(pid, privacy: .public)"
+            )
+        }
+        return status == .success
+    }
+
+    /// Test hook — process-scoped memo, so a test that seeds a pid must be able to clear it.
+    public func resetManualAccessibilityMemoForTesting() {
+        manualAccessibilityLock.lock()
+        manualAccessibilityPIDs.removeAll()
+        manualAccessibilityLock.unlock()
     }
 
     /// Focused element's `kAXRoleAttribute`, when readable.

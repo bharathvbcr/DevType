@@ -475,4 +475,137 @@ final class SelectionGateTests: XCTestCase {
         XCTAssertNil(monitor.rawCachedSelection())
         defaults.removePersistentDomain(forName: "devtype.tests.selection.raw")
     }
+
+    // MARK: - Chromium / Electron accessibility tree
+
+    /// Regression for the field report this whole path exists for:
+    /// `outcome=noFocus app=com.anthropic.claudefordesktop axCandidates=0`.
+    ///
+    /// Zero candidates is not an empty selection. Chromium keeps its accessibility tree off
+    /// until a client asks, so every focus probe answered nothing while the user's text sat
+    /// selected. The gate must call that `noFocusedElement`, never `emptySelection` — the two
+    /// send the user to opposite places.
+    func testNoCandidatesIsReportedAsNoFocusNotAsAnEmptySelection() {
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.anthropic.claudefordesktop",
+            frontmostIsOwnProcess: false,
+            focusAvailable: false,
+            candidates: [],
+            cached: nil,
+            isMuted: { _ in false },
+            isWeakAX: { _ in true }
+        )
+        XCTAssertEqual(outcome.failure, .noFocusedElement)
+        XCTAssertEqual(SelectionReader.describe(outcome), "noFocus")
+    }
+
+    /// Once the tree is switched on the probes resolve an element, and a weak-AX verdict must
+    /// not then veto the read — every Electron app is weak-AX, and the hotkey path types
+    /// nothing into the selection, so the staleness reason for that rejection does not apply.
+    func testWeakAXElectronSelectionIsStillUsable() {
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.anthropic.claudefordesktop",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(text: "improve this prompt", isOwnProcess: false, bundleID: "com.anthropic.claudefordesktop")
+            ],
+            cached: nil,
+            isMuted: { _ in false },
+            isWeakAX: { _ in true }
+        )
+        XCTAssertEqual(outcome.result?.text, "improve this prompt")
+        XCTAssertEqual(outcome.result?.isWeakAX, true, "The verdict rides along; it does not veto.")
+    }
+
+    func testManualAccessibilityIsAttemptedOncePerProcess() {
+        XCTAssertTrue(
+            AXContextChecker.shouldActivateManualAccessibility(pid: 4242, alreadyActivated: [])
+        )
+        XCTAssertFalse(
+            AXContextChecker.shouldActivateManualAccessibility(pid: 4242, alreadyActivated: [4242]),
+            "Re-poking a live pid is an AX round-trip the user waits on for an answer that "
+                + "cannot change once the tree is up."
+        )
+        XCTAssertTrue(
+            AXContextChecker.shouldActivateManualAccessibility(pid: 99, alreadyActivated: [4242]),
+            "The memo is per pid, not global — a second Electron app must still be woken."
+        )
+        XCTAssertFalse(
+            AXContextChecker.shouldActivateManualAccessibility(pid: 0, alreadyActivated: []),
+            "pid 0 is not a real target."
+        )
+        XCTAssertFalse(
+            AXContextChecker.shouldActivateManualAccessibility(pid: -1, alreadyActivated: [])
+        )
+    }
+
+    /// The live memo must actually memoize, or the poll loop runs on every hotkey press.
+    func testActivateManualAccessibilityMemoizesAcrossCalls() {
+        let checker = AXContextChecker()
+        checker.resetManualAccessibilityMemoForTesting()
+        let pid = ProcessInfo.processInfo.processIdentifier
+
+        // The first call may or may not succeed (we are not a Chromium app); what must hold is
+        // that the second call is a no-op regardless of the first one's answer.
+        _ = checker.activateManualAccessibility(pid: pid)
+        XCTAssertFalse(
+            checker.activateManualAccessibility(pid: pid),
+            "Second activation for the same pid must short-circuit."
+        )
+
+        checker.resetManualAccessibilityMemoForTesting()
+        _ = checker.activateManualAccessibility(pid: pid)
+        XCTAssertFalse(checker.activateManualAccessibility(pid: pid))
+    }
+
+    /// VoiceOver's `AXEnhancedUserInterface` is the attribute we must *not* set: AppKit apps
+    /// react to it by rearranging and resizing their windows.
+    func testManualAccessibilityUsesTheNonInvasiveAttribute() {
+        XCTAssertEqual(AXContextChecker.manualAccessibilityAttribute, "AXManualAccessibility")
+        XCTAssertGreaterThan(AXContextChecker.manualAccessibilitySettleSeconds, 0)
+        XCTAssertLessThanOrEqual(
+            AXContextChecker.manualAccessibilitySettleSeconds, 0.5,
+            "This wait is on an explicit gesture; beyond half a second it reads as a hang."
+        )
+        XCTAssertLessThan(
+            AXContextChecker.manualAccessibilityPollSeconds,
+            AXContextChecker.manualAccessibilitySettleSeconds
+        )
+    }
+
+    /// The probe summary is the only thing in a bug report that can tell "tree never switched
+    /// on" apart from "app is timing out", so it must survive into the diagnostic line.
+    func testProbeSummaryReachesTheDiagnosticReport() {
+        let store = AIDiagnosticsStore()
+        store.recordSelectionRead(
+            outcome: "noFocus",
+            bundleID: "com.anthropic.claudefordesktop",
+            candidateCount: 0,
+            characters: 0,
+            probeSummary: "systemWide:noValue appScoped:noValue chain:noValue"
+        )
+        let iso = ISO8601DateFormatter()
+        let lines = AIDiagnosticsStore.selectionReadLines(store.recentSelectionReads(), iso: iso)
+        XCTAssertTrue(
+            lines.contains { $0.contains("systemWide:noValue appScoped:noValue chain:noValue") },
+            "Per-probe AX status must appear in the report; got \(lines)"
+        )
+    }
+
+    /// An empty summary must not print an empty labelled line.
+    func testProbeSummaryLineIsOmittedWhenAbsent() {
+        let store = AIDiagnosticsStore()
+        store.recordSelectionRead(
+            outcome: "live", bundleID: "com.apple.Safari", candidateCount: 1, characters: 12
+        )
+        let lines = AIDiagnosticsStore.selectionReadLines(
+            store.recentSelectionReads(), iso: ISO8601DateFormatter()
+        )
+        XCTAssertFalse(lines.contains { $0.hasPrefix("Last selection AX probes:") })
+    }
 }

@@ -54,19 +54,26 @@ public final class AIDiagnosticsStore {
         public let candidateCount: Int
         /// Character count of the resolved selection (0 on failure). Never the content.
         public let characters: Int
+        /// Per-probe AX status, e.g. `systemWide:noValue appScoped:err-25212 chain:noValue`.
+        ///
+        /// `candidateCount: 0` alone cannot distinguish an app whose accessibility tree was
+        /// never switched on from one that is timing out — and those need opposite fixes.
+        public let probeSummary: String
 
         public init(
             at: Date,
             outcome: String,
             bundleID: String?,
             candidateCount: Int,
-            characters: Int
+            characters: Int,
+            probeSummary: String = ""
         ) {
             self.at = at
             self.outcome = outcome
             self.bundleID = bundleID
             self.candidateCount = candidateCount
             self.characters = characters
+            self.probeSummary = probeSummary
         }
     }
 
@@ -108,6 +115,7 @@ public final class AIDiagnosticsStore {
         bundleID: String?,
         candidateCount: Int,
         characters: Int,
+        probeSummary: String = "",
         at date: Date = Date()
     ) {
         lock.lock()
@@ -117,7 +125,8 @@ public final class AIDiagnosticsStore {
                 outcome: outcome,
                 bundleID: bundleID,
                 candidateCount: candidateCount,
-                characters: characters
+                characters: characters,
+                probeSummary: probeSummary
             )
         )
         if selectionReads.count > Self.capacity {
@@ -245,6 +254,9 @@ public final class AIDiagnosticsStore {
                 + "app=\(last.bundleID ?? "(unknown)") axCandidates=\(last.candidateCount) "
                 + "chars=\(last.characters)"
         )
+        if !last.probeSummary.isEmpty {
+            lines.append("Last selection AX probes: \(last.probeSummary)")
+        }
         var counts: [String: Int] = [:]
         for read in reads {
             counts[read.outcome, default: 0] += 1
