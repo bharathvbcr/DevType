@@ -125,6 +125,15 @@ private final class SnippetRowView: NSView {
         metricsStack.translatesAutoresizingMaskIntoConstraints = false
         metricsStack.setContentCompressionResistancePriority(.defaultHigh + 1, for: .horizontal)
         metricsStack.setContentHuggingPriority(.defaultHigh + 1, for: .horizontal)
+        // Now that the text column claims the rest of the row, the metrics have
+        // to stay welded to their own content width. `setContentHuggingPriority`
+        // is not enough — a stack view arranges by its *own* hugging priority,
+        // and under the default `.gravityAreas` it happily stretched across the
+        // row and flung the usage count away from its pill.
+        metricsStack.distribution = .fill
+        metricsStack.setHuggingPriority(.required, for: .horizontal)
+        usageLabel.setContentHuggingPriority(.required, for: .horizontal)
+        usageLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         metricsStack.addArrangedSubview(triggerPill)
         metricsStack.addArrangedSubview(usageLabel)
 

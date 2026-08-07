@@ -95,9 +95,44 @@ Setup can **Finish when Accessibility is granted** (CDHash load finished). **Pos
 
 - **Open at Login** — `SMAppService` login item (packaged `.app` only)
 - **Mute Frontmost App** / **Muted Apps…** — per-app expansion denylist
-- **Manage Snippets…** — add / edit (double-click, multi-line replacement editor) / delete with confirm; case & word-boundary toggles; case-insensitive duplicate triggers blocked when matching is case-insensitive
+- **Manage Snippets…** — add / edit (double-click, multi-line replacement editor) / delete with confirm; case & word-boundary toggles; case-insensitive duplicate triggers blocked when matching is case-insensitive. **New Snippet** is a split button: primary click adds a blank snippet; the ▾ disclosure opens **Add from Template** (AI + general starters — see below)
 - **Permission Recovery…** (`⌘⇧P`) — identity, capabilities, inject/tap health, Request / Open / Relaunch / Test Expansion (lab inject) / **Copy Logs** (clipboard diagnostic + selectable OSLog preview)
 - **Diagnose Secure Input** — reports lock on/off; on macOS 27+ the holder is unknown (frontmost PID is context only, not the Secure Input owner)
+
+## On-device AI transforms
+
+DevType can run **Apple Foundation Models** text transforms on-device (macOS 26+ with Apple Intelligence). Nothing is sent to a cloud API.
+
+- **Enable** in **Preferences → AI** (`Enable on-device AI transforms`). Master switch defaults **off** (`devtype.ai.enabled`). The AI tab is hidden on older macOS.
+- **Action palette** — default hotkey **⌘⌥A** (rebind under Preferences → AI). Opens over the current selection; pick a built-in action.
+- **Typed triggers** — snippets may set `aiTransform` to a kind raw value. Select text, type the trigger; DevType erases the trigger and runs that action. **Add from Template** (AI section) pre-fills suggested triggers (`:fix`, `:rw`, …) and the `aiTransform` field.
+- **Kinds** — `proofread`, `rewrite`, `paraphrase`, `expand`, `condense`, `formal`, `friendly`, `bulletize`, `promptenhance` (plus `custom` for free-form instructions from the palette `> …` path). Defaults: proofread → **direct**; other built-ins → **preview** (per-action override in Preferences → AI).
+- **Preview vs direct** — Direct replaces the selection as soon as generation finishes. Preview streams into a panel (Replace / Copy / Retry / Cancel).
+- **SelectionMonitor privacy** — while AI is off, DevType does **not** observe selected text. When enabled (and Accessibility is granted), a short-TTL AX cache backs typed AI triggers only; muted apps and Secure Input are honored. Optional **typed-path app allowlist** restricts monitoring + typed AI to listed bundle IDs (hotkey path unaffected).
+- **Weak-AX apps** — Chrome / Slack / Electron and similar often cannot report selection reliably for the typed path; DevType refuses and points you at ⌘⌥A instead.
+- **Undo** — palette offers **Undo Last AI** when a prior transform was stashed. Host-app undo may still need **two ⌘Z** after a clipboard-paste replace (delete + paste).
+
+## Command palette
+
+**⌘/** (or the configured hotkey; Preferences still labels the binding **Command Palette** / prefs key `inlineSearch`) opens a hybrid palette:
+
+- **Snippets** — ranked search (`SnippetSearch`, sigil-stripped)
+- **AI tools** — same built-in transforms as the action palette (gated when AI is off / unavailable)
+- **Date tools** — e.g. `today`, `tomorrow` / `date+1`, plus offsets like `date+3`
+- **Clipboard** — insert current pasteboard string
+- **Navigation** — Preferences, Manage Snippets, Permission Recovery
+- Plus text ops, generators, math (`= …`), and custom AI (`> …`)
+
+Matching is **offline** (aliases, tokens, fuzzy subsequence / NLEmbedding soft-rank). Optional on-device semantic routing exists but defaults off.
+
+## Add from Template
+
+In **Manage Snippets…**, the **New Snippet** control is a split button. Click the ▾ side (tooltip **Add from Template**) to open a sheet with:
+
+- **AI** — one starter per built-in transform (sets `aiTransform` + a punctuation-leading trigger)
+- **General** — signature, date, fill-in, clipboard, nested snippet, email starters
+
+Picking a row opens the snippet editor pre-filled; edit and save as usual.
 
 ## Snippet templates (dual macro syntax)
 
@@ -158,7 +193,7 @@ A snippet can paste an image instead of text: attach one in the editor (photo bu
 
 ## Search, import, sync
 
-- **Inline search** — `⌘/` palette with sigil-stripped ranking (`SnippetSearch`)
+- **Command palette** — `⌘/` hybrid palette (snippets + AI + date/clipboard/nav); see [Command palette](#command-palette) above
 - **Import Snippets…** — one unified picker (`SnippetImporter`) that auto-detects the format: TextExpander 4/5 group XML (`TEImporter`, plain text only) or Espanso config/match/package/YAML (`EspansoImporter`; trigger/replace, `$|$` → `{{cursor}}`, `image_path` → image snippets; dynamic vars, forms, HTML/markdown, regex skipped)
 - **Schema v2** — `{ schemaVersion, groups }` with v1 → default “General” group migrate (no wipe); Save As / Link / Don’t Sync + directory watchers
 
