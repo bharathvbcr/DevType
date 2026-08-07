@@ -131,25 +131,208 @@ final class AIPlumbingTests: XCTestCase {
 
     // MARK: - Proofread keeps the text in its own language
 
-    /// Proofread is the Telugu / Hindi grammar fix too. Its one failure mode is quietly
-    /// becoming Translate — a Telugu correction coming back as English.
-    func testProofreadHandlesRomanizedIndicWithoutTranslating() {
-        let instructions = AITransformKind.proofread.instructions.lowercased()
-        XCTAssertTrue(instructions.contains("telugu"))
-        XCTAssertTrue(instructions.contains("hindi"))
-        XCTAssertTrue(instructions.contains("english letters"))
-        XCTAssertTrue(
-            instructions.contains("never translate"),
-            "Proofread must return the text in the language it was written in."
-        )
-    }
-
-    /// The original English contract still holds — this is an extension, not a rewrite.
     func testProofreadStillOnlyFixesErrors() {
         let instructions = AITransformKind.proofread.instructions.lowercased()
         XCTAssertTrue(instructions.contains("spelling, grammar, and punctuation"))
         XCTAssertTrue(instructions.contains("only fix errors"))
+        XCTAssertTrue(instructions.contains("never translate"))
         XCTAssertEqual(AITransformKind.proofread.defaultOutputMode, .direct)
+    }
+
+    /// The reported bug, in one assertion. Measured against the on-device model, a
+    /// proofread prompt that names Hindi returns *English* input rewritten in
+    /// Devanagari — the mention itself is the trigger, so the prompt names no
+    /// language and relies on "the same language it was written in".
+    func testProofreadPromptNamesNoLanguage() {
+        let instructions = AITransformKind.proofread.instructions.lowercased()
+        for language in [
+            "telugu", "hindi", "devanagari", "romanized", "english letters", "spanish"
+        ] {
+            XCTAssertFalse(
+                instructions.contains(language),
+                "Naming \(language) turns it into a candidate output language."
+            )
+        }
+        XCTAssertTrue(instructions.contains("same language"))
+        XCTAssertTrue(instructions.contains("script it was written in"))
+    }
+
+    // MARK: - Script policy (the runtime net under the prompt)
+
+    func testScriptPolicyCatchesEnglishAnsweredInDevanagari() {
+        XCTAssertEqual(
+            AIScriptPolicy.sameAsInput.violation(input: "i went home", output: "मैं घर गया"),
+            "devanagari"
+        )
+        XCTAssertNil(
+            AIScriptPolicy.sameAsInput.violation(input: "i went home", output: "I went home.")
+        )
+        // Punctuation, digits, and emoji carry no language.
+        XCTAssertNil(
+            AIScriptPolicy.sameAsInput.violation(input: "meet at 5", output: "Meet at 5 — ok? 👍")
+        )
+        // Native script in, native script out is the author's own choice.
+        XCTAssertNil(
+            AIScriptPolicy.sameAsInput.violation(input: "मैं घर गया", output: "मैं घर गया।")
+        )
+    }
+
+    /// The outbound translations land in a field where the user types romanized.
+    func testLatinOnlyPolicyRejectsNativeScript() {
+        XCTAssertEqual(
+            AIScriptPolicy.latinOnly.violation(input: "I am going home", output: "मैं घर जा रहा हूँ"),
+            "devanagari"
+        )
+        XCTAssertNil(
+            AIScriptPolicy.latinOnly.violation(input: "I am going home", output: "main ghar ja raha hoon")
+        )
+        XCTAssertEqual(AITransformKind.translateHindi.scriptPolicy, .latinOnly)
+        XCTAssertEqual(AITransformKind.translateTelugu.scriptPolicy, .latinOnly)
+        XCTAssertEqual(AITransformKind.proofread.scriptPolicy, .sameAsInput)
+        XCTAssertEqual(AITransformKind.rewrite.scriptPolicy, .unconstrained)
+    }
+
+    /// Count parity is not enough: the model eats blank lines while keeping the line
+    /// count plausible, so the separators themselves have to match.
+    func testLineStructureCheckSeesCollapsedBlankLines() {
+        let input = "one.\n\n\ntwo.\nthree."
+        XCTAssertTrue(
+            AITransformText.preservesLineStructure(input: input, output: "One.\n\n\nTwo.\nThree.")
+        )
+        XCTAssertFalse(
+            AITransformText.preservesLineStructure(input: input, output: "One.\nTwo.\nThree."),
+            "A collapsed blank line must be caught."
+        )
+        XCTAssertFalse(
+            AITransformText.preservesLineStructure(input: input, output: "One. Two. Three."),
+            "A flattened paragraph must be caught."
+        )
+    }
+
+    /// A proofread that doubles in length answered the text instead of correcting it.
+    /// This is the last way a bad result reaches the field on the direct path.
+    func testLengthPolicyCatchesAnAnswerInsteadOfACorrection() {
+        let question = "can you tel me were the config file lives"
+        XCTAssertTrue(
+            AILengthPolicy.correction.exceeded(
+                input: question,
+                output: "The configuration file lives in ~/.config/devtype/config.json, and you can override its location with the DEVTYPE_CONFIG environment variable."
+            )
+        )
+        XCTAssertFalse(
+            AILengthPolicy.correction.exceeded(
+                input: question,
+                output: "Can you tell me where the config file lives?"
+            )
+        )
+        // Short inputs get slack: one fix moves the ratio a long way.
+        XCTAssertFalse(AILengthPolicy.correction.exceeded(input: "hi", output: "Hi, there."))
+        // Rewriting kinds are supposed to change length.
+        XCTAssertFalse(
+            AILengthPolicy.unconstrained.exceeded(input: "short", output: String(repeating: "x", count: 500))
+        )
+        XCTAssertEqual(AITransformKind.proofread.lengthPolicy, .correction)
+        XCTAssertEqual(AITransformKind.expand.lengthPolicy, .unconstrained)
+    }
+
+    /// Greedy sampling for proofread means Retry would return the identical string;
+    /// the transformer re-rolls on a repeated request instead.
+    func testDeterministicKindsAreProofreadAndTranslation() {
+        XCTAssertTrue(AITransformKind.proofread.isDeterministic)
+        for kind in translateKinds {
+            XCTAssertTrue(kind.isDeterministic, "\(kind)")
+        }
+        for kind in [AITransformKind.rewrite, .paraphrase, .expand, .condense, .custom] {
+            XCTAssertFalse(kind.isDeterministic, "\(kind)")
+        }
+    }
+
+    func testRepeatTrackerCountsConsecutiveIdenticalRequests() {
+        var tracker = AIRepeatTracker()
+        XCTAssertEqual(tracker.attempt(for: "a"), 0)
+        XCTAssertEqual(tracker.attempt(for: "a"), 1, "Retry on the same request.")
+        XCTAssertEqual(tracker.attempt(for: "a"), 2)
+        XCTAssertEqual(tracker.attempt(for: "b"), 0, "A different request starts over.")
+        XCTAssertEqual(tracker.attempt(for: "a"), 0)
+    }
+
+    // MARK: - Output shaping
+
+    /// The model is handed trimmed input, but the replacement overwrites the whole
+    /// selection — dropping its spaces welds the result to the neighbouring words.
+    func testSelectionWhitespaceSurvivesTheRoundTrip() {
+        XCTAssertEqual(
+            AITransformText.restoringAffixes(of: "  hello world ", to: "hello, world"),
+            "  hello, world "
+        )
+        XCTAssertEqual(
+            AITransformText.restoringAffixes(of: "line\n", to: "  line  "),
+            "line\n"
+        )
+        // Nothing usable to re-wrap: leave the result alone.
+        XCTAssertEqual(AITransformText.restoringAffixes(of: " x ", to: "   "), "   ")
+    }
+
+    func testSanitizeStripsWrappersTheInputNeverHad() {
+        XCTAssertEqual(
+            AITransformText.sanitize("\"Corrected text.\"", input: "corrected text"),
+            "Corrected text."
+        )
+        XCTAssertEqual(
+            AITransformText.sanitize("```\nlet x = 1\n```", input: "let x = 1"),
+            "let x = 1"
+        )
+        // Quotes the author wrote stay put.
+        XCTAssertEqual(
+            AITransformText.sanitize("\"Hello.\"", input: "\"helo.\""),
+            "\"Hello.\""
+        )
+        XCTAssertEqual(
+            AITransformText.sanitize("He said \"go\" and left.", input: "he said \"go\" and left"),
+            "He said \"go\" and left."
+        )
+        XCTAssertEqual(
+            AITransformText.sanitize("```\ncode\n```", input: "```\ncode\n```"),
+            "```\ncode\n```"
+        )
+    }
+
+    // MARK: - Chunking preserves the author's spacing
+
+    func testChunkingRejoinsOnTheOriginalSeparators() {
+        let text = "First para.\n\n\nSecond para.\n\nThird."
+        let segments = AITransformText.segments(text)
+        XCTAssertEqual(segments.map(\.body), ["First para.", "Second para.", "Third."])
+        XCTAssertEqual(segments.map(\.separator), ["\n\n\n", "\n\n", ""])
+        XCTAssertEqual(
+            AITransformText.joined(segments, bodies: segments.map(\.body)),
+            text,
+            "An untouched round trip must be byte-identical."
+        )
+        XCTAssertEqual(
+            AITransformText.joined(segments, bodies: ["A", "B", "C"]),
+            "A\n\n\nB\n\nC"
+        )
+    }
+
+    func testChunkingFallsBackToLinesForASingleParagraph() {
+        let text = "one line\nsecond line\nthird line"
+        let segments = AITransformText.segments(text)
+        XCTAssertEqual(segments.count, 3, "A one-paragraph block still needs somewhere to break.")
+        XCTAssertEqual(AITransformText.joined(segments, bodies: segments.map(\.body)), text)
+    }
+
+    func testChunkingLeavesUnsplittableTextAlone() {
+        let segments = AITransformText.segments("a single sentence with no breaks")
+        XCTAssertEqual(segments.map(\.body), ["a single sentence with no breaks"])
+        XCTAssertEqual(segments.map(\.separator), [""])
+    }
+
+    func testChunkingHandlesWindowsLineEndings() {
+        let text = "First.\r\n\r\nSecond."
+        let segments = AITransformText.segments(text)
+        XCTAssertEqual(segments.map(\.body), ["First.", "Second."])
+        XCTAssertEqual(AITransformText.joined(segments, bodies: segments.map(\.body)), text)
     }
 
     func testPromptEnhanceCatalogDefaults() {

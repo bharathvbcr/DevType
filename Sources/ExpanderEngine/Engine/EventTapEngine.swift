@@ -765,7 +765,7 @@ public final class EventTapEngine {
         // A longer trigger won — drop any held shorter one and expand this normally. The final
         // key is swallowed as usual and the erase covers the whole matched trigger.
         if heldCoordinator.cancelAll(reason: .longerTriggerWon) {
-            DevTypeLog.debounce.debug("[Debounce] hold cancelled — longer trigger matched")
+            DevTypeLog.debounce.info("[Debounce] hold released — longer trigger matched and expands now")
         }
 
         // Prefix debounce: this trigger is a strict prefix of a longer one, so firing now would
@@ -1346,7 +1346,7 @@ public final class EventTapEngine {
         // keystroke's timestamp. Anything marked later arrived during the hold.
         let payload = HeldPayload(match: match, armInputMark: inputClock.lastInputAt)
         let hold = heldCoordinator.arm(payload: payload, trigger: triggerText, focusPID: focusPID)
-        DevTypeLog.debounce.debug(
+        DevTypeLog.debounce.info(
             "[Debounce] hold armed gen=\(hold.generation, privacy: .public) triggerLen=\(triggerText.count, privacy: .public) window=\(Int(Self.prefixDebounceInterval * 1000), privacy: .public)ms"
         )
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.prefixDebounceInterval) { [weak self] in
@@ -1394,7 +1394,7 @@ public final class EventTapEngine {
             return
 
         case .cancelled(let reason):
-            DevTypeLog.debounce.debug(
+            DevTypeLog.debounce.info(
                 "[Debounce] hold cancelled reason=\(reason.rawValue, privacy: .public)"
             )
 
@@ -1407,8 +1407,18 @@ public final class EventTapEngine {
             scheduleStaleExpiry(generation: hold.generation)
 
         case .fire(let hold, let suffix):
+            // `kind` is a category, never content: it is what separates "fired on a space after
+            // the short trigger" (correct) from "fired on a word character" (a longer trigger
+            // the matcher failed to see) in a field report.
+            let kind: String
+            if let first = suffix.first {
+                kind = first.isLetter || first.isNumber || first == "_"
+                    ? "word" : (first.isWhitespace ? "space" : "punct")
+            } else {
+                kind = "empty"
+            }
             DevTypeLog.debounce.info(
-                "[Debounce] hold fired by keystroke gen=\(hold.generation, privacy: .public) suffixLen=\(suffix.utf16.count, privacy: .public)"
+                "[Debounce] hold fired by keystroke gen=\(hold.generation, privacy: .public) suffixLen=\(suffix.utf16.count, privacy: .public) suffixKind=\(kind, privacy: .public)"
             )
             expandHeld(hold, suffix: suffix)
         }

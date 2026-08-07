@@ -37,6 +37,12 @@ public enum AITransformError: Error, Equatable, Sendable {
     case concurrentRequests
     /// Guided-generation schema / guide was rejected by the model.
     case unsupportedGuide
+    /// The model answered in a writing system the transform forbids (e.g. English
+    /// proofread coming back in Devanagari). Nothing is injected.
+    case languageDrift
+    /// The model rewrote or answered the text instead of correcting it. Nothing is
+    /// injected — a proofread that doubles in length is not a proofread.
+    case unexpectedRewrite
     /// Caller discarded the result (Cancel). Generation may still finish; do not inject.
     case discarded
     case unknown(String)
@@ -127,6 +133,261 @@ public enum AITokenBudget {
     }
 }
 
+// MARK: - Pure text plumbing (no FoundationModels dependency)
+
+/// Input/output shaping shared by `AITextTransformer` and unit tests.
+public enum AITransformText {
+
+    /// One paragraph (or line) plus the whitespace that separated it from the next.
+    /// Chunked transforms rejoin with the *original* separators — a fixed "\n\n"
+    /// silently rewrites the author's spacing, which proofread promises not to do.
+    public struct Segment: Equatable, Sendable {
+        public let body: String
+        public let separator: String
+
+        public init(body: String, separator: String) {
+            self.body = body
+            self.separator = separator
+        }
+    }
+
+    public enum Granularity: Sendable {
+        /// Paragraphs, falling back to lines when the text is one paragraph.
+        case automatic
+        /// Every line break starts a new segment.
+        case line
+    }
+
+    /// Paragraph split; falls back to a line split when the text is one paragraph,
+    /// so a long unbroken block still has somewhere to break rather than refusing.
+    public static func segments(
+        _ text: String,
+        granularity: Granularity = .automatic
+    ) -> [Segment] {
+        if granularity == .line { return split(text, minimumNewlines: 1) }
+        let paragraphs = split(text, minimumNewlines: 2)
+        if paragraphs.count > 1 { return paragraphs }
+        let lines = split(text, minimumNewlines: 1)
+        return lines.count > 1 ? lines : paragraphs
+    }
+
+    /// Whether a result kept the input's exact line shape — same number of lines and
+    /// the same breaks between them. The on-device model reliably flattens multi-line
+    /// input, or quietly eats blank lines, however firmly the prompt asks it not to,
+    /// so proofread verifies the shape instead of trusting it.
+    public static func preservesLineStructure(input: String, output: String) -> Bool {
+        segments(input, granularity: .line).map(\.separator)
+            == segments(output, granularity: .line).map(\.separator)
+    }
+
+    public static func joined(_ segments: [Segment], bodies: [String]) -> String {
+        var out = ""
+        for (index, segment) in segments.enumerated() {
+            out += (index < bodies.count ? bodies[index] : segment.body)
+            out += segment.separator
+        }
+        return out
+    }
+
+    private static func split(_ text: String, minimumNewlines: Int) -> [Segment] {
+        var result: [Segment] = []
+        var body = ""
+        var pending = ""
+        var newlines = 0
+
+        func closeSegment(with separator: String) {
+            if !body.isEmpty {
+                result.append(Segment(body: body, separator: separator))
+                body = ""
+            } else if let last = result.popLast() {
+                result.append(Segment(body: last.body, separator: last.separator + separator))
+            }
+        }
+
+        for character in text {
+            if character.isWhitespace {
+                pending.append(character)
+                if character.isNewline { newlines += 1 }
+                continue
+            }
+            if newlines >= minimumNewlines {
+                closeSegment(with: pending)
+            } else {
+                body += pending
+            }
+            pending = ""
+            newlines = 0
+            body.append(character)
+        }
+        closeSegment(with: pending)
+        return result
+    }
+
+    /// Re-attaches the selection's own leading / trailing whitespace to a result.
+    /// The model is handed trimmed input, so without this a selection like
+    /// `" hello "` is replaced by `"hello"` and words weld together in the field.
+    public static func restoringAffixes(of original: String, to result: String) -> String {
+        let core = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !core.isEmpty else { return result }
+        return leadingWhitespace(original) + core + trailingWhitespace(original)
+    }
+
+    public static func leadingWhitespace(_ text: String) -> String {
+        String(text.prefix(while: { $0.isWhitespace }))
+    }
+
+    public static func trailingWhitespace(_ text: String) -> String {
+        String(text.reversed().prefix(while: { $0.isWhitespace }).reversed())
+    }
+
+    /// Strips wrappers the model adds on its own — a code fence or a pair of quotes
+    /// the input never had. Anything the input already carried is left alone.
+    public static func sanitize(_ text: String, input: String) -> String {
+        var out = text
+
+        if !input.contains("```") {
+            let lines = out.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            if lines.count >= 2,
+               lines[0].trimmingCharacters(in: .whitespaces).hasPrefix("```"),
+               lines[lines.count - 1].trimmingCharacters(in: .whitespaces) == "```" {
+                out = lines.dropFirst().dropLast().joined(separator: "\n")
+            }
+        }
+
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inputTrimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pairs: [(Character, Character)] = [("\"", "\""), ("\u{201C}", "\u{201D}"), ("'", "'")]
+        for (open, close) in pairs {
+            guard trimmed.count >= 2, trimmed.first == open, trimmed.last == close else { continue }
+            let inner = String(trimmed.dropFirst().dropLast())
+            // An interior quote means the pair is probably the author's, not a wrapper.
+            guard !inner.contains(open), !inner.contains(close) else { continue }
+            guard !(inputTrimmed.first == open && inputTrimmed.last == close) else { continue }
+            out = inner
+            break
+        }
+        return out
+    }
+}
+
+/// How far a result may drift in size from the text it came from.
+///
+/// A correction stays about as long as the original. When the model answers the text
+/// instead of correcting it — it does this with questions and instructions — the reply
+/// balloons, and on the direct path that lands in the user's field with no review.
+public enum AILengthPolicy: Sendable, Equatable {
+    /// Roughly the same size, with slack for short inputs where one fix moves the
+    /// ratio a lot ("hi" → "Hi, there.").
+    case correction
+    case unconstrained
+
+    /// Characters of slack before the ratio applies at all.
+    static let floorCharacters = 40
+    static let maximumGrowth = 2.0
+
+    public func exceeded(input: String, output: String) -> Bool {
+        guard self == .correction else { return false }
+        let limit = max(
+            Self.floorCharacters,
+            Int(Double(input.count) * Self.maximumGrowth)
+        )
+        return output.count > limit
+    }
+}
+
+/// Writing systems a transform is allowed to answer in.
+///
+/// The prompt asks; this enforces. A small on-device model answering English input
+/// in Devanagari — the bug this shipped to fix — is invisible to every other check,
+/// and on the direct path it lands in the user's field unreviewed.
+public enum AIScriptPolicy: Sendable, Equatable {
+    /// The reply may only use scripts the input already used (proofread).
+    case sameAsInput
+    /// The reply must be Latin letters (romanized Telugu / Hindi, or English).
+    case latinOnly
+    case unconstrained
+
+    /// `nil` when the output is acceptable, else the offending script's name.
+    public func violation(input: String, output: String) -> String? {
+        switch self {
+        case .unconstrained:
+            return nil
+        case .latinOnly:
+            return AIScriptFamily.families(in: output)
+                .subtracting([.latin])
+                .first?
+                .rawValue
+        case .sameAsInput:
+            return AIScriptFamily.families(in: output)
+                .subtracting(AIScriptFamily.families(in: input))
+                .first?
+                .rawValue
+        }
+    }
+}
+
+/// Coarse writing-system buckets. Only letters are classified — punctuation, digits,
+/// and emoji carry no language and would otherwise fire false violations.
+public enum AIScriptFamily: String, Sendable, Hashable {
+    case latin, devanagari, telugu, otherIndic, cjk, hangul, cyrillic, greek, arabic, hebrew, other
+
+    public static func families(in text: String) -> Set<AIScriptFamily> {
+        var found: Set<AIScriptFamily> = []
+        for character in text where character.isLetter {
+            for scalar in character.unicodeScalars {
+                if let family = family(of: scalar) { found.insert(family) }
+            }
+        }
+        return found
+    }
+
+    static func family(of scalar: Unicode.Scalar) -> AIScriptFamily? {
+        switch scalar.value {
+        case 0x0041...0x005A, 0x0061...0x007A, 0x00C0...0x024F, 0x1E00...0x1EFF:
+            return .latin
+        case 0x0370...0x03FF, 0x1F00...0x1FFF:
+            return .greek
+        case 0x0400...0x04FF, 0x0500...0x052F:
+            return .cyrillic
+        case 0x0590...0x05FF:
+            return .hebrew
+        case 0x0600...0x06FF, 0x0750...0x077F:
+            return .arabic
+        case 0x0900...0x097F:
+            return .devanagari
+        case 0x0C00...0x0C7F:
+            return .telugu
+        case 0x0980...0x09FF, 0x0A00...0x0BFF, 0x0C80...0x0D7F:
+            return .otherIndic
+        case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
+            return .cjk
+        case 0x1100...0x11FF, 0xAC00...0xD7AF:
+            return .hangul
+        default:
+            return .other
+        }
+    }
+}
+
+/// Counts consecutive identical requests so a Retry can re-roll sampling.
+public struct AIRepeatTracker: Sendable {
+    private var lastSignature: String?
+    private var attempts = 0
+
+    public init() {}
+
+    /// Returns 0 for a new request, then 1, 2, … while the same request repeats.
+    public mutating func attempt(for signature: String) -> Int {
+        if lastSignature == signature {
+            attempts += 1
+        } else {
+            lastSignature = signature
+            attempts = 0
+        }
+        return attempts
+    }
+}
+
 // MARK: - Locale probe (no actor hop)
 
 /// Cached locale support for greying out AI palette rows (B′3).
@@ -174,6 +435,8 @@ public actor AITextTransformer {
     private var staticTokenCache: [String: (instruction: Int, framing: Int)] = [:]
     /// Monotonic seed for reproducible retries when sampling is random.
     private var retrySeed: UInt64 = 1
+    /// Detects a repeated request (the Retry button) so deterministic kinds re-roll.
+    private var repeats = AIRepeatTracker()
 
     public init() {
         model = SystemLanguageModel(
@@ -243,17 +506,37 @@ public actor AITextTransformer {
         kind: AITransformKind = .proofread,
         customInstructions: String? = nil
     ) {
+        // Callers fire prewarm and the transform back to back; the actor is reentrant,
+        // so without this the warm session can be built *while* a transform is running
+        // and compete with it for the same model.
+        guard !inFlight else { return }
         let instructions = Self.resolvedInstructions(
             kind: kind,
             customInstructions: customInstructions
         )
         let session = LanguageModelSession(model: model, instructions: instructions)
         warmSession = session
-        session.prewarm(promptPrefix: Prompt(Self.promptFramingPrefix))
+        session.prewarm(promptPrefix: Prompt(Self.promptFraming(for: kind)))
     }
 
-    /// Shared prompt framing used by `runTransform` and `prewarm` so the warm prefix matches.
+    /// Default prompt framing. `runTransform` and `prewarm` resolve it through
+    /// `promptFraming(for:)` so the warm prefix matches what the request will send.
     nonisolated static let promptFramingPrefix = "Transform this text:\n\n"
+
+    /// Per-kind framing. "Transform this text" is an instruction to change the text,
+    /// which is the wrong verb for proofreading — the framing line is the last thing
+    /// the model reads before the input, so it carries real weight.
+    nonisolated static func promptFraming(for kind: AITransformKind) -> String {
+        switch kind {
+        case .proofread:
+            return "Proofread the text below. Return it corrected, in its own language:\n\n"
+        case .translate, .translateTelugu, .translateHindi:
+            return "Translate the text below:\n\n"
+        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
+             .bulletize, .promptEnhance, .custom:
+            return promptFramingPrefix
+        }
+    }
 
     /// GCD entry point. Completion fires exactly once on `completionQueue`.
     /// Discard via the returned handle so a late result cannot inject.
@@ -360,6 +643,14 @@ public actor AITextTransformer {
             kind: kind,
             customInstructions: customInstructions
         )
+        // Same kind + instructions + input as last time means the user pressed Retry.
+        let attempt = repeats.attempt(
+            for: kind.rawValue + "\u{1f}" + instructions + "\u{1f}" + trimmed
+        )
+
+        // Granularity for the chunked pass below: paragraphs when the input did not
+        // fit, lines when a single-shot result came back with its line breaks eaten.
+        var chunkGranularity: AITransformText.Granularity = .automatic
 
         // Try single-shot first; on `.inputTooLarge` for chunk-safe kinds, fall through.
         do {
@@ -373,12 +664,25 @@ public actor AITextTransformer {
                 instructions: instructions,
                 input: trimmed,
                 maxResponseTokens: budget.maxResponseTokens,
+                attempt: attempt,
                 streamPartials: streamPartials,
                 onPartial: onPartial
             )
-            AIDiagnosticsStore.shared.recordSuccess(kind: kind.rawValue)
-            once.complete(.success(text))
-            return
+            if kind.preservesLineStructure,
+               kind.isChunkSafe,
+               AITransformText.segments(trimmed, granularity: .line).count > 1,
+               !AITransformText.preservesLineStructure(input: trimmed, output: text) {
+                // The model collapsed the layout. Redo it a line at a time and rejoin
+                // on the author's own breaks; no prompt wording prevents this.
+                DevTypeLog.store.debug(
+                    "[AI] line structure lost kind=\(kind.rawValue, privacy: .public) — repairing per line"
+                )
+                chunkGranularity = .line
+            } else {
+                AIDiagnosticsStore.shared.recordSuccess(kind: kind.rawValue)
+                once.complete(.success(AITransformText.restoringAffixes(of: input, to: text)))
+                return
+            }
         } catch let error as AITransformError {
             if case .inputTooLarge = error, kind.isChunkSafe {
                 // Fall through to chunking.
@@ -393,7 +697,7 @@ public actor AITextTransformer {
 
         // B′4: paragraph chunking for chunk-safe kinds, serialized on this actor latch.
         do {
-            let chunks = Self.paragraphChunks(trimmed)
+            let chunks = AITransformText.segments(trimmed, granularity: chunkGranularity)
             guard chunks.count > 1 else {
                 // Still too large as one paragraph — refuse.
                 let budgetErr: AITransformError
@@ -420,25 +724,27 @@ public actor AITextTransformer {
                 let budget = try await evaluateBudget(
                     kind: kind,
                     instructions: instructions,
-                    input: chunk
+                    input: chunk.body
                 )
                 let piece = try await generateOnce(
                     kind: kind,
                     instructions: instructions,
-                    input: chunk,
+                    input: chunk.body,
                     maxResponseTokens: budget.maxResponseTokens,
+                    attempt: attempt,
                     streamPartials: false,
                     onPartial: { _ in }
                 )
                 pieces.append(piece)
-                assembled = pieces.joined(separator: "\n\n")
+                // Rejoin on the author's own separators, not a canned "\n\n".
+                assembled = AITransformText.joined(Array(chunks.prefix(pieces.count)), bodies: pieces)
                 if streamPartials {
-                    let progress = assembled + (index + 1 < chunks.count ? "\n\n…" : "")
+                    let progress = assembled + (index + 1 < chunks.count ? "…" : "")
                     onPartial(progress)
                 }
             }
             AIDiagnosticsStore.shared.recordSuccess(kind: kind.rawValue)
-            once.complete(.success(assembled))
+            once.complete(.success(AITransformText.restoringAffixes(of: input, to: assembled)))
         } catch let error as AITransformError {
             once.complete(.failure(error))
         } catch {
@@ -446,11 +752,74 @@ public actor AITextTransformer {
         }
     }
 
+    /// Generates, then enforces the kind's script and length policies. A violation is
+    /// re-rolled once (greedy would just repeat it); a second violation fails the
+    /// transform rather than injecting text the user did not ask for.
     private func generateOnce(
         kind: AITransformKind,
         instructions: String,
         input: String,
         maxResponseTokens: Int,
+        attempt: Int,
+        streamPartials: Bool,
+        onPartial: @escaping @Sendable (String?) -> Void
+    ) async throws -> String {
+        var lastFailure = AITransformError.languageDrift
+        for extraAttempt in 0...1 {
+            let text = try await generateRaw(
+                kind: kind,
+                instructions: instructions,
+                input: input,
+                maxResponseTokens: maxResponseTokens,
+                attempt: attempt + extraAttempt,
+                streamPartials: streamPartials,
+                onPartial: onPartial
+            )
+
+            if let script = kind.scriptPolicy.violation(input: input, output: text) {
+                lastFailure = .languageDrift
+                record(violation: "languageDrift", detail: "answered in \(script)", kind: kind, attempt: extraAttempt)
+                continue
+            }
+            if kind.lengthPolicy.exceeded(input: input, output: text) {
+                lastFailure = .unexpectedRewrite
+                record(
+                    violation: "unexpectedRewrite",
+                    detail: "\(input.count) chars in, \(text.count) out",
+                    kind: kind,
+                    attempt: extraAttempt
+                )
+                continue
+            }
+            return text
+        }
+        throw lastFailure
+    }
+
+    /// Contract violations are logged without the text itself — the detail describes
+    /// the shape of the failure, never the user's selection or the model's answer.
+    private func record(
+        violation: String,
+        detail: String,
+        kind: AITransformKind,
+        attempt: Int
+    ) {
+        DevTypeLog.store.error(
+            "[AI] \(violation, privacy: .public) kind=\(kind.rawValue, privacy: .public) \(detail, privacy: .public) attempt=\(attempt, privacy: .public)"
+        )
+        AIDiagnosticsStore.shared.recordFailure(
+            kind: kind.rawValue,
+            error: violation,
+            detail: detail
+        )
+    }
+
+    private func generateRaw(
+        kind: AITransformKind,
+        instructions: String,
+        input: String,
+        maxResponseTokens: Int,
+        attempt: Int,
         streamPartials: Bool,
         onPartial: @escaping @Sendable (String?) -> Void
     ) async throws -> String {
@@ -458,13 +827,15 @@ public actor AITextTransformer {
         if session.isResponding {
             DevTypeLog.store.debug("[AI] session.isResponding was unexpectedly true before respond")
         }
-        let prompt = "\(Self.promptFramingPrefix)\(input)"
+        let prompt = "\(Self.promptFraming(for: kind))\(input)"
         let options = Self.generationOptions(
             kind: kind,
             maxResponseTokens: maxResponseTokens,
-            seed: nextSeed()
+            seed: nextSeed(),
+            attempt: attempt
         )
 
+        let raw: String
         if streamPartials {
             let stream = session.streamResponse(
                 to: prompt,
@@ -479,15 +850,31 @@ public actor AITextTransformer {
                     lastText = partial
                 }
             }
-            return lastText
+            raw = lastText
         } else {
             let response = try await session.respond(
                 to: prompt,
                 generating: TransformedText.self,
                 options: options
             )
-            return response.content.text
+            raw = response.content.text
         }
+
+        let cleaned = AITransformText.sanitize(raw, input: input)
+        // An empty response is a failed generation, not a result. Letting it through
+        // means the direct path replaces the user's selection with nothing.
+        guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            DevTypeLog.store.error(
+                "[AI] empty generation kind=\(kind.rawValue, privacy: .public)"
+            )
+            AIDiagnosticsStore.shared.recordFailure(
+                kind: kind.rawValue,
+                error: "emptyOutput",
+                detail: "model returned no text"
+            )
+            throw AITransformError.decodingFailure
+        }
+        return cleaned
     }
 
     private func nextSeed() -> UInt64 {
@@ -496,30 +883,33 @@ public actor AITextTransformer {
         return seed
     }
 
+    /// Greedy for deterministic kinds so the same selection corrects the same way —
+    /// except on a repeat of the identical request, where greedy would hand back a
+    /// byte-identical result and make Retry look broken. Temperature is meaningless
+    /// under greedy sampling, so it is only passed with random sampling.
     nonisolated static func generationOptions(
         kind: AITransformKind,
         maxResponseTokens: Int,
-        seed: UInt64
+        seed: UInt64,
+        attempt: Int
     ) -> GenerationOptions {
-        if kind == .proofread {
+        if kind.isDeterministic && attempt == 0 {
             return GenerationOptions(
                 sampling: .greedy,
-                temperature: kind.temperature,
                 maximumResponseTokens: maxResponseTokens
             )
         }
+        // A deterministic kind's own temperature (0.2) re-rolls to the same string on
+        // a short edit, which is what Retry looked like before. Warm it enough to
+        // move without turning a correction into a rewrite.
+        let temperature = kind.isDeterministic && attempt > 0
+            ? min(1.0, kind.temperature + 0.3)
+            : kind.temperature
         return GenerationOptions(
             sampling: .random(top: 50, seed: seed),
-            temperature: kind.temperature,
+            temperature: temperature,
             maximumResponseTokens: maxResponseTokens
         )
-    }
-
-    nonisolated static func paragraphChunks(_ text: String) -> [String] {
-        let parts = text.components(separatedBy: "\n\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return parts.isEmpty ? [text] : parts
     }
 
     private static func resolvedInstructions(
@@ -548,7 +938,7 @@ public actor AITextTransformer {
             framingTokens = cached.framing
         } else {
             let i = await estimateTokenCount(instructions)
-            let f = await estimateTokenCount(Self.promptFramingPrefix)
+            let f = await estimateTokenCount(Self.promptFraming(for: kind))
             staticTokenCache[cacheKey] = (i, f)
             instructionTokens = i
             framingTokens = f

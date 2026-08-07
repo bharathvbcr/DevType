@@ -224,6 +224,13 @@ public final class PasteboardBroker {
     /// - Parameters:
     ///   - bundleID: frontmost app, used only for §3.4 timing adaptation. Captured by the caller at
     ///     paste time rather than read here, so an app switch mid-paste cannot mislabel the sample.
+    ///   - focusedRole: AX role of the focused element at inject time. §8.4: delivery-trust
+    ///     verdicts are role-scoped (a Chromium web view must not decide for the same app's
+    ///     native fields), so the hold loop must ask with the same key the condemnation was
+    ///     recorded under — asking bundle-only is how the antigravity incident re-pasted.
+    ///   - staleProbe: text the caller *removed* from the field just before this paste (the
+    ///     erased trigger). If a verification read still shows it, the mirror is stale by
+    ///     construction and its "missing" answer is discarded.
     ///   - leaveClipboardOnFailure: When true, skip immediate restore on `.notPosted` / `.failed` so the
     ///     concealed payload remains for a manual ⌘V (secure clipboard paste under Secure Input).
     ///   - holdTimeoutOverride: Optional longer hold (e.g. secure clipboard paste under SI).
@@ -234,6 +241,9 @@ public final class PasteboardBroker {
         expectedText: String?,
         baseline: DeliveryVerifier.FocusedTextObservation?,
         bundleID: String? = nil,
+        focusedRole: String? = nil,
+        staleProbe: String? = nil,
+        staleProbeCaseInsensitive: Bool = false,
         leaveClipboardOnFailure: Bool = false,
         holdTimeoutOverride: TimeInterval? = nil,
         completeBeforeRestore: Bool = false,
@@ -298,6 +308,9 @@ public final class PasteboardBroker {
                     expectedText: expectedText,
                     baseline: baseline,
                     bundleID: bundleID,
+                    focusedRole: focusedRole,
+                    staleProbe: staleProbe,
+                    staleProbeCaseInsensitive: staleProbeCaseInsensitive,
                     pasteAttemptsCompleted: 1,
                     holdStarted: Date(),
                     holdTimeout: holdTimeoutValue,
@@ -313,6 +326,9 @@ public final class PasteboardBroker {
         expectedText: String,
         baseline: DeliveryVerifier.FocusedTextObservation?,
         bundleID: String?,
+        focusedRole: String?,
+        staleProbe: String?,
+        staleProbeCaseInsensitive: Bool,
         pasteAttemptsCompleted: Int,
         holdStarted: Date,
         holdTimeout: TimeInterval,
@@ -324,20 +340,30 @@ public final class PasteboardBroker {
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteDeliverySettleDelay) {
             let delivery = self.verifier.verifyFocusedTextDelivery(
                 expectedText: expectedText,
-                baseline: baseline
+                baseline: baseline,
+                staleProbe: staleProbe,
+                staleProbeCaseInsensitive: staleProbeCaseInsensitive
             )
             let elapsed = Date().timeIntervalSince(holdStarted)
             // Reset on any non-failure so only an uninterrupted run of failures counts as proof.
             let failures = (delivery == .failed) ? consecutiveFailures + 1 : 0
-            // An app already condemned as AX-false-success cannot testify that a paste missed.
-            let trustFailure = AXWriteCapabilityStore.shared.canConfirmDelivery(bundleID: bundleID)
+            // §8.4: a `.failed` read may only drive corrective writes (re-paste here, the trigger
+            // restore downstream) when this `(bundle, role)` is a proven truthful witness — never
+            // condemned, and with at least one earlier in-window AX-confirmed delivery. Unknown
+            // apps are *not* trusted by default: the first contact with a readable-but-lying
+            // mirror (com.google.antigravity) is exactly where "trust until condemned" doubled
+            // the user's text.
+            let trustFailure = AXWriteCapabilityStore.shared.mayActOnDeliveryFailure(
+                bundleID: bundleID,
+                role: focusedRole
+            )
             // Logged once per hold — the loop re-reads every `pasteDeliverySettleDelay`, and a
             // line per tick would bury the decision it is meant to explain.
             if delivery == .failed, !trustFailure, failures == 1 {
                 DevTypeLog.inject.notice(
                     """
                     [Inject] paste hold: AX says missing but \(bundleID ?? "(unknown)", privacy: .public) \
-                    cannot confirm delivery — not re-pasting (would duplicate)
+                    is not a proven delivery witness — not re-pasting (would duplicate)
                     """
                 )
                 InjectTelemetryLog.shared.recordSuppressedMissVerdict(bundleID: bundleID)
@@ -356,6 +382,13 @@ public final class PasteboardBroker {
                 // §3.4: this is the one moment the system actually *measures* how long this app
                 // takes to consume a paste. Everything else in `InjectTiming` is a guess.
                 self.timing.recordDeliveryLatency(elapsed, bundleID: bundleID)
+                // §8.4: an in-window AX confirmation is the one event that earns read trust —
+                // this `(bundle, role)` may now have future confirmed misses acted on. Late
+                // confirmations (the pipeline's deferred re-verify) deliberately do not qualify.
+                AXWriteCapabilityStore.shared.recordDeliveryConfirmed(
+                    bundleID: bundleID,
+                    role: focusedRole
+                )
                 self.finishOwnership(ticket, deferBy: nil)
                 completion(.delivered)
 
@@ -403,6 +436,9 @@ public final class PasteboardBroker {
                         expectedText: expectedText,
                         baseline: baseline,
                         bundleID: bundleID,
+                        focusedRole: focusedRole,
+                        staleProbe: staleProbe,
+                        staleProbeCaseInsensitive: staleProbeCaseInsensitive,
                         pasteAttemptsCompleted: pasteAttemptsCompleted + 1,
                         holdStarted: holdStarted,
                         holdTimeout: holdTimeout,
@@ -418,6 +454,9 @@ public final class PasteboardBroker {
                     expectedText: expectedText,
                     baseline: baseline,
                     bundleID: bundleID,
+                    focusedRole: focusedRole,
+                    staleProbe: staleProbe,
+                    staleProbeCaseInsensitive: staleProbeCaseInsensitive,
                     pasteAttemptsCompleted: pasteAttemptsCompleted,
                     holdStarted: holdStarted,
                     holdTimeout: holdTimeout,

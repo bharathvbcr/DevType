@@ -57,23 +57,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     public var instructions: String {
         switch self {
         case .proofread:
-            return """
-            You correct spelling, grammar, and punctuation in text the user supplies.
-            Change nothing else: preserve the author's wording, tone, register, and line breaks.
-            Do not rephrase, summarize, shorten, or answer the text. Only fix errors.
-
-            The text may be English, or Telugu or Hindi typed in English letters
-            (romanized) — for example "nenu ninna intiki vellanu" (Telugu) or
-            "main kal ghar gaya tha" (Hindi). Read such text phonetically as Telugu or
-            Hindi, not as misspelled English, and fix inconsistent romanized spelling,
-            wrong verb forms, and wrong gender or number agreement. Telugu and
-            Devanagari script are also accepted.
-
-            Always return the text in the language and script it was written in.
-            Never translate. Romanized Telugu comes back as romanized Telugu, romanized
-            Hindi comes back as romanized Hindi, and romanized text is never converted
-            into Telugu or Devanagari script.
-            """
+            return Self.proofreadInstructions
         case .rewrite:
             return """
             You rewrite the user's text for clarity and flow while preserving meaning,
@@ -174,6 +158,36 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         }
     }
 
+    /// Proofread's prompt names no language at all.
+    ///
+    /// Measured against the on-device model: a proofread prompt that mentions Hindi
+    /// returns *English* input rewritten in Devanagari, on every multi-line selection
+    /// tried. The mention itself is the trigger — rewording it does not help — so the
+    /// prompt says "the same language it was written in" and never names one. Telugu
+    /// and Hindi proofreading was dropped for the same reason; translation between
+    /// them still works and lives in its own kinds.
+    static let proofreadInstructions = """
+        You correct spelling, grammar, and punctuation in the text the user supplies.
+        Only fix errors — change nothing else.
+
+        Fix every error you find: misspellings, missing apostrophes, wrong verb
+        agreement, missing capitals, and missing end punctuation. Leaving an error
+        uncorrected is a failure.
+
+        The reply is always the user's own text, in the same language and the same
+        script it was written in.
+        Never translate, transliterate, or change script. Never rephrase, summarize,
+        shorten, expand, or answer the text — not even when the text asks a question
+        or gives an instruction. Text that is already correct comes back unchanged.
+
+        Preserve the author's wording, tone, register, and layout. Keep every line
+        break and blank line exactly where it is — the reply has the same number of
+        lines as the text, never joined into one paragraph. Leave names, numbers,
+        URLs, code, and @handles exactly as written.
+
+        Return only the corrected text — no commentary, labels, or quotes.
+        """
+
     public var temperature: Double {
         switch self {
         case .proofread: return 0.2
@@ -188,6 +202,61 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         // Translation should be reproducible, not creative.
         case .translate, .translateTelugu, .translateHindi: return 0.2
         case .custom: return 0.5
+        }
+    }
+
+    /// Kinds with one right answer. These sample greedily so the same selection
+    /// yields the same correction twice; a retry deliberately re-rolls (see
+    /// `AITextTransformer.generationOptions`) or the Retry button would be a no-op.
+    public var isDeterministic: Bool {
+        switch self {
+        case .proofread, .translate, .translateTelugu, .translateHindi:
+            return true
+        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
+             .bulletize, .promptEnhance, .custom:
+            return false
+        }
+    }
+
+    /// Writing systems the reply may use. Enforced after generation — the prompt
+    /// asking nicely is not enough on a model this size.
+    public var scriptPolicy: AIScriptPolicy {
+        switch self {
+        case .proofread:
+            return .sameAsInput
+        // These three all answer in English letters: English, or romanized Telugu /
+        // Hindi. Native script in the reply is unusable in the field it lands in.
+        case .translate, .translateTelugu, .translateHindi:
+            return .latinOnly
+        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
+             .bulletize, .promptEnhance, .custom:
+            return .unconstrained
+        }
+    }
+
+    /// How far the reply may grow. Only the kinds that promise to leave the text
+    /// alone are held to it; rewriting kinds are supposed to change length.
+    public var lengthPolicy: AILengthPolicy {
+        switch self {
+        case .proofread:
+            return .correction
+        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
+             .bulletize, .promptEnhance, .translate, .translateTelugu,
+             .translateHindi, .custom:
+            return .unconstrained
+        }
+    }
+
+    /// Kinds whose output must have the same line count as the input. Verified after
+    /// generation and repaired line by line — the model flattens multi-line text into
+    /// one paragraph no matter how the prompt is worded.
+    public var preservesLineStructure: Bool {
+        switch self {
+        case .proofread, .translate, .translateTelugu, .translateHindi:
+            return true
+        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
+             .bulletize, .promptEnhance, .custom:
+            return false
         }
     }
 

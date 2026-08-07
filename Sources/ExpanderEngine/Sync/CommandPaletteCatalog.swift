@@ -1031,14 +1031,13 @@ public enum CommandPaletteCatalog {
     private static func aiAliases(for kind: AITransformKind) -> [String] {
         switch kind {
         case .proofread:
+            // No Telugu / Hindi aliases: the on-device model cannot proofread either
+            // language — it answers in native script or trips Apple's guardrail — and
+            // an alias for something that only ever errors is worse than no alias.
+            // Translation between them still works; those rows own it.
             return [
                 "proofread", "proof read", "proof-read", "fix spelling", "fix grammar",
-                "grammar", "spelling", "correct", "typo", "typos",
-                // Proofread keeps the text in its own language, so it is also the
-                // Telugu / Hindi grammar fix.
-                "fix telugu", "fix hindi", "correct telugu", "correct hindi",
-                "telugu grammar", "hindi grammar", "proofread telugu", "proofread hindi",
-                "fix tenglish", "fix hinglish"
+                "grammar", "spelling", "correct", "typo", "typos"
             ]
         case .rewrite:
             return ["rewrite", "re-write", "rephrase", "clarify", "make clearer", "improve writing"]

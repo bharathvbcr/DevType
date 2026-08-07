@@ -148,6 +148,16 @@ enum AITransformFlow {
                 EventTapEngine.shared.resumeMatching()
                 switch result {
                 case .success(let text):
+                    // Never let a blank result erase the selection on the direct path.
+                    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        softAlert(
+                            title: loc.s("ai.alert.failed.title"),
+                            message: localizedError(.decodingFailure, loc: loc),
+                            loc: loc
+                        )
+                        sourceApp?.activate()
+                        return
+                    }
                     AIUndoStore.stash(input)
                     onInject(text, sourceApp)
                 case .failure(let error):
@@ -200,6 +210,10 @@ enum AITransformFlow {
             return loc.s("ai.error.busy")
         case .unsupportedGuide:
             return loc.s("ai.error.unsupportedGuide")
+        case .languageDrift:
+            return loc.s("ai.error.languageDrift")
+        case .unexpectedRewrite:
+            return loc.s("ai.error.unexpectedRewrite")
         case .discarded:
             return loc.s("ai.error.discarded")
         case .unknown(let message):

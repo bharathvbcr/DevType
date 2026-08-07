@@ -523,8 +523,9 @@ private final class AIPreviewController: NSViewController {
         showingDiff = false
         textView.string = partial
         textView.scrollToEndOfDocument(nil)
-        replaceButton.isEnabled = !partial.isEmpty
-        copyButton.isEnabled = !partial.isEmpty
+        // Replace / Copy stay disabled until the stream finishes: Return is bound to
+        // Replace, and a fast Return over a half-streamed snapshot injects truncated
+        // text. The failure path below re-enables them for a partial worth keeping.
     }
 
     private func applyCompletion(_ result: Result<String, AITransformError>) {

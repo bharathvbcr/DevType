@@ -22,10 +22,20 @@ public struct HeldExpansionState: Equatable, Sendable {
     public let trigger: String
     /// Characters typed after the trigger since the hold began.
     public let typedAfter: String
+    /// §8.5: `trigger + typedAfter` spelled out a *complete longer trigger* at some point during
+    /// this hold. Normally unreachable — the matcher expands the longer trigger itself and the
+    /// hold is cancelled as `longerTriggerWon` before `advance` ever sees the keystroke — so a
+    /// set flag means the matcher declined what the index recognizes (app-scoped elsewhere, case
+    /// mismatch, a divergent buffer). From that point the shorter trigger may **never** fire:
+    /// the user visibly typed the longer trigger, and `shorter + suffix` would fabricate an
+    /// expansion they did not intend. The hold resolves by cancellation instead — the trigger
+    /// stays literal, which is the failure mode this engine always prefers.
+    public let passedThroughLongerTrigger: Bool
 
-    public init(trigger: String, typedAfter: String = "") {
+    public init(trigger: String, typedAfter: String = "", passedThroughLongerTrigger: Bool = false) {
         self.trigger = trigger
         self.typedAfter = typedAfter
+        self.passedThroughLongerTrigger = passedThroughLongerTrigger
     }
 
     /// What one keystroke does to the hold.
@@ -78,9 +88,28 @@ public struct HeldExpansionState: Equatable, Sendable {
         }
 
         let combined = typedAfter + typedNow
+        let full = trigger + combined
 
-        return prefixIndex.hasViableExtension(after: trigger + combined)
-            ? .keepWaiting(HeldExpansionState(trigger: trigger, typedAfter: combined))
-            : .fire(suffix: combined)
+        // §8.5: two distinct questions about `full`, and both must keep the hold alive:
+        //   * could it still GROW into a longer trigger? (mid-word — keep waiting)
+        //   * did it just BECOME a longer trigger? (completion — the matcher owns expanding it;
+        //     if the matcher declined, firing the shorter fabricates `shorter + suffix` over
+        //     text the user typed as the longer trigger)
+        // `hasViableExtension` alone answers only the first — `` `slml `` strictly extends
+        // nothing, so on the final `l` it reads as a dead end and the old code fired
+        // `` `slm `` + "l".
+        let completedLongerTrigger = passedThroughLongerTrigger || prefixIndex.isCompleteTrigger(full)
+
+        if prefixIndex.hasViableExtension(after: full) || prefixIndex.isCompleteTrigger(full) {
+            return .keepWaiting(HeldExpansionState(
+                trigger: trigger,
+                typedAfter: combined,
+                passedThroughLongerTrigger: completedLongerTrigger
+            ))
+        }
+
+        // Diverged with no completion in sight. If a longer trigger was ever spelled out during
+        // this hold, the shorter must not fire — resolve to nothing and leave the text literal.
+        return passedThroughLongerTrigger ? .cancel : .fire(suffix: combined)
     }
 }

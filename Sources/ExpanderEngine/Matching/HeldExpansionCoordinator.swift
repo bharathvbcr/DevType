@@ -85,6 +85,10 @@ public final class HeldExpansionCoordinator<Payload> {
         public var firedByKeystroke = 0
         public var cancelledByEdit = 0
         public var cancelledByReset = 0
+        /// A longer trigger completed and expanded normally; the shorter hold stood down.
+        /// This is the debounce *working* — kept separate from `cancelledByReset` so a field
+        /// report can tell a successful longer-trigger expansion from a mouse click.
+        public var cancelledLongerWon = 0
         public var expiredStale = 0
         /// Holds dropped because input the hold could not observe reached the field.
         public var cancelledUnobserved = 0
@@ -97,6 +101,7 @@ public final class HeldExpansionCoordinator<Payload> {
             "Prefix debounce: armed=\(armed) extended=\(extended)"
                 + " fired(timeout=\(firedByTimeout) keystroke=\(firedByKeystroke))"
                 + " cancelled(edit=\(cancelledByEdit) reset=\(cancelledByReset)"
+                + " longer-won=\(cancelledLongerWon)"
                 + " stale=\(expiredStale) unobserved=\(cancelledUnobserved))"
                 + " races-absorbed=\(racesAbsorbed)"
         }
@@ -222,7 +227,8 @@ public final class HeldExpansionCoordinator<Payload> {
     private func recordCancel(_ reason: CancelReason) {
         switch reason {
         case .editOrCaretMove: _telemetry.cancelledByEdit += 1
-        case .bufferReset, .longerTriggerWon: _telemetry.cancelledByReset += 1
+        case .bufferReset: _telemetry.cancelledByReset += 1
+        case .longerTriggerWon: _telemetry.cancelledLongerWon += 1
         case .stale: _telemetry.expiredStale += 1
         case .unobservedInput: _telemetry.cancelledUnobserved += 1
         }

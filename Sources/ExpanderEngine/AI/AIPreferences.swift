@@ -145,6 +145,10 @@ public extension AITransformError {
             return "ai.error.refusal"
         case .unsupportedGuide:
             return "ai.error.unsupportedGuide"
+        case .languageDrift:
+            return "ai.error.languageDrift"
+        case .unexpectedRewrite:
+            return "ai.error.unexpectedRewrite"
         case .discarded:
             return "ai.error.discarded"
         case .unknown:

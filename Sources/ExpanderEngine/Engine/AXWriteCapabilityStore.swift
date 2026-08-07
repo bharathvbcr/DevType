@@ -37,6 +37,12 @@ public final class AXWriteCapabilityStore {
     /// Unverifiable-after-write strikes this launch, keyed like `learned`. Deliberately not
     /// persisted — see `recordUnverifiableAfterWrite`.
     private var unverifiableStrikes: [String: Int] = [:]
+    /// §8.4: `(bundle, role)` keys whose AX has *positively proven* it can see a paste land — a
+    /// delivery was AX-confirmed inside the operational hold window at least once. This is the
+    /// second trust dimension, separate from `learned`: `learned` answers "do AX writes work",
+    /// this answers "do AX reads tell the truth fast enough to act on". Persisted alongside
+    /// verdicts under a distinct key namespace.
+    private var deliveryReadProven: Set<String> = []
 
     /// `nil` disables persistence (used by tests and by the plain `init()`).
     private let fileURL: URL?
@@ -58,7 +64,9 @@ public final class AXWriteCapabilityStore {
         if let fileURL {
             let parent = fileURL.deletingLastPathComponent()
             try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-            learned = Self.loadFromDisk(fileURL: fileURL)
+            let loaded = Self.loadFromDisk(fileURL: fileURL)
+            learned = loaded.verdicts
+            deliveryReadProven = loaded.proven
         }
     }
 
@@ -138,7 +146,12 @@ public final class AXWriteCapabilityStore {
              // then "succeeds" via unverifiable AX direct with nothing pasted.
              "net.whatsapp.WhatsApp", "net.whatsapp.WhatsApp.beta",
              "com.microsoft.teams2", "com.microsoft.teams", "com.apple.Safari",
-             "com.github.githubapp", "com.github.GitHubClient":
+             "com.github.githubapp", "com.github.GitHubClient",
+             // Google Antigravity (Electron IDE). Field incident 2026-08-07: AX write
+             // false-succeeded, and its AXValue mirror also never showed a landed paste inside
+             // the hold window — the stale `.failed` reads drove a re-paste plus a trigger
+             // restore, tripling the text. Seeded so no fresh install pays that first attempt.
+             "com.google.antigravity":
             return .falseSuccess
         default:
             // Electron / Chromium shells (Cursor, VS Code, Slack variants, Notion, Linear, …).
@@ -199,8 +212,68 @@ public final class AXWriteCapabilityStore {
     /// re-pasting duplicates the expansion, and restoring the trigger appends it after text that
     /// did land. `nil`/unknown bundles stay trusted, so nothing outside the condemned set changes.
     public func canConfirmDelivery(bundleID: String?) -> Bool {
+        canConfirmDelivery(bundleID: bundleID, role: nil)
+    }
+
+    /// §8.4: role-aware form. The field incident this closes: the false-success verdict for
+    /// `com.google.antigravity` was recorded under `(bundle, AXTextArea)`, but the paste hold
+    /// queried delivery trust with the bundle alone — missed the condemnation, believed the stale
+    /// "text missing" answer, and re-pasted plus restored the trigger over a paste that landed.
+    public func canConfirmDelivery(bundleID: String?, role: String?) -> Bool {
         guard let bundleID, !bundleID.isEmpty else { return true }
-        return verdict(for: bundleID) != .falseSuccess
+        return verdict(for: bundleID, role: role) != .falseSuccess
+    }
+
+    // MARK: - Delivery-read proof (§8.4)
+
+    /// Has a paste in this `(bundle, role)` ever been AX-confirmed inside the hold window?
+    /// Composite key first, then the bundle-level key, mirroring `verdict(for:role:)`.
+    public func hasProvenDeliveryReads(bundleID: String, role: String?) -> Bool {
+        guard !bundleID.isEmpty else { return false }
+        let canonical = Self.canonicalBundleID(bundleID)
+        let compositeKey = Self.verdictKey(bundleID: canonical, role: role)
+        lock.lock()
+        defer { lock.unlock() }
+        return deliveryReadProven.contains(compositeKey) || deliveryReadProven.contains(canonical)
+    }
+
+    /// Record an in-window AX-confirmed delivery — the only event that earns read trust.
+    ///
+    /// Deliberately *not* fed by late confirmations (the deferred re-verify): an app whose mirror
+    /// catches up only after the hold window would earn proof it cannot honor inside the window,
+    /// and the next in-window `.failed` would drive a duplicating re-paste.
+    public func recordDeliveryConfirmed(bundleID: String?, role: String?) {
+        guard let bundleID, !bundleID.isEmpty else { return }
+        let key = Self.verdictKey(bundleID: Self.canonicalBundleID(bundleID), role: role)
+        lock.lock()
+        let inserted = deliveryReadProven.insert(key).inserted
+        lock.unlock()
+        if inserted {
+            DevTypeLog.inject.info(
+                "[Inject] delivery reads proven for \(bundleID, privacy: .public)\(role.map { " role=\($0)" } ?? "", privacy: .public) — confirmed-miss corrections enabled"
+            )
+            scheduleSave()
+        }
+    }
+
+    /// §8.4: the single gate for every *corrective* write a delivery `.failed` can drive —
+    /// re-pasting Cmd+V and restoring the erased trigger. Both add text to the field, so both
+    /// require this app's AX to be a **proven truthful witness**, not merely an uncondemned one:
+    ///
+    ///  1. Not condemned — a false-success app's reads are known to lie (role-aware).
+    ///  2. Positively proven — some earlier paste here was AX-confirmed *inside* the hold window.
+    ///
+    /// An unknown app failing (2) gets exactly one paste and a `postedUnverified` outcome. That is
+    /// the deliberate trade: the cost of wrongly *withholding* a correction is one missing
+    /// expansion the user retypes; the cost of wrongly *performing* one is doubled text in the
+    /// user's document. A readable-and-truthful app converts to proven on its first confirmed
+    /// delivery (the overwhelmingly common case in native apps), so the ladder is armed from the
+    /// second expansion on. A readable-but-lying app (Electron/Chromium stale mirrors) can never
+    /// prove itself in-window, so it is suppressed forever — which is the fix.
+    public func mayActOnDeliveryFailure(bundleID: String?, role: String?) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else { return false }
+        guard canConfirmDelivery(bundleID: bundleID, role: role) else { return false }
+        return hasProvenDeliveryReads(bundleID: bundleID, role: role)
     }
 
     // MARK: - Learning
@@ -222,6 +295,10 @@ public final class AXWriteCapabilityStore {
         let previous = learned[key]
         learned[key] = .falseSuccess
         trustedStreak[key] = 0
+        // §8.4: fresh evidence that this AX lies revokes any earlier read proof — an app update
+        // can regress a once-truthful mirror, and stale proof would re-arm the corrective ladder
+        // its own reads can no longer justify. Proof is re-earned by the next confirmed delivery.
+        deliveryReadProven.remove(key)
         let changed = previous != .falseSuccess
         lock.unlock()
         if changed {
@@ -271,6 +348,9 @@ public final class AXWriteCapabilityStore {
         lock.lock()
         let strikes = (unverifiableStrikes[key] ?? 0) + 1
         unverifiableStrikes[key] = strikes
+        // §8.4: an unverifiable-after-write observation is evidence the mirror has gone bad;
+        // suspend read proof immediately rather than waiting for the condemning second strike.
+        deliveryReadProven.remove(key)
         lock.unlock()
         guard strikes >= Self.unverifiableStrikesToCondemn else {
             return .struck(count: strikes)
@@ -316,6 +396,7 @@ public final class AXWriteCapabilityStore {
         learned.removeAll()
         trustedStreak.removeAll()
         unverifiableStrikes.removeAll()
+        deliveryReadProven.removeAll()
         lock.unlock()
         scheduleSave()
     }
@@ -348,16 +429,23 @@ public final class AXWriteCapabilityStore {
             self.lock.lock()
             self.savePending = false
             let snapshot = self.learned
+            let provenSnapshot = self.deliveryReadProven
             self.lock.unlock()
-            Self.saveToDisk(snapshot, fileURL: fileURL)
+            Self.saveToDisk(snapshot, proven: provenSnapshot, fileURL: fileURL)
         }
     }
 
     private struct PersistedFile: Codable {
         var version: Int
-        /// key -> raw verdict string ("trusted" / "falseSuccess").
+        /// key -> raw verdict string ("trusted" / "falseSuccess"). §8.4 read-proof entries share
+        /// this map under a `deliveryRead|` key prefix with the raw value "confirmed"; builds
+        /// that predate them skip unrecognised raw values, so the file stays interchangeable.
         var entries: [String: String]
     }
+
+    /// §8.4: key namespace for persisted read-proof entries.
+    private static let deliveryReadKeyPrefix = "deliveryRead|"
+    private static let deliveryReadRawValue = "confirmed"
 
     private static func rawValue(for verdict: Verdict) -> String? {
         switch verdict {
@@ -375,32 +463,45 @@ public final class AXWriteCapabilityStore {
         }
     }
 
-    private static func loadFromDisk(fileURL: URL) -> [String: Verdict] {
+    private static func loadFromDisk(fileURL: URL) -> (verdicts: [String: Verdict], proven: Set<String>) {
         guard FileManager.default.fileExists(atPath: fileURL.path),
               let data = try? Data(contentsOf: fileURL),
               let file = try? JSONDecoder().decode(PersistedFile.self, from: data) else {
-            return [:]
+            return ([:], [])
         }
         guard file.version <= persistenceSchemaVersion else {
             // Written by a newer build — do not guess at its semantics, just relearn.
             DevTypeLog.inject.notice(
                 "[Inject] AX write-capability file schema \(file.version, privacy: .public) is newer than \(persistenceSchemaVersion, privacy: .public) — ignoring"
             )
-            return [:]
+            return ([:], [])
         }
-        var result: [String: Verdict] = [:]
+        var verdicts: [String: Verdict] = [:]
+        var proven: Set<String> = []
         for (key, raw) in file.entries {
-            guard !key.isEmpty, let verdict = verdict(fromRaw: raw) else { continue }
-            result[key] = verdict
+            guard !key.isEmpty else { continue }
+            // A proof entry is prefix AND marker value together. Matching on the prefix alone
+            // would silently drop a *verdict* recorded for a (pathological) bundle ID that
+            // happens to begin with the prefix — namespaces must never eat each other's data.
+            if key.hasPrefix(deliveryReadKeyPrefix), raw == deliveryReadRawValue {
+                let bare = String(key.dropFirst(deliveryReadKeyPrefix.count))
+                if !bare.isEmpty { proven.insert(bare) }
+                continue
+            }
+            guard let verdict = verdict(fromRaw: raw) else { continue }
+            verdicts[key] = verdict
         }
-        return result
+        return (verdicts, proven)
     }
 
-    private static func saveToDisk(_ verdicts: [String: Verdict], fileURL: URL) {
+    private static func saveToDisk(_ verdicts: [String: Verdict], proven: Set<String>, fileURL: URL) {
         var entries: [String: String] = [:]
         for (key, verdict) in verdicts {
             guard let raw = rawValue(for: verdict) else { continue }
             entries[key] = raw
+        }
+        for key in proven {
+            entries[deliveryReadKeyPrefix + key] = deliveryReadRawValue
         }
         let file = PersistedFile(version: persistenceSchemaVersion, entries: entries)
         do {

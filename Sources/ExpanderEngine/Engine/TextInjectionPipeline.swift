@@ -1201,7 +1201,10 @@ public final class TextInjectionPipeline {
                     text: payload,
                     expectedText: textToInject,
                     baseline: hidPasteBaseline,
-                    bundleID: context.frontBundleID
+                    bundleID: context.frontBundleID,
+                    focusedRole: focusedRole,
+                    staleProbe: erasePlan.expectedText,
+                    staleProbeCaseInsensitive: erasePlan.caseInsensitive
                 ) { result in
                     // #region agent log
                     TextInjectionPipeline.debugLogInject(
@@ -1228,6 +1231,7 @@ public final class TextInjectionPipeline {
                         expectedText: textToInject,
                         baseline: hidPasteBaseline,
                         context: context,
+                        focusedRole: focusedRole,
                         path: "shellBracketPaste",
                         cursorOffset: cursorOffset,
                         totalUTF16Length: totalUTF16,
@@ -1274,7 +1278,10 @@ public final class TextInjectionPipeline {
                 text: textToInject,
                 expectedText: textToInject,
                 baseline: hidPasteBaseline,
-                bundleID: context.frontBundleID
+                bundleID: context.frontBundleID,
+                focusedRole: focusedRole,
+                staleProbe: erasePlan.expectedText,
+                staleProbeCaseInsensitive: erasePlan.caseInsensitive
             ) { result in
                 // #region agent log
                 TextInjectionPipeline.debugLogInject(
@@ -1292,6 +1299,7 @@ public final class TextInjectionPipeline {
                     expectedText: textToInject,
                     baseline: hidPasteBaseline,
                     context: context,
+                    focusedRole: focusedRole,
                     path: "hidPaste",
                     cursorOffset: cursorOffset,
                     totalUTF16Length: totalUTF16,
@@ -1448,12 +1456,35 @@ public final class TextInjectionPipeline {
         expectedText: String,
         baseline: FocusedTextObservation?,
         context: InjectContext,
+        focusedRole: String? = nil,
         path: String,
         cursorOffset: Int?,
         totalUTF16Length: Int,
         trailingKeys: [String] = [],
         completion: @escaping () -> Void
     ) {
+        // §8.4 defense-in-depth: a `.failed` verdict may only drive the trigger restore when this
+        // `(bundle, role)` is a proven truthful witness. The hold loop applies the same gate
+        // before ever emitting `.failed`, but this function is reachable from more than one
+        // broker path and the proof can be revoked mid-flight — re-check at the point of harm.
+        // Suppressed failures are handled as `.unavailable`: outcome `postedUnverified`, field
+        // left alone, with the deferred re-verify still able to upgrade to success.
+        var result = result
+        if result == .failed,
+           !AXWriteCapabilityStore.shared.mayActOnDeliveryFailure(
+               bundleID: context.frontBundleID,
+               role: focusedRole
+           ) {
+            DevTypeLog.inject.notice(
+                """
+                [Inject] paste delivery: AX says missing but \
+                \(context.frontBundleID ?? "(unknown)", privacy: .public) is not a proven delivery \
+                witness — leaving the field alone (restore would duplicate)
+                """
+            )
+            InjectTelemetryLog.shared.recordSuppressedMissVerdict(bundleID: context.frontBundleID)
+            result = .unavailable
+        }
         switch result {
         case .delivered:
             positionCursorIfNeeded(
@@ -1485,29 +1516,36 @@ public final class TextInjectionPipeline {
             DispatchQueue.main.asyncAfter(deadline: .now() + TextInjectionPipeline.pasteReverifyDelay) {
                 let retry = self.verifier.verifyFocusedTextDelivery(
                     expectedText: expectedText,
-                    baseline: baseline
+                    baseline: baseline,
+                    staleProbe: context.erasePlan.expectedText,
+                    staleProbeCaseInsensitive: context.erasePlan.caseInsensitive
                 )
                 switch retry {
                 case .delivered:
+                    // Late confirmation upgrades the recorded outcome but deliberately does NOT
+                    // record delivery-read proof: a mirror that confirms only after the hold
+                    // window cannot be trusted to justify in-window corrections next time.
                     DevTypeLog.inject.info("[Inject] paste re-verify: text confirmed after settle delay")
                     PermissionCoordinator.shared.recordInjectOutcome(
                         .succeeded,
                         refuseContext: nil,
                         path: path
                     )
-                case .failed where !AXWriteCapabilityStore.shared.canConfirmDelivery(
-                    bundleID: context.frontBundleID
+                case .failed where !AXWriteCapabilityStore.shared.mayActOnDeliveryFailure(
+                    bundleID: context.frontBundleID,
+                    role: focusedRole
                 ):
-                    // §8.1: the other half of the duplicate report. The hold loop already refuses
-                    // to re-paste on this app's `.failed` verdict, but this deferred re-read used
-                    // to act on the very same false negative — writing the trigger back *after*
-                    // an expansion that did land. On a virtualised web view the AXValue never
-                    // contains the pasted text, so this fires on every single expansion.
+                    // §8.1/§8.4: the other half of the duplicate report. The hold loop already
+                    // refuses to re-paste on this app's `.failed` verdict, but this deferred
+                    // re-read used to act on the very same false negative — writing the trigger
+                    // back *after* an expansion that did land. This is the most dangerous restore
+                    // in the pipeline (it fires ~a second after a paste that usually landed), so
+                    // it demands the strongest evidence: a proven, role-matched truthful witness.
                     DevTypeLog.inject.notice(
                         """
                         [Inject] paste re-verify: AX says missing but \
-                        \(context.frontBundleID ?? "(unknown)", privacy: .public) cannot confirm \
-                        delivery — leaving the field alone (restoring the trigger would duplicate)
+                        \(context.frontBundleID ?? "(unknown)", privacy: .public) is not a proven \
+                        delivery witness — leaving the field alone (restoring the trigger would duplicate)
                         """
                     )
                     InjectTelemetryLog.shared.recordSuppressedMissVerdict(bundleID: context.frontBundleID)
