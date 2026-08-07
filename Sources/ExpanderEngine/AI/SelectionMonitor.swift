@@ -114,6 +114,21 @@ public final class SelectionMonitor {
         return snapshot
     }
 
+    /// Unfiltered cache snapshot, freshness included, for the *explicit* command paths
+    /// (AI hotkey / palette).
+    ///
+    /// `cachedSelection(…)` layers the typed-path rules on top — allowlist, weak-AX rejection —
+    /// and those are wrong here. They exist because a typed trigger is keyed *into* the selection
+    /// it means to transform, which is what makes a weak-AX app's stale report dangerous. A
+    /// hotkey types nothing. `SelectionReader.evaluate` applies the checks that do belong
+    /// (freshness, mute, same-app) so this stays a plain accessor.
+    public func rawCachedSelection() -> CachedSelection? {
+        lock.lock()
+        let snapshot = cache
+        lock.unlock()
+        return snapshot
+    }
+
     /// True when a fresh cache entry exists but is blocked solely by weak-AX rejection.
     /// Used to show a distinct typed-path hint (not the generic selection-unavailable message).
     public func hasWeakAXBlockedSelection(
@@ -366,7 +381,10 @@ public final class SelectionMonitor {
             clearCache()
             return
         }
-        let text = SelectionReader.copySelectedText(from: element)
+        // Primary attribute only. This runs from an AX notification that many apps fire on every
+        // keystroke, and the fallback attributes would cost two extra IPC round-trips exactly
+        // when there is nothing selected. The explicit AI paths run the full ladder themselves.
+        let text = SelectionReader.copySelectedText(from: element, allowFallbackAttributes: false)
         applySelectionRefresh(text: text, bundleID: bundleID, element: element)
     }
 

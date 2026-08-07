@@ -171,6 +171,37 @@ public final class AXContextChecker {
         return nil
     }
 
+    /// Every distinct focused element the three AX probes can resolve, in probe order.
+    ///
+    /// `focusedElement()` returns the *first* probe that answers, which is right for the
+    /// keystroke path (cheapest wins) but wrong when the question is "where is the user's
+    /// selection?". The system-wide probe and the app-scoped probe routinely resolve to
+    /// different elements — a browser window vs. the web area inside it — and only one of them
+    /// reports the selection. Trying only the winner is how a real selection reads as none.
+    ///
+    /// Costs up to three AX round-trips, so this is for explicit user gestures (AI hotkey,
+    /// palette) and never for the per-keystroke gate.
+    public func focusedElementCandidates() -> [AXUIElement] {
+        var candidates: [AXUIElement] = []
+
+        func append(_ result: FocusQueryResult) {
+            guard case .available(let element) = result else { return }
+            guard !candidates.contains(where: { CFEqual($0, element) }) else { return }
+            candidates.append(element)
+        }
+
+        append(mapFocusCopy(copyFocusedUIElement(from: systemWideElement())))
+
+        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+            let appElement = AXUIElementCreateApplication(pid)
+            Self.applyMessagingTimeout(to: appElement)
+            append(mapFocusCopy(copyFocusedUIElement(from: appElement)))
+        }
+
+        append(copyFocusedElementViaFocusedApplicationChain().mapped)
+        return candidates
+    }
+
     /// Focused element's `kAXRoleAttribute`, when readable.
     ///
     /// Used by inject to consult `AXWriteCapabilityStore` with a `(bundleID, role)` key so a

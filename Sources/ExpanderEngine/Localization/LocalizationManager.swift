@@ -838,6 +838,20 @@ public final class LocalizationManager: ObservableObject {
             "ai.alert.noSelection.message": "Select text first, then open the AI palette.",
             "ai.alert.failed.title": "AI Transform Failed",
 
+            "ai.selection.unavailable.title": "Selection Unavailable",
+            "ai.selection.fail.axUntrusted":
+                "DevType can't read the selection because Accessibility access is off. "
+                + "Re-grant it in Permission Recovery, then try again.",
+            "ai.selection.fail.secureInput":
+                "Secure Input is active, so macOS blocks reading the selection. "
+                + "A password field somewhere still has the keyboard — click into a normal "
+                + "text field and try again.",
+            "ai.selection.fail.muted":
+                "DevType is muted in %@. Unmute it in Preferences → Apps to use AI actions there.",
+            "ai.selection.fail.noFocus":
+                "No text field has keyboard focus, so there is no selection to read. "
+                + "Click into the text, select it, then try again.",
+
             "ai.error.emptyInput": "No text to transform.",
 
             "ai.preview.subtitle": "Review the result, then Replace, Copy, Retry, or Cancel.",
@@ -1770,6 +1784,20 @@ public final class LocalizationManager: ObservableObject {
             "ai.alert.noSelection.message": "먼저 텍스트를 선택한 뒤 AI 팔레트를 여세요.",
             "ai.alert.failed.title": "AI 변환 실패",
 
+            "ai.selection.unavailable.title": "선택을 읽을 수 없음",
+            "ai.selection.fail.axUntrusted":
+                "손쉬운 사용 권한이 꺼져 있어 선택 영역을 읽을 수 없습니다. "
+                + "권한 복구에서 다시 허용한 뒤 시도하세요.",
+            "ai.selection.fail.secureInput":
+                "보안 입력이 활성화되어 macOS가 선택 영역 읽기를 차단합니다. "
+                + "어딘가의 암호 입력란이 키보드를 점유하고 있습니다 — 일반 텍스트 필드를 "
+                + "클릭한 뒤 다시 시도하세요.",
+            "ai.selection.fail.muted":
+                "%@에서 DevType이 음소거되어 있습니다. 환경설정 → 앱에서 음소거를 해제하세요.",
+            "ai.selection.fail.noFocus":
+                "키보드 포커스를 가진 텍스트 필드가 없어 읽을 선택 영역이 없습니다. "
+                + "텍스트를 클릭해 선택한 뒤 다시 시도하세요.",
+
             "ai.error.emptyInput": "변환할 텍스트가 없습니다.",
 
             "ai.preview.subtitle": "결과를 확인한 뒤 바꾸기, 복사, 다시 시도, 취소를 하세요.",
@@ -2687,6 +2715,20 @@ public final class LocalizationManager: ObservableObject {
             "ai.alert.noSelection.title": "選択がありません",
             "ai.alert.noSelection.message": "先にテキストを選択してから AI パレットを開いてください。",
             "ai.alert.failed.title": "AI 変換に失敗しました",
+
+            "ai.selection.unavailable.title": "選択を読み取れません",
+            "ai.selection.fail.axUntrusted":
+                "アクセシビリティ権限がオフのため選択範囲を読み取れません。"
+                + "「権限の復旧」で再度許可してからお試しください。",
+            "ai.selection.fail.secureInput":
+                "セキュア入力が有効なため、macOS が選択範囲の読み取りをブロックしています。"
+                + "どこかのパスワード欄がキーボードを保持しています — 通常のテキスト欄を"
+                + "クリックしてからお試しください。",
+            "ai.selection.fail.muted":
+                "%@ では DevType がミュートされています。環境設定 → App でミュートを解除してください。",
+            "ai.selection.fail.noFocus":
+                "キーボードフォーカスのあるテキスト欄がないため、読み取る選択範囲がありません。"
+                + "テキストをクリックして選択してからお試しください。",
 
             "ai.error.emptyInput": "変換するテキストがありません。",
 

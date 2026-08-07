@@ -37,11 +37,45 @@ public final class AIDiagnosticsStore {
         }
     }
 
+    /// One resolved selection read, for the report's `-- On-device AI --` section.
+    ///
+    /// "Prompt Enhance says no text is selected" was previously unfalsifiable from a diagnostic
+    /// report: nothing recorded whether the read failed on Accessibility, Secure Input, a mute,
+    /// a missing focused element, or a genuinely empty selection.
+    ///
+    /// **Privacy:** records the outcome label, the app, how many AX probes answered, and the
+    /// *length* of what was read. Never the text.
+    public struct SelectionRead: Equatable, Sendable {
+        public let at: Date
+        /// `live` / `cached`, or a `SelectionReader.Failure.diagnosticLabel`.
+        public let outcome: String
+        public let bundleID: String?
+        /// Distinct focused elements the AX probes resolved.
+        public let candidateCount: Int
+        /// Character count of the resolved selection (0 on failure). Never the content.
+        public let characters: Int
+
+        public init(
+            at: Date,
+            outcome: String,
+            bundleID: String?,
+            candidateCount: Int,
+            characters: Int
+        ) {
+            self.at = at
+            self.outcome = outcome
+            self.bundleID = bundleID
+            self.candidateCount = candidateCount
+            self.characters = characters
+        }
+    }
+
     private let lock = UnfairLock()
     private var failures: [Failure] = []
     private var successCount = 0
     private var lastSuccessAt: Date?
     private var lastSuccessKind: String?
+    private var selectionReads: [SelectionRead] = []
 
     public init() {}
 
@@ -69,12 +103,36 @@ public final class AIDiagnosticsStore {
         lock.unlock()
     }
 
+    public func recordSelectionRead(
+        outcome: String,
+        bundleID: String?,
+        candidateCount: Int,
+        characters: Int,
+        at date: Date = Date()
+    ) {
+        lock.lock()
+        selectionReads.append(
+            SelectionRead(
+                at: date,
+                outcome: outcome,
+                bundleID: bundleID,
+                candidateCount: candidateCount,
+                characters: characters
+            )
+        )
+        if selectionReads.count > Self.capacity {
+            selectionReads.removeFirst(selectionReads.count - Self.capacity)
+        }
+        lock.unlock()
+    }
+
     public func reset() {
         lock.lock()
         failures.removeAll()
         successCount = 0
         lastSuccessAt = nil
         lastSuccessKind = nil
+        selectionReads.removeAll()
         lock.unlock()
     }
 
@@ -83,6 +141,13 @@ public final class AIDiagnosticsStore {
     public func recentFailures() -> [Failure] {
         lock.lock()
         let snapshot = failures
+        lock.unlock()
+        return snapshot
+    }
+
+    public func recentSelectionReads() -> [SelectionRead] {
+        lock.lock()
+        let snapshot = selectionReads
         lock.unlock()
         return snapshot
     }
@@ -109,6 +174,7 @@ public final class AIDiagnosticsStore {
         let successes = successCount
         let successAt = lastSuccessAt
         let successKind = lastSuccessKind
+        let reads = selectionReads
         lock.unlock()
 
         var lines = [
@@ -133,6 +199,7 @@ public final class AIDiagnosticsStore {
 
         guard let last = snapshot.last else {
             lines.append("Last failure: (none)")
+            lines.append(contentsOf: Self.selectionReadLines(reads, iso: iso))
             return lines
         }
         lines.append(
@@ -153,6 +220,40 @@ public final class AIDiagnosticsStore {
                 .joined(separator: " ")
             lines.append("Failure breakdown: \(summary)")
         }
+        lines.append(contentsOf: Self.selectionReadLines(reads, iso: iso))
+        return lines
+    }
+
+    /// `-- On-device AI --` tail describing how selection reads resolved.
+    ///
+    /// The last read is spelled out because it is almost always *the* read the user is
+    /// complaining about; the histogram below it separates "one unlucky read" from "this app
+    /// never reports a selection".
+    static func selectionReadLines(
+        _ reads: [SelectionRead],
+        iso: ISO8601DateFormatter
+    ) -> [String] {
+        guard let last = reads.last else {
+            return ["Selection reads: (none this session)"]
+        }
+        var lines = [
+            "Selection reads: \(reads.count)"
+                + (reads.count >= capacity ? " (capped at \(capacity))" : "")
+        ]
+        lines.append(
+            "Last selection read: \(iso.string(from: last.at)) outcome=\(last.outcome) "
+                + "app=\(last.bundleID ?? "(unknown)") axCandidates=\(last.candidateCount) "
+                + "chars=\(last.characters)"
+        )
+        var counts: [String: Int] = [:]
+        for read in reads {
+            counts[read.outcome, default: 0] += 1
+        }
+        let summary = counts
+            .sorted { ($0.value, $0.key) > ($1.value, $1.key) }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: " ")
+        lines.append("Selection read breakdown: \(summary)")
         return lines
     }
 }

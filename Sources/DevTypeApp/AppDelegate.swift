@@ -649,7 +649,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         _ command: PaletteCommand,
         insertText: String,
         sourceApp: NSRunningApplication?,
-        selection: SelectionReader.Result?
+        selection: SelectionReader.Outcome
     ) {
         CommandUsageStatsStore.shared.recordUsage(for: command.id)
 
@@ -686,13 +686,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         case .textOp(let op):
             // Captured at panel-open; a live read here would always miss and silently
             // fall through to the clipboard, transforming the wrong text with no warning.
-            let source = selection?.text
+            let source = selection.result?.text
                 ?? NSPasteboard.general.string(forType: .string)
                 ?? ""
-            guard !source.isEmpty else {
+            guard !SelectionReader.isBlankSelection(source) else {
                 DevTypeAlert.info(
                     title: loc.s(command.titleKey),
-                    message: loc.s("ai.alert.noSelection.message")
+                    message: selection.failure?.message(loc: loc)
+                        ?? loc.s("ai.alert.noSelection.message")
                 )
                 sourceApp?.activate()
                 return
@@ -725,7 +726,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         kind: AITransformKind,
         customInstructions: String?,
         sourceApp: NSRunningApplication?,
-        selection: SelectionReader.Result?
+        selection: SelectionReader.Outcome
     ) {
         guard AIPreferences.isEnabled else {
             DevTypeAlert.info(
@@ -744,16 +745,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             return
         }
-        guard let selection, !selection.text.isEmpty else {
+        guard case .selection(let resolved) = selection else {
+            let failure = selection.failure ?? .emptySelection
             DevTypeAlert.info(
-                title: loc.s("ai.alert.noSelection.title"),
-                message: loc.s("ai.alert.noSelection.message")
+                title: failure.title(loc: loc),
+                message: failure.message(loc: loc)
             )
             sourceApp?.activate()
             return
         }
         AITransformFlow.run(
-            input: selection.text,
+            input: resolved.text,
             kind: kind,
             sourceApp: sourceApp,
             customInstructions: customInstructions,

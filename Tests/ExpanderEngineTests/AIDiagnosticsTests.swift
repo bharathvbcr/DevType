@@ -32,6 +32,107 @@ final class AIDiagnosticsTests: XCTestCase {
         XCTAssertTrue(text.contains("appleIntelligenceNotEnabled"))
         XCTAssertTrue(text.contains("Last failure: (none)"))
         XCTAssertTrue(text.contains("Last success: (none)"))
+        XCTAssertTrue(text.contains("Selection reads: (none this session)"))
+    }
+
+    // MARK: - Selection reads
+
+    /// "Prompt Enhance says nothing is selected" was unfalsifiable from a diagnostic report:
+    /// nothing recorded whether the read died on Accessibility, Secure Input, a mute, a missing
+    /// focused element, or a genuinely empty selection.
+    func testSelectionReadOutcomeReachesTheReport() {
+        let store = AIDiagnosticsStore()
+        store.recordSelectionRead(
+            outcome: "secureInput",
+            bundleID: "com.google.Chrome",
+            candidateCount: 0,
+            characters: 0
+        )
+        let text = store.diagnosticLines(
+            enabled: true,
+            availability: "available",
+            localeNote: nil,
+            iso: makeISO()
+        ).joined(separator: "\n")
+
+        XCTAssertTrue(text.contains("outcome=secureInput"))
+        XCTAssertTrue(text.contains("app=com.google.Chrome"))
+        XCTAssertTrue(text.contains("axCandidates=0"))
+    }
+
+    /// One failed read is noise; the same failure in the same app every time is the bug report.
+    func testSelectionReadBreakdownSeparatesOneOffFromAlways() {
+        let store = AIDiagnosticsStore()
+        for _ in 0..<4 {
+            store.recordSelectionRead(
+                outcome: "emptySelection",
+                bundleID: "com.microsoft.VSCode",
+                candidateCount: 1,
+                characters: 0
+            )
+        }
+        store.recordSelectionRead(
+            outcome: "live",
+            bundleID: "com.apple.TextEdit",
+            candidateCount: 2,
+            characters: 42
+        )
+        let text = store.diagnosticLines(
+            enabled: true,
+            availability: "available",
+            localeNote: nil,
+            iso: makeISO()
+        ).joined(separator: "\n")
+
+        XCTAssertTrue(text.contains("Selection reads: 5"))
+        XCTAssertTrue(text.contains("emptySelection=4"))
+        XCTAssertTrue(text.contains("live=1"))
+        XCTAssertTrue(text.contains("chars=42"), "The last read is spelled out in full.")
+    }
+
+    /// **Privacy:** the store records how much was selected, never what. A diagnostic report is
+    /// pasted into issue trackers and chat.
+    func testSelectionReadNeverStoresTheSelectedText() {
+        let store = AIDiagnosticsStore()
+        let secret = "my bank password is hunter2"
+        store.recordSelectionRead(
+            outcome: "live",
+            bundleID: "com.apple.Safari",
+            candidateCount: 1,
+            characters: secret.count
+        )
+        let text = store.diagnosticLines(
+            enabled: true,
+            availability: "available",
+            localeNote: nil,
+            iso: makeISO()
+        ).joined(separator: "\n")
+
+        XCTAssertFalse(text.contains(secret))
+        XCTAssertFalse(text.contains("hunter2"))
+        XCTAssertTrue(text.contains("chars=\(secret.count)"))
+    }
+
+    func testSelectionReadRingIsBounded() {
+        let store = AIDiagnosticsStore()
+        for index in 0..<(AIDiagnosticsStore.capacity + 25) {
+            store.recordSelectionRead(
+                outcome: "live",
+                bundleID: "app.\(index)",
+                candidateCount: 1,
+                characters: index
+            )
+        }
+        let reads = store.recentSelectionReads()
+        XCTAssertEqual(reads.count, AIDiagnosticsStore.capacity)
+        XCTAssertEqual(
+            reads.last?.characters,
+            AIDiagnosticsStore.capacity + 24,
+            "The ring must keep the newest entries, not the oldest."
+        )
+
+        store.reset()
+        XCTAssertTrue(store.recentSelectionReads().isEmpty)
     }
 
     /// The whole point: Apple's `debugDescription` is the only explanation for a guardrail

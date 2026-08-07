@@ -26,7 +26,7 @@ enum InlineSearchPanel {
     static func toggle(
         store: SnippetStore = .shared,
         loc: LocalizationManager = .shared,
-        onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Result?) -> Void
+        onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Outcome) -> Void
     ) {
         if isOpen { close() } else { open(store: store, loc: loc, onPick: onPick) }
     }
@@ -42,14 +42,17 @@ enum InlineSearchPanel {
     private static func open(
         store: SnippetStore,
         loc: LocalizationManager,
-        onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Result?) -> Void
+        onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Outcome) -> Void
     ) {
         let sourceApp = NSWorkspace.shared.frontmostApplication
         // Read the selection HERE, before `NSApp.activate(ignoringOtherApps:)` below makes
         // DevType frontmost. `SelectionReader` resolves the *system-wide* focused element,
         // so once our own panel is key it reads the search field — never the user's text.
         // Any later read from a palette command is therefore guaranteed to return nil.
-        let sourceSelection = SelectionReader.readSelectedText()
+        //
+        // The whole `Outcome` is carried, not just the text: the failure reason is what the
+        // command handlers need to tell the user why, and it can only be captured here.
+        let sourceSelection = SelectionReader.readSelection()
         EventTapEngine.shared.suspendMatching()
 
         let panel = KeyablePanel(

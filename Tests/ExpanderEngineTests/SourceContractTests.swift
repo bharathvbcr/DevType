@@ -91,7 +91,7 @@ final class SourceContractTests: XCTestCase {
     func testInlineSearchPanelReadsSelectionBeforeActivatingDevType() throws {
         let text = try source("Sources/DevTypeApp/InlineSearchPanel.swift")
 
-        guard let readOffset = offset(of: "SelectionReader.readSelectedText()", in: text) else {
+        guard let readOffset = offset(of: "SelectionReader.readSelection()", in: text) else {
             return XCTFail(
                 "InlineSearchPanel must capture the selection at panel-open time. "
                     + "Without it, palette commands have no selection to act on."
@@ -147,10 +147,52 @@ final class SourceContractTests: XCTestCase {
         )
 
         XCTAssertFalse(
-            region.contains("SelectionReader.readSelectedText()"),
+            region.contains("SelectionReader.read"),
             "Palette command handlers must use the selection captured by InlineSearchPanel at "
                 + "panel-open time. A live SelectionReader read runs while our own panel is key "
                 + "and always returns nil (and for .textOp silently falls back to the clipboard)."
+        )
+    }
+
+    // MARK: - Failed selection reads must explain themselves
+
+    /// Every path that tells the user there is no selection must render the *typed* failure.
+    /// Hard-coding `ai.alert.noSelection.message` there is how a revoked Accessibility grant,
+    /// an active Secure Input session, and a muted app all came to say "Select text first" —
+    /// advice the user has already followed, pointing at none of the three real causes.
+    func testSelectionFailuresAreReportedWithTheirOwnReason() throws {
+        for path in ["Sources/DevTypeApp/AITransformFlow.swift", "Sources/DevTypeApp/AppDelegate.swift"] {
+            let text = try source(path)
+            guard text.contains("SelectionReader.read") || text.contains("selection.failure")
+                    || text.contains("case .selection(") else {
+                continue
+            }
+            XCTAssertTrue(
+                text.contains("failure.message(loc:") || text.contains("failure?.message(loc:"),
+                "\(path) resolves a selection but never renders the typed failure message."
+            )
+        }
+    }
+
+    /// The AI hotkey path must ask for the reason, not just the text. `readSelectedText()`
+    /// discards it, and this entry point is the one that pops the alert.
+    func testAIHotkeyPathUsesTheTypedOutcome() throws {
+        let text = try source("Sources/DevTypeApp/AITransformFlow.swift")
+        guard let start = offset(of: "static func presentFromHotkey", in: text),
+              let end = offset(of: "static func presentFromEngine", in: text),
+              start < end else {
+            return XCTFail("Could not locate presentFromHotkey in AITransformFlow.")
+        }
+        let region = String(
+            text[text.index(text.startIndex, offsetBy: start)..<text.index(text.startIndex, offsetBy: end)]
+        )
+        XCTAssertTrue(
+            region.contains("SelectionReader.readSelection()"),
+            "presentFromHotkey must use readSelection() so the alert can name the real cause."
+        )
+        XCTAssertFalse(
+            region.contains("readSelectedText()"),
+            "readSelectedText() throws the failure reason away."
         )
     }
 
