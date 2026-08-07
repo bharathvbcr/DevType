@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/platform-macOS%2014.0%2B-blue" alt="macOS 14+">
   <img src="https://img.shields.io/badge/language-Swift%205.9-orange" alt="Swift 5.9">
   <img src="https://img.shields.io/badge/AI-Apple%20Foundation%20Models-purple" alt="Apple Intelligence">
-  <img src="https://img.shields.io/badge/architecture-Native%20LSUIElement-green" alt="Native LSUIElement">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
 </p>
 
 ---
@@ -128,4 +128,4 @@ DevType parses Mustache `{{...}}` tags and TextExpander `%...%` tags seamlessly.
 
 ## 📄 License & Attribution
 
-DevType is licensed under the MIT License. See [NOTICE](NOTICE) forSnipKey Kit component attributions.
+DevType is licensed under the [MIT License](LICENSE). See [NOTICE](NOTICE) for SnipKey Kit component attributions.
