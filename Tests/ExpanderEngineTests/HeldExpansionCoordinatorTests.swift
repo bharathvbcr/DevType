@@ -108,17 +108,32 @@ final class HeldExpansionCoordinatorTests: XCTestCase {
         )
     }
 
-    /// Paste / IME commit: several characters can arrive in one event. A multi-character
-    /// `typedNow` that completes-and-passes the longer trigger must fire in one step.
+    /// Paste / IME commit: several characters can arrive in one event.
+    ///
+    /// §8.5 split the outcome in two:
+    ///  * an event that lands EXACTLY on a longer trigger is a completion — the matcher owns
+    ///    expanding it, so the resolve path must keep the hold (and never fire the shorter over
+    ///    text that spells the longer trigger in full);
+    ///  * an event that overshoots past every trigger is a divergence — the hold fires in one
+    ///    step with the whole suffix, exactly as immediate firing would have left the field.
     func testMultiCharacterEventResolvesInOneStep() {
-        let coordinator = Coordinator()
-        coordinator.arm(payload: 1, trigger: "`slm", focusPID: nil)
-        guard case .fire(_, let suffix) = coordinator.resolveKeystroke(
+        let exact = Coordinator()
+        exact.arm(payload: 1, trigger: "`slm", focusPID: nil)
+        guard case .rearmed(let hold) = exact.resolveKeystroke(
             typedNow: "about", isDelete: false, prefixIndex: index
         ) else {
-            return XCTFail("Nothing extends `slmabout — expected .fire.")
+            return XCTFail("`slmabout is a complete trigger — the shorter must not fire over it.")
         }
-        XCTAssertEqual(suffix, "about")
+        XCTAssertTrue(hold.state.passedThroughLongerTrigger)
+
+        let overshoot = Coordinator()
+        overshoot.arm(payload: 1, trigger: "`slm", focusPID: nil)
+        guard case .fire(_, let suffix) = overshoot.resolveKeystroke(
+            typedNow: "abouz", isDelete: false, prefixIndex: index
+        ) else {
+            return XCTFail("Nothing extends or equals `slmabouz — expected .fire.")
+        }
+        XCTAssertEqual(suffix, "abouz")
     }
 
     func testBackspaceReturnTabAndBareChordsCancel() {
@@ -355,6 +370,7 @@ final class HeldExpansionCoordinatorTests: XCTestCase {
         XCTAssertEqual(
             telemetry.firedByTimeout + telemetry.firedByKeystroke
                 + telemetry.cancelledByEdit + telemetry.cancelledByReset
+                + telemetry.cancelledLongerWon
                 + telemetry.expiredStale + telemetry.cancelledUnobserved,
             consumptions.value,
             "Telemetry must account for every consumption exactly once."

@@ -140,33 +140,26 @@ final class CommandPaletteMatchingTests: XCTestCase {
         }
     }
 
-    /// Proofread absorbed the Telugu / Hindi grammar fix, so the phrasings that used to
-    /// reach a separate row must still land somewhere.
-    func testTeluguHindiGrammarFixesReachProofread() {
-        for query in [
-            "fix telugu", "fix hindi", "telugu grammar", "hindi grammar",
-            "correct telugu", "proofread hindi"
+    /// Proofread no longer claims Telugu / Hindi: the on-device model cannot do it,
+    /// so those phrasings must reach the translate rows rather than a row that only
+    /// ever returns an error.
+    func testTeluguHindiPhrasingsReachTranslationNotProofread() {
+        for (query, expected) in [
+            ("to telugu", "ai.totelugu"),
+            ("to hindi", "ai.tohindi"),
+            ("telugu to english", "ai.translate")
         ] {
             let hits = CommandPaletteCatalog.matchCommands(query: query, loc: .shared)
-            XCTAssertTrue(
-                hits.contains { $0.command.id == "ai.proofread" },
-                "\(query) should surface proofread."
-            )
-        }
-    }
-
-    /// "fix telugu" is a correction request. If a translate row outranks proofread here,
-    /// the user's Telugu silently comes back as English.
-    func testFixTeluguRanksProofreadAboveAnyTranslation() {
-        let hits = CommandPaletteCatalog.matchCommands(query: "fix telugu", loc: .shared)
-        guard let proofread = hits.firstIndex(where: { $0.command.id == "ai.proofread" }) else {
-            return XCTFail("expected proofread for 'fix telugu'")
-        }
-        for id in ["ai.translate", "ai.totelugu"] {
-            if let translation = hits.firstIndex(where: { $0.command.id == id }) {
-                XCTAssertLessThan(proofread, translation, "proofread should outrank \(id)")
+            guard let top = hits.first else {
+                return XCTFail("no hits for \(query)")
             }
+            XCTAssertEqual(top.command.id, expected, "\(query) should rank \(expected) first")
         }
+        let proofreadHits = CommandPaletteCatalog.matchCommands(query: "fix telugu", loc: .shared)
+        XCTAssertFalse(
+            proofreadHits.contains { $0.command.id == "ai.proofread" },
+            "Proofread must not advertise a language it cannot handle."
+        )
     }
 
     // MARK: - What the palette shows before anything is typed

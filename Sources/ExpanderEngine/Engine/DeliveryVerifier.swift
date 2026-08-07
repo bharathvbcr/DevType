@@ -90,19 +90,25 @@ public final class DeliveryVerifier {
 
     public func verifyFocusedTextDelivery(
         expectedText: String,
-        baseline: FocusedTextObservation?
+        baseline: FocusedTextObservation?,
+        staleProbe: String? = nil,
+        staleProbeCaseInsensitive: Bool = false
     ) -> TextDeliveryVerification {
         Self.verifyTextDelivery(
             expectedText: expectedText,
             baseline: baseline,
-            after: captureFocusedTextObservation()
+            after: captureFocusedTextObservation(),
+            staleProbe: staleProbe,
+            staleProbeCaseInsensitive: staleProbeCaseInsensitive
         )
     }
 
     public static func verifyTextDelivery(
         expectedText: String,
         baseline: FocusedTextObservation?,
-        after: FocusedTextObservation?
+        after: FocusedTextObservation?,
+        staleProbe: String? = nil,
+        staleProbeCaseInsensitive: Bool = false
     ) -> TextDeliveryVerification {
         guard !expectedText.isEmpty else { return .delivered }
         guard let after else { return .unavailable }
@@ -133,6 +139,35 @@ public final class DeliveryVerifier {
                 if baselineValue != value || baseline.selectedText != after.selectedText {
                     return .unavailable
                 }
+            }
+            // §8.4 staleness oracle: `staleProbe` is text the pipeline *provably removed* from
+            // the field before pasting (the erased trigger, deleted by counted backspaces). A
+            // read that still shows it is a stale mirror by construction — its "expected text
+            // missing" answer is testimony about a field state that no longer exists, and acting
+            // on it duplicates the paste. When the probe legitimately recurs elsewhere in the
+            // document this errs toward `.unavailable`, which suppresses corrections — the safe
+            // direction by design.
+            //
+            // Case-insensitive triggers carry the *snippet's* casing in the plan while the field
+            // held whatever the user typed ("SLML" vs "slml"), so the scan must fold case exactly
+            // like the erase-precondition comparison does — a probe the user's casing can dodge
+            // protects nothing.
+            if let staleProbe, !staleProbe.isEmpty {
+                let probeHit: Bool
+                if staleProbeCaseInsensitive {
+                    probeHit = boundedContains(
+                        staleProbe.lowercased(),
+                        in: value.lowercased(),
+                        caretLocation: after.caretLocation
+                    ) == true
+                } else {
+                    probeHit = boundedContains(
+                        staleProbe,
+                        in: value,
+                        caretLocation: after.caretLocation
+                    ) == true
+                }
+                if probeHit { return .unavailable }
             }
             return .failed
         }

@@ -20,6 +20,8 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
     private let ambiguous: Set<String>
     /// Every folded trigger key, for viable-extension queries.
     private let allKeys: [String]
+    /// Same keys as a set, for exact-completion queries.
+    private let completeKeys: Set<String>
     /// Longest trigger, so extension scans can bail early.
     private let maxKeyLength: Int
 
@@ -49,6 +51,7 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
 
         self.ambiguous = ambiguous
         self.allKeys = keys
+        self.completeKeys = Set(keys)
         self.maxKeyLength = longest
     }
 
@@ -72,5 +75,19 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
             if key.lowercased().hasPrefix(folded) { return true }
         }
         return false
+    }
+
+    /// True when `text` **is** an enabled trigger, in full.
+    ///
+    /// The companion question to `hasViableExtension`, and the one it deliberately does not
+    /// answer: `hasViableExtension` counts only *strictly longer* triggers, so text that has
+    /// just spelled out a longer trigger exactly reads as a dead end. A held shorter trigger
+    /// that fires on that answer fabricates `shorter + suffix` over text the user visibly typed
+    /// as the longer trigger (`` `slm `` + `l` over `` `slml ``). Matches the same generous
+    /// case folding as the extension scan: a false positive merely keeps a hold waiting, while
+    /// a false negative fires the wrong trigger.
+    public func isCompleteTrigger(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        return completeKeys.contains(text) || completeKeys.contains(text.lowercased())
     }
 }
