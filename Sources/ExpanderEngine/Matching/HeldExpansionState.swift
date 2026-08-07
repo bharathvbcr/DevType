@@ -41,9 +41,16 @@ public struct HeldExpansionState: Equatable, Sendable {
         case fire(suffix: String)
     }
 
-    /// Text to erase after the trigger if the debounce timer fires right now, i.e. the user
-    /// stopped typing part-way toward a longer trigger.
+    /// Text to erase after the trigger if the hold is fired right now.
     public var pendingSuffix: String { typedAfter }
+
+    /// Whether a debounce timeout may fire this hold.
+    ///
+    /// Only true before anything is typed after the trigger. Stopping on `` `slm `` means the
+    /// user meant `` `slm ``. Stopping on `` `slma `` does not mean they meant `` `slm `` then
+    /// `a` — they are part-way through `` `slmabout ``, and firing on a timeout there yields
+    /// `ScholarLM` with `about` stranded after it.
+    public var mayFireOnTimeout: Bool { typedAfter.isEmpty }
 
     /// Advances the hold by one keystroke.
     ///
@@ -60,13 +67,17 @@ public struct HeldExpansionState: Equatable, Sendable {
         // modifier chord) may have moved the caret.
         guard !isDelete, !typedNow.isEmpty else { return .cancel }
 
-        let combined = typedAfter + typedNow
-
-        // A newline or tab ends the word outright; nothing longer can follow, and waiting would
-        // strand the expansion after the line was already submitted.
-        if combined.contains(where: { $0.isNewline || $0 == "\t" }) {
-            return .fire(suffix: combined)
+        // Return and Tab do not merely end the word — in a chat box or a form they *submit* it.
+        // By the time the keystroke is seen the text may already be gone, and firing then would
+        // erase from a field that has since been cleared, eating whatever the user types next.
+        // Dropping the hold costs a literal `` `slm `` in the sent message; firing it risks
+        // destroying the next message. Only reachable because the hold delayed the expansion —
+        // without the debounce the trigger had already fired keystrokes earlier.
+        if typedNow.contains(where: { $0.isNewline || $0 == "\t" }) {
+            return .cancel
         }
+
+        let combined = typedAfter + typedNow
 
         return prefixIndex.hasViableExtension(after: trigger + combined)
             ? .keepWaiting(HeldExpansionState(trigger: trigger, typedAfter: combined))

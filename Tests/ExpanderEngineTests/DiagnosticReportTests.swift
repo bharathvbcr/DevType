@@ -228,6 +228,31 @@ final class DiagnosticReportTests: XCTestCase {
     }
 
     func testCopyToPasteboardWritesPlainString() {
+        // `NSPasteboard.general` is the real clipboard of whoever runs the suite, not a
+        // fixture. Without this snapshot, every `swift test` silently destroys what the
+        // person at the keyboard had copied — and the next ⌘V hands them a stray
+        // `devtype-diagnostic-test-…` token instead of their own text.
+        let pasteboard = NSPasteboard.general
+        let saved: [[NSPasteboard.PasteboardType: Data]] = (pasteboard.pasteboardItems ?? [])
+            .map { item in
+                var flavors: [NSPasteboard.PasteboardType: Data] = [:]
+                for type in item.types {
+                    if let data = item.data(forType: type) { flavors[type] = data }
+                }
+                return flavors
+            }
+            .filter { !$0.isEmpty }
+        defer {
+            pasteboard.clearContents()
+            if !saved.isEmpty {
+                pasteboard.writeObjects(saved.map { flavors in
+                    let item = NSPasteboardItem()
+                    for (type, data) in flavors { item.setData(data, forType: type) }
+                    return item
+                })
+            }
+        }
+
         let ok = DiagnosticReport.copyToPasteboard("devtype-diagnostic-test-\(UUID().uuidString)")
         XCTAssertTrue(ok)
         let pasted = NSPasteboard.general.string(forType: .string)

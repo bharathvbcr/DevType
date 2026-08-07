@@ -157,11 +157,23 @@ final class PrefixDebounceTests: XCTestCase {
         XCTAssertEqual(decide("`slm", "."), .fire(suffix: "."))
     }
 
-    /// Return and Tab end the word outright; nothing longer can follow, and waiting would leave
-    /// the expansion stranded after the line was submitted.
-    func testNewlineAndTabFireImmediately() {
-        XCTAssertEqual(decide("`slm", "\n"), .fire(suffix: "\n"))
-        XCTAssertEqual(decide("`slm", "\t"), .fire(suffix: "\t"))
+    /// Return and Tab may have *submitted* the field, not just ended the word. Firing then
+    /// erases from a field that has since been cleared, eating the next thing typed — so the
+    /// hold is dropped instead. The cost is a literal trigger in the sent text; the alternative
+    /// is destroying the next message.
+    func testReturnAndTabDropTheHoldRatherThanFiringIntoASubmittedField() {
+        XCTAssertEqual(decide("`slm", "\n"), .cancel)
+        XCTAssertEqual(decide("`slm", "\r"), .cancel)
+        XCTAssertEqual(decide("`slm", "\t"), .cancel)
+    }
+
+    /// Even part-way toward the longer trigger — `` `slmab `` + Return is still a submit.
+    func testReturnDropsAHoldTypedPartWayTowardTheLongerTrigger() {
+        XCTAssertEqual(
+            HeldExpansionState(trigger: "`slm", typedAfter: "ab")
+                .advance(typedNow: "\n", isDelete: false, prefixIndex: realLibrary),
+            .cancel
+        )
     }
 
     func testUnicodeSuffixSurvives() {
@@ -229,10 +241,55 @@ final class PrefixDebounceTests: XCTestCase {
         XCTAssertEqual(steps.last, .fire(suffix: "ab!"))
     }
 
-    /// The debounce timer fires with no keystroke to add. It must still erase everything typed
-    /// during the hold — erasing only the trigger would leave the erase text mismatched against
-    /// the field and the expansion would be refused.
-    func testPendingSuffixCoversATimerFiredHold() {
+    // MARK: - When a timeout may fire
+
+    /// Stopping on `` `slm `` means the user meant `` `slm ``.
+    func testAFreshHoldFiresOnTimeout() {
+        XCTAssertTrue(HeldExpansionState(trigger: "`slm").mayFireOnTimeout)
+    }
+
+    /// The regression the user hit: typing `` `slmabout `` needed every keystroke inside the
+    /// 250 ms window, so one hesitation mid-word fired `` `slm `` and left `about` stranded —
+    /// the field read `ScholarLMabout`. Once characters are typed toward a longer trigger, no
+    /// timeout may fire; the hold waits for a keystroke that actually decides.
+    func testAHoldTypedOnwardNeverFiresOnTimeout() {
+        for partial in ["a", "ab", "abou"] {
+            XCTAssertFalse(
+                HeldExpansionState(trigger: "`slm", typedAfter: partial).mayFireOnTimeout,
+                "`slm\(partial) is on the way to `slmabout — a timeout must not fire `slm."
+            )
+        }
+    }
+
+    /// Pausing part-way through a longer trigger must leave the hold alive rather than
+    /// resolving it, so resuming still reaches `` `slmabout ``.
+    func testPausingMidWordKeepsTheHoldAliveAndResumable() {
+        var state = HeldExpansionState(trigger: "`slm")
+        guard case .keepWaiting(let afterA) = state.advance(
+            typedNow: "a",
+            isDelete: false,
+            prefixIndex: realLibrary
+        ) else {
+            return XCTFail("`slma should still be on the way to `slmabout.")
+        }
+        state = afterA
+        XCTAssertFalse(state.mayFireOnTimeout, "A pause here must not fire `slm.")
+
+        // …the user resumes after any length of pause.
+        guard case .keepWaiting(let afterB) = state.advance(
+            typedNow: "b",
+            isDelete: false,
+            prefixIndex: realLibrary
+        ) else {
+            return XCTFail("`slmab should still be on the way to `slmabout.")
+        }
+        XCTAssertEqual(afterB.typedAfter, "ab")
+    }
+
+    /// A held expansion fired by a decisive keystroke must still erase everything typed
+    /// during the hold — erasing only the trigger would leave the erase text mismatched
+    /// against the field and the expansion would be refused.
+    func testPendingSuffixCoversAFiredHold() {
         var state = HeldExpansionState(trigger: "`slm")
         XCTAssertEqual(state.pendingSuffix, "")
         for character in ["a", "b"] {
@@ -277,9 +334,66 @@ final class PrefixDebounceTests: XCTestCase {
         }
     }
 
+    // MARK: - Where holding is safe at all
+
+    /// A hold leaves the trigger in the field while the user keeps typing, so the erase must be
+    /// *verifiable* when it finally runs. In an app whose AX cannot be believed the precondition
+    /// degrades to a blind count-based backspace, which would eat the characters typed during
+    /// the hold. Those apps must not debounce at all.
+    func testAXOpaqueAppsDoNotHold() {
+        for bundleID in [
+            "com.tinyspeck.slackmacgap",   // Slack
+            "com.google.Chrome",
+            "com.microsoft.VSCode",
+            "net.whatsapp.WhatsApp",
+            "com.hnc.Discord",
+            "com.anthropic.claudefordesktop"
+        ] {
+            XCTAssertFalse(
+                EventTapEngine.canHoldMatch(bundleID: bundleID),
+                "\(bundleID) cannot verify an erase, so it must not debounce."
+            )
+        }
+    }
+
+    /// An app with no known AX problem keeps the feature.
+    func testAXTrustworthyAppsHold() {
+        XCTAssertTrue(EventTapEngine.canHoldMatch(bundleID: "com.apple.TextEdit"))
+    }
+
+    /// Without a bundle ID the verdict cannot even be looked up, so holding is not safe.
+    func testUnknownAppDoesNotHold() {
+        XCTAssertFalse(EventTapEngine.canHoldMatch(bundleID: nil))
+        XCTAssertFalse(EventTapEngine.canHoldMatch(bundleID: ""))
+    }
+
     // MARK: - Timing
 
-    func testDebounceIntervalIsTheRequested250ms() {
-        XCTAssertEqual(EventTapEngine.prefixDebounceInterval, 0.25, accuracy: 0.0001)
+    /// 250 ms was tighter than an ordinary pause-and-continue: hesitating before the `a` of
+    /// `` `slmabout `` fired `` `slm `` instead. The window has to comfortably exceed a natural
+    /// mid-word pause, while staying short enough that `` `slm `` alone still feels instant.
+    func testDebounceIntervalToleratesANaturalMidWordPause() {
+        XCTAssertGreaterThanOrEqual(
+            EventTapEngine.prefixDebounceInterval,
+            0.5,
+            "Below ~0.5 s a normal hesitation makes the longer trigger unreachable."
+        )
+        XCTAssertLessThanOrEqual(
+            EventTapEngine.prefixDebounceInterval,
+            0.75,
+            "Past ~0.75 s the shorter trigger feels broken rather than merely delayed."
+        )
+    }
+
+    /// A hold with no firing timer must still be bounded, or it outlives the context it was
+    /// recorded against. Expiry cancels — it must never be long enough to be mistaken for a
+    /// firing delay, nor short enough to interrupt someone mid-word.
+    func testStaleHoldTimeoutIsBoundedAndCancelOnly() {
+        XCTAssertGreaterThan(
+            EventTapEngine.heldExpansionStaleTimeout,
+            EventTapEngine.prefixDebounceInterval * 4,
+            "Expiry must not race the debounce window."
+        )
+        XCTAssertLessThanOrEqual(EventTapEngine.heldExpansionStaleTimeout, 60)
     }
 }
