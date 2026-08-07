@@ -137,6 +137,19 @@ public final class AXWriteCapabilityStore {
         verdict(for: bundleID, role: role) == .falseSuccess
     }
 
+    /// §8.1: may this app's AX be believed when it says the pasted text is *not* in the field?
+    ///
+    /// A different question from `shouldSkipAXSelectedText`, answered by the same evidence: an app
+    /// whose AX reports writes it never performed is an app whose `AXValue` does not reflect the
+    /// real field. Its `.failed` delivery verdict is therefore a false negative — permanent, not
+    /// transient — and the two actions that verdict drives both put text in the field twice:
+    /// re-pasting duplicates the expansion, and restoring the trigger appends it after text that
+    /// did land. `nil`/unknown bundles stay trusted, so nothing outside the condemned set changes.
+    public func canConfirmDelivery(bundleID: String?) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else { return true }
+        return verdict(for: bundleID) != .falseSuccess
+    }
+
     // MARK: - Learning
 
     /// Record that AX claimed success but the field did not change. Sticky across launches.

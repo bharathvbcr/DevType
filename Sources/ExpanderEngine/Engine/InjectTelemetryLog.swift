@@ -71,9 +71,34 @@ public final class InjectTelemetryLog {
         }
     }
 
+    /// §8.1: the three events that can put text in the field *twice*, counted per app.
+    ///
+    /// Deliberately not inject outcomes — one expansion that duplicates text is still exactly one
+    /// `Entry`, which is why the outcome histogram said `succeeded=14 failedSilent=1` while the
+    /// user was looking at doubled text. These count the actions instead: a second ⌘V posted for a
+    /// single expansion, and a trigger written back after a paste we could not see. A healthy app
+    /// reports zero of both; a non-zero `pasteRetries` is the duplicate-expansion signature.
+    public struct DuplicateRiskCounters: Equatable {
+        /// Second (or later) ⌘V posted inside one expansion, on a confirmed-missing verdict.
+        public var pasteRetries: Int = 0
+        /// Trigger text written back after a paste was judged failed.
+        public var triggerRestores: Int = 0
+        /// `.failed` verdicts ignored because this app's AX cannot testify about delivery. These
+        /// are the ones that *would* have re-pasted before the fix — useful for confirming the
+        /// guard is doing work rather than sitting idle.
+        public var suppressedMissVerdicts: Int = 0
+
+        public init() {}
+
+        public var isEmpty: Bool {
+            pasteRetries == 0 && triggerRestores == 0 && suppressedMissVerdicts == 0
+        }
+    }
+
     public let capacity: Int
     private let lock = UnfairLock()
     private var entries: [Entry] = []
+    private var duplicateRisk: [String: DuplicateRiskCounters] = [:]
 
     public init(capacity: Int = InjectTelemetryLog.defaultCapacity) {
         self.capacity = max(1, capacity)
@@ -137,6 +162,35 @@ public final class InjectTelemetryLog {
         return result
     }
 
+    // MARK: - Duplicate risk
+
+    public func recordPasteRetry(bundleID: String?) {
+        mutateDuplicateRisk(bundleID: bundleID) { $0.pasteRetries += 1 }
+    }
+
+    public func recordTriggerRestore(bundleID: String?) {
+        mutateDuplicateRisk(bundleID: bundleID) { $0.triggerRestores += 1 }
+    }
+
+    public func recordSuppressedMissVerdict(bundleID: String?) {
+        mutateDuplicateRisk(bundleID: bundleID) { $0.suppressedMissVerdicts += 1 }
+    }
+
+    public func duplicateRiskByBundle() -> [String: DuplicateRiskCounters] {
+        lock.lock()
+        defer { lock.unlock() }
+        return duplicateRisk
+    }
+
+    private func mutateDuplicateRisk(bundleID: String?, _ body: (inout DuplicateRiskCounters) -> Void) {
+        let key = bundleID?.isEmpty == false ? bundleID! : "(unknown)"
+        lock.lock()
+        var counters = duplicateRisk[key] ?? DuplicateRiskCounters()
+        body(&counters)
+        duplicateRisk[key] = counters
+        lock.unlock()
+    }
+
     public func refuseReasonHistogram() -> [String: Int] {
         var result: [String: Int] = [:]
         for entry in recentEntries() {
@@ -192,6 +246,24 @@ public final class InjectTelemetryLog {
             }
         }
 
+        let risky = duplicateRiskByBundle()
+            .filter { !$0.value.isEmpty }
+            .sorted { lhs, rhs in
+                lhs.value.pasteRetries == rhs.value.pasteRetries
+                    ? lhs.key < rhs.key
+                    : lhs.value.pasteRetries > rhs.value.pasteRetries
+            }
+        if !risky.isEmpty {
+            lines.append("Duplicate risk (text written twice for one expansion):")
+            for (bundle, counters) in risky {
+                lines.append(
+                    "  \(bundle): re-pastes=\(counters.pasteRetries) "
+                        + "trigger-restores=\(counters.triggerRestores) "
+                        + "suppressed-AX-misses=\(counters.suppressedMissVerdicts)"
+                )
+            }
+        }
+
         let refusals = refuseReasonHistogram().sorted { lhs, rhs in
             lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
         }
@@ -208,6 +280,7 @@ public final class InjectTelemetryLog {
     public func reset() {
         lock.lock()
         entries.removeAll(keepingCapacity: true)
+        duplicateRisk.removeAll(keepingCapacity: true)
         lock.unlock()
     }
 }

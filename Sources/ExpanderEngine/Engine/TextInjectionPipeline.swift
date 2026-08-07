@@ -1453,6 +1453,22 @@ public final class TextInjectionPipeline {
                         refuseContext: nil,
                         path: path
                     )
+                case .failed where !AXWriteCapabilityStore.shared.canConfirmDelivery(
+                    bundleID: context.frontBundleID
+                ):
+                    // §8.1: the other half of the duplicate report. The hold loop already refuses
+                    // to re-paste on this app's `.failed` verdict, but this deferred re-read used
+                    // to act on the very same false negative — writing the trigger back *after*
+                    // an expansion that did land. On a virtualised web view the AXValue never
+                    // contains the pasted text, so this fires on every single expansion.
+                    DevTypeLog.inject.notice(
+                        """
+                        [Inject] paste re-verify: AX says missing but \
+                        \(context.frontBundleID ?? "(unknown)", privacy: .public) cannot confirm \
+                        delivery — leaving the field alone (restoring the trigger would duplicate)
+                        """
+                    )
+                    InjectTelemetryLog.shared.recordSuppressedMissVerdict(bundleID: context.frontBundleID)
                 case .failed:
                     // Late confirmation that paste never landed — escalate + restore trigger.
                     DevTypeLog.inject.error("[Inject] paste re-verify: AX readable but text missing — treating as failed")
@@ -1461,7 +1477,8 @@ public final class TextInjectionPipeline {
                     self.clearLastExpansion(ifInjectedTextIs: expectedText)
                     self.restoreTriggerAfterFailedPaste(
                         erasePlan: context.erasePlan,
-                        swallowed: context.swallowed
+                        swallowed: context.swallowed,
+                        bundleID: context.frontBundleID
                     )
                     PermissionCoordinator.shared.recordInjectOutcome(
                         .failedSilent,
@@ -1475,11 +1492,16 @@ public final class TextInjectionPipeline {
 
         case .notPosted, .failed:
             DevTypeLog.inject.error(
-                "[Inject] paste delivery \(TextInjectionPipeline.pasteResultLabel(result), privacy: .public) — restoring trigger"
+                """
+                [Inject] paste delivery \(TextInjectionPipeline.pasteResultLabel(result), privacy: .public) \
+                — restoring trigger (app=\(context.frontBundleID ?? "(unknown)", privacy: .public) path=\(path, privacy: .public))
+                """
             )
             restoreTriggerAfterFailedPaste(
                 erasePlan: context.erasePlan,
-                swallowed: context.swallowed
+                swallowed: context.swallowed,
+                bundleID: context.frontBundleID,
+                countsAsDuplicateRisk: result != .notPosted
             )
             PermissionCoordinator.shared.recordInjectOutcome(
                 .failedSilent,
@@ -1496,9 +1518,18 @@ public final class TextInjectionPipeline {
     /// who asked for it.
     private func restoreTriggerAfterFailedPaste(
         erasePlan: ErasePlan,
-        swallowed: SwallowedKey
+        swallowed: SwallowedKey,
+        bundleID: String? = nil,
+        countsAsDuplicateRisk: Bool = true
     ) {
         if let text = erasePlan.expectedText, !text.isEmpty {
+            // Counted, not just logged: a restore that runs after a paste which actually landed is
+            // indistinguishable from a legitimate one in the outcome histogram, and both show up
+            // to the user as text they did not type. `countsAsDuplicateRisk` is false only when
+            // ⌘V provably never posted, where putting the trigger back cannot duplicate anything.
+            if countsAsDuplicateRisk {
+                InjectTelemetryLog.shared.recordTriggerRestore(bundleID: bundleID)
+            }
             if ax.attemptAXDirectInjection(text: text, bundleID: nil) {
                 if swallowed.mustReinjectOnRefuse {
                     _ = reinjectSwallowedKey(swallowed)

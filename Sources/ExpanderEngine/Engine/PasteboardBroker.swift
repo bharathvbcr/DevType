@@ -330,7 +330,18 @@ public final class PasteboardBroker {
             // Reset on any non-failure so only an uninterrupted run of failures counts as proof.
             let failures = (delivery == .failed) ? consecutiveFailures + 1 : 0
             // An app already condemned as AX-false-success cannot testify that a paste missed.
-            let trustFailure = bundleID.map { !AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: $0) } ?? true
+            let trustFailure = AXWriteCapabilityStore.shared.canConfirmDelivery(bundleID: bundleID)
+            // Logged once per hold — the loop re-reads every `pasteDeliverySettleDelay`, and a
+            // line per tick would bury the decision it is meant to explain.
+            if delivery == .failed, !trustFailure, failures == 1 {
+                DevTypeLog.inject.notice(
+                    """
+                    [Inject] paste hold: AX says missing but \(bundleID ?? "(unknown)", privacy: .public) \
+                    cannot confirm delivery — not re-pasting (would duplicate)
+                    """
+                )
+                InjectTelemetryLog.shared.recordSuppressedMissVerdict(bundleID: bundleID)
+            }
             let decision = PasteboardBroker.decidePasteHold(
                 delivery: delivery,
                 pasteAttemptsCompleted: pasteAttemptsCompleted,
@@ -350,7 +361,12 @@ public final class PasteboardBroker {
 
             case .failConfirmed:
                 DevTypeLog.inject.error(
-                    "[Inject] paste hold: AX readable but expected text missing after \(pasteAttemptsCompleted, privacy: .public) Cmd+V attempt(s)"
+                    """
+                    [Inject] paste hold: AX readable but expected text missing after \
+                    \(pasteAttemptsCompleted, privacy: .public) Cmd+V attempt(s) — \
+                    app=\(bundleID ?? "(unknown)", privacy: .public) \
+                    elapsed=\(Int(elapsed * 1000), privacy: .public)ms
+                    """
                 )
                 self.finishOwnership(
                     ticket,
@@ -363,9 +379,17 @@ public final class PasteboardBroker {
                 completion(.unavailable)
 
             case .retryPaste:
+                // The one action in this file that can duplicate the user's text if the verdict
+                // driving it is wrong, so it says exactly what convinced it.
                 DevTypeLog.inject.notice(
-                    "[Inject] paste hold: retrying Cmd+V (attempt \(pasteAttemptsCompleted + 1, privacy: .public))"
+                    """
+                    [Inject] paste hold: retrying Cmd+V (attempt \(pasteAttemptsCompleted + 1, privacy: .public)) — \
+                    app=\(bundleID ?? "(unknown)", privacy: .public) \
+                    consecutiveMisses=\(failures, privacy: .public) \
+                    elapsed=\(Int(elapsed * 1000), privacy: .public)ms
+                    """
                 )
+                InjectTelemetryLog.shared.recordPasteRetry(bundleID: bundleID)
                 self.hid.postCmdVKeyEventsAsync { posted in
                     guard posted else {
                         self.finishOwnership(
