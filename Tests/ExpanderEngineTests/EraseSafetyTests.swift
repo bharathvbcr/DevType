@@ -262,6 +262,153 @@ final class EraseSafetyTests: XCTestCase {
         XCTAssertEqual(AXWriteCapabilityStore.seedVerdict(bundleID: "com.apple.Notes"), .unknown)
     }
 
+    // MARK: - Chromium installed web apps (PWAs)
+
+    /// The field report: a GitHub PWA installed from Chrome carries the fresh bundle ID
+    /// `com.google.Chrome.app.<32-char id>` — same renderer, same lying AX, but unknown to every
+    /// list. It took the AX write path, the write could not be verified, and the expand was
+    /// refused. Canonicalization maps the wrapper back to its host browser.
+    func testChromiumPWACollapsesToItsHostBrowser() {
+        let pwa = "com.google.Chrome.app.mjoklplbddabcmpepnokjaffbmgbkkgg"
+        XCTAssertEqual(AXWriteCapabilityStore.canonicalBundleID(pwa), "com.google.Chrome")
+        XCTAssertEqual(
+            AXWriteCapabilityStore.canonicalBundleID(
+                "com.microsoft.edgemac.app.abcdefghijklmnopabcdefghijklmnop"
+            ),
+            "com.microsoft.edgemac"
+        )
+        // The canonical ID hits the seed list, so the store's verdict skips the AX write.
+        XCTAssertEqual(AXWriteCapabilityStore().verdict(for: pwa), .falseSuccess)
+        // And the raw static seed check agrees, for callers that do not canonicalize.
+        XCTAssertEqual(AXWriteCapabilityStore.seedVerdict(bundleID: pwa), .falseSuccess)
+        XCTAssertTrue(
+            SelectionReader.isWeakAXApp(bundleID: pwa),
+            "The selection paths share the verdict: a PWA's cached selection is as "
+                + "untrustworthy as its parent browser's."
+        )
+    }
+
+    /// The 32×[a–p] shape is what keeps ordinary reverse-DNS IDs out. A bundle ID that merely
+    /// contains ".app." must pass through untouched.
+    func testOrdinaryBundleIDsAreNotMisreadAsPWAs() {
+        for id in [
+            "com.example.app.metrics",                                   // suffix not 32 chars
+            "com.example.app.abcdefghijklmnopabcdefghijklmnoz",          // 'z' outside a–p
+            "com.example.app.ABCDEFGHIJKLMNOPABCDEFGHIJKLMNOP",          // uppercase
+            ".app.abcdefghijklmnopabcdefghijklmnop",                     // nothing before marker
+            "com.example.application",                                   // no ".app." segment
+        ] {
+            XCTAssertEqual(
+                AXWriteCapabilityStore.canonicalBundleID(id), id,
+                "\(id) must not be collapsed"
+            )
+        }
+        XCTAssertEqual(
+            AXWriteCapabilityStore.seedVerdict(bundleID: "com.example.app.metrics"), .unknown
+        )
+    }
+
+    /// Safari's "Add to Dock" web apps use a different wrapper shape — `com.apple.Safari.WebApp.`
+    /// + UUID — and must collapse to Safari's seeded verdict the same way Chromium PWAs collapse
+    /// to their browser's.
+    func testSafariWebAppsCollapseToSafari() {
+        let webApp = "com.apple.Safari.WebApp.E1A2B3C4-D5E6-47F8-9A0B-C1D2E3F4A5B6"
+        XCTAssertEqual(AXWriteCapabilityStore.canonicalBundleID(webApp), "com.apple.Safari")
+        XCTAssertEqual(AXWriteCapabilityStore.seedVerdict(bundleID: webApp), .falseSuccess)
+        XCTAssertTrue(SelectionReader.isWeakAXApp(bundleID: webApp))
+
+        // The UUID requirement is the guard against collateral collapse.
+        let notAWebApp = "com.apple.Safari.WebApp.Helper"
+        XCTAssertEqual(AXWriteCapabilityStore.canonicalBundleID(notAWebApp), notAWebApp)
+        XCTAssertEqual(AXWriteCapabilityStore.seedVerdict(bundleID: notAWebApp), .unknown)
+    }
+
+    /// The escalating self-heal for unverifiable-after-write refusals: strike one warns,
+    /// strike two condemns (persisted via the normal falseSuccess path), and a condemned app
+    /// reports as such instead of accumulating further strikes.
+    func testUnverifiableStrikesEscalateToCondemnation() {
+        let store = AXWriteCapabilityStore()
+        let bundleID = "com.example.FreshWebShell"
+        let role = "AXTextArea"
+
+        XCTAssertEqual(
+            store.recordUnverifiableAfterWrite(bundleID: bundleID, role: role),
+            .struck(count: 1),
+            "One observation is not proof — a transient (focus stolen mid-inject) looks the same."
+        )
+        XCTAssertFalse(
+            store.shouldSkipAXSelectedText(bundleID: bundleID, role: role),
+            "A single strike must not change behaviour yet."
+        )
+        XCTAssertEqual(
+            store.recordUnverifiableAfterWrite(bundleID: bundleID, role: role),
+            .condemned
+        )
+        XCTAssertTrue(
+            store.shouldSkipAXSelectedText(bundleID: bundleID, role: role),
+            "After condemnation every expansion skips the AX write and goes straight to HID."
+        )
+        XCTAssertEqual(
+            store.recordUnverifiableAfterWrite(bundleID: bundleID, role: role),
+            .alreadyCondemned
+        )
+    }
+
+    /// Strikes canonicalize like everything else: one refusal inside a web app plus one inside
+    /// its host browser is two strikes against the same identity, not one each against two.
+    func testStrikesAccumulateAcrossAWebAppFamily() {
+        let store = AXWriteCapabilityStore()
+        let role = "AXTextArea"
+        // A Chromium-shaped browser that is NOT in the seed list — a seeded one would report
+        // alreadyCondemned before any strike could accumulate.
+        XCTAssertEqual(
+            store.recordUnverifiableAfterWrite(
+                bundleID: "org.example.NewChromium.app.abcdefghijklmnopabcdefghijklmnop",
+                role: role
+            ),
+            .struck(count: 1)
+        )
+        XCTAssertEqual(
+            store.recordUnverifiableAfterWrite(
+                bundleID: "org.example.NewChromium.app.ppppoooonnnnmmmmllllkkkkjjjjiiii",
+                role: role
+            ),
+            .condemned,
+            "A sibling web app's refusal is the same renderer failing the same way."
+        )
+        // And a seeded family reports alreadyCondemned outright — no strikes needed.
+        XCTAssertEqual(
+            store.recordUnverifiableAfterWrite(
+                bundleID: "com.brave.Browser.app.abcdefghijklmnopabcdefghijklmnop",
+                role: role
+            ),
+            .alreadyCondemned
+        )
+    }
+
+    /// A lesson learned inside one web app must cover the browser and every sibling web app —
+    /// and a verdict learned before canonicalization existed (stored under the raw wrapper ID)
+    /// must still be honoured.
+    func testVerdictsLearnedInOnePWACoverTheWholeFamily() {
+        let store = AXWriteCapabilityStore()
+        let role = "AXTextArea"
+        store.recordFalseSuccess(
+            bundleID: "com.vivaldi.Vivaldi.app.abcdefghijklmnopabcdefghijklmnop",
+            role: role
+        )
+        XCTAssertTrue(
+            store.shouldSkipAXSelectedText(bundleID: "com.vivaldi.Vivaldi", role: role),
+            "The web app's lie is the browser's lie."
+        )
+        XCTAssertTrue(
+            store.shouldSkipAXSelectedText(
+                bundleID: "com.vivaldi.Vivaldi.app.ppppoooonnnnmmmmllllkkkkjjjjiiii",
+                role: role
+            ),
+            "A sibling web app installed later must not re-pay the first false success."
+        )
+    }
+
     /// Role-keyed condemnation must be visible to the inject preferHID check when the same role is
     /// focused — otherwise WhatsApp keeps taking AX direct after erase and can "succeed" empty.
     func testRoleKeyedFalseSuccessIsHonouredWhenRoleIsKnown() {

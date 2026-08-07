@@ -139,6 +139,14 @@ public final class PermissionCoordinator {
         outcomeLock.withLock { _lastInjectOutcome }
     }
 
+    /// Clears the last-outcome slot — the user acknowledged a failure by restarting the engine,
+    /// and the status item must stop showing the urgent state for an attempt that is no longer
+    /// pending anyone's attention. The refuse *provenance* is deliberately kept (it documents
+    /// what happened for the diagnostic report), as is the telemetry ring.
+    public func clearLastInjectOutcome() {
+        outcomeLock.withLock { _lastInjectOutcome = nil }
+    }
+
     /// Gate / frontmost / timestamp captured at the most recent refuse (not cleared on later success).
     public var lastRecordedInjectRefuseProvenance: InjectRefuseProvenance? {
         outcomeLock.withLock { _lastInjectRefuseProvenance }

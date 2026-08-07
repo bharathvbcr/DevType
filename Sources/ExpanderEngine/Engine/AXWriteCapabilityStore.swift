@@ -34,6 +34,9 @@ public final class AXWriteCapabilityStore {
     /// Consecutive verified AX writes needed to clear a `falseSuccess` verdict. AX writes are not
     /// attempted once an app is condemned, so in practice this only matters if a seed is overridden.
     private var trustedStreak: [String: Int] = [:]
+    /// Unverifiable-after-write strikes this launch, keyed like `learned`. Deliberately not
+    /// persisted — see `recordUnverifiableAfterWrite`.
+    private var unverifiableStrikes: [String: Int] = [:]
 
     /// `nil` disables persistence (used by tests and by the plain `init()`).
     private let fileURL: URL?
@@ -78,9 +81,52 @@ public final class AXWriteCapabilityStore {
         return "\(bundleID)|\(role)"
     }
 
+    /// Collapses a Chromium "installed web app" shell to its host browser's identity.
+    ///
+    /// Chromium browsers give every installed web app (PWA / app shortcut) a **fresh bundle ID**
+    /// of the form `<browser-bundle-id>.app.<32-character id>` — e.g. the GitHub app installed
+    /// from Chrome is `com.google.Chrome.app.mjoklplbddabcmpepnokjaffbmgbkkgg`. It is the same
+    /// renderer with the same broken AX, but under a bundle ID no seed list or learned verdict
+    /// has ever seen. The observed failure: a PWA passes every capability check as "unknown",
+    /// the AX write is attempted, the field cannot be verified afterwards, and the expansion is
+    /// refused — on every attempt, forever, in every newly installed web app.
+    ///
+    /// The suffix alphabet is Chromium's extension-ID encoding: exactly 32 characters drawn from
+    /// `a`–`p` (a hex digest re-mapped past `f`, precisely so it cannot look like anything
+    /// else). Requiring the full `.app.` + 32×[a–p] shape means an ordinary reverse-DNS bundle
+    /// ID that merely contains ".app." cannot be misclassified.
+    ///
+    /// Every read and write below canonicalizes first, so one verdict covers the browser and
+    /// every web app it installs — past and future — with no per-app relearning.
+    public static func canonicalBundleID(_ bundleID: String) -> String {
+        // Safari web apps ("Add to Dock", macOS 14+): `com.apple.Safari.WebApp.<UUID>`. Same
+        // WebKit view as Safari itself, same seeded verdict — and the UUID requirement keeps
+        // any unrelated `…Safari.WebApp.something` from collapsing.
+        let safariWebAppPrefix = "com.apple.Safari.WebApp."
+        if bundleID.hasPrefix(safariWebAppPrefix),
+           UUID(uuidString: String(bundleID.dropFirst(safariWebAppPrefix.count))) != nil {
+            return "com.apple.Safari"
+        }
+
+        guard let marker = bundleID.range(of: ".app.", options: .backwards),
+              marker.lowerBound != bundleID.startIndex else {
+            return bundleID
+        }
+        let suffix = bundleID[marker.upperBound...]
+        guard suffix.count == 32, suffix.allSatisfy({ $0 >= "a" && $0 <= "p" }) else {
+            return bundleID
+        }
+        return String(bundleID[..<marker.lowerBound])
+    }
+
     /// Known-bad seeds. Chromium/Electron shells and Messages report success without mutating.
     /// Kept deliberately small — it only saves the *first* wasted attempt; learning covers the rest.
-    public static func seedVerdict(bundleID: String) -> Verdict {
+    ///
+    /// Canonicalizes first, so callers that hit this statically (`SelectionReader.isWeakAXApp`)
+    /// see the same verdict for an installed web app as for its host browser without having to
+    /// know canonicalization exists.
+    public static func seedVerdict(bundleID rawBundleID: String) -> Verdict {
+        let bundleID = canonicalBundleID(rawBundleID)
         switch bundleID {
         case "com.apple.MobileSMS", "com.apple.iChat",
              "com.google.Chrome", "com.google.Chrome.canary", "com.google.Chrome.beta",
@@ -103,6 +149,9 @@ public final class AXWriteCapabilityStore {
             // Electron, but not under any of the prefixes above. Its AXValue is readable and
             // never contains pasted text, so delivery verification cannot judge it.
             if bundleID == "com.anthropic.claudefordesktop" { return .falseSuccess }
+            // Installed web apps (Chromium PWAs, Safari "Add to Dock") never reach this branch
+            // under their wrapper IDs — `canonicalBundleID` collapsed them to the host browser
+            // above, which the exact-match list already covers.
             return .unknown
         }
     }
@@ -118,14 +167,18 @@ public final class AXWriteCapabilityStore {
     /// nothing learned before roles were threaded through is lost.
     public func verdict(for bundleID: String, role: String?) -> Verdict {
         guard !bundleID.isEmpty else { return .unknown }
-        let compositeKey = Self.verdictKey(bundleID: bundleID, role: role)
+        let canonical = Self.canonicalBundleID(bundleID)
+        let compositeKey = Self.verdictKey(bundleID: canonical, role: role)
+        // Verdicts learned before canonicalization existed were stored under the raw web-app
+        // bundle ID — keep reading those so an existing install loses nothing.
+        let rawCompositeKey = Self.verdictKey(bundleID: bundleID, role: role)
         lock.lock()
-        let composite = learned[compositeKey]
-        let bundleOnly = learned[bundleID]
+        let composite = learned[compositeKey] ?? (canonical == bundleID ? nil : learned[rawCompositeKey])
+        let bundleOnly = learned[canonical] ?? (canonical == bundleID ? nil : learned[bundleID])
         lock.unlock()
         if let composite { return composite }
         if let bundleOnly { return bundleOnly }
-        return Self.seedVerdict(bundleID: bundleID)
+        return Self.seedVerdict(bundleID: canonical)
     }
 
     /// True when the AX selected-text write should be skipped entirely for this app.
@@ -159,9 +212,12 @@ public final class AXWriteCapabilityStore {
 
     /// §3.3: condemn only `(bundleID, role)` when a role is known, so a Chromium web view cannot
     /// condemn the same app's native text fields.
+    ///
+    /// Recorded under the *canonical* bundle ID, so a lesson learned in one Chromium web app
+    /// covers the host browser and every sibling web app instead of being relearned per install.
     public func recordFalseSuccess(bundleID: String, role: String?) {
         guard !bundleID.isEmpty else { return }
-        let key = Self.verdictKey(bundleID: bundleID, role: role)
+        let key = Self.verdictKey(bundleID: Self.canonicalBundleID(bundleID), role: role)
         lock.lock()
         let previous = learned[key]
         learned[key] = .falseSuccess
@@ -177,6 +233,52 @@ public final class AXWriteCapabilityStore {
         }
     }
 
+    /// Outcome of one "attempted AX write, field unverifiable afterwards" observation.
+    public enum UnverifiableStrikeOutcome: Equatable {
+        /// First strike this launch — noted, nothing condemned. A transient (the user switching
+        /// focus mid-inject, an AX tree caught mid-teardown) looks identical to a broken shell
+        /// on a single observation, and a wrong condemnation is effectively permanent: AX writes
+        /// stop being attempted, so the rehabilitation streak can never accumulate.
+        case struck(count: Int)
+        /// The strike threshold was reached — the app is now condemned (persisted).
+        case condemned
+        /// Already condemned; nothing to do.
+        case alreadyCondemned
+    }
+
+    /// Strikes within one launch before an unverifiable-after-write refusal condemns the app.
+    /// A genuinely broken shell hits the second strike on the user's very next expansion
+    /// attempt (usually seconds later, when they retype the trigger that just refused); a
+    /// transient almost never repeats against the same `(bundle, role)`.
+    public static let unverifiableStrikesToCondemn = 2
+
+    /// Escalating self-heal for the "AX write attempted, field unverifiable even after the
+    /// settle retry" refusal — the signature of a Chromium/Electron shell no seed or learned
+    /// verdict has seen (a freshly installed web app hits it on its first-ever expansion).
+    ///
+    /// Strikes are deliberately in-memory only: persisting suspicion would let two transients
+    /// months apart condemn a healthy app. Condemnation itself persists via
+    /// `recordFalseSuccess`, so once an app *is* judged broken the fix survives relaunch.
+    public func recordUnverifiableAfterWrite(
+        bundleID: String,
+        role: String?
+    ) -> UnverifiableStrikeOutcome {
+        guard !bundleID.isEmpty else { return .struck(count: 0) }
+        if verdict(for: bundleID, role: role) == .falseSuccess {
+            return .alreadyCondemned
+        }
+        let key = Self.verdictKey(bundleID: Self.canonicalBundleID(bundleID), role: role)
+        lock.lock()
+        let strikes = (unverifiableStrikes[key] ?? 0) + 1
+        unverifiableStrikes[key] = strikes
+        lock.unlock()
+        guard strikes >= Self.unverifiableStrikesToCondemn else {
+            return .struck(count: strikes)
+        }
+        recordFalseSuccess(bundleID: bundleID, role: role)
+        return .condemned
+    }
+
     /// Record a verified AX write. Does not resurrect a condemned app on a single observation.
     public func recordTrusted(bundleID: String) {
         recordTrusted(bundleID: bundleID, role: nil)
@@ -184,7 +286,7 @@ public final class AXWriteCapabilityStore {
 
     public func recordTrusted(bundleID: String, role: String?) {
         guard !bundleID.isEmpty else { return }
-        let key = Self.verdictKey(bundleID: bundleID, role: role)
+        let key = Self.verdictKey(bundleID: Self.canonicalBundleID(bundleID), role: role)
         lock.lock()
         var changed = false
         if learned[key] == .falseSuccess {
@@ -213,6 +315,7 @@ public final class AXWriteCapabilityStore {
         lock.lock()
         learned.removeAll()
         trustedStreak.removeAll()
+        unverifiableStrikes.removeAll()
         lock.unlock()
         scheduleSave()
     }

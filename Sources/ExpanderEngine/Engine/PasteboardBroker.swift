@@ -625,6 +625,123 @@ public final class PasteboardBroker {
         }
     }
 
+    // MARK: - Copy capture (clipboard-fallback selection read)
+
+    /// How long to wait for the target app to answer a synthetic ⌘C with a pasteboard write,
+    /// and how often to look. Copies are near-instant in practice; the timeout exists for apps
+    /// that write the board from a secondary thread after the key event round-trips.
+    public static let copyCaptureTimeout: TimeInterval = 0.30
+    public static let copyCapturePollInterval: TimeInterval = 0.02
+
+    /// What a `captureSelectionViaCopy` attempt produced. The label is recorded in the selection
+    /// diagnostics — a fallback that ran and found the board untouched is a different bug report
+    /// from one that never posted.
+    public enum CopyCaptureOutcome: Equatable {
+        /// The app answered ⌘C with a string. May still be blank — the *reader* owns blankness.
+        case captured(String)
+        /// ⌘C was posted and the pasteboard never changed: nothing selected, or the app ignores
+        /// the chord. Indistinguishable from outside, and both mean "no selection to use".
+        case boardUnchanged
+        /// The app wrote the board but with no string representation (an image, a file).
+        case noStringOnBoard
+        /// The key events could not be posted (Post Events revoked mid-session).
+        case postFailed
+
+        public var diagnosticLabel: String {
+            switch self {
+            case .captured: return "captured"
+            case .boardUnchanged: return "unchanged"
+            case .noStringOnBoard: return "noString"
+            case .postFailed: return "postFailed"
+            }
+        }
+    }
+
+    /// Pure: restore only when the board still shows the copy we observed. Anything else means
+    /// another writer got there after our capture, and writing over them would eat *their* data
+    /// to clean up after ours.
+    public static func shouldRestoreAfterCopyCapture(
+        changeCountNow: Int,
+        changeCountAfterCopy: Int
+    ) -> Bool {
+        changeCountNow == changeCountAfterCopy
+    }
+
+    /// Last-resort selection read: snapshot the board, post ⌘C, wait briefly for the target app
+    /// to write, read the string, put the user's clipboard back.
+    ///
+    /// This is the one sanctioned synthetic-copy path — `SelectionReader`'s "no unmanaged ⌘C"
+    /// rule is about clipboard *ownership*, and this method is the owner: the same snapshot /
+    /// changeCount / verified-restore machinery every paste already goes through, including
+    /// inheriting a still-pending expansion restore rather than adopting our own payload as
+    /// "the user's clipboard".
+    ///
+    /// Costs up to `copyCaptureTimeout` of calling-thread wait, so it is only for explicit user
+    /// gestures, and only after every AX tier has failed. Two limits it cannot remove: a clipboard
+    /// manager will see the transient copy (the *target app* writes the board, so nspasteboard.org
+    /// markers cannot be attached), and an app that treats ⌘C-with-no-selection as "copy the
+    /// current line" will report that line as the selection — which is why the caller only runs
+    /// this when AX could not even resolve a focused element, never on a readable-but-empty
+    /// selection.
+    ///
+    /// - Parameter postCopy: the ⌘C itself, injectable so tests can simulate the target app.
+    public func captureSelectionViaCopy(
+        pasteboard: NSPasteboard = .general,
+        timeout: TimeInterval = copyCaptureTimeout,
+        pollInterval: TimeInterval = copyCapturePollInterval,
+        postCopy: (() -> Bool)? = nil
+    ) -> CopyCaptureOutcome {
+        let snapshot = acquireUserClipboardSnapshot(pasteboard: pasteboard)
+        let baseline = pasteboard.changeCount
+
+        let posted = postCopy.map { $0() } ?? hid.postCmdCKeyEvents()
+        guard posted else { return .postFailed }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while pasteboard.changeCount == baseline, Date() < deadline {
+            usleep(useconds_t(max(pollInterval, 0.001) * 1_000_000))
+        }
+        guard pasteboard.changeCount != baseline else {
+            // Nothing was written, so nothing needs restoring — the board was never touched.
+            return .boardUnchanged
+        }
+
+        let afterCopy = pasteboard.changeCount
+
+        // One extra poll interval: apps that declare types first and provide data second bump
+        // `changeCount` before the string is actually there.
+        usleep(useconds_t(max(pollInterval, 0.001) * 1_000_000))
+        let captured = pasteboard.string(forType: .string)
+
+        if Self.shouldRestoreAfterCopyCapture(
+            changeCountNow: pasteboard.changeCount,
+            changeCountAfterCopy: afterCopy
+        ) {
+            pasteboard.clearContents()
+            if let snapshot, !snapshot.isEmpty {
+                let restoredItems: [NSPasteboardItem] = snapshot.map { itemDict in
+                    let newItem = NSPasteboardItem()
+                    itemDict.forEach { type, data in newItem.setData(data, forType: type) }
+                    return newItem
+                }
+                if !pasteboard.writeObjects(restoredItems) {
+                    DevTypeLog.inject.error(
+                        "[Inject] copy-capture clipboard restore write failed — the user's clipboard was not restored"
+                    )
+                }
+            }
+            // An empty snapshot restores to an empty board: leaving the captured selection up
+            // would hand it to every clipboard manager watching the board.
+        } else {
+            DevTypeLog.inject.notice(
+                "[Inject] copy-capture restore abandoned — another owner wrote the pasteboard during capture"
+            )
+        }
+
+        guard let captured else { return .noStringOnBoard }
+        return .captured(captured)
+    }
+
     /// §1.7: bounded pasteboard snapshot. See `snapshotMaxItems` for the tradeoff.
     private static func snapshotPasteboard(_ pasteboard: NSPasteboard) -> PasteboardSnapshot? {
         guard let items = pasteboard.pasteboardItems else { return nil }

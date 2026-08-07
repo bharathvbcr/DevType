@@ -306,6 +306,9 @@ public final class LocalizationManager: ObservableObject {
             "menu.recovery": "Permission Recovery…",
             "menu.diagnostics": "Diagnostics…",
             "menu.diagnoseSecure": "Diagnose Secure Input",
+            "menu.restartEngine": "Expansion Failed — Restart Engine",
+            "menu.hotkeys.toggle": "Keyboard Shortcuts",
+            "menu.conflicts.toggle": "Trigger Conflict Warnings",
             "menu.mute.front": "Mute Frontmost App",
             "menu.mute.apps": "Muted Apps…",
             "menu.quit": "Quit DevType",
@@ -851,6 +854,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.selection.fail.noFocus":
                 "No text field has keyboard focus, so there is no selection to read. "
                 + "Click into the text, select it, then try again.",
+            "ai.selection.fail.tooLarge":
+                "That selection is %@ characters, past the %@-character limit for AI actions. "
+                + "Select a smaller passage and try again.",
 
             "ai.error.emptyInput": "No text to transform.",
 
@@ -1274,6 +1280,9 @@ public final class LocalizationManager: ObservableObject {
             "menu.recovery": "권한 복구…",
             "menu.diagnostics": "진단…",
             "menu.diagnoseSecure": "보안 입력 진단",
+            "menu.restartEngine": "확장 실패 — 엔진 재시작",
+            "menu.hotkeys.toggle": "키보드 단축키",
+            "menu.conflicts.toggle": "트리거 충돌 경고",
             "menu.mute.front": "최상위 앱 음소거",
             "menu.mute.apps": "음소거된 앱…",
             "menu.quit": "DevType 종료",
@@ -1797,6 +1806,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.selection.fail.noFocus":
                 "키보드 포커스를 가진 텍스트 필드가 없어 읽을 선택 영역이 없습니다. "
                 + "텍스트를 클릭해 선택한 뒤 다시 시도하세요.",
+            "ai.selection.fail.tooLarge":
+                "선택한 텍스트가 %@자로, AI 작업 한도인 %@자를 초과합니다. "
+                + "더 짧은 부분을 선택한 뒤 다시 시도하세요.",
 
             "ai.error.emptyInput": "변환할 텍스트가 없습니다.",
 
@@ -2206,6 +2218,9 @@ public final class LocalizationManager: ObservableObject {
             "menu.recovery": "権限の復旧…",
             "menu.diagnostics": "診断…",
             "menu.diagnoseSecure": "セキュア入力を診断",
+            "menu.restartEngine": "展開に失敗 — エンジンを再起動",
+            "menu.hotkeys.toggle": "キーボードショートカット",
+            "menu.conflicts.toggle": "トリガー競合の警告",
             "menu.mute.front": "最前面のアプリをミュート",
             "menu.mute.apps": "ミュート中のアプリ…",
             "menu.quit": "DevType を終了",
@@ -2729,6 +2744,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.selection.fail.noFocus":
                 "キーボードフォーカスのあるテキスト欄がないため、読み取る選択範囲がありません。"
                 + "テキストをクリックして選択してからお試しください。",
+            "ai.selection.fail.tooLarge":
+                "選択範囲が %@ 文字あり、AI 操作の上限 %@ 文字を超えています。"
+                + "もっと短い範囲を選択してからお試しください。",
 
             "ai.error.emptyInput": "変換するテキストがありません。",
 

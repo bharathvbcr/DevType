@@ -109,6 +109,16 @@ enum HotkeyPreferences {
     static let inlineSearchKey = "devtype.hotkey.inlineSearch"
     static let aiPaletteKey = "devtype.hotkey.aiPalette"
     static let macrosKey = "devtype.hotkeyMacros"
+    static let shortcutsDisabledKey = "devtype.hotkeys.disabled"
+
+    /// Global kill switch for every Carbon hotkey DevType registers — inline search, the AI
+    /// palette, and user macros. For people whose other tools fight over the same chords.
+    /// Text expansion is untouched: triggers come through the event tap, not hotkeys, and the
+    /// menu items still open the same panels by click.
+    static var shortcutsDisabled: Bool {
+        get { UserDefaults.standard.bool(forKey: shortcutsDisabledKey) }
+        set { UserDefaults.standard.set(newValue, forKey: shortcutsDisabledKey) }
+    }
 
     static var inlineSearchShortcut: DevTypeShortcut {
         get {

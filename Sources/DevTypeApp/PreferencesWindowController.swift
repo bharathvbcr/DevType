@@ -1332,6 +1332,7 @@ final class PreferencesViewController: NSViewController,
         lines.append(EventTapEngine.shared.tapDisableCounters.summaryLine)
         let telemetry = PermissionCoordinator.shared.injectTelemetrySummaryLines()
         lines.append(contentsOf: telemetry)
+        lines.append(EventTapEngine.shared.prefixDebounceDiagnostics())
         let overlong = EventTapEngine.shared.overlongTriggerDiagnostics()
         if overlong.isEmpty {
             lines.append(loc.s("prefs.advanced.overlong.none"))

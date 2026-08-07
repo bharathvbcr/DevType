@@ -41,6 +41,10 @@ public enum DiagnosticReport {
         public var injectTelemetryLines: [String]
         /// §3.9: triggers longer than the match buffer, which can never fire.
         public var overlongTriggerLines: [String]
+        /// Prefix-debounce hold lifecycle counters (`EventTapEngine.prefixDebounceDiagnostics()`).
+        /// `races-absorbed` counts debounce timers that lost to a keystroke at the deadline —
+        /// each one used to be a possible double expansion.
+        public var prefixDebounceSummary: String?
         /// On-device AI state + recent transform outcomes. An AI failure was previously
         /// invisible here, so a guardrail refusal left no trace in the artifact people
         /// actually paste. Contains no user text — see `AIDiagnosticsStore`.
@@ -71,7 +75,8 @@ public enum DiagnosticReport {
             tapDisableSummary: String? = nil,
             injectTelemetryLines: [String] = [],
             overlongTriggerLines: [String] = [],
-            aiLines: [String] = []
+            aiLines: [String] = [],
+            prefixDebounceSummary: String? = nil
         ) {
             self.generatedAt = generatedAt
             self.bundleID = bundleID
@@ -98,6 +103,7 @@ public enum DiagnosticReport {
             self.injectTelemetryLines = injectTelemetryLines
             self.overlongTriggerLines = overlongTriggerLines
             self.aiLines = aiLines
+            self.prefixDebounceSummary = prefixDebounceSummary
         }
     }
 
@@ -199,7 +205,8 @@ public enum DiagnosticReport {
             tapDisableSummary: EventTapEngine.shared.tapDisableCounters.summaryLine,
             injectTelemetryLines: PermissionCoordinator.shared.injectTelemetrySummaryLines(),
             overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics(),
-            aiLines: captureAILines()
+            aiLines: captureAILines(),
+            prefixDebounceSummary: EventTapEngine.shared.prefixDebounceDiagnostics()
         )
     }
 
@@ -324,6 +331,12 @@ public enum DiagnosticReport {
         } else {
             lines.append(contentsOf: context.aiLines)
         }
+
+        // Prefix-debounce lifecycle. "races-absorbed" is the line to read when a report claims
+        // a double expansion: each count is a timer/keystroke collision the coordinator resolved.
+        lines.append("")
+        lines.append("-- Prefix debounce --")
+        lines.append(context.prefixDebounceSummary ?? "(not captured)")
 
         // §3.9: triggers past the 64-character match buffer can never fire and nothing said so.
         lines.append("")

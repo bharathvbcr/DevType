@@ -17,6 +17,20 @@ public enum DevTypeLog {
     public static let app = Logger(subsystem: subsystem, category: "App")
     public static let store = Logger(subsystem: subsystem, category: "Store")
 
+    /// Prefix-debounce hold lifecycle (arm / extend / fire / cancel / absorbed races).
+    ///
+    /// Its own category because a hold's whole story spans two threads and up to three timers;
+    /// mixed into `EventTap` it is buried under per-keystroke traffic. Never logs trigger or
+    /// suffix *content* — only lengths, generations, and outcomes.
+    public static let debounce = Logger(subsystem: subsystem, category: "Debounce")
+
+    /// AX selection reads for the AI paths.
+    ///
+    /// Its own category because "Prompt Enhance says no text is selected" is diagnosed from a
+    /// 30-minute log window, and mixed into `EventTap` these lines are buried under per-keystroke
+    /// traffic. Never logs the selected text — only outcome, app, attribute, and length.
+    public static let selection = Logger(subsystem: subsystem, category: "Selection")
+
     /// Boolean TCC-style result for CG/AX preflights (macOS has no notDetermined here).
     public static func grantLabel(_ granted: Bool) -> String {
         granted ? "granted" : "denied"

@@ -26,6 +26,8 @@ public extension SelectionReader {
         case noFocusedElement
         /// Focus was readable and there genuinely is nothing selected (or only whitespace).
         case emptySelection
+        /// The selection is past `SelectionReader.maxSelectionCharacters`. Carries its length.
+        case selectionTooLarge(Int)
 
         /// Stable, non-localized label for logs and the diagnostic report.
         public var diagnosticLabel: String {
@@ -35,13 +37,15 @@ public extension SelectionReader {
             case .appMuted: return "appMuted"
             case .noFocusedElement: return "noFocus"
             case .emptySelection: return "emptySelection"
+            case .selectionTooLarge: return "tooLarge"
             }
         }
 
         public var titleKey: String {
             switch self {
             case .emptySelection: return "ai.alert.noSelection.title"
-            case .accessibilityUntrusted, .secureInputActive, .appMuted, .noFocusedElement:
+            case .accessibilityUntrusted, .secureInputActive, .appMuted, .noFocusedElement,
+                 .selectionTooLarge:
                 return "ai.selection.unavailable.title"
             }
         }
@@ -53,6 +57,7 @@ public extension SelectionReader {
             case .appMuted: return "ai.selection.fail.muted"
             case .noFocusedElement: return "ai.selection.fail.noFocus"
             case .emptySelection: return "ai.alert.noSelection.message"
+            case .selectionTooLarge: return "ai.selection.fail.tooLarge"
             }
         }
 
@@ -64,8 +69,61 @@ public extension SelectionReader {
             switch self {
             case .appMuted(let bundleID):
                 return loc.s(messageKey, bundleID)
+            case .selectionTooLarge(let characters):
+                return loc.s(
+                    messageKey,
+                    "\(characters)",
+                    "\(SelectionReader.maxSelectionCharacters)"
+                )
             case .accessibilityUntrusted, .secureInputActive, .noFocusedElement, .emptySelection:
                 return loc.s(messageKey)
+            }
+        }
+    }
+
+    /// Which rung of the AX ladder produced the text. Diagnostics only — never changes what is
+    /// injected, but it is the single most useful field in a "no selection" bug report: it says
+    /// whether an app answers the plain attribute, needs the range pair, or is marker-only.
+    enum ReadVia: Equatable, Sendable {
+        /// `kAXSelectedText`.
+        case selectedText
+        /// `kAXSelectedText` after the long-timeout retry (large selection).
+        case selectedTextSlow
+        /// `kAXSelectedTextRange` + `kAXStringForRange`.
+        case stringForRange
+        /// `kAXSelectedTextRange` + `kAXAttributedStringForRange`.
+        case attributedStringForRange
+        /// `kAXSelectedTextRange` sliced out of `kAXValue`.
+        case valueSubstring
+        /// `AXSelectedTextRanges` (discontinuous / multi-cursor).
+        case selectedTextRanges
+        /// `AXSelectedTextMarkerRange` + `AXStringForTextMarkerRange` (WebKit / Chromium).
+        case textMarker
+        /// Read off an ancestor `n` hops above the focused element.
+        case ancestor(Int)
+        /// Read off the application element itself.
+        case applicationElement
+        /// Recovered from `SelectionMonitor`'s cache.
+        case cache
+        /// Captured by the brokered ⌘C fallback (`PasteboardBroker.captureSelectionViaCopy`).
+        case clipboardCopy
+        /// No rung answered, or the caller did not track one.
+        case unknown
+
+        public var rawValue: String {
+            switch self {
+            case .selectedText: return "selectedText"
+            case .selectedTextSlow: return "selectedTextSlow"
+            case .stringForRange: return "stringForRange"
+            case .attributedStringForRange: return "attributedStringForRange"
+            case .valueSubstring: return "valueSubstring"
+            case .selectedTextRanges: return "selectedTextRanges"
+            case .textMarker: return "textMarker"
+            case .ancestor(let hops): return "ancestor+\(hops)"
+            case .applicationElement: return "applicationElement"
+            case .cache: return "cache"
+            case .clipboardCopy: return "clipboardCopy"
+            case .unknown: return "unknown"
             }
         }
     }
@@ -77,6 +135,8 @@ public extension SelectionReader {
         /// Recovered from `SelectionMonitor`'s last-known-good cache because the live read
         /// resolved to DevType's own panel (or to nothing at all).
         case cached
+        /// Captured by the ⌘C clipboard fallback after every AX tier failed.
+        case clipboard
     }
 
     enum Outcome: Equatable {
@@ -104,11 +164,19 @@ public extension SelectionReader {
         /// app: the system-wide probe can still resolve into the *previous* app mid-switch, and
         /// reading a muted app's text through that window would sidestep the mute list.
         public let bundleID: String?
+        /// Which AX rung answered for this element.
+        public let via: ReadVia
 
-        public init(text: String?, isOwnProcess: Bool, bundleID: String? = nil) {
+        public init(
+            text: String?,
+            isOwnProcess: Bool,
+            bundleID: String? = nil,
+            via: ReadVia = .unknown
+        ) {
             self.text = text
             self.isOwnProcess = isOwnProcess
             self.bundleID = bundleID
+            self.via = via
         }
     }
 
@@ -177,12 +245,13 @@ public extension SelectionReader {
         }
         if let usableLive, let text = usableLive.text {
             let bundleID = usableLive.bundleID ?? frontmostBundleID
-            return .selection(
+            return accept(
                 Result(
                     text: text,
                     bundleID: bundleID,
                     isWeakAX: bundleID.map(isWeakAX) ?? false,
-                    source: .live
+                    source: .live,
+                    via: usableLive.via
                 )
             )
         }
@@ -196,24 +265,26 @@ public extension SelectionReader {
                frontmostBundleID: frontmostBundleID,
                frontmostIsOwnProcess: frontmostIsOwnProcess
            ) {
-            return .selection(
+            return accept(
                 Result(
                     text: cached.text,
                     bundleID: cached.bundleID,
                     isWeakAX: isWeakAX(cached.bundleID),
-                    source: .cached
+                    source: .cached,
+                    via: .cache
                 )
             )
         }
 
         if let own = candidates.first(where: { $0.isOwnProcess && !isBlankSelection($0.text) }),
            let text = own.text {
-            return .selection(
+            return accept(
                 Result(
                     text: text,
                     bundleID: own.bundleID ?? frontmostBundleID,
                     isWeakAX: false,
-                    source: .live
+                    source: .live,
+                    via: own.via
                 )
             )
         }
@@ -222,6 +293,69 @@ public extension SelectionReader {
             return .failure(.noFocusedElement)
         }
         return .failure(.emptySelection)
+    }
+
+    /// Final size check on a selection that has otherwise won the gate.
+    ///
+    /// Deliberately at the end rather than as a candidate filter: an oversized selection is the
+    /// user's actual selection, so falling through to a *different* one and silently
+    /// transforming that would be worse than refusing. They get told the length and the limit.
+    private static func accept(_ result: Result) -> Outcome {
+        let characters = result.text.count
+        guard characters <= SelectionReader.maxSelectionCharacters else {
+            return .failure(.selectionTooLarge(characters))
+        }
+        return .selection(result)
+    }
+
+    /// Pure policy: may the brokered ⌘C fallback run after this failure?
+    ///
+    /// `.noFocusedElement` **only** — the app published no usable accessibility tree at all
+    /// (Java without the a11y bridge, custom OpenGL views, a Chromium tree that never settled),
+    /// so a synthetic copy is the only read left. Never on `.emptySelection`: there AX resolved a
+    /// focused element and answered "nothing selected", and that answer must be believed —
+    /// VS Code-family editors treat ⌘C with no selection as "copy the whole current line", which
+    /// would surface a line the user never selected as their "selection".
+    ///
+    /// Every hard block stays hard: an untrusted / secure-input / muted failure never reaches
+    /// here as `.noFocusedElement` (precedence in `evaluate`), and the live re-checks guard the
+    /// time that has passed since. `frontmostIsOwnProcess` because a ⌘C while DevType is
+    /// frontmost lands on our own panel.
+    static func shouldAttemptClipboardFallback(
+        failure: Failure,
+        frontmostIsOwnProcess: Bool,
+        canPostEvents: Bool,
+        secureInputActive: Bool
+    ) -> Bool {
+        guard case .noFocusedElement = failure else { return false }
+        return !frontmostIsOwnProcess && canPostEvents && !secureInputActive
+    }
+
+    /// Pure: turn a copy-capture outcome into a selection outcome, or `nil` to keep the
+    /// original failure.
+    ///
+    /// A blank capture keeps the original failure rather than becoming `.emptySelection` —
+    /// "the app answered ⌘C with whitespace" is not evidence the user's real problem changed.
+    /// The size ceiling applies exactly as it does to AX reads: an oversized capture is the
+    /// user's actual selection, so it is refused by name, never silently dropped.
+    static func outcomeForClipboardCapture(
+        text: String?,
+        bundleID: String?,
+        isWeakAX: (String) -> Bool = { SelectionReader.isWeakAXApp(bundleID: $0) }
+    ) -> Outcome? {
+        guard let text, !isBlankSelection(text) else { return nil }
+        guard text.count <= SelectionReader.maxSelectionCharacters else {
+            return .failure(.selectionTooLarge(text.count))
+        }
+        return .selection(
+            Result(
+                text: text,
+                bundleID: bundleID,
+                isWeakAX: bundleID.map(isWeakAX) ?? false,
+                source: .clipboard,
+                via: .clipboardCopy
+            )
+        )
     }
 
     /// A cached selection may only be used for the app it came from.

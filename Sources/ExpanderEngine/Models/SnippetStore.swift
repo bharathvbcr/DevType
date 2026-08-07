@@ -1558,9 +1558,29 @@ public final class SnippetStore {
         }
     }
 
+    /// User preference: report trigger conflicts (duplicates, shadowing, empty triggers) in the
+    /// editor and library health UI. On by default; the menu bar exposes the switch.
+    ///
+    /// Only the *reporting* is optional. The matcher's behaviour with colliding triggers is
+    /// unchanged either way — turning this off means "stop warning me", not "make `:Hi` and
+    /// `:hi` both fire".
+    public static let conflictDetectionDisabledDefaultsKey = "devtype.conflictDetection.disabled"
+
+    public static var isConflictDetectionEnabled: Bool {
+        get { !UserDefaults.standard.bool(forKey: conflictDetectionDisabledDefaultsKey) }
+        set { UserDefaults.standard.set(!newValue, forKey: conflictDetectionDisabledDefaultsKey) }
+    }
+
     /// §1.9: triggers the matcher will shadow, plus unusable (empty) triggers.
+    ///
+    /// Empty when the user has switched conflict detection off — every reporting surface
+    /// (editor validation, library health) goes through here or checks the flag itself, so one
+    /// switch silences all of them. `triggerConflicts(in:)` stays ungated: it is the pure
+    /// detector, and callers that need the truth regardless of preference (tests, internals)
+    /// use it directly.
     public func triggerConflicts() -> [TriggerConflict] {
-        Self.triggerConflicts(in: loadGroups())
+        guard Self.isConflictDetectionEnabled else { return [] }
+        return Self.triggerConflicts(in: loadGroups())
     }
 
     /// §1.9: case folding matches `AbbreviationMatcher` — case-sensitive snippets
