@@ -183,6 +183,9 @@ public final class EventTapEngine {
     /// priority, so the userInteractive tap callback could block behind a utility-QoS file-watch
     /// thread holding this lock in the `snippets` setter.
     private let lock = UnfairLock()
+    /// Prefix-debounce state; guarded by `lock`.
+    private var _held: HeldExpansion?
+    private var _heldGeneration: UInt64 = 0
     /// §2.3: a real fixed-capacity ring. The old "ring buffer" was an `Array` plus
     /// `removeFirst(...)` — an O(n) memmove on every keystroke at steady state.
     private var ringBuffer = CharacterRingBuffer(capacity: EventTapEngine.maxBufferCapacity)
@@ -682,13 +685,46 @@ public final class EventTapEngine {
 
         // §2.1: cached matcher — one reference copy, no rebuild.
         let snapshotState = matchSnapshot
-        guard let match = findMatch(
+        let matchResult = findMatch(
             characters: bufferCharacters,
             layout: layoutSnapshot,
             allowPhysicalFallback: allowPhysical,
             snapshot: snapshotState,
             bundleID: context.bundleID
-        ) else {
+        )
+
+        guard let match = matchResult else {
+            // No match. If a shorter trigger is being held, this keystroke decides its fate:
+            // either the user is still typing toward a longer trigger, or no longer trigger can
+            // follow and the held one must fire now (with the characters typed meanwhile).
+            resolveHeldExpansionOnNoMatch(
+                bufferCharacters: bufferCharacters,
+                prefixIndex: snapshotState.prefixIndex
+            )
+            return Unmanaged.passUnretained(event)
+        }
+
+        // A longer trigger won — drop any held shorter one and expand this normally. The final
+        // key is swallowed as usual and the erase covers the whole matched trigger.
+        cancelHeldExpansion()
+
+        // Prefix debounce: this trigger is a strict prefix of a longer one, so firing now would
+        // make that longer trigger unreachable. Hold briefly instead. The key is NOT swallowed —
+        // at this point we do not know which trigger the user is typing, and swallowing a key we
+        // may never expand would silently eat input.
+        // `fieldText` is nil for physical-Hangul matches, where the trigger cannot be
+        // reconstructed — never hold one, since the erase could not be verified later.
+        if let fieldText = match.fieldText,
+           snapshotState.prefixIndex.isAmbiguous(
+               trigger: fieldText,
+               caseSensitive: match.snippet.isCaseSensitive
+           ) {
+            holdExpansion(
+                match: match,
+                triggerText: fieldText,
+                bufferCount: bufferCharacters.count,
+                focusPID: context.processID
+            )
             return Unmanaged.passUnretained(event)
         }
 
@@ -1117,11 +1153,191 @@ public final class EventTapEngine {
         }
     }
 
+
+    // MARK: - Prefix debounce (ambiguous triggers)
+
+    /// How long a match is held when a longer trigger could still win.
+    ///
+    /// Only ambiguous triggers ever wait — one that no other trigger extends fires with zero
+    /// added latency, which is the overwhelming majority. The window is re-armed on every
+    /// keystroke, so it bounds the pause *between* characters, not the whole word: typing
+    /// `` `slmabout `` never needs 250 ms × 5.
+    public static let prefixDebounceInterval: TimeInterval = 0.25
+
+    /// What a keystroke that produced no match means for a held expansion.
+    public enum HeldExpansionDecision: Equatable {
+        /// The buffer can still grow into a longer trigger — keep waiting.
+        case keepWaiting
+        /// No longer trigger can follow. Fire the held one now, erasing the trigger plus
+        /// `suffix` and re-appending `suffix` after the expansion, so the result matches what
+        /// firing immediately would have produced.
+        case fireNow(suffix: String)
+    }
+
+    /// Pure decision used by `resolveHeldExpansionOnNoMatch`, split out so it can be tested
+    /// without a live event tap.
+    public static func decideHeldExpansion(
+        trigger: String,
+        typedAfter: String,
+        prefixIndex: TriggerPrefixIndex
+    ) -> HeldExpansionDecision {
+        // A newline or tab ends the word outright; nothing longer can follow.
+        if typedAfter.contains(where: { $0.isNewline || $0 == "\t" }) {
+            return .fireNow(suffix: typedAfter)
+        }
+        return prefixIndex.hasViableExtension(after: trigger + typedAfter)
+            ? .keepWaiting
+            : .fireNow(suffix: typedAfter)
+    }
+
+    private struct HeldExpansion {
+        let match: SnippetMatch
+        /// Trigger exactly as it sits in the field (`SnippetMatch.fieldText`).
+        let triggerText: String
+        /// Buffer length when the hold started, so characters typed since can be recovered.
+        let bufferCount: Int
+        let focusPID: pid_t?
+        let generation: UInt64
+    }
+
+    /// Begin (or restart) holding `match`. Never swallows the key: at this point we do not know
+    /// which trigger the user is typing, and swallowing one we may never expand would eat input.
+    private func holdExpansion(
+        match: SnippetMatch,
+        triggerText: String,
+        bufferCount: Int,
+        focusPID: pid_t?
+    ) {
+        lock.lock()
+        _heldGeneration &+= 1
+        let generation = _heldGeneration
+        _held = HeldExpansion(
+            match: match,
+            triggerText: triggerText,
+            bufferCount: bufferCount,
+            focusPID: focusPID,
+            generation: generation
+        )
+        lock.unlock()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.prefixDebounceInterval) { [weak self] in
+            self?.fireHeldExpansion(generation: generation, suffix: "")
+        }
+    }
+
+    /// Drop any held expansion. Bumping the generation invalidates the pending timer, so a
+    /// cancelled hold can never fire later.
+    public func cancelHeldExpansion() {
+        lock.lock()
+        _held = nil
+        _heldGeneration &+= 1
+        lock.unlock()
+    }
+
+    /// A keystroke produced no match while an expansion was held.
+    private func resolveHeldExpansionOnNoMatch(
+        bufferCharacters: [Character],
+        prefixIndex: TriggerPrefixIndex
+    ) {
+        lock.lock()
+        guard let held = _held else {
+            lock.unlock()
+            return
+        }
+        let generation = held.generation
+        let trigger = held.triggerText
+        let typedCount = max(0, bufferCharacters.count - held.bufferCount)
+        lock.unlock()
+
+        // The buffer was reset (focus moved, mouse click) — the record no longer describes the
+        // text in front of the caret, so it must not be expanded.
+        guard typedCount > 0, bufferCharacters.count >= typedCount else {
+            cancelHeldExpansion()
+            return
+        }
+        let typedAfter = String(bufferCharacters.suffix(typedCount))
+
+        switch Self.decideHeldExpansion(
+            trigger: trigger,
+            typedAfter: typedAfter,
+            prefixIndex: prefixIndex
+        ) {
+        case .keepWaiting:
+            // Re-arm so the window measures the gap between keystrokes. `bufferCount` is kept
+            // at its original value so `typedAfter` keeps accumulating.
+            lock.lock()
+            _heldGeneration &+= 1
+            let next = _heldGeneration
+            _held = HeldExpansion(
+                match: held.match,
+                triggerText: held.triggerText,
+                bufferCount: held.bufferCount,
+                focusPID: held.focusPID,
+                generation: next
+            )
+            lock.unlock()
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.prefixDebounceInterval) { [weak self] in
+                self?.fireHeldExpansion(generation: next, suffix: "")
+            }
+
+        case .fireNow(let suffix):
+            fireHeldExpansion(generation: generation, suffix: suffix)
+        }
+    }
+
+    /// Expand a held match. `suffix` is text typed after the trigger during the hold; it is
+    /// erased along with the trigger and re-appended after the expansion.
+    private func fireHeldExpansion(generation: UInt64, suffix: String) {
+        lock.lock()
+        guard let held = _held, held.generation == generation else {
+            lock.unlock()
+            return
+        }
+        _held = nil
+        _heldGeneration &+= 1
+        lock.unlock()
+
+        let trigger = held.triggerText
+        let eraseText = trigger + suffix
+        // No key was swallowed on this path, so the whole trigger is sitting in the field.
+        let erasePlan = ErasePlan(
+            text: eraseText,
+            caseInsensitive: !held.match.snippet.isCaseSensitive
+        )
+
+        beginExpansion()
+        resetBuffer()
+
+        let snippet = held.match.snippet
+        let focusPID = held.focusPID
+        processingQueue.async { [weak self] in
+            self?.performDeferredExpand(
+                snippet: snippet,
+                triggerUTF16Length: eraseText.utf16.count,
+                lastEventUTF16Count: 0,
+                swallowedUnicode: "",
+                swallowedKeyCode: 0,
+                swallowedFlags: [],
+                terminator: "",
+                eraseCountOverride: nil,
+                erasePlan: erasePlan,
+                armedFocusPID: focusPID,
+                swallowedFinalKey: false,
+                textSuffix: suffix
+            )
+        }
+    }
+
     public func resetBuffer() {
         lock.lock()
         ringBuffer.removeAll()
         layoutBuffer.clear()
         lastEventUTF16Count = 1
+        // A held expansion describes text at a caret position the reset just invalidated
+        // (mouse click, focus change, escape). Firing it later would erase whatever happens to
+        // be in front of the caret now.
+        _held = nil
+        _heldGeneration &+= 1
         lock.unlock()
     }
 
@@ -1166,7 +1382,14 @@ public final class EventTapEngine {
         terminator: String,
         eraseCountOverride: Int?,
         erasePlan: ErasePlan,
-        armedFocusPID: pid_t?
+        armedFocusPID: pid_t?,
+        /// False when the trigger's final key was let through instead of swallowed — the
+        /// prefix-debounce path never swallows, because at match time we do not yet know
+        /// whether a longer trigger will win.
+        swallowedFinalKey: Bool = true,
+        /// Characters typed after the trigger while the match was held. They are inside
+        /// `erasePlan`, so they must be re-appended to the injected text or they vanish.
+        textSuffix: String = ""
     ) {
         let quiescence = inputClock.arm()
 
@@ -1319,7 +1542,9 @@ public final class EventTapEngine {
                             resolved: resolved,
                             clipboardSnapshot: clipboardSnapshot,
                             quiescence: postPanel,
-                            armedFocusPID: armedFocusPID
+                            armedFocusPID: armedFocusPID,
+                            swallowedFinalKey: swallowedFinalKey,
+                            textSuffix: textSuffix
                         )
                     }
                 }
@@ -1340,7 +1565,9 @@ public final class EventTapEngine {
             resolved: firstPass,
             clipboardSnapshot: clipboardSnapshot,
             quiescence: quiescence,
-            armedFocusPID: armedFocusPID
+            armedFocusPID: armedFocusPID,
+            swallowedFinalKey: swallowedFinalKey,
+            textSuffix: textSuffix
         )
     }
 
@@ -1559,7 +1786,9 @@ public final class EventTapEngine {
         resolved: MacroExpansionResult,
         clipboardSnapshot: String?,
         quiescence: InputQuiescenceGuard,
-        armedFocusPID: pid_t?
+        armedFocusPID: pid_t?,
+        swallowedFinalKey: Bool = true,
+        textSuffix: String = ""
     ) {
         if case .abort = inputClock.decide(quiescence) {
             refuseAfterSwallow(
@@ -1621,7 +1850,7 @@ public final class EventTapEngine {
             snippet: snippet,
             triggerLength: triggerUTF16Length,
             clipboardOverride: clipboardSnapshot,
-            swallowedFinalKey: true,
+            swallowedFinalKey: swallowedFinalKey,
             lastEventCharacterCount: lastEventUTF16Count,
             plan: plan,
             swallowedUnicode: swallowedUnicode,
@@ -1630,7 +1859,7 @@ public final class EventTapEngine {
             terminator: terminator,
             eraseCountOverride: eraseCountOverride,
             erasePlan: erasePlan,
-            preResolvedText: resolved.text,
+            preResolvedText: resolved.text + textSuffix,
             preResolvedCursorOffset: resolved.cursorOffset,
             trailingKeys: resolved.trailingKeys,
             snippetLookup: lookup
