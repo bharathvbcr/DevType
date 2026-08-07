@@ -3,12 +3,19 @@
 .build-xcode/
 .swiftpm/
 *.xcodeproj/
+*.xcworkspace/
+*.playground/
 DerivedData/
 *.xcuserdata/
 
 # Packaged / legacy build outputs (regenerate via Scripts/package-app.sh)
 build/
+Public/
+*.app
 *.app.source-sha256
+*.dmg
+*.pkg
+*.zip
 
 # Local Python tooling (icon scripts, etc.)
 .venv/
@@ -17,10 +24,20 @@ __pycache__/
 *.py[cod]
 .Python
 
-# macOS
+# macOS & OS metadata
 .DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
 *.swp
 *~
+
+# IDEs & Editors
+.idea/
+.vscode/
+
 
 # Secrets / local env
 .env
