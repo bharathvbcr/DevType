@@ -87,11 +87,17 @@ public final class InjectTelemetryLog {
         /// are the ones that *would* have re-pasted before the fix — useful for confirming the
         /// guard is doing work rather than sitting idle.
         public var suppressedMissVerdicts: Int = 0
+        /// §8.3: keystrokes held during a delivery and replayed after it. Each one is a character
+        /// that would previously have landed *in front of* the expansion — the `aScholarLM` bug.
+        /// Non-zero here is the fix working, not a problem.
+        public var typeAheadReplays: Int = 0
+        public var typeAheadCharacters: Int = 0
 
         public init() {}
 
         public var isEmpty: Bool {
             pasteRetries == 0 && triggerRestores == 0 && suppressedMissVerdicts == 0
+                && typeAheadReplays == 0
         }
     }
 
@@ -174,6 +180,13 @@ public final class InjectTelemetryLog {
 
     public func recordSuppressedMissVerdict(bundleID: String?) {
         mutateDuplicateRisk(bundleID: bundleID) { $0.suppressedMissVerdicts += 1 }
+    }
+
+    public func recordTypeAheadReplay(bundleID: String?, characters: Int) {
+        mutateDuplicateRisk(bundleID: bundleID) {
+            $0.typeAheadReplays += 1
+            $0.typeAheadCharacters += max(0, characters)
+        }
     }
 
     public func duplicateRiskByBundle() -> [String: DuplicateRiskCounters] {
@@ -259,7 +272,9 @@ public final class InjectTelemetryLog {
                 lines.append(
                     "  \(bundle): re-pastes=\(counters.pasteRetries) "
                         + "trigger-restores=\(counters.triggerRestores) "
-                        + "suppressed-AX-misses=\(counters.suppressedMissVerdicts)"
+                        + "suppressed-AX-misses=\(counters.suppressedMissVerdicts) "
+                        + "type-ahead-replays=\(counters.typeAheadReplays)"
+                        + "(\(counters.typeAheadCharacters) chars)"
                 )
             }
         }

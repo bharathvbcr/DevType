@@ -201,6 +201,9 @@ public final class EventTapEngine {
     private var _isEnabled: Bool = true
     private var _isTapRunning: Bool = false
     private var _isExpanding: Bool = false
+    /// §8.3: keystrokes typed while an expansion is in flight, held so they cannot land ahead of
+    /// the paste. Guarded by `lock` — mutated from the tap callback and from `endExpansion`.
+    private var _typeAhead = TypeAheadBuffer()
     /// Nested suspend depth (fill-in + inline search / AI panels). Matching is skipped while > 0.
     private var _matchingSuspendCount: Int = 0
     private var _isSecureInputActive: Bool = false
@@ -575,6 +578,19 @@ public final class EventTapEngine {
         // Pass through while inject+restore owns the critical section.
         // Must NOT swallow synthetic HID (backspace / ⌘V / arrows) we post ourselves.
         if expanding || isSynthetic {
+            // §8.3: the expansion is still being delivered. Passing a real keystroke through here
+            // is what let `a` land in front of `ScholarLM` — the paste was still in flight. Hold
+            // it instead and replay after delivery, so ordering matches an instant expansion.
+            if expanding, !isSynthetic {
+                switch admitTypeAhead(event: event) {
+                case .swallow:
+                    return nil
+                case .flushThenPassThrough(let replay):
+                    replayTypeAhead(replay, reason: "hold released early")
+                case .passThrough:
+                    break
+                }
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -719,7 +735,8 @@ public final class EventTapEngine {
            snapshotState.prefixIndex.isAmbiguous(
                trigger: fieldText,
                caseSensitive: match.snippet.isCaseSensitive
-           ) {
+           ),
+           Self.canHoldMatch(bundleID: context.bundleID) {
             holdExpansion(
                 match: match,
                 triggerText: fieldText,
@@ -1159,10 +1176,48 @@ public final class EventTapEngine {
     /// How long a match is held when a longer trigger could still win.
     ///
     /// Only ambiguous triggers ever wait — one that no other trigger extends fires with zero
-    /// added latency, which is the overwhelming majority. The window is re-armed on every
-    /// keystroke, so it bounds the pause *between* characters, not the whole word: typing
-    /// `` `slmabout `` never needs 250 ms × 5.
-    public static let prefixDebounceInterval: TimeInterval = 0.25
+    /// added latency, which is the overwhelming majority. The window applies only to a hold
+    /// with nothing typed after the trigger (see `armHold`); once the user types onward toward
+    /// a longer trigger, no timeout fires at all.
+    ///
+    /// So this governs exactly one gap: finishing `` `slm `` and starting the `a` of
+    /// `` `slmabout ``. At 250 ms that gap was tighter than an ordinary pause-and-continue, and
+    /// the longer trigger became unreachable whenever the user hesitated before it.
+    ///
+    /// The cost is paid by the shorter trigger: typing `` `slm `` and stopping now waits this
+    /// long before expanding. That is the whole trade — every millisecond that makes
+    /// `` `slmabout `` easier to reach makes `` `slm `` slower to fire, and no value avoids it.
+    public static let prefixDebounceInterval: TimeInterval = 0.6
+
+    /// Upper bound on a hold that is waiting for a decisive keystroke.
+    ///
+    /// Such a hold has no firing timer, so without this it would live until the buffer reset —
+    /// holding a snapshot of a snippet the user may since have edited, against a caret that may
+    /// have moved in a way no reset caught. Expiry **cancels**; it never expands. The cost of
+    /// being wrong is the user's literal text staying put, not an erase in the wrong place.
+    public static let heldExpansionStaleTimeout: TimeInterval = 10.0
+
+    /// Whether a match may be held at all in this app.
+    ///
+    /// Holding is only safe where the erase can be *verified* at fire time. `ErasePlan`'s
+    /// precondition degrades to `.unavailable` — a blind, count-based backspace — whenever AX
+    /// cannot be read, and blind erases are exactly what a hold cannot afford: unlike the
+    /// immediate path, which swallows the final key and erases in the same breath, a hold leaves
+    /// the trigger in the field while the user keeps typing. Anything typed in that window shifts
+    /// the caret, and a blind erase then eats the user's own characters.
+    ///
+    /// So in an app whose AX cannot be believed (Chromium/Electron shells — Slack, Chrome, VS
+    /// Code, Notion, WhatsApp …) DevType does not debounce. Those apps keep the pre-debounce
+    /// behaviour: the shorter trigger fires immediately. `` `slmabout `` stays unreachable there,
+    /// which is a live limitation rather than a fixed one — but it is a trigger that does not
+    /// fire, not text that gets eaten.
+    static func canHoldMatch(bundleID: String?) -> Bool {
+        // The user disabled the precondition guard, so every erase is blind.
+        guard ErasePreconditionChecker.isEnabled else { return false }
+        // No bundle ID means the verdict cannot even be looked up — assume the worst.
+        guard let bundleID, !bundleID.isEmpty else { return false }
+        return !AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID)
+    }
 
     private struct HeldExpansion {
         let match: SnippetMatch
@@ -1186,8 +1241,16 @@ public final class EventTapEngine {
         )
     }
 
-    /// Stores the hold under a fresh generation and starts the debounce timer for it. The
-    /// generation invalidates any timer already in flight, so only the newest hold can fire.
+    /// Stores the hold under a fresh generation. The generation invalidates any timer already
+    /// in flight, so only the newest hold can fire.
+    ///
+    /// The timer is armed **only while nothing has been typed after the trigger**. Stopping on
+    /// `` `slm `` means the user meant `` `slm ``, so it fires after the debounce. But once they
+    /// have typed on toward a longer trigger, a timeout is the wrong answer: firing `` `slm ``
+    /// part-way through `` `slmabout `` produces `ScholarLM` with `about` stranded after it, and
+    /// it only takes one hesitation mid-word to trigger. There, the hold waits for a keystroke
+    /// that actually decides — a divergent character, a terminator, backspace, or a focus change
+    /// — however long that takes.
     private func armHold(match: SnippetMatch, state: HeldExpansionState, focusPID: pid_t?) {
         lock.lock()
         _heldGeneration &+= 1
@@ -1200,9 +1263,30 @@ public final class EventTapEngine {
         )
         lock.unlock()
 
+        guard state.mayFireOnTimeout else {
+            // No firing timer for this one. Bound its lifetime with a cancel so a hold left
+            // mid-word cannot outlive the context it was recorded against.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.heldExpansionStaleTimeout) {
+                [weak self] in
+                self?.cancelHeldExpansion(generation: generation)
+            }
+            return
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.prefixDebounceInterval) { [weak self] in
             self?.fireHeldExpansion(generation: generation, extraSuffix: "")
         }
+    }
+
+    /// Drops the hold only if it is still the one `generation` refers to, so an expiry timer
+    /// cannot cancel a newer hold that replaced it.
+    private func cancelHeldExpansion(generation: UInt64) {
+        lock.lock()
+        if let held = _held, held.generation == generation {
+            _held = nil
+            _heldGeneration &+= 1
+        }
+        lock.unlock()
     }
 
     /// Drop any held expansion. Bumping the generation invalidates the pending timer, so a
@@ -1942,18 +2026,105 @@ public final class EventTapEngine {
 
     /// Marks inject+restore critical section. Cleared only by `endExpansion` after inject completes.
     private func beginExpansion() {
+        // Read the frontmost context *before* taking `lock` — it has its own lock, and acquiring
+        // the two in this order here but the reverse anywhere else is a deadlock.
+        let focusPID = frontmostContext.processID
         lock.lock()
         _isExpanding = true
+        // §8.3: from here until `endExpansion`, keys the user types are held rather than passed
+        // through, so they cannot overtake the paste still in flight.
+        _typeAhead.beginExpansion(focusPID: focusPID)
         lock.unlock()
     }
 
     private func endExpansion() {
         lock.lock()
         _isExpanding = false
+        let replay = _typeAhead.endExpansion()
         ringBuffer.removeAll()
         layoutBuffer.clear()
         lastEventUTF16Count = 1
         lock.unlock()
+        // §8.3: outside the lock — replaying posts HID events, and the tap callback for those
+        // events takes this same lock.
+        replayTypeAhead(replay, reason: "expansion complete")
+    }
+
+    /// Decides one keystroke against the type-ahead hold. Runs on the tap thread, so it reads the
+    /// event directly and never touches AppKit.
+    private func admitTypeAhead(event: CGEvent) -> TypeAheadBuffer.Decision {
+        let flags = event.flags
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let resets = Self.shouldResetBuffer(flags: flags, keyCode: keyCode)
+
+        var unicode = ""
+        var length = 0
+        withUnsafeTemporaryAllocation(
+            of: UniChar.self,
+            capacity: EventTapEngine.unicodeScratchCapacity
+        ) { scratch in
+            event.keyboardGetUnicodeString(
+                maxStringLength: EventTapEngine.unicodeScratchCapacity,
+                actualStringLength: &length,
+                unicodeString: scratch.baseAddress
+            )
+            if length > 0 {
+                unicode = String(utf16CodeUnits: scratch.baseAddress!, count: length)
+            }
+        }
+
+        let focusPID = frontmostContext.processID
+        lock.lock()
+        let decision = _typeAhead.admit(
+            unicode: unicode,
+            isSynthetic: false,
+            resetsBuffer: resets,
+            focusPID: focusPID
+        )
+        lock.unlock()
+        return decision
+    }
+
+    /// Re-posts keystrokes held during an expansion, in the order they were typed.
+    ///
+    /// The queue's invariant is that everything admitted is replayed exactly once, so this is the
+    /// only exit and it must not be conditional on anything that could silently skip it.
+    private func replayTypeAhead(_ text: String, reason: String) {
+        guard !text.isEmpty else { return }
+        // The tap source runs on the main run loop, so a flush from the tap callback lands here
+        // already on main and posts *inline* — deliberately. That is what puts the replayed
+        // characters ahead of the key that caused the flush, which is the order the user typed
+        // them in. Hopping to main unconditionally would post them after it and reintroduce the
+        // very transposition this type exists to prevent. The hop below is only for completion
+        // callbacks arriving off-main.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.replayTypeAhead(text, reason: reason)
+            }
+            return
+        }
+        DevTypeLog.inject.notice(
+            """
+            [TypeAhead] replaying \(text.count, privacy: .public) held keystroke(s) — \
+            reason=\(reason, privacy: .public)
+            """
+        )
+        InjectTelemetryLog.shared.recordTypeAheadReplay(
+            bundleID: cachedFrontmostBundleID,
+            characters: text.count
+        )
+        // HID only — deliberately *not* `attemptAXDirectInjection`. That call reports success
+        // without writing in the whole Chromium/Electron false-success class, which is exactly
+        // where this bug occurs, so an AX replay would silently eat the user's keystrokes: the
+        // one outcome this design must never produce. A posted key can be dropped by the system,
+        // but it is never a lie.
+        for character in text {
+            _ = TextInjectionPipeline.shared.postUnicodeKeyEvent(
+                unicode: String(character),
+                keyCode: 0,
+                flags: []
+            )
+        }
     }
 
     private func handleFlagsChanged(_ event: CGEvent) {
