@@ -745,6 +745,17 @@ final class PermissionOnboardingController: NSViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.requestSettleInterval, execute: work)
     }
 
+    /// Post Events is the one optional capability and has no Settings list of its own, so the
+    /// only remedy is re-Requesting — which makes it the easiest button to hammer.
+    private func requestPostEvents() {
+        performRequest(
+            logLabel: "Post Events",
+            request: { _ = PermissionRequester.shared.requestPostEvent() },
+            stillMissing: { !PermissionProbe().snapshot().canPostEvents },
+            stillMissingHint: { [loc] in loc.s("onboarding.post.stillMissing") }
+        )
+    }
+
     @objc private func primaryAction() {
         let snapshot = PermissionProbe().snapshot()
         switch step {
@@ -935,17 +946,6 @@ final class PermissionOnboardingController: NSViewController {
         view.window?.close()
     }
 
-    /// Post Events is the one optional capability and has no Settings list of its own, so the
-    /// only remedy is re-Requesting — which makes it the easiest button to hammer.
-    private func requestPostEvents() {
-        performRequest(
-            logLabel: "Post Events",
-            request: { _ = PermissionRequester.shared.requestPostEvent() },
-            stillMissing: { !PermissionProbe().snapshot().canPostEvents },
-            stillMissingHint: { [loc] in loc.s("onboarding.post.stillMissing") }
-        )
-    }
-
     private func presentOpenSettings(for kind: PermissionKind) {
         DevTypeLog.permission.info(
             "[Permission] onboarding Open Settings kind=\(DevTypeLog.kindName(kind), privacy: .public)"
@@ -982,8 +982,7 @@ final class PermissionOnboardingController: NSViewController {
         DevTypeLog.app.info("[App] relaunch from onboarding")
         // A failed spawn must not become an unrequested quit — say so and stay in the wizard.
         guard AppRelauncher.relaunch() else {
-            statusLabel.stringValue = loc.s("onboarding.relaunchFailed")
-            statusLabel.textColor = DevTypeTheme.redBright
+            setTransientHint(loc.s("onboarding.relaunchFailed"), color: DevTypeTheme.redBright)
             return
         }
     }

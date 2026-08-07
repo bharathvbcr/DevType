@@ -240,9 +240,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if !onboardingDone {
             // Avoid double-scheduling from launch + CDHash callback on the same run loop.
-            if onboardingWindowController?.window?.isVisible == true || onboardingPresentationInFlight {
+            if isOnboardingVisible || onboardingPresentationInFlight {
                 DevTypeLog.permission.debug(
                     "[Permission] UI → skip duplicate onboarding schedule (single-flight)"
+                )
+                return
+            }
+            // The user already said "not now" this launch — do not re-present over their work.
+            if onboardingDismissedThisLaunch {
+                DevTypeLog.permission.info(
+                    "[Permission] UI → onboarding dismissed this launch; not re-presenting"
                 )
                 return
             }
@@ -975,6 +982,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func presentTapFailedAlert() {
+        // The wizard drives `refresh(presentTapFailureAlert: true)` from Request, Open Settings,
+        // and each Verify/Done render, so a machine that cannot install the tap would throw a
+        // modal alert in front of Setup repeatedly — over the one screen already reporting
+        // "Tap: not running" and offering the fix. Setup speaks for itself while it is open.
+        if isOnboardingVisible {
+            DevTypeLog.eventTap.notice(
+                "[EventTap] tap start failed while Setup is open — deferring to the wizard's own status"
+            )
+            return
+        }
         DevTypeAlert.present(
             title: loc.s("alert.tapFailed.title"),
             message: EngineDisplayStatus.tapFailedRecoveryGuidance,
@@ -1154,6 +1171,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openPermissionRecovery(_ sender: Any?) {
+        // Setup owns the screen while it is up. Recovery covers the same three capabilities from
+        // the same probe, so stacking it over the wizard gives the user two windows disagreeing
+        // about which button to press next — and two claims on the activation policy.
+        if isOnboardingVisible {
+            DevTypeLog.permission.info(
+                "[Permission] UI → Recovery requested while Setup is open; focusing Setup instead"
+            )
+            onboardingWindowController?.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         DevTypeLog.permission.info("[Permission] UI → open Permission Recovery")
         if permissionWindowController == nil || permissionWindowController?.window == nil {
             let viewController = PermissionRecoveryController { [weak self] in
@@ -1201,13 +1229,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             DevTypeTheme.styleWindow(window, title: loc.s("window.setup"))
             window.center()
             window.isReleasedWhenClosed = false
-            NotificationCenter.default.addObserver(
+            // Replace rather than accumulate: a re-created window would otherwise leave the
+            // previous block-based observer registered against a dead window forever.
+            if let onboardingCloseObserver {
+                NotificationCenter.default.removeObserver(onboardingCloseObserver)
+            }
+            onboardingCloseObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification,
                 object: window,
                 queue: .main
             ) { [weak self] _ in
-                self?.onboardingPresentationInFlight = false
+                guard let self else { return }
+                self.onboardingPresentationInFlight = false
                 PermissionRequester.shared.endSetupActivation()
+                // Covers every dismissal, including the close button — which never reaches
+                // Skip or Finish, so nothing else would refresh the menu or set the latch.
+                if !ProcessIdentity.isOnboardingCompleted() {
+                    DevTypeLog.permission.info(
+                        "[Permission] Setup closed without completing — not re-presenting this launch"
+                    )
+                    self.onboardingDismissedThisLaunch = true
+                }
+                PermissionCoordinator.shared.refresh(presentTapFailureAlert: false)
+                self.refreshStatusItemUI()
             }
             onboardingWindowController = NSWindowController(window: window)
         }

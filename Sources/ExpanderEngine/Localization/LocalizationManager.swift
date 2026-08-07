@@ -927,11 +927,11 @@ public final class LocalizationManager: ObservableObject {
             "onboarding.step": "Step %d of %d",
             "onboarding.skip": "Skip for now",
             "onboarding.back": "Back",
-            "onboarding.continue": "Continue",
-            "onboarding.continueAXOnly": "Continue (AX-only)",
             "onboarding.continueWithoutListen": "Continue without Listen",
             "onboarding.relaunchFailed":
                 "Could not start the relaunch helper — DevType is still running. Quit and reopen it from /Applications/DevType.app.",
+            "onboarding.continue": "Continue",
+            "onboarding.continueAXOnly": "Continue (AX-only)",
             "onboarding.finish": "Finish",
             "onboarding.request": "Request",
             "onboarding.requestAccessibility": "Request Accessibility",
