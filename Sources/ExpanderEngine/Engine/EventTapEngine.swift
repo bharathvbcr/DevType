@@ -554,6 +554,13 @@ public final class EventTapEngine {
 
         // Mouse clicks move the caret — buffer is no longer valid.
         if EventTapEngine.mouseDownTypes.contains(type) {
+            // §8.3: and any keystrokes being held for an in-flight expansion must go out *now*,
+            // at the caret they were typed at. Replaying them after the click would type them
+            // wherever the user just clicked.
+            lock.lock()
+            let stranded = _typeAhead.flushForCaretChange()
+            lock.unlock()
+            replayTypeAhead(stranded, reason: "caret moved (click)")
             resetBuffer()
             return Unmanaged.passUnretained(event)
         }
