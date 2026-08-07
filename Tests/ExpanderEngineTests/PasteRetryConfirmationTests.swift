@@ -1,0 +1,179 @@
+import XCTest
+@testable import ExpanderEngine
+
+/// Duplicate expansions ("ScholarLMScholarLM") came from the paste-hold loop re-posting Cmd+V.
+///
+/// `DeliveryVerifier` reports `.failed` when the AXValue is *readable* and does not contain the
+/// expected text. On hosts that return a readable-but-stale value immediately after a paste
+/// (WebKit, Electron), that is a false negative: the paste did land, AX just had not caught up.
+/// `decidePasteHold` treated one such observation as proof and posted a second Cmd+V, so the
+/// user got the replacement twice.
+///
+/// The asymmetry that drives the fix: an unnecessary re-read costs one settle delay, while an
+/// unnecessary re-paste corrupts the document. So `.failed` now needs confirming.
+final class PasteRetryConfirmationTests: XCTestCase {
+
+    private func decide(
+        _ delivery: DeliveryVerifier.TextDeliveryVerification,
+        attempts: Int = 1,
+        elapsed: TimeInterval = 0.05,
+        failures: Int
+    ) -> PasteboardBroker.PasteHoldDecision {
+        PasteboardBroker.decidePasteHold(
+            delivery: delivery,
+            pasteAttemptsCompleted: attempts,
+            elapsed: elapsed,
+            consecutiveFailures: failures
+        )
+    }
+
+    // MARK: - The regression
+
+    /// The exact shape of the double-paste bug: one stale read must not re-paste.
+    func testSingleFailedObservationDoesNotRetry() {
+        XCTAssertEqual(
+            decide(.failed, failures: 1),
+            .waitMore,
+            "One `.failed` may be a stale AX read; re-reading is cheap, re-pasting duplicates text."
+        )
+    }
+
+    /// A real failure still gets its retry — the fix must not disable recovery.
+    func testConfirmedFailureStillRetries() {
+        XCTAssertEqual(
+            decide(.failed, failures: PasteboardBroker.requiredFailureConfirmations),
+            .retryPaste
+        )
+    }
+
+    func testConfirmedFailureWithNoAttemptsLeftIsFinal() {
+        XCTAssertEqual(
+            decide(.failed, attempts: InjectTiming.pasteDeliveryMaxAttempts, failures: 2),
+            .failConfirmed,
+            "Once the attempt budget is spent, a confirmed failure must stop, not loop."
+        )
+    }
+
+    /// Waiting is bounded: an unconfirmed failure past the hold timeout must not wait forever.
+    func testUnconfirmedFailurePastTimeoutStopsWaiting() {
+        let decision = decide(
+            .failed,
+            elapsed: InjectTiming.pasteDeliveryHoldTimeout + 1,
+            failures: 1
+        )
+        XCTAssertNotEqual(decision, .waitMore, "The confirmation wait must be time-bounded.")
+        XCTAssertEqual(decision, .retryPaste)
+    }
+
+    // MARK: - Unchanged behaviour
+
+    func testDeliveredSucceedsRegardlessOfPriorFailures() {
+        // A stale read followed by a good one is the expected happy path on slow hosts.
+        XCTAssertEqual(decide(.delivered, failures: 1), .succeed)
+        XCTAssertEqual(decide(.delivered, failures: 5), .succeed)
+    }
+
+    func testUnavailableWaitsThenGivesUpUnverified() {
+        XCTAssertEqual(decide(.unavailable, elapsed: 0.01, failures: 0), .waitMore)
+        XCTAssertEqual(
+            decide(.unavailable, elapsed: InjectTiming.pasteDeliveryHoldTimeout + 1, failures: 0),
+            .giveUpUnverified,
+            "Unverifiable is not failure — it must never re-paste."
+        )
+    }
+
+    /// `.unavailable` must never reach a retry at any failure count: an unreadable field is not
+    /// evidence the paste missed, and re-pasting there is how weak-AX apps get duplicates.
+    func testUnavailableNeverRetriesAtAnyFailureCount() {
+        for failures in 0...5 {
+            for elapsed: TimeInterval in [0.0, 0.5, InjectTiming.pasteDeliveryHoldTimeout + 1] {
+                XCTAssertNotEqual(
+                    decide(.unavailable, elapsed: elapsed, failures: failures),
+                    .retryPaste,
+                    "unavailable must not re-paste (failures=\(failures), elapsed=\(elapsed))."
+                )
+            }
+        }
+    }
+
+    /// Callers that do not track the run keep the pre-fix behaviour, so the parameter's default
+    /// cannot silently change an untracked call site.
+    func testDefaultTreatsFailureAsAlreadyConfirmed() {
+        XCTAssertEqual(
+            PasteboardBroker.decidePasteHold(
+                delivery: .failed,
+                pasteAttemptsCompleted: 1,
+                elapsed: 0.05
+            ),
+            .retryPaste
+        )
+    }
+
+    func testConfirmationThresholdIsAtLeastTwo() {
+        XCTAssertGreaterThanOrEqual(
+            PasteboardBroker.requiredFailureConfirmations, 2,
+            "A threshold of 1 would restore the double-paste bug."
+        )
+    }
+
+    // MARK: - The verifier behaviour that made this necessary
+
+    /// Documents the false negative at its source: a readable-but-stale value is reported as
+    /// `.failed`, indistinguishable from a genuine miss. This is why the *decision* has to be
+    /// conservative — the verifier cannot tell these apart on its own.
+    func testStaleReadableValueIsReportedAsFailed() {
+        let baseline = DeliveryVerifier.FocusedTextObservation(
+            value: "`slm",
+            selectedText: nil,
+            caretLocation: 4
+        )
+        // The paste landed, but AX still returns the pre-paste text.
+        let stale = DeliveryVerifier.FocusedTextObservation(
+            value: "`slm",
+            selectedText: nil,
+            caretLocation: 4
+        )
+        XCTAssertEqual(
+            DeliveryVerifier.verifyTextDelivery(
+                expectedText: "ScholarLM",
+                baseline: baseline,
+                after: stale
+            ),
+            .failed,
+            "A stale read is indistinguishable from a miss — hence confirmation before retry."
+        )
+    }
+
+    func testGenuineDeliveryIsReportedAsDelivered() {
+        let baseline = DeliveryVerifier.FocusedTextObservation(
+            value: "`slm", selectedText: nil, caretLocation: 4
+        )
+        let after = DeliveryVerifier.FocusedTextObservation(
+            value: "ScholarLM", selectedText: nil, caretLocation: 9
+        )
+        XCTAssertEqual(
+            DeliveryVerifier.verifyTextDelivery(
+                expectedText: "ScholarLM", baseline: baseline, after: after
+            ),
+            .delivered
+        )
+    }
+
+    /// The doubled state itself must not read as "needs another paste" — otherwise a duplicate
+    /// could cascade into a third copy.
+    func testAlreadyDoubledTextIsNotReportedAsFailed() {
+        let baseline = DeliveryVerifier.FocusedTextObservation(
+            value: "`slm", selectedText: nil, caretLocation: 4
+        )
+        let doubled = DeliveryVerifier.FocusedTextObservation(
+            value: "ScholarLMScholarLM", selectedText: nil, caretLocation: 18
+        )
+        XCTAssertNotEqual(
+            DeliveryVerifier.verifyTextDelivery(
+                expectedText: "ScholarLM", baseline: baseline, after: doubled
+            ),
+            .failed,
+            "Text that is already present twice must never trigger a third paste."
+        )
+    }
+}

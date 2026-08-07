@@ -805,6 +805,19 @@ public enum CommandPaletteCatalog {
             boost += 40
         case .paraphrase where q.contains("paraphrase") || q.contains("reword"):
             boost += 50
+        case .translate where q.contains("translat") || q.contains("english")
+            || q.contains("meaning"):
+            boost += 60
+        // "fix telugu" / "telugu grammar" wants refine, not translate; a bare
+        // language name is ambiguous, so both rows get the lift and the alias
+        // scores decide the order.
+        case .translate where q.contains("telugu") || q.contains("hindi"):
+            boost += 40
+        case .refine where q.contains("grammar") || q.contains("correct")
+            || q.contains("fix") || q.contains("refine") || q.contains("polish"):
+            boost += 50
+        case .refine where q.contains("telugu") || q.contains("hindi"):
+            boost += 40
         default:
             break
         }
@@ -1043,6 +1056,20 @@ public enum CommandPaletteCatalog {
             return [
                 "prompt enhance", "enhance prompt", "improve prompt", "better prompt",
                 "promptenhance", "prompt"
+            ]
+        case .translate:
+            return [
+                "translate", "translation", "translate to english", "to english",
+                "english", "telugu", "hindi", "telugu to english", "hindi to english",
+                "tenglish", "hinglish", "romanized telugu", "romanized hindi",
+                "convert to english", "meaning in english", "what does this mean"
+            ]
+        case .refine:
+            return [
+                "refine", "polish", "fix telugu", "fix hindi", "correct telugu",
+                "correct hindi", "telugu grammar", "hindi grammar", "grammar telugu",
+                "grammar hindi", "proofread telugu", "proofread hindi",
+                "fix tenglish", "fix hinglish", "keep language", "same language"
             ]
         case .custom:
             return ["custom"]

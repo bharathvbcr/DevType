@@ -698,7 +698,8 @@ public final class EventTapEngine {
             // either the user is still typing toward a longer trigger, or no longer trigger can
             // follow and the held one must fire now (with the characters typed meanwhile).
             resolveHeldExpansionOnNoMatch(
-                bufferCharacters: bufferCharacters,
+                typedNow: length > 0 ? unicodeStr : "",
+                isDelete: keyAction == .deleteLast,
                 prefixIndex: snapshotState.prefixIndex
             )
             return Unmanaged.passUnretained(event)
@@ -722,7 +723,6 @@ public final class EventTapEngine {
             holdExpansion(
                 match: match,
                 triggerText: fieldText,
-                bufferCount: bufferCharacters.count,
                 focusPID: context.processID
             )
             return Unmanaged.passUnretained(event)
@@ -1164,64 +1164,44 @@ public final class EventTapEngine {
     /// `` `slmabout `` never needs 250 ms × 5.
     public static let prefixDebounceInterval: TimeInterval = 0.25
 
-    /// What a keystroke that produced no match means for a held expansion.
-    public enum HeldExpansionDecision: Equatable {
-        /// The buffer can still grow into a longer trigger — keep waiting.
-        case keepWaiting
-        /// No longer trigger can follow. Fire the held one now, erasing the trigger plus
-        /// `suffix` and re-appending `suffix` after the expansion, so the result matches what
-        /// firing immediately would have produced.
-        case fireNow(suffix: String)
-    }
-
-    /// Pure decision used by `resolveHeldExpansionOnNoMatch`, split out so it can be tested
-    /// without a live event tap.
-    public static func decideHeldExpansion(
-        trigger: String,
-        typedAfter: String,
-        prefixIndex: TriggerPrefixIndex
-    ) -> HeldExpansionDecision {
-        // A newline or tab ends the word outright; nothing longer can follow.
-        if typedAfter.contains(where: { $0.isNewline || $0 == "\t" }) {
-            return .fireNow(suffix: typedAfter)
-        }
-        return prefixIndex.hasViableExtension(after: trigger + typedAfter)
-            ? .keepWaiting
-            : .fireNow(suffix: typedAfter)
-    }
-
     private struct HeldExpansion {
         let match: SnippetMatch
-        /// Trigger exactly as it sits in the field (`SnippetMatch.fieldText`).
-        let triggerText: String
-        /// Buffer length when the hold started, so characters typed since can be recovered.
-        let bufferCount: Int
+        /// Trigger plus everything typed after it — see `HeldExpansionState`.
+        let state: HeldExpansionState
         let focusPID: pid_t?
         let generation: UInt64
     }
 
-    /// Begin (or restart) holding `match`. Never swallows the key: at this point we do not know
-    /// which trigger the user is typing, and swallowing one we may never expand would eat input.
+    /// Begin holding `match`. Never swallows the key: at this point we do not know which trigger
+    /// the user is typing, and swallowing one we may never expand would eat input.
     private func holdExpansion(
         match: SnippetMatch,
         triggerText: String,
-        bufferCount: Int,
         focusPID: pid_t?
     ) {
+        armHold(
+            match: match,
+            state: HeldExpansionState(trigger: triggerText),
+            focusPID: focusPID
+        )
+    }
+
+    /// Stores the hold under a fresh generation and starts the debounce timer for it. The
+    /// generation invalidates any timer already in flight, so only the newest hold can fire.
+    private func armHold(match: SnippetMatch, state: HeldExpansionState, focusPID: pid_t?) {
         lock.lock()
         _heldGeneration &+= 1
         let generation = _heldGeneration
         _held = HeldExpansion(
             match: match,
-            triggerText: triggerText,
-            bufferCount: bufferCount,
+            state: state,
             focusPID: focusPID,
             generation: generation
         )
         lock.unlock()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.prefixDebounceInterval) { [weak self] in
-            self?.fireHeldExpansion(generation: generation, suffix: "")
+            self?.fireHeldExpansion(generation: generation, extraSuffix: "")
         }
     }
 
@@ -1235,59 +1215,42 @@ public final class EventTapEngine {
     }
 
     /// A keystroke produced no match while an expansion was held.
+    ///
+    /// `typedNow` is what *this* keystroke put in the field, taken straight from the event
+    /// rather than from the ring buffer — see `HeldExpansion.typedAfter`.
     private func resolveHeldExpansionOnNoMatch(
-        bufferCharacters: [Character],
+        typedNow: String,
+        isDelete: Bool,
         prefixIndex: TriggerPrefixIndex
     ) {
         lock.lock()
-        guard let held = _held else {
-            lock.unlock()
-            return
-        }
-        let generation = held.generation
-        let trigger = held.triggerText
-        let typedCount = max(0, bufferCharacters.count - held.bufferCount)
+        let held = _held
         lock.unlock()
+        guard let held else { return }
 
-        // The buffer was reset (focus moved, mouse click) — the record no longer describes the
-        // text in front of the caret, so it must not be expanded.
-        guard typedCount > 0, bufferCharacters.count >= typedCount else {
-            cancelHeldExpansion()
-            return
-        }
-        let typedAfter = String(bufferCharacters.suffix(typedCount))
-
-        switch Self.decideHeldExpansion(
-            trigger: trigger,
-            typedAfter: typedAfter,
+        switch held.state.advance(
+            typedNow: typedNow,
+            isDelete: isDelete,
             prefixIndex: prefixIndex
         ) {
-        case .keepWaiting:
-            // Re-arm so the window measures the gap between keystrokes. `bufferCount` is kept
-            // at its original value so `typedAfter` keeps accumulating.
-            lock.lock()
-            _heldGeneration &+= 1
-            let next = _heldGeneration
-            _held = HeldExpansion(
-                match: held.match,
-                triggerText: held.triggerText,
-                bufferCount: held.bufferCount,
-                focusPID: held.focusPID,
-                generation: next
-            )
-            lock.unlock()
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.prefixDebounceInterval) { [weak self] in
-                self?.fireHeldExpansion(generation: next, suffix: "")
-            }
+        case .cancel:
+            cancelHeldExpansion()
 
-        case .fireNow(let suffix):
-            fireHeldExpansion(generation: generation, suffix: suffix)
+        case .keepWaiting(let next):
+            // Re-arm so the window measures the gap *between* keystrokes, carrying the
+            // characters typed so far.
+            armHold(match: held.match, state: next, focusPID: held.focusPID)
+
+        case .fire:
+            fireHeldExpansion(generation: held.generation, extraSuffix: typedNow)
         }
     }
 
-    /// Expand a held match. `suffix` is text typed after the trigger during the hold; it is
-    /// erased along with the trigger and re-appended after the expansion.
-    private func fireHeldExpansion(generation: UInt64, suffix: String) {
+    /// Expand a held match. Everything typed after the trigger during the hold — the record's
+    /// accumulated `typedAfter` plus `extraSuffix` from the keystroke that ended the hold — is
+    /// erased along with the trigger and re-appended after the expansion, so the field ends up
+    /// exactly as firing immediately would have left it.
+    private func fireHeldExpansion(generation: UInt64, extraSuffix: String) {
         lock.lock()
         guard let held = _held, held.generation == generation else {
             lock.unlock()
@@ -1297,7 +1260,10 @@ public final class EventTapEngine {
         _heldGeneration &+= 1
         lock.unlock()
 
-        let trigger = held.triggerText
+        let trigger = held.state.trigger
+        // `pendingSuffix` covers a hold ended by the timer; `extraSuffix` adds the keystroke
+        // that ended it when a key did.
+        let suffix = held.state.pendingSuffix + extraSuffix
         let eraseText = trigger + suffix
         // No key was swallowed on this path, so the whole trigger is sitting in the field.
         let erasePlan = ErasePlan(
