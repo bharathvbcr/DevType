@@ -56,7 +56,7 @@ echo "==> version ${VERSION}"
 
 # Verify the hardened runtime flag actually landed. Notarization fails without it,
 # and the failure message from Apple is much less obvious than this one.
-if ! codesign -d --verbose=2 "${APP_BUNDLE}" 2>&1 | grep -q "flags=.*runtime"; then
+if ! codesign -d --verbose=2 "${APP_BUNDLE}" 2>&1 | grep "flags=.*runtime" >/dev/null; then
   die "bundle is not signed with the Hardened Runtime; notarization would be rejected"
 fi
 codesign --verify --strict --deep --verbose=2 "${APP_BUNDLE}" \
