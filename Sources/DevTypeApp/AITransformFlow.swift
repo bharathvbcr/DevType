@@ -32,10 +32,16 @@ enum AITransformFlow {
             return
         }
 
-        guard let selection = SelectionReader.readSelectedText() else {
+        // Typed outcome, not `Result?`: the reason decides the message. "Select text first" is
+        // actively misleading when the real cause is a revoked AX grant or Secure Input.
+        let selection: SelectionReader.Result
+        switch SelectionReader.readSelection() {
+        case .selection(let resolved):
+            selection = resolved
+        case .failure(let failure):
             softAlert(
-                title: loc.s("ai.alert.noSelection.title"),
-                message: loc.s("ai.alert.noSelection.message"),
+                title: failure.title(loc: loc),
+                message: failure.message(loc: loc),
                 loc: loc
             )
             return
