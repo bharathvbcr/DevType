@@ -22,6 +22,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastLoggedDisplayStatus: EngineDisplayStatus?
     /// Single-flight: launch + CDHash callback must not open Setup twice.
     private var onboardingPresentationInFlight = false
+    /// Set when the user dismisses Setup without completing it (Skip, or closing the window).
+    ///
+    /// `presentOnboardingOrRecoveryIfNeeded()` runs twice per launch — once directly, once from
+    /// `onIdentityResolved` after `codesign` returns. Skipping only closes the window; it
+    /// deliberately does not record completion. So a user who skipped before the hash resolved got
+    /// the wizard thrown back in their face a beat later, on top of whatever they had moved on to.
+    /// The latch is per-launch: the next launch still offers Setup, as it should.
+    private var onboardingDismissedThisLaunch = false
+    /// True while the Setup window is on screen. Recovery and the Tap Failed alert both defer to
+    /// it rather than stacking a second permission surface over the first-run flow.
+    private var isOnboardingVisible: Bool {
+        onboardingWindowController?.window?.isVisible == true
+    }
+    /// Token for the Setup window's close observer, so re-creating the window cannot register a
+    /// second one against the same notification.
+    private var onboardingCloseObserver: NSObjectProtocol?
     private let hotkeyManager = HotkeyManager()
     private let loc = LocalizationManager.shared
     /// §5.2: token for the `accessibilityDisplayOptionsDidChange` observer.
@@ -51,7 +67,54 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         wireSecureClipboardPasteHint()
         presentLibraryHealthIfNeeded()
         startSecureInputMonitoring()
+        syncSelectionMonitorWithAIPreferences()
         wireTapHealth()
+
+        if ProcessInfo.processInfo.environment["DEVTYPE_MGR_PREVIEW"] != nil {
+            NSApp.setActivationPolicy(.regular)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.openSnippetManager(nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    guard let window = self.snippetWindowController?.window,
+                          let content = window.contentView else { exit(2) }
+                    window.setContentSize(NSSize(width: 985, height: 633))
+                    var tables: [NSTableView] = []
+                    func collect(_ v: NSView) {
+                        if let t = v as? NSTableView { tables.append(t) }
+                        v.subviews.forEach(collect)
+                    }
+                    collect(content)
+                    // Groups table first: row 0 == All Snippets.
+                    tables.first?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                    content.layoutSubtreeIfNeeded()
+                    // Exercise cell recycling before measuring.
+                    if let snippets = tables.last {
+                        snippets.scrollRowToVisible(min(30, max(0, snippets.numberOfRows - 1)))
+                        content.layoutSubtreeIfNeeded()
+                        snippets.scrollRowToVisible(0)
+                    }
+                    content.layoutSubtreeIfNeeded()
+                    func walk(_ v: NSView) {
+                        if String(describing: type(of: v)).contains("Marquee") {
+                            let stack = v.superview
+                            let title = stack?.subviews.first(where: { $0 is NSTextField }) as? NSTextField
+                            let inner = v.subviews.first?.subviews.compactMap { $0 as? NSTextField }.first
+                            NSLog("DBGROW text=\((inner?.stringValue ?? "?").prefix(16)) w=\(v.bounds.width) innerW=\(inner?.frame.width ?? -1) intrinsic=\(v.intrinsicContentSize.width) stackW=\(stack?.bounds.width ?? -1) titleW=\(title?.bounds.width ?? -1)")
+                        }
+                        v.subviews.forEach(walk)
+                    }
+                    walk(content)
+                    if let out = ProcessInfo.processInfo.environment["DEVTYPE_LAYOUT_SHOT"],
+                       let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                        content.cacheDisplay(in: content.bounds, to: rep)
+                        if let data = rep.representation(using: .png, properties: [:]) {
+                            try? data.write(to: URL(fileURLWithPath: out))
+                        }
+                    }
+                    exit(0)
+                }
+            }
+        }
 
         NotificationCenter.default.addObserver(
             forName: .devTypeLanguageChanged,
@@ -477,6 +540,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func rebuildRecentMenu() {
+        assertMainThread()
         guard let recentSubmenu else { return }
         recentSubmenu.removeAllItems()
         if recentSnippets.isEmpty {
@@ -534,11 +598,33 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         EventTapEngine.shared.presentFillIn = { title, fields, completion in
             _ = FillInPanel.present(title: title, fields: fields, completion: completion)
         }
+        // Typed AI path handoff — always preview in phase 1.
+        EventTapEngine.shared.presentAITransform = { [weak self] input, kind, sourceApp, customInstructions, restoreOnCancel in
+            AITransformFlow.presentFromEngine(
+                input: input,
+                kind: kind,
+                sourceApp: sourceApp,
+                customInstructions: customInstructions,
+                restoreOnCancel: restoreOnCancel
+            ) { text, app in
+                self?.injectAIReplacement(text: text, sourceApp: app)
+            }
+        }
+        EventTapEngine.shared.presentAITransformHint = { [weak self] localizationKey in
+            guard let self else { return }
+            DevTypeAlert.info(
+                title: self.loc.s("ai.alert.noSelection.title"),
+                message: self.loc.s(localizationKey)
+            )
+        }
     }
 
     private func registerHotkeys() {
         hotkeyManager.onInlineSearch = { [weak self] in
             self?.toggleInlineSearch(nil)
+        }
+        hotkeyManager.onAIPalette = { [weak self] in
+            self?.presentAIPalette()
         }
         hotkeyManager.onInsertText = { text in
             TextInjectionPipeline.shared.inject(
@@ -577,8 +663,213 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleInlineSearch(_ sender: Any?) {
-        InlineSearchPanel.toggle { [weak self] snippet, sourceApp in
-            self?.expandFromSearch(snippet, sourceApp: sourceApp)
+        InlineSearchPanel.toggle { [weak self] pick, sourceApp, selection in
+            guard let self else { return }
+            switch pick {
+            case .snippet(let snippet):
+                self.expandFromSearch(snippet, sourceApp: sourceApp)
+            case .command(let command, let insertText):
+                self.handlePaletteCommand(
+                    command,
+                    insertText: insertText,
+                    sourceApp: sourceApp,
+                    selection: selection
+                )
+            }
+        }
+    }
+
+    /// Hybrid palette commit: AI → `AITransformFlow`, date/clipboard → inject, navigate → windows.
+    ///
+    /// `selection` is captured at panel-open time by `InlineSearchPanel`. It must not be
+    /// re-read here: the panel is key by now, so a live `SelectionReader` read resolves to
+    /// our own search field and yields nil.
+    private func handlePaletteCommand(
+        _ command: PaletteCommand,
+        insertText: String,
+        sourceApp: NSRunningApplication?,
+        selection: SelectionReader.Result?
+    ) {
+        CommandUsageStatsStore.shared.recordUsage(for: command.id)
+
+        switch command.action {
+        case .ai(let kind):
+            runPaletteAI(
+                kind: kind,
+                customInstructions: nil,
+                sourceApp: sourceApp,
+                selection: selection
+            )
+
+        case .aiCustom(let instructions):
+            runPaletteAI(
+                kind: .custom,
+                customInstructions: instructions,
+                sourceApp: sourceApp,
+                selection: selection
+            )
+
+        case .date, .clipboard, .generate, .insert:
+            guard !insertText.isEmpty else {
+                if case .clipboard = command.action {
+                    DevTypeAlert.info(
+                        title: loc.s("palette.tool.clipboard"),
+                        message: loc.s("palette.tool.clipboard.empty")
+                    )
+                }
+                sourceApp?.activate()
+                return
+            }
+            injectPaletteText(insertText, sourceApp: sourceApp)
+
+        case .textOp(let op):
+            // Captured at panel-open; a live read here would always miss and silently
+            // fall through to the clipboard, transforming the wrong text with no warning.
+            let source = selection?.text
+                ?? NSPasteboard.general.string(forType: .string)
+                ?? ""
+            guard !source.isEmpty else {
+                DevTypeAlert.info(
+                    title: loc.s(command.titleKey),
+                    message: loc.s("ai.alert.noSelection.message")
+                )
+                sourceApp?.activate()
+                return
+            }
+            injectPaletteText(PaletteTextOps.apply(op, to: source), sourceApp: sourceApp)
+
+        case .count:
+            sourceApp?.activate()
+
+        case .undoAI:
+            guard let original = AIUndoStore.consume() else {
+                sourceApp?.activate()
+                return
+            }
+            injectPaletteText(original, sourceApp: sourceApp)
+
+        case .navigate(let target):
+            switch target {
+            case .preferences:
+                openPreferences(nil)
+            case .manageSnippets:
+                openSnippetManager(nil)
+            case .permissionRecovery:
+                openPermissionRecovery(nil)
+            }
+        }
+    }
+
+    private func runPaletteAI(
+        kind: AITransformKind,
+        customInstructions: String?,
+        sourceApp: NSRunningApplication?,
+        selection: SelectionReader.Result?
+    ) {
+        guard AIPreferences.isEnabled else {
+            DevTypeAlert.info(
+                title: loc.s("ai.alert.disabled.title"),
+                message: loc.s("ai.alert.disabled.message")
+            )
+            return
+        }
+        switch AITextTransformSupport.availability {
+        case .available:
+            break
+        case .unavailable(let reason):
+            DevTypeAlert.info(
+                title: loc.s("ai.alert.unavailable.title"),
+                message: AITransformFlow.localizedAvailability(reason, loc: loc)
+            )
+            return
+        }
+        guard let selection, !selection.text.isEmpty else {
+            DevTypeAlert.info(
+                title: loc.s("ai.alert.noSelection.title"),
+                message: loc.s("ai.alert.noSelection.message")
+            )
+            sourceApp?.activate()
+            return
+        }
+        AITransformFlow.run(
+            input: selection.text,
+            kind: kind,
+            sourceApp: sourceApp,
+            customInstructions: customInstructions,
+            forcePreview: kind == .custom || customInstructions != nil,
+            loc: loc
+        ) { [weak self] text, app in
+            self?.injectAIReplacement(text: text, sourceApp: app)
+        }
+    }
+
+    /// Insert resolved palette text (date tools / clipboard) with eraseCount 0, like hotkey insertText.
+    private func injectPaletteText(_ text: String, sourceApp: NSRunningApplication?) {
+        if let sourceApp {
+            sourceApp.activate()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [self] in
+            TextInjectionPipeline.shared.inject(
+                snippet: SnippetModel(title: "Palette", triggerKeyword: "", replacementText: text),
+                triggerLength: 0,
+                swallowedFinalKey: false,
+                eraseCountOverride: 0,
+                preResolvedText: text,
+                secureClipboardPaste: true,
+                completion: { [weak self] in
+                    self?.refreshStatusItemUI()
+                }
+            )
+        }
+    }
+
+    private func presentAIPalette() {
+        AITransformFlow.presentFromHotkey { [weak self] text, sourceApp in
+            self?.injectAIReplacement(text: text, sourceApp: sourceApp)
+        }
+    }
+
+    /// Inject AI result after reactivating the source app. Uses `erasePlan: .empty`
+    /// so clipboard paste replaces the live selection (hotkey) or inserts at the
+    /// caret (typed path, where the trigger was already erased).
+    private func injectAIReplacement(text: String, sourceApp: NSRunningApplication?) {
+        if let sourceApp {
+            sourceApp.activate()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [self] in
+            let snapshot = PermissionCoordinator.shared.cachedSnapshot
+            let snippet = SnippetModel(
+                title: "AI Transform",
+                triggerKeyword: "",
+                replacementText: text
+            )
+            let needsCursor = InjectionPlanner.needsCursorHID(
+                cursorOffset: nil,
+                totalUTF16Length: text.utf16.count
+            )
+            let isTerminal = AXContextChecker.shared.isFrontmostAppTerminal()
+            let plan = InjectionPlanner().plan(
+                snapshot: snapshot,
+                isTerminal: isTerminal,
+                needsCursorHID: needsCursor,
+                isMultiLine: text.contains(where: \.isNewline)
+            )
+            if case .refuse = plan { return }
+
+            EventTapEngine.shared.suspendMatching()
+            TextInjectionPipeline.shared.inject(
+                snippet: snippet,
+                triggerLength: 0,
+                swallowedFinalKey: false,
+                plan: plan,
+                erasePlan: .empty,
+                preResolvedText: text,
+                secureClipboardPaste: true,
+                completion: {
+                    EventTapEngine.shared.resumeMatching()
+                    self.refreshStatusItemUI()
+                }
+            )
         }
     }
 
@@ -791,6 +1082,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshStatusItemUI() {
+        // `TextInjectionPipeline` fires its completion on the serial `com.devtype.inject`
+        // queue, so every inject-completion call site reaches this off-main. Updating the
+        // status item / `PillBadgeView` runs AutoLayout, and AutoLayout off the main thread
+        // aborts the process outright (`_AssertAutoLayoutOnAllowedThreadsOnly` → SIGABRT),
+        // not merely misbehaves. Funnel to main before touching any AppKit state.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.refreshStatusItemUI() }
+            return
+        }
+        assertMainThread()
         let snapshot = PermissionProbe().snapshot()
         let display = EngineDisplayStatus.resolve(
             snapshot: snapshot,
@@ -1052,8 +1353,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         openPreferences(sender, tab: .general)
     }
 
+    /// Start/stop `SelectionMonitor` from persisted `devtype.ai.enabled` (default off).
+    /// Preferences also toggles via `AIPreferences.isEnabled`; this covers cold launch.
+    private func syncSelectionMonitorWithAIPreferences() {
+        SelectionMonitor.shared.isFeatureEnabled = AIPreferences.isEnabled
+    }
+
     @objc private func quitApp(_ sender: NSMenuItem) {
         DevTypeLog.app.info("[App] quit requested")
+        SelectionMonitor.shared.stop()
         EventTapEngine.shared.stop()
         SecureInputMonitor.shared.stopMonitoring()
         PermissionCoordinator.shared.cancelPendingWork()

@@ -145,9 +145,19 @@ private final class SnippetRowView: NSView {
             enableSwitch.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             enableSwitch.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
 
+            // Both labels span the whole text column, and the column spans the
+            // whole row. As a `<=`, the stack settled at whatever its widest
+            // label measured — so a preview one point past its own measured
+            // width truncated ("El Paso" → "El P…") with hundreds of points of
+            // empty row to its right, and a recycled cell inherited the previous
+            // occupant's narrower width. The trigger pill still takes the space
+            // it needs: it outranks the text on hugging and compression alike.
+            titleLabel.widthAnchor.constraint(equalTo: textStack.widthAnchor),
+            previewLabel.widthAnchor.constraint(equalTo: textStack.widthAnchor),
+
             textStack.leadingAnchor.constraint(equalTo: enableSwitch.trailingAnchor, constant: 12),
             textStack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: metricsStack.leadingAnchor, constant: -12),
+            textStack.trailingAnchor.constraint(equalTo: metricsStack.leadingAnchor, constant: -12),
 
             metricsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             metricsStack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
@@ -689,12 +699,13 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         ])
 
         // MARK: Action bar
-        let addButton = CapsuleButton(
+        let addButton = SplitCapsuleButton(
             title: loc.s("manager.add"),
             symbol: "plus",
-            style: .primary,
+            disclosureTooltip: loc.s("manager.add.template.tooltip"),
             target: self,
-            action: #selector(addSnippet)
+            primaryAction: #selector(addSnippet),
+            disclosureAction: #selector(addSnippetFromTemplate)
         )
         let editButton = CapsuleButton(
             title: loc.s("manager.edit"),
@@ -990,19 +1001,28 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     // MARK: - Snippet actions
 
     @objc private func addSnippet() {
-        presentEditor(for: nil)
+        presentEditor(for: nil, draft: nil)
+    }
+
+    @objc private func addSnippetFromTemplate() {
+        SnippetTemplatePanel.present(from: view.window) { [weak self] template in
+            guard let self else { return }
+            let draft = template.makeDraft(loc: self.loc)
+            self.presentEditor(for: nil, draft: draft)
+        }
     }
 
     @objc private func editSelectedSnippet() {
         let selectedRow = tableView.selectedRow
         guard selectedRow >= 0 && selectedRow < snippets.count else { return }
-        presentEditor(for: snippets[selectedRow])
+        presentEditor(for: snippets[selectedRow], draft: nil)
     }
 
-    private func presentEditor(for existing: SnippetModel?) {
+    private func presentEditor(for existing: SnippetModel?, draft: SnippetModel?) {
         SnippetEditorSheet.present(
             from: view.window,
             existing: existing,
+            draft: draft,
             groups: groups,
             currentGroupID: selectedGroupID,
             validate: { [weak self] trigger, caseSensitive in

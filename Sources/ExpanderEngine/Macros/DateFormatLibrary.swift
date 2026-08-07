@@ -44,7 +44,7 @@ public struct DatePreset: Equatable, Identifiable {
 ///
 /// Arithmetic is always performed through `Calendar.date(byAdding:)`, never by adding a raw
 /// `TimeInterval`, so DST transitions and variable month lengths behave the way users expect.
-public struct DateOffset: Equatable {
+public struct DateOffset: Equatable, Sendable {
     public var years: Int
     public var months: Int
     public var weeks: Int

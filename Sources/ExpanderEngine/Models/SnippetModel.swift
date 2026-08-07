@@ -25,6 +25,8 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
     public var includeApps: [String]
     /// §4.4: Bundle IDs this snippet is suppressed in. Takes precedence over `includeApps`.
     public var excludeApps: [String]
+    /// On-device AI transform kind id (empty = plain snippet). Backward-compatible via `decodeIfPresent`.
+    public var aiTransform: String
 
     /// True when this snippet pastes an image instead of text.
     public var isImageSnippet: Bool { !imagePath.isEmpty }
@@ -57,7 +59,8 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         usageCount: Int = 0,
         tags: [String] = [],
         includeApps: [String] = [],
-        excludeApps: [String] = []
+        excludeApps: [String] = [],
+        aiTransform: String = ""
     ) {
         self.id = id
         self.title = title
@@ -75,6 +78,7 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         self.tags = tags
         self.includeApps = includeApps
         self.excludeApps = excludeApps
+        self.aiTransform = aiTransform
     }
 
     /// Display title for lists: label if present, else title, else trigger.
@@ -90,6 +94,8 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         case imagePath, createdAt, updatedAt, usageCount
         // §4.4: added in schema v2.1 — always decoded with `decodeIfPresent`.
         case tags, includeApps, excludeApps
+        // On-device AI — absent in every pre-existing library file.
+        case aiTransform
     }
 
     public init(from decoder: Decoder) throws {
@@ -111,6 +117,7 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         includeApps = try c.decodeIfPresent([String].self, forKey: .includeApps) ?? []
         excludeApps = try c.decodeIfPresent([String].self, forKey: .excludeApps) ?? []
+        aiTransform = try c.decodeIfPresent(String.self, forKey: .aiTransform) ?? ""
     }
 }
 

@@ -24,6 +24,7 @@ enum PreferencesTab: Int, CaseIterable {
     case general
     case snippets
     case hotkeys
+    case ai
     case advanced
 
     var title: String {
@@ -31,6 +32,7 @@ enum PreferencesTab: Int, CaseIterable {
         case .general: return LocalizationManager.shared.s("prefs.tab.general")
         case .snippets: return LocalizationManager.shared.s("prefs.tab.snippets")
         case .hotkeys: return LocalizationManager.shared.s("prefs.tab.hotkeys")
+        case .ai: return LocalizationManager.shared.s("prefs.tab.ai")
         case .advanced: return LocalizationManager.shared.s("prefs.tab.advanced")
         }
     }
@@ -40,8 +42,17 @@ enum PreferencesTab: Int, CaseIterable {
         case .general: return "gearshape"
         case .snippets: return "square.stack.3d.up"
         case .hotkeys: return "keyboard"
+        case .ai: return "sparkles"
         case .advanced: return "wrench.and.screwdriver"
         }
+    }
+
+    /// AI requires macOS 26+; hide the tab on older systems.
+    static var visibleCases: [PreferencesTab] {
+        if #available(macOS 26.0, *) {
+            return Array(allCases)
+        }
+        return allCases.filter { $0 != .ai }
     }
 }
 
@@ -90,14 +101,14 @@ private final class PrefsFlippedView: NSView {
 // MARK: - Sidebar nav row
 
 /// System Settings–style sidebar row: icon + label, rounded selection, hover
-/// wash, and a ⌘1…⌘4 key equivalent so the window is keyboard-navigable.
+/// wash, and a ⌘1…⌘N key equivalent so the window is keyboard-navigable.
 private final class SidebarNavRow: NSButton {
     let tab: PreferencesTab
     private let symbolName: String
     var isSelectedRow = false { didSet { needsDisplay = true } }
     private var hovering = false { didSet { needsDisplay = true } }
 
-    init(tab: PreferencesTab, target: AnyObject?, action: Selector?) {
+    init(tab: PreferencesTab, index: Int, target: AnyObject?, action: Selector?) {
         self.tab = tab
         self.symbolName = tab.symbol
         super.init(frame: .zero)
@@ -108,7 +119,7 @@ private final class SidebarNavRow: NSButton {
         wantsLayer = true
         focusRingType = .none
         translatesAutoresizingMaskIntoConstraints = false
-        keyEquivalent = String(tab.rawValue + 1)
+        keyEquivalent = String(index + 1)
         keyEquivalentModifierMask = [.command]
         setContentHuggingPriority(.defaultLow, for: .horizontal)
         heightAnchor.constraint(equalToConstant: 30).isActive = true
@@ -243,6 +254,25 @@ final class PreferencesViewController: NSViewController,
         wrapping: true
     )
 
+    // AI
+    private let aiEnabledSwitch = NSSwitch()
+    private let aiAvailabilityLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(11),
+        color: DevTypeTheme.textSecondary,
+        wrapping: true
+    )
+    private var aiPaletteRecorder: ShortcutRecorderView?
+    private var aiOutputModePopups: [AITransformKind: NSPopUpButton] = [:]
+    private let aiAllowlistTable = NSTableView()
+    private let aiAllowlistEmptyLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(11.5),
+        color: DevTypeTheme.textTertiary
+    )
+    private let aiAllowlistField = NSTextField()
+    private var aiAllowlist: [String] = []
+
     init(hotkeyManager: HotkeyManager?) {
         self.hotkeyManager = hotkeyManager
         super.init(nibName: nil, bundle: nil)
@@ -278,8 +308,8 @@ final class PreferencesViewController: NSViewController,
         navStack.translatesAutoresizingMaskIntoConstraints = false
         navStack.setAccessibilityRole(NSAccessibility.Role.tabGroup)
         navStack.setAccessibilityLabel(loc.s("ax.preferences.tabs"))
-        for tab in PreferencesTab.allCases {
-            let row = SidebarNavRow(tab: tab, target: self, action: #selector(navRowTapped(_:)))
+        for (index, tab) in PreferencesTab.visibleCases.enumerated() {
+            let row = SidebarNavRow(tab: tab, index: index, target: self, action: #selector(navRowTapped(_:)))
             row.isSelectedRow = tab == selectedTab
             navRows.append(row)
             navStack.addArrangedSubview(row)
@@ -331,7 +361,7 @@ final class PreferencesViewController: NSViewController,
         content.addSubview(paneTitle)
         content.addSubview(paneHost)
 
-        for tab in PreferencesTab.allCases {
+        for tab in PreferencesTab.visibleCases {
             let pane = makeScrollingPane(for: tab)
             pane.isHidden = tab != selectedTab
             paneHost.addSubview(pane)
@@ -405,7 +435,8 @@ final class PreferencesViewController: NSViewController,
     }
 
     func select(_ tab: PreferencesTab) {
-        applyTabSelection(tab, animated: false)
+        let resolved = PreferencesTab.visibleCases.contains(tab) ? tab : .general
+        applyTabSelection(resolved, animated: false)
     }
 
     @objc private func navRowTapped(_ sender: SidebarNavRow) {
@@ -435,6 +466,7 @@ final class PreferencesViewController: NSViewController,
         }
         if tab == .snippets { stats.refresh() }
         if tab == .advanced { reloadAdvanced() }
+        if tab == .ai { reloadAI() }
     }
 
     /// Sidebar footer: one glance answers "is it on?" without opening the menu.
@@ -474,6 +506,7 @@ final class PreferencesViewController: NSViewController,
         reloadGeneral()
         reloadSnippets()
         reloadHotkeys()
+        reloadAI()
         reloadAdvanced()
         refreshEngineStatus()
     }
@@ -503,6 +536,7 @@ final class PreferencesViewController: NSViewController,
         case .general: buildGeneral(into: stack)
         case .snippets: buildSnippets(into: stack)
         case .hotkeys: buildHotkeys(into: stack)
+        case .ai: buildAI(into: stack)
         case .advanced: buildAdvanced(into: stack)
         }
 
@@ -951,6 +985,287 @@ final class PreferencesViewController: NSViewController,
         reloadHotkeys()
     }
 
+    // MARK: AI
+
+    private func buildAI(into stack: NSStackView) {
+        let featureAvailable: Bool
+        if #available(macOS 26.0, *) {
+            featureAvailable = true
+        } else {
+            featureAvailable = false
+        }
+
+        if !featureAvailable {
+            let unsupportedCard = makeCard(title: loc.s("prefs.tab.ai"), symbol: "sparkles")
+            let note = DevTypeTheme.makeLabel(
+                loc.s("prefs.ai.unsupported.hint"),
+                font: DevTypeTheme.font(11.5),
+                color: DevTypeTheme.textSecondary,
+                wrapping: true
+            )
+            note.translatesAutoresizingMaskIntoConstraints = false
+            stackInCard(unsupportedCard, views: [note])
+            stack.addArrangedSubview(unsupportedCard)
+            pinWidth(of: [unsupportedCard], to: stack)
+            return
+        }
+
+        // Enable + availability
+        let enableCard = makeCard(title: loc.s("prefs.ai.enable.card"), symbol: "sparkles")
+        let enableRow = makeToggleRow(
+            title: loc.s("prefs.ai.enable"),
+            toggle: aiEnabledSwitch,
+            action: #selector(aiEnabledChanged)
+        )
+        let privacyNote = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.privacy"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        privacyNote.translatesAutoresizingMaskIntoConstraints = false
+        aiAvailabilityLabel.translatesAutoresizingMaskIntoConstraints = false
+        stackInCard(enableCard, views: [enableRow, privacyNote, aiAvailabilityLabel])
+
+        // Palette hotkey
+        let hotkeyCard = makeCard(title: loc.s("prefs.ai.hotkey"), symbol: "keyboard")
+        let hotkeyHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.hotkey.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        hotkeyHint.translatesAutoresizingMaskIntoConstraints = false
+        let recorder = ShortcutRecorderView(shortcut: HotkeyPreferences.aiPaletteShortcut)
+        recorder.onChange = { [weak self] shortcut in
+            self?.applyAIPaletteShortcut(shortcut)
+        }
+        aiPaletteRecorder = recorder
+        let resetButton = CapsuleButton(
+            title: loc.s("prefs.ai.hotkey.reset"),
+            symbol: "arrow.counterclockwise",
+            style: .secondary,
+            target: self,
+            action: #selector(resetAIPaletteShortcut)
+        )
+        let recorderRow = NSStackView(views: [recorder, resetButton])
+        recorderRow.orientation = .horizontal
+        recorderRow.spacing = 10
+        recorderRow.translatesAutoresizingMaskIntoConstraints = false
+        stackInCard(hotkeyCard, views: [hotkeyHint, recorderRow])
+
+        // Per-action output modes
+        let modesCard = makeCard(title: loc.s("prefs.ai.outputModes"), symbol: "arrow.left.arrow.right")
+        let modesHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.outputModes.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        modesHint.translatesAutoresizingMaskIntoConstraints = false
+        var modeRows: [NSView] = [modesHint]
+        aiOutputModePopups.removeAll()
+        for kind in AITransformKind.builtInPalette {
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            popup.translatesAutoresizingMaskIntoConstraints = false
+            popup.removeAllItems()
+            popup.addItem(withTitle: loc.s("prefs.ai.output.direct"))
+            popup.lastItem?.representedObject = AIOutputMode.direct.rawValue
+            popup.addItem(withTitle: loc.s("prefs.ai.output.preview"))
+            popup.lastItem?.representedObject = AIOutputMode.preview.rawValue
+            popup.target = self
+            popup.action = #selector(aiOutputModeChanged(_:))
+            popup.setAccessibilityLabel(loc.s(kind.localizationKey))
+            popup.widthAnchor.constraint(greaterThanOrEqualToConstant: 110).isActive = true
+            aiOutputModePopups[kind] = popup
+
+            let label = DevTypeTheme.makeLabel(
+                loc.s(kind.localizationKey),
+                font: DevTypeTheme.font(12.5, .medium),
+                color: DevTypeTheme.textPrimary
+            )
+            label.translatesAutoresizingMaskIntoConstraints = false
+            let row = NSStackView(views: [label, popup])
+            row.orientation = .horizontal
+            row.spacing = 10
+            row.alignment = .centerY
+            row.translatesAutoresizingMaskIntoConstraints = false
+            label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            popup.setContentHuggingPriority(.required, for: .horizontal)
+            modeRows.append(row)
+        }
+        stackInCard(modesCard, views: modeRows)
+
+        // Typed-path allowlist
+        let allowCard = makeCard(title: loc.s("prefs.ai.allowlist"), symbol: "checkmark.seal")
+        let allowHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.allowlist.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        allowHint.translatesAutoresizingMaskIntoConstraints = false
+
+        aiAllowlistTable.headerView = nil
+        aiAllowlistTable.rowHeight = 22
+        aiAllowlistTable.backgroundColor = .clear
+        aiAllowlistTable.gridStyleMask = []
+        aiAllowlistTable.usesAlternatingRowBackgroundColors = false
+        aiAllowlistTable.allowsMultipleSelection = true
+        aiAllowlistTable.dataSource = self
+        aiAllowlistTable.delegate = self
+        if aiAllowlistTable.tableColumns.isEmpty {
+            aiAllowlistTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("aiAllow")))
+        }
+        aiAllowlistTable.setAccessibilityLabel(loc.s("prefs.ai.allowlist"))
+
+        let allowScroll = NSScrollView()
+        allowScroll.translatesAutoresizingMaskIntoConstraints = false
+        allowScroll.hasVerticalScroller = true
+        allowScroll.borderType = .noBorder
+        allowScroll.drawsBackground = false
+        allowScroll.documentView = aiAllowlistTable
+        allowScroll.heightAnchor.constraint(equalToConstant: 110).isActive = true
+
+        aiAllowlistEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        aiAllowlistField.translatesAutoresizingMaskIntoConstraints = false
+        aiAllowlistField.placeholderString = loc.s("prefs.ai.allowlist.bundleID")
+        aiAllowlistField.font = DevTypeTheme.font(12)
+        aiAllowlistField.setAccessibilityLabel(loc.s("prefs.ai.allowlist.bundleID"))
+        aiAllowlistField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+
+        let allowButtons = NSStackView(views: [
+            CapsuleButton(
+                title: loc.s("prefs.ai.allowlist.addFrontmost"),
+                symbol: "plus.app",
+                style: .secondary,
+                target: self,
+                action: #selector(aiAllowlistAddFrontmost)
+            ),
+            CapsuleButton(
+                title: loc.s("common.add"),
+                symbol: "plus",
+                style: .primary,
+                target: self,
+                action: #selector(aiAllowlistAddTyped)
+            ),
+            CapsuleButton(
+                title: loc.s("common.remove"),
+                symbol: "trash",
+                style: .destructive,
+                target: self,
+                action: #selector(aiAllowlistRemove)
+            )
+        ])
+        allowButtons.orientation = .horizontal
+        allowButtons.spacing = 8
+        allowButtons.translatesAutoresizingMaskIntoConstraints = false
+
+        let editorRow = NSStackView(views: [aiAllowlistField])
+        editorRow.orientation = .horizontal
+        editorRow.translatesAutoresizingMaskIntoConstraints = false
+
+        stackInCard(allowCard, views: [allowHint, allowScroll, aiAllowlistEmptyLabel, editorRow, allowButtons])
+
+        for card in [enableCard, hotkeyCard, modesCard, allowCard] {
+            stack.addArrangedSubview(card)
+        }
+        pinWidth(of: [enableCard, hotkeyCard, modesCard, allowCard], to: stack)
+    }
+
+    private func reloadAI() {
+        guard panes[.ai] != nil else { return }
+        aiEnabledSwitch.state = AIPreferences.isEnabled ? .on : .off
+        aiAvailabilityLabel.stringValue = loc.s(
+            "prefs.ai.availability",
+            loc.s(AITextTransformSupport.availability.localizationKey)
+        )
+        switch AITextTransformSupport.availability {
+        case .available:
+            aiAvailabilityLabel.textColor = DevTypeTheme.statusGreen
+        case .unavailable:
+            aiAvailabilityLabel.textColor = DevTypeTheme.statusOrange
+        }
+        aiPaletteRecorder?.setShortcut(HotkeyPreferences.aiPaletteShortcut)
+        for (kind, popup) in aiOutputModePopups {
+            let mode = AIPreferences.outputMode(for: kind)
+            let index = mode == .direct ? 0 : 1
+            popup.selectItem(at: index)
+        }
+        aiAllowlist = AIPreferences.typedPathAllowlist
+        aiAllowlistTable.reloadData()
+        aiAllowlistEmptyLabel.stringValue = aiAllowlist.isEmpty
+            ? loc.s("prefs.ai.allowlist.empty")
+            : ""
+        aiAllowlistEmptyLabel.isHidden = !aiAllowlist.isEmpty
+    }
+
+    @objc private func aiEnabledChanged() {
+        AIPreferences.isEnabled = aiEnabledSwitch.state == .on
+        reloadAI()
+    }
+
+    @objc private func aiOutputModeChanged(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String,
+              let mode = AIOutputMode(rawValue: raw) else { return }
+        guard let kind = aiOutputModePopups.first(where: { $0.value === sender })?.key else { return }
+        AIPreferences.setOutputMode(mode, for: kind)
+    }
+
+    private func applyAIPaletteShortcut(_ shortcut: DevTypeShortcut?) {
+        guard let shortcut else { return }
+        guard let manager = hotkeyManager else {
+            HotkeyPreferences.aiPaletteShortcut = shortcut
+            reloadAI()
+            return
+        }
+        let status = manager.applyAIPaletteShortcut(shortcut)
+        if status != noErr {
+            DevTypeAlert.warn(
+                title: loc.s("prefs.hotkeys.failed.title"),
+                message: loc.s("prefs.hotkeys.failed.message", shortcut.displayString, Int(status)),
+                window: view.window
+            )
+        }
+        reloadAI()
+    }
+
+    @objc private func resetAIPaletteShortcut() {
+        HotkeyPreferences.resetAIPaletteShortcut()
+        applyAIPaletteShortcut(.aiPaletteDefault)
+    }
+
+    @objc private func aiAllowlistAddFrontmost() {
+        guard let bundleID = AXContextChecker.shared.frontmostApplicationBundleIdentifier(),
+              !bundleID.isEmpty else {
+            DevTypeAlert.warn(
+                title: loc.s("alert.muteFrontmost.failed.title"),
+                message: loc.s("alert.muteFrontmost.failed.message"),
+                window: view.window
+            )
+            return
+        }
+        AIPreferences.addTypedPathApp(bundleID)
+        reloadAI()
+    }
+
+    @objc private func aiAllowlistAddTyped() {
+        let bundleID = aiAllowlistField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundleID.isEmpty else { return }
+        AIPreferences.addTypedPathApp(bundleID)
+        aiAllowlistField.stringValue = ""
+        reloadAI()
+    }
+
+    @objc private func aiAllowlistRemove() {
+        let selected = aiAllowlistTable.selectedRowIndexes
+        guard !selected.isEmpty else { return }
+        let ids = selected.compactMap { aiAllowlist.indices.contains($0) ? aiAllowlist[$0] : nil }
+        AIPreferences.removeTypedPathApps(ids)
+        reloadAI()
+    }
+
     // MARK: Advanced (§2.10 / §3.9 / §3.2 / §3.7 readouts)
 
     private func buildAdvanced(into stack: NSStackView) {
@@ -1061,6 +1376,7 @@ final class PreferencesViewController: NSViewController,
     func numberOfRows(in tableView: NSTableView) -> Int {
         if tableView === mutedTable { return mutedApps.count }
         if tableView === macroTable { return macros.count }
+        if tableView === aiAllowlistTable { return aiAllowlist.count }
         return 0
     }
 
@@ -1077,6 +1393,9 @@ final class PreferencesViewController: NSViewController,
                 ? loc.s("prefs.hotkeys.macros.kind.insertText")
                 : loc.s("prefs.hotkeys.macros.kind.openURL")
             text = "\(shortcut.displayString)  ·  \(kindTitle)  ·  \(macro.argument)"
+        } else if tableView === aiAllowlistTable {
+            guard aiAllowlist.indices.contains(row) else { return nil }
+            text = aiAllowlist[row]
         } else {
             return nil
         }

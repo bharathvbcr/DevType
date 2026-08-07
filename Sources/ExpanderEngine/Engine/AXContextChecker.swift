@@ -171,6 +171,27 @@ public final class AXContextChecker {
         return nil
     }
 
+    /// Focused element's `kAXRoleAttribute`, when readable.
+    ///
+    /// Used by inject to consult `AXWriteCapabilityStore` with a `(bundleID, role)` key so a
+    /// Chromium web view's false-success does not dictate the same app's native fields — and so a
+    /// role already condemned this session skips AX write / AX direct without re-paying the cost.
+    public func focusedElementRole(element: AXUIElement? = nil) -> String? {
+        let axElement: AXUIElement
+        if let element {
+            axElement = element
+        } else {
+            guard let fetched = focusedElement() else { return nil }
+            axElement = fetched
+        }
+        var roleRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleRef) == .success,
+              let role = roleRef as? String, !role.isEmpty else {
+            return nil
+        }
+        return role
+    }
+
     /// Pure fail-closed policy: AX unavailable or no focused element ⇒ treat as unsafe.
     public static func mustRefuseExpandWhenFocusedUnknown(
         axTrusted: Bool,

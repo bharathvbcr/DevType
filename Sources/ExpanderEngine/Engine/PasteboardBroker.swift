@@ -169,6 +169,22 @@ public final class PasteboardBroker {
         }
     }
 
+    // MARK: - User clipboard write
+
+    /// Writes a string the user intends to keep (e.g. Preview → Copy).
+    ///
+    /// Invalidates any in-flight expansion restore so a later restore cannot clobber
+    /// the copied text, and so `changeCount` tracking stays coherent with ownership.
+    public func writeUserClipboardString(_ string: String) {
+        _ = beginRestoreGeneration()
+        restoreLock.lock()
+        pendingTicket = nil
+        restoreLock.unlock()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(string, forType: .string)
+    }
+
     // MARK: - Text paste
 
     public func pasteViaClipboard(text: String, completion: ((Bool) -> Void)? = nil) {

@@ -2,11 +2,18 @@ import AppKit
 import Carbon.HIToolbox
 import ExpanderEngine
 
-/// Spotlight-style glass palette for searching and expanding snippets (⌘/ by default).
+/// Spotlight-style glass palette for snippets, AI tools, and instant commands (⌘/ by default).
 enum InlineSearchPanel {
     private final class KeyablePanel: NSPanel {
         override var canBecomeKey: Bool { true }
         override var canBecomeMain: Bool { true }
+    }
+
+    /// Result of committing a palette row.
+    enum Pick {
+        case snippet(SnippetModel)
+        /// `insertText` is non-empty for date/clipboard inserts; empty for AI / navigate.
+        case command(PaletteCommand, insertText: String)
     }
 
     private static var panel: NSPanel?
@@ -19,7 +26,7 @@ enum InlineSearchPanel {
     static func toggle(
         store: SnippetStore = .shared,
         loc: LocalizationManager = .shared,
-        onPick: @escaping (SnippetModel, NSRunningApplication?) -> Void
+        onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Result?) -> Void
     ) {
         if isOpen { close() } else { open(store: store, loc: loc, onPick: onPick) }
     }
@@ -35,9 +42,14 @@ enum InlineSearchPanel {
     private static func open(
         store: SnippetStore,
         loc: LocalizationManager,
-        onPick: @escaping (SnippetModel, NSRunningApplication?) -> Void
+        onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Result?) -> Void
     ) {
         let sourceApp = NSWorkspace.shared.frontmostApplication
+        // Read the selection HERE, before `NSApp.activate(ignoringOtherApps:)` below makes
+        // DevType frontmost. `SelectionReader` resolves the *system-wide* focused element,
+        // so once our own panel is key it reads the search field — never the user's text.
+        // Any later read from a palette command is therefore guaranteed to return nil.
+        let sourceSelection = SelectionReader.readSelectedText()
         EventTapEngine.shared.suspendMatching()
 
         let panel = KeyablePanel(
@@ -52,9 +64,9 @@ enum InlineSearchPanel {
         let controller = InlineSearchController(
             store: store,
             loc: loc,
-            onPick: { snippet in
+            onPick: { pick in
                 close()
-                onPick(snippet, sourceApp)
+                onPick(pick, sourceApp, sourceSelection)
             },
             onCancel: {
                 close()
@@ -77,29 +89,20 @@ enum InlineSearchPanel {
 
     // MARK: - Session-aware dismissal
 
-    /// The palette is a transient session: anything that takes focus away from it
-    /// dismisses it, exactly like esc. That covers a click in another DevType
-    /// window, a click in another app or on the desktop, and focus leaving the
-    /// panel by any other route (⌘-tab, Mission Control, a menu bar click).
     private static func installDismissWatchers(for panel: NSPanel) {
         let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
 
-        // Clicks landing in another window of our own app.
         let local = NSEvent.addLocalMonitorForEvents(matching: clicks) { event in
             if event.window !== panel { dismissFromOutsideInteraction() }
             return event
         }
         if let local { dismissMonitors.append(local) }
 
-        // Clicks landing in any other app (or the desktop).
         let global = NSEvent.addGlobalMonitorForEvents(matching: clicks) { _ in
             dismissFromOutsideInteraction()
         }
         if let global { dismissMonitors.append(global) }
 
-        // Backstop for focus changes that never produce a click here. Attached a
-        // runloop turn late so the activation that opens the panel can settle
-        // without tripping it.
         DispatchQueue.main.async {
             guard self.panel === panel else { return }
             dismissObservers.append(
@@ -119,17 +122,11 @@ enum InlineSearchPanel {
         dismissObservers.removeAll()
     }
 
-    /// Unlike esc, focus has already moved on its own — don't reactivate the
-    /// source app on top of wherever the user just clicked.
     private static func dismissFromOutsideInteraction() {
         guard panel != nil else { return }
         close()
     }
 
-    /// Subtle fade + settle presentation, like Spotlight.
-    ///
-    /// §5.2: this used to run unconditionally. It now honours Reduce Motion —
-    /// the panel simply appears at its final frame, fully opaque.
     private static func animateIn(_ panel: NSPanel) {
         let finalFrame = panel.frame
         guard !DevTypeAccessibility.reduceMotion else {
@@ -160,9 +157,35 @@ enum InlineSearchPanel {
     }
 }
 
+// MARK: - Header cell
+
+private final class PaletteHeaderCellView: NSView {
+    private let label = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10, .bold), color: DevTypeTheme.textTertiary)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+        ])
+        dtHideSubviewsFromAccessibility()
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func configure(section: PaletteSection, loc: LocalizationManager) {
+        label.stringValue = loc.s(section.titleKey).uppercased()
+    }
+}
+
 // MARK: - Result cell
 
-/// One result row: crimson trigger pill, title + preview, group tag, ⌘n jump hint.
+/// One result row: crimson trigger/badge pill, title + preview, section/group tag, ⌘n jump hint.
 private final class SearchHitCellView: NSView {
     private let triggerPill = PillBadgeView(text: "", tint: DevTypeTheme.accent, font: DevTypeTheme.mono(11.5, .bold), truncates: true)
     private let titleLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(13, .semibold), color: DevTypeTheme.textPrimary)
@@ -187,8 +210,6 @@ private final class SearchHitCellView: NSView {
         NSLayoutConstraint.activate([
             triggerPill.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             triggerPill.centerYAnchor.constraint(equalTo: centerYAnchor),
-            // Fixed-width trigger column: titles always start at the same x,
-            // no matter how long the trigger keyword is.
             triggerPill.widthAnchor.constraint(equalToConstant: 92),
 
             titleLabel.leadingAnchor.constraint(equalTo: triggerPill.trailingAnchor, constant: 12),
@@ -201,8 +222,6 @@ private final class SearchHitCellView: NSView {
 
             groupLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             groupLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            // Fixed-width group column keeps the title's trailing edge (and the
-            // ⌘n jump cap anchored to it) stable across rows.
             groupLabel.widthAnchor.constraint(equalToConstant: 88)
         ])
     }
@@ -210,13 +229,48 @@ private final class SearchHitCellView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(with hit: SearchHit, jumpNumber: Int?) {
+    func configureCommand(_ hit: PaletteCommandHit, jumpNumber: Int?, loc: LocalizationManager) {
+        let tint: NSColor
+        switch hit.command.section {
+        case .ai: tint = DevTypeTheme.accentBright
+        case .commands: tint = DevTypeTheme.accent
+        case .snippets: tint = DevTypeTheme.accent
+        }
+        let triggerText = hit.command.trigger.isEmpty ? "·" : hit.command.trigger
+        triggerPill.update(text: triggerText, tint: hit.isEnabled ? tint : DevTypeTheme.textTertiary)
+        triggerPill.toolTip = hit.command.trigger
+
+        titleLabel.textColor = hit.isEnabled ? DevTypeTheme.textPrimary : DevTypeTheme.textTertiary
+        titleLabel.stringValue = loc.s(hit.command.titleKey)
+
+        previewLabel.textColor = DevTypeTheme.textSecondary
+        if let reason = hit.disabledReason, !reason.isEmpty {
+            previewLabel.stringValue = reason
+        } else {
+            previewLabel.stringValue = hit.preview
+        }
+
+        groupLabel.textColor = DevTypeTheme.textTertiary
+        groupLabel.stringValue = loc.s(hit.command.section.titleKey)
+        groupLabel.toolTip = groupLabel.stringValue
+
+        installJumpCap(hit.isEnabled ? jumpNumber : nil)
+
+        dtHideSubviewsFromAccessibility()
+        dtApplyAccessibility(
+            role: NSAccessibility.Role.row,
+            label: loc.s("ax.paletteRow.command", triggerText, loc.s(hit.command.titleKey), loc.s(hit.command.section.titleKey)),
+            value: hit.preview,
+            help: jumpNumber.map { loc.s("ax.searchRow.help", $0) }
+                ?? loc.s("ax.searchRow.helpNoJump")
+        )
+    }
+
+    func configureSnippet(with hit: SearchHit, jumpNumber: Int?) {
         let loc = LocalizationManager.shared
         let tint = hit.snippet.enabled ? DevTypeTheme.accent : DevTypeTheme.statusGray
         let triggerText = hit.snippet.triggerKeyword.isEmpty ? "·" : hit.snippet.triggerKeyword
 
-        // §4.7: `SearchHit.highlights` carries the matched ranges, so results can
-        // show *why* they matched instead of a flat string.
         if let attributed = Self.highlighted(
             triggerText,
             field: .trigger,
@@ -252,8 +306,6 @@ private final class SearchHitCellView: NSView {
             previewText = MacroPreview.render(hit.snippet.replacementText)
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespaces)
-            // Content ranges are offsets into `replacementText`, which the macro
-            // preview rewrites — so only highlight when the preview is unchanged.
             if previewText == hit.snippet.replacementText,
                let attributed = Self.highlighted(
                    previewText,
@@ -283,22 +335,8 @@ private final class SearchHitCellView: NSView {
         }
         groupLabel.toolTip = hit.groupName
 
-        jumpCap?.removeFromSuperview()
-        jumpCap = nil
-        if let jumpNumber {
-            let cap = KeyCapView("⌘\(jumpNumber)")
-            jumpCap = cap
-            addSubview(cap)
-            NSLayoutConstraint.activate([
-                cap.trailingAnchor.constraint(equalTo: groupLabel.leadingAnchor, constant: -6),
-                cap.centerYAnchor.constraint(equalTo: centerYAnchor)
-            ])
-        }
+        installJumpCap(jumpNumber)
 
-        // §5.1: this is the app's PRIMARY keyboard surface and it announced
-        // "row 1" with no content — four bare NSTextFields plus a custom
-        // PillBadgeView in a plain NSView, none of them AX elements. Collapse the
-        // row into one labelled element with a spoken keyboard hint.
         dtHideSubviewsFromAccessibility()
         let spokenTrigger = hit.snippet.triggerKeyword.isEmpty
             ? loc.s("ax.noTrigger")
@@ -314,9 +352,20 @@ private final class SearchHitCellView: NSView {
         )
     }
 
-    /// §4.7: builds an `NSAttributedString` with the matched ranges emphasised.
-    /// Returns nil when the hit carries no highlight for `field` (legacy hits and
-    /// the empty-query listing), so callers fall back to a plain string.
+    private func installJumpCap(_ jumpNumber: Int?) {
+        jumpCap?.removeFromSuperview()
+        jumpCap = nil
+        if let jumpNumber {
+            let cap = KeyCapView("⌘\(jumpNumber)")
+            jumpCap = cap
+            addSubview(cap)
+            NSLayoutConstraint.activate([
+                cap.trailingAnchor.constraint(equalTo: groupLabel.leadingAnchor, constant: -6),
+                cap.centerYAnchor.constraint(equalTo: centerYAnchor)
+            ])
+        }
+    }
+
     private static func highlighted(
         _ text: String,
         field: SearchField,
@@ -327,8 +376,6 @@ private final class SearchHitCellView: NSView {
         guard !text.isEmpty,
               let highlight = hit.highlights.first(where: { $0.field == field }),
               !highlight.ranges.isEmpty else { return nil }
-        // `ranges` are grapheme offsets into the original field text; the engine
-        // ships the converter because NSAttributedString wants UTF-16.
         let ranges = SnippetSearch.utf16Ranges(highlight.ranges, in: text)
         guard !ranges.isEmpty else { return nil }
 
@@ -339,8 +386,6 @@ private final class SearchHitCellView: NSView {
         let full = NSRange(location: 0, length: attributed.length)
         let emphasis = DevTypeTheme.accentBright
         let emphasisFont = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
-        // §5.2: weight + background, not colour alone, so the match is visible
-        // under Differentiate Without Color and in greyscale.
         let attributes: [NSAttributedString.Key: Any] = [
             .foregroundColor: emphasis,
             .backgroundColor: emphasis.withAlphaComponent(0.18),
@@ -360,14 +405,20 @@ private final class SearchHitCellView: NSView {
 private final class InlineSearchController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private let store: SnippetStore
     private let loc: LocalizationManager
-    private let onPick: (SnippetModel) -> Void
+    private let onPick: (InlineSearchPanel.Pick) -> Void
     private let onCancel: () -> Void
 
     private var groups: [SnippetGroup] = []
-    private var hits: [SearchHit] = []
+    private var rows: [PaletteListRow] = []
     private var selection = 0
     private var keyMonitor: Any?
     private var listenerToken: UUID?
+    /// Clipboard text + changeCount — refreshed on open / when changeCount moves (not every keystroke).
+    private var cachedClipboard: String?
+    private var cachedClipboardChangeCount: Int = -1
+    private var semanticBoostIDs: [String] = []
+    private var semanticWorkItem: DispatchWorkItem?
+    private var aiDisabledReason: String?
 
     private let searchField = NSTextField()
     private let tableView = NSTableView()
@@ -375,7 +426,12 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     private let emptyState = NSView()
     private var scrollView = NSScrollView()
 
-    init(store: SnippetStore, loc: LocalizationManager, onPick: @escaping (SnippetModel) -> Void, onCancel: @escaping () -> Void) {
+    init(
+        store: SnippetStore,
+        loc: LocalizationManager,
+        onPick: @escaping (InlineSearchPanel.Pick) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
         self.store = store
         self.loc = loc
         self.onPick = onPick
@@ -400,7 +456,6 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         glass.frame = NSRect(x: 0, y: 0, width: 640, height: 460)
         let root = glass.contentView
 
-        // MARK: Search row
         let magnifier = NSImageView()
         magnifier.translatesAutoresizingMaskIntoConstraints = false
         magnifier.image = DevTypeTheme.symbol("magnifyingglass", size: 17, weight: .medium, color: DevTypeTheme.accent)
@@ -429,7 +484,6 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         let divider = DevTypeTheme.makeHairline()
         root.addSubview(divider)
 
-        // MARK: Results table
         scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
@@ -447,18 +501,14 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         tableView.target = self
         tableView.doubleAction = #selector(expandSelected)
         tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row")))
-        // §5.1: the results table and the query field are the two things a
-        // VoiceOver user needs named on this surface.
         tableView.setAccessibilityLabel(loc.s("ax.searchResults"))
         searchField.setAccessibilityLabel(loc.s("search.placeholder"))
         magnifier.setAccessibilityElement(false)
         scrollView.documentView = tableView
         root.addSubview(scrollView)
 
-        // MARK: Empty state
         setupEmptyState(in: root)
 
-        // MARK: Footer — key-cap hints
         let footerDivider = DevTypeTheme.makeHairline()
         root.addSubview(footerDivider)
 
@@ -560,6 +610,8 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     override func viewDidAppear() {
         super.viewDidAppear()
         groups = store.loadGroups()
+        refreshClipboardCache(force: true)
+        aiDisabledReason = AILocaleSupport.disabledReason(loc: loc)
         listenerToken = store.addGroupListener { [weak self] updated in
             DispatchQueue.main.async {
                 self?.groups = updated
@@ -572,6 +624,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
+        semanticWorkItem?.cancel()
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
     }
 
@@ -582,45 +635,87 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     func controlTextDidChange(_ obj: Notification) {
         selection = 0
         refreshHits()
+        scheduleSemanticBoost()
+    }
+
+    private func refreshClipboardCache(force: Bool = false) {
+        let count = NSPasteboard.general.changeCount
+        guard force || count != cachedClipboardChangeCount else { return }
+        cachedClipboardChangeCount = count
+        cachedClipboard = NSPasteboard.general.string(forType: .string)
+    }
+
+    private func scheduleSemanticBoost() {
+        semanticWorkItem?.cancel()
+        let query = searchField.stringValue
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let ids = CommandPaletteCatalog.semanticBoostIDs(for: query)
+            DispatchQueue.main.async {
+                guard self.searchField.stringValue == query else { return }
+                self.semanticBoostIDs = ids
+                self.refreshHits()
+            }
+        }
+        semanticWorkItem = work
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + .milliseconds(PaletteToolRouter.debounceMilliseconds),
+            execute: work
+        )
     }
 
     private func refreshHits() {
+        refreshClipboardCache()
         let query = searchField.stringValue
-        if query.trimmingCharacters(in: .whitespaces).isEmpty {
-            hits = groups
-                .filter(\.enabled)
-                .flatMap { group in
-                    group.snippets
-                        .filter { $0.enabled && !$0.triggerKeyword.isEmpty }
-                        .map { SearchHit(snippet: $0, groupID: group.id, groupName: group.name, score: 0) }
-                }
-                .sorted { $0.snippet.updatedAt > $1.snippet.updatedAt }
-                .prefix(50)
-                .map { $0 }
-        } else {
-            // §4.7: rank by usage as well as match quality. The store paid the
-            // full cost of maintaining usage counts and `SnippetSearch` ignored
-            // them entirely — a `boost` closure fixes that without making the
-            // search module depend on the store.
-            hits = SnippetSearch.run(
-                query: query,
-                in: groups,
-                includeDisabled: false,
-                limit: 50,
-                boost: { [weak store] snippetID in
-                    store?.usageCount(forSnippetID: snippetID) ?? 0
-                }
-            )
+        let previous = rows
+        rows = CommandPaletteCatalog.buildRows(
+            query: query,
+            groups: groups,
+            loc: loc,
+            usageBoost: { [weak store] snippetID in
+                store?.usageCount(forSnippetID: snippetID) ?? 0
+            },
+            clipboardPreview: cachedClipboard,
+            semanticBoostIDs: semanticBoostIDs,
+            commandUsageBoost: { CommandUsageStatsStore.shared.rankBoost(for: $0) },
+            aiDisabledReason: aiDisabledReason,
+            commandLimit: 20,
+            snippetLimit: 40
+        )
+
+        if selection < 0 || !rows.indices.contains(selection) || !rows[selection].isSelectable {
+            selection = firstSelectableIndex(from: 0, step: 1) ?? -1
         }
-        selection = min(selection, max(0, hits.count - 1))
-        tableView.reloadData()
-        if !hits.isEmpty {
+
+        reloadTableDiff(from: previous, to: rows)
+        if selection >= 0 {
             tableView.selectRowIndexes(IndexSet(integer: selection), byExtendingSelection: false)
             tableView.scrollRowToVisible(selection)
+        } else {
+            tableView.deselectAll(nil)
         }
-        emptyState.isHidden = !hits.isEmpty
-        let total = groups.flatMap(\.snippets).count
-        countLabel.stringValue = loc.s("search.count", hits.count, total)
+
+        let selectableCount = rows.filter(\.isSelectable).count
+        emptyState.isHidden = selectableCount > 0
+        let totalSnippets = groups.flatMap(\.snippets).count
+        countLabel.stringValue = loc.s("search.count", selectableCount, totalSnippets)
+    }
+
+    /// Prefer range reloads over full `reloadData` once the catalogue is large (D3).
+    private func reloadTableDiff(from old: [PaletteListRow], to new: [PaletteListRow]) {
+        if old.isEmpty || old.count != new.count {
+            tableView.reloadData()
+            return
+        }
+        var changed = IndexSet()
+        for i in new.indices where !Self.rowsEqual(old[i], new[i]) {
+            changed.insert(i)
+        }
+        if changed.count > new.count / 2 {
+            tableView.reloadData()
+        } else if !changed.isEmpty {
+            tableView.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: 0))
+        }
     }
 
     private func installKeyMonitor() {
@@ -643,25 +738,18 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
                 }
                 return event
             default:
-                // §4.7: this used to be `Int(event.charactersIgnoringModifiers ?? "")`,
-                // which fails on AZERTY (digits need ⇧), on Dvorak-like layouts,
-                // and on any layout where the top row is not 1–9. Key codes are
-                // layout-independent, which is the whole point of ⌘1–9.
                 if event.modifierFlags.contains(.command),
-                   let digit = Self.digitKeyCodes[Int(event.keyCode)],
-                   hits.indices.contains(digit - 1) {
-                    self.onPick(self.hits[digit - 1].snippet)
-                    return nil
+                   let digit = Self.digitKeyCodes[Int(event.keyCode)] {
+                    if let pick = self.pickAtJumpIndex(digit - 1) {
+                        self.onPick(pick)
+                        return nil
+                    }
                 }
                 return event
             }
         }
     }
 
-    /// §4.7: virtual key code → jump index, main row and numeric keypad.
-    /// Note the hardware ordering quirk: `kVK_ANSI_6` sits *below* `kVK_ANSI_5`
-    /// but `kVK_ANSI_7` is above it, which is exactly why a literal table beats
-    /// arithmetic here.
     private static let digitKeyCodes: [Int: Int] = [
         kVK_ANSI_1: 1, kVK_ANSI_2: 2, kVK_ANSI_3: 3, kVK_ANSI_4: 4, kVK_ANSI_5: 5,
         kVK_ANSI_6: 6, kVK_ANSI_7: 7, kVK_ANSI_8: 8, kVK_ANSI_9: 9,
@@ -670,36 +758,143 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         kVK_ANSI_Keypad7: 7, kVK_ANSI_Keypad8: 8, kVK_ANSI_Keypad9: 9
     ]
 
-    private func moveSelection(_ delta: Int) {
-        guard !hits.isEmpty else { return }
-        selection = min(max(0, selection + delta), hits.count - 1)
+    /// Jump index among selectable rows only (headers skipped).
+    private func pickAtJumpIndex(_ index: Int) -> InlineSearchPanel.Pick? {
+        let selectable = rows.compactMap { row -> InlineSearchPanel.Pick? in
+            switch row {
+            case .command(let hit):
+                guard hit.isEnabled else { return nil }
+                return .command(hit.command, insertText: hit.insertText)
+            case .snippet(let hit):
+                return .snippet(hit.snippet)
+            case .header:
+                return nil
+            }
+        }
+        guard selectable.indices.contains(index) else { return nil }
+        return selectable[index]
+    }
+
+    private static func rowsEqual(_ a: PaletteListRow, _ b: PaletteListRow) -> Bool {
+        a == b
+    }
+
+    private func firstSelectableIndex(from start: Int, step: Int) -> Int? {
+        guard !rows.isEmpty else { return nil }
+        var index = start
+        while index >= 0 && index < rows.count {
+            if rows[index].isSelectable { return index }
+            index += step
+        }
+        return nil
+    }
+
+    private func applySelection(scroll: Bool) {
+        guard rows.indices.contains(selection) else {
+            tableView.deselectAll(nil)
+            return
+        }
         tableView.selectRowIndexes(IndexSet(integer: selection), byExtendingSelection: false)
-        tableView.scrollRowToVisible(selection)
+        if scroll { tableView.scrollRowToVisible(selection) }
+    }
+
+    private func moveSelection(_ delta: Int) {
+        guard !rows.isEmpty else { return }
+        let start = selection < 0 ? (delta > 0 ? 0 : rows.count - 1) : selection + delta
+        guard let next = firstSelectableIndex(from: start, step: delta > 0 ? 1 : -1) else { return }
+        selection = next
+        applySelection(scroll: true)
+    }
+
+    private func selectedPick() -> InlineSearchPanel.Pick? {
+        guard rows.indices.contains(selection) else { return nil }
+        switch rows[selection] {
+        case .command(let hit):
+            return .command(hit.command, insertText: hit.insertText)
+        case .snippet(let hit):
+            return .snippet(hit.snippet)
+        case .header:
+            return nil
+        }
     }
 
     @objc private func expandSelected() {
-        guard hits.indices.contains(selection) else { return }
-        onPick(hits[selection].snippet)
+        guard let pick = selectedPick() else { return }
+        onPick(pick)
     }
 
     @objc private func cancel() { onCancel() }
 
-    // MARK: Table data source / delegate
+    // MARK: Table
 
-    func numberOfRows(in tableView: NSTableView) -> Int { hits.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard rows.indices.contains(row) else { return 48 }
+        switch rows[row] {
+        case .header: return 22
+        case .command, .snippet: return 48
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        guard rows.indices.contains(row) else { return false }
+        return rows[row].isSelectable
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard hits.indices.contains(row) else { return nil }
-        let identifier = NSUserInterfaceItemIdentifier("hitCell")
-        let cell: SearchHitCellView
-        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? SearchHitCellView {
-            cell = reused
-        } else {
-            cell = SearchHitCellView()
-            cell.identifier = identifier
+        guard rows.indices.contains(row) else { return nil }
+        switch rows[row] {
+        case .header(let section):
+            let identifier = NSUserInterfaceItemIdentifier("paletteHeader")
+            let cell: PaletteHeaderCellView
+            if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? PaletteHeaderCellView {
+                cell = reused
+            } else {
+                cell = PaletteHeaderCellView()
+                cell.identifier = identifier
+            }
+            cell.configure(section: section, loc: loc)
+            return cell
+
+        case .command(let hit):
+            let identifier = NSUserInterfaceItemIdentifier("hitCell")
+            let cell: SearchHitCellView
+            if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? SearchHitCellView {
+                cell = reused
+            } else {
+                cell = SearchHitCellView()
+                cell.identifier = identifier
+            }
+            let jump = jumpNumber(forSelectableRow: row)
+            cell.configureCommand(hit, jumpNumber: jump, loc: loc)
+            return cell
+
+        case .snippet(let hit):
+            let identifier = NSUserInterfaceItemIdentifier("hitCell")
+            let cell: SearchHitCellView
+            if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? SearchHitCellView {
+                cell = reused
+            } else {
+                cell = SearchHitCellView()
+                cell.identifier = identifier
+            }
+            let jump = jumpNumber(forSelectableRow: row)
+            cell.configureSnippet(with: hit, jumpNumber: jump)
+            return cell
         }
-        cell.configure(with: hits[row], jumpNumber: row < 9 ? row + 1 : nil)
-        return cell
+    }
+
+    private func jumpNumber(forSelectableRow row: Int) -> Int? {
+        var index = 0
+        for i in 0..<rows.count {
+            guard rows[i].isSelectable else { continue }
+            if i == row {
+                return index < 9 ? index + 1 : nil
+            }
+            index += 1
+        }
+        return nil
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -707,6 +902,9 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        selection = tableView.selectedRow
+        let row = tableView.selectedRow
+        if row >= 0, rows.indices.contains(row), rows[row].isSelectable {
+            selection = row
+        }
     }
 }

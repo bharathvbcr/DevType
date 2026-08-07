@@ -371,7 +371,11 @@ public final class HIDKeyPoster {
         guard utf16OffsetFromEnd > 0 else { return 0 }
         let total = text.utf16.count
         guard utf16OffsetFromEnd < total else { return text.count }
-        let splitIndex = String.Index(utf16Offset: total - utf16OffsetFromEnd, in: text)
+        let rawIndex = String.Index(utf16Offset: total - utf16OffsetFromEnd, in: text)
+        // Mid-cluster UTF-16 offsets (ZWJ emoji, flags) must round down to the
+        // grapheme start; otherwise the suffix Character view can invent extra
+        // clusters from a torn sequence and overshoot `text.count`.
+        let splitIndex = text.rangeOfComposedCharacterSequence(at: rawIndex).lowerBound
         return text[splitIndex...].count
     }
 }

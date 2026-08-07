@@ -279,8 +279,22 @@ public final class AXTextWriter {
 
     // MARK: - Direct insert
 
-    public func attemptAXDirectInjection(text: String) -> Bool {
+    public func attemptAXDirectInjection(text: String, bundleID: String? = nil) -> Bool {
         guard let axElement = AXContextChecker.shared.focusedElement() else { return false }
+
+        var roleRef: CFTypeRef?
+        let role: String? =
+            (AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleRef) == .success)
+            ? (roleRef as? String)
+            : nil
+
+        // Same class of lie as range replace. After erase, a false AX "success" that we cannot
+        // verify must not short-circuit HID paste — that reports succeeded with an empty field.
+        if let bundleID, !bundleID.isEmpty,
+           AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID, role: role) {
+            return false
+        }
+
         // Baseline before the write so `verifyTextDelivery` can distinguish "nothing happened" from
         // "it happened but the host reports a stale value". Without it a real insert can be judged
         // failed, and the caller then pastes the same text a second time.
@@ -295,6 +309,8 @@ public final class AXTextWriter {
         case .failed:
             return false
         case .delivered, .unavailable:
+            // `.unavailable` stays "assume delivered" for honest AX-opaque hosts so we do not
+            // double-paste. Known-lying apps never reach here — they return false above.
             return true
         }
     }

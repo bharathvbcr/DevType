@@ -13,15 +13,17 @@ struct HotkeyMacroAction: Equatable {
     var argument: String
 }
 
-/// Registers global Carbon hotkeys for inline search (⌘/) and optional text/URL macros.
+/// Registers global Carbon hotkeys for inline search (⌘/), AI palette, and optional text/URL macros.
 final class HotkeyManager {
     private var refs: [UInt32: EventHotKeyRef] = [:]
     private var nextID: UInt32 = 1
     private var handlerInstalled = false
     private var inlineSearchHotkeyID: UInt32?
+    private var aiPaletteHotkeyID: UInt32?
     private var macroByID: [UInt32: HotkeyMacroAction] = [:]
 
     var onInlineSearch: (() -> Void)?
+    var onAIPalette: (() -> Void)?
     var onInsertText: ((String) -> Void)?
     var onOpenURL: ((String) -> Void)?
     /// §4.2: `RegisterEventHotKey` failure used to be logged and dropped, so a
@@ -36,10 +38,14 @@ final class HotkeyManager {
     /// Defaults to ⌘/ for compatibility with the old hardcoded binding.
     var inlineSearchShortcut: DevTypeShortcut = HotkeyPreferences.inlineSearchShortcut
 
+    /// Persisted in `devtype.hotkey.aiPalette`. Defaults to ⌘⌥A.
+    var aiPaletteShortcut: DevTypeShortcut = HotkeyPreferences.aiPaletteShortcut
+
     func registerAll() {
         installHandlerIfNeeded()
         unregisterAll()
         registerInlineSearch()
+        registerAIPalette()
         for macro in macros where macro.keyCode != 0 {
             registerMacro(macro)
         }
@@ -57,6 +63,16 @@ final class HotkeyManager {
         return lastRegistrationStatus
     }
 
+    /// Rebinds the AI action-palette shortcut, persists it, and re-registers.
+    @discardableResult
+    func applyAIPaletteShortcut(_ shortcut: DevTypeShortcut) -> OSStatus {
+        HotkeyPreferences.aiPaletteShortcut = shortcut
+        aiPaletteShortcut = shortcut
+        lastAIPaletteRegistrationStatus = noErr
+        registerAll()
+        return lastAIPaletteRegistrationStatus
+    }
+
     /// §4.3: replaces the macro list, persists it, and re-registers.
     func applyMacros(_ updated: [HotkeyMacroAction]) {
         HotkeyPreferences.saveMacros(updated)
@@ -66,6 +82,9 @@ final class HotkeyManager {
 
     /// Status from the most recent inline-search registration attempt.
     private(set) var lastRegistrationStatus: OSStatus = noErr
+
+    /// Status from the most recent AI-palette registration attempt.
+    private(set) var lastAIPaletteRegistrationStatus: OSStatus = noErr
 
     static func loadMacros() -> [HotkeyMacroAction] {
         guard let data = UserDefaults.standard.data(forKey: "devtype.hotkeyMacros"),
@@ -121,10 +140,39 @@ final class HotkeyManager {
         }
     }
 
+    private func registerAIPalette() {
+        let shortcut = aiPaletteShortcut
+        let id = nextID
+        nextID += 1
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4454_5059), id: id)
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            shortcut.keyCode,
+            shortcut.carbonModifiers,
+            hotKeyID,
+            GetEventDispatcherTarget(),
+            0,
+            &ref
+        )
+        lastAIPaletteRegistrationStatus = status
+        let label = shortcut.displayString
+        if status == noErr, let ref {
+            refs[id] = ref
+            aiPaletteHotkeyID = id
+            DevTypeLog.app.info("[Hotkey] AI palette registered (\(label, privacy: .public))")
+        } else {
+            DevTypeLog.app.error(
+                "[Hotkey] AI palette registration failed shortcut=\(label, privacy: .public) status=\(status, privacy: .public)"
+            )
+            onRegistrationFailed?(label, status)
+        }
+    }
+
     private func unregisterAll() {
         for (_, ref) in refs { UnregisterEventHotKey(ref) }
         refs.removeAll()
         inlineSearchHotkeyID = nil
+        aiPaletteHotkeyID = nil
         // §4.3: re-registering after an edit reuses fresh IDs; stale entries here
         // would keep firing removed macros.
         macroByID.removeAll()
@@ -198,6 +246,12 @@ final class HotkeyManager {
         if id == inlineSearchHotkeyID {
             DispatchQueue.main.async { [weak self] in
                 self?.onInlineSearch?()
+            }
+            return
+        }
+        if id == aiPaletteHotkeyID {
+            DispatchQueue.main.async { [weak self] in
+                self?.onAIPalette?()
             }
             return
         }

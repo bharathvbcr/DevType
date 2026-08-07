@@ -198,7 +198,8 @@ public final class EventTapEngine {
     private var _isEnabled: Bool = true
     private var _isTapRunning: Bool = false
     private var _isExpanding: Bool = false
-    private var _matchingSuspended: Bool = false
+    /// Nested suspend depth (fill-in + inline search / AI panels). Matching is skipped while > 0.
+    private var _matchingSuspendCount: Int = 0
     private var _isSecureInputActive: Bool = false
 
     // MARK: - §2.1 cached matcher
@@ -307,6 +308,29 @@ public final class EventTapEngine {
     /// Present fill-in UI from the app target. `(title, fields, completion)` — completion nil = cancel.
     public var presentFillIn: ((String, [FillField], @escaping ([Int: String]?) -> Void) -> Void)?
 
+    /// Typed-path / off-pipeline AI handoff. App target presents the preview (or action)
+    /// panel. Called on the main queue after the trigger erase has finished and expansion ended.
+    /// Parameters: captured selection text, transform kind, source app for reactivation,
+    /// optional custom instructions (snippet body for `.custom`), erased trigger to restore on cancel.
+    public var presentAITransform: ((
+        _ input: String,
+        _ kind: AITransformKind,
+        _ sourceApp: NSRunningApplication?,
+        _ customInstructions: String?,
+        _ restoreOnCancel: String?
+    ) -> Void)?
+
+    /// Localization key for the typed-AI path when selection is absent or stale.
+    /// UI should show a hint that points the user at the AI hotkey / palette.
+    public static let aiSelectionUnavailableHintKey = "ai.typed.selectionUnavailable"
+
+    /// Localization key when a fresh cache exists but the host is weak-AX (Chrome/Slack/Electron).
+    public static let aiWeakAXHintKey = "ai.typed.weakAX"
+
+    /// Typed AI path: selection unavailable. Invoked on the main queue with a localization key
+    /// (see `aiSelectionUnavailableHintKey` / `aiWeakAXHintKey`).
+    public var presentAITransformHint: ((String) -> Void)?
+
     /// Keycodes that desync the ring buffer. Return/Tab intentionally omitted — DevType may
     /// treat them as terminators and swallow (unlike SnipKey listenOnly clearBuffer).
     public static let bufferResetKeyCodes: Set<Int64> = [
@@ -400,25 +424,25 @@ public final class EventTapEngine {
     }
 
     /// When true, the tap still runs but abbreviation matching is skipped (fill-in panels, inline search).
+    /// True while the suspend reference count is greater than zero.
     public var matchingSuspended: Bool {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return _matchingSuspended
-        }
-        set {
-            lock.lock()
-            _matchingSuspended = newValue
-            lock.unlock()
-        }
+        lock.lock()
+        defer { lock.unlock() }
+        return _matchingSuspendCount > 0
     }
 
+    /// Increment the matching-suspend reference count. Nested callers must pair with `resumeMatching()`.
     public func suspendMatching() {
-        matchingSuspended = true
+        lock.lock()
+        _matchingSuspendCount += 1
+        lock.unlock()
     }
 
+    /// Decrement the matching-suspend reference count (clamped at zero). Matching resumes only when count hits 0.
     public func resumeMatching() {
-        matchingSuspended = false
+        lock.lock()
+        _matchingSuspendCount = max(0, _matchingSuspendCount - 1)
+        lock.unlock()
     }
 
     /// Set when macOS Secure Event Input is active; matching is suppressed independently of user pause.
@@ -542,7 +566,7 @@ public final class EventTapEngine {
         let expanding = _isExpanding
         let enabled = _isEnabled
         let secureFlag = _isSecureInputActive
-        let suspended = _matchingSuspended
+        let suspended = _matchingSuspendCount > 0
         lock.unlock()
 
         // Pass through while inject+restore owns the critical section.
@@ -1218,6 +1242,21 @@ public final class EventTapEngine {
             return
         }
 
+        // Typed AI transform: erase the trigger under fresh gates, end expansion immediately,
+        // then hand off to the panel off-pipeline. Never hold `_isExpanding` across the model call.
+        if !snippet.aiTransform.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            handleTypedAITransformExpand(
+                snippet: snippet,
+                erasePlan: erasePlan,
+                swallowedUnicode: swallowedUnicode,
+                swallowedKeyCode: swallowedKeyCode,
+                swallowedFlags: swallowedFlags,
+                quiescence: quiescence,
+                armedFocusPID: armedFocusPID
+            )
+            return
+        }
+
         let clipboardSnapshot = mainProbe.clipboard
         let lookup: (String) -> String? = { [weak self] trigger in
             guard let self else { return nil }
@@ -1303,6 +1342,208 @@ public final class EventTapEngine {
             quiescence: quiescence,
             armedFocusPID: armedFocusPID
         )
+    }
+
+    /// Off-pipeline typed AI path: fresh Secure Input + AX gates, selection cache, guarded erase,
+    /// `endExpansion`, then `presentAITransform` on main. Model work must not run under `_isExpanding`.
+    private func handleTypedAITransformExpand(
+        snippet: SnippetModel,
+        erasePlan: ErasePlan,
+        swallowedUnicode: String,
+        swallowedKeyCode: Int64,
+        swallowedFlags: CGEventFlags,
+        quiescence: InputQuiescenceGuard,
+        armedFocusPID: pid_t?
+    ) {
+        guard let kind = AITransformKind.named(snippet.aiTransform) else {
+            refuseAfterSwallow(
+                reason: "Unknown AI transform kind",
+                swallowedUnicode: swallowedUnicode,
+                swallowedKeyCode: swallowedKeyCode,
+                swallowedFlags: swallowedFlags
+            )
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+
+            if case .abort = self.inputClock.decide(quiescence) {
+                self.refuseAfterSwallow(
+                    reason: "User input after arm — expand aborted",
+                    swallowedUnicode: swallowedUnicode,
+                    swallowedKeyCode: swallowedKeyCode,
+                    swallowedFlags: swallowedFlags
+                )
+                return
+            }
+
+            // Re-check gates live — SecureInputMonitor's 350ms poll is stale; passwords must
+            // never reach the model.
+            let snapshot = PermissionCoordinator.shared.cachedSnapshot
+            let decision = AXContextChecker.shared.evaluateExpandGate(
+                canUseAX: snapshot.canUseAX,
+                canPostEvents: snapshot.canPostEvents
+            )
+            let secureInput = AXContextChecker.isSecureEventInputEnabledLive()
+            let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+
+            if secureInput {
+                self.refuseAfterSwallow(
+                    reason: AXContextChecker.secureInputActiveReason,
+                    swallowedUnicode: swallowedUnicode,
+                    swallowedKeyCode: swallowedKeyCode,
+                    swallowedFlags: swallowedFlags,
+                    refuseContext: .capture(
+                        reason: AXContextChecker.secureInputActiveReason,
+                        decision: decision
+                    )
+                )
+                return
+            }
+            if decision.shouldBlock {
+                self.refuseAfterSwallow(
+                    reason: decision.reason,
+                    swallowedUnicode: swallowedUnicode,
+                    swallowedKeyCode: swallowedKeyCode,
+                    swallowedFlags: swallowedFlags,
+                    refuseContext: .capture(reason: decision.reason, decision: decision)
+                )
+                return
+            }
+            if let armedFocusPID, currentPID != armedFocusPID {
+                self.refuseAfterSwallow(
+                    reason: "Focus moved — expand aborted",
+                    swallowedUnicode: swallowedUnicode,
+                    swallowedKeyCode: swallowedKeyCode,
+                    swallowedFlags: swallowedFlags
+                )
+                return
+            }
+
+            // Consume is single-use so a second trigger cannot reuse the same stale text.
+            // Same-element check (CFEqual) makes the longer TTL safe.
+            let weakAXBlocked = SelectionMonitor.shared.hasWeakAXBlockedSelection()
+            guard let selection = SelectionMonitor.shared.consumeSelection() else {
+                self.refuseAfterSwallow(
+                    reason: weakAXBlocked ? "AI selection weak-AX" : "AI selection unavailable",
+                    swallowedUnicode: swallowedUnicode,
+                    swallowedKeyCode: swallowedKeyCode,
+                    swallowedFlags: swallowedFlags
+                )
+                let hintKey = weakAXBlocked
+                    ? Self.aiWeakAXHintKey
+                    : Self.aiSelectionUnavailableHintKey
+                self.presentAITransformHint?(hintKey)
+                return
+            }
+
+            guard self.presentAITransform != nil else {
+                self.refuseAfterSwallow(
+                    reason: "AI transform required but no presenter wired",
+                    swallowedUnicode: swallowedUnicode,
+                    swallowedKeyCode: swallowedKeyCode,
+                    swallowedFlags: swallowedFlags
+                )
+                return
+            }
+
+            let restoreOnCancel: String? = {
+                guard let expected = erasePlan.expectedText, !expected.isEmpty else { return nil }
+                return expected
+            }()
+
+            EraseExecutor.shared.performGuardedErase(plan: erasePlan) { [weak self] erased in
+                guard let self else { return }
+                if !erased {
+                    self.refuseAfterSwallow(
+                        reason: "AI trigger erase failed",
+                        swallowedUnicode: swallowedUnicode,
+                        swallowedKeyCode: swallowedKeyCode,
+                        swallowedFlags: swallowedFlags
+                    )
+                    return
+                }
+                // Expansion ends here — panel owns the rest. Do not hold `_isExpanding`.
+                self.endExpansion()
+                let sourceApp = NSWorkspace.shared.frontmostApplication
+                let selectedText = selection.text
+                let customInstructions: String? = {
+                    guard kind == .custom else { return nil }
+                    let body = snippet.replacementText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return body.isEmpty ? nil : body
+                }()
+                guard let presenter = self.presentAITransform else {
+                    DevTypeLog.eventTap.error(
+                        "[EventTap] AI transform presenter cleared after erase — trigger already removed"
+                    )
+                    return
+                }
+                presenter(selectedText, kind, sourceApp, customInstructions, restoreOnCancel)
+            }
+        }
+    }
+
+    /// Inject an AI transform result without erasing again (trigger erase already happened, or
+    /// hotkey path replaces the live selection via paste). Always passes `erasePlan: .empty`
+    /// and `secureClipboardPaste: true` — do not rely on `eraseCountOverride: 0` alone.
+    public func injectAITransformResult(
+        text: String,
+        snippet: SnippetModel? = nil,
+        sourceApp: NSRunningApplication? = nil,
+        completion: (() -> Void)? = nil
+    ) {
+        let work = { [weak self] in
+            if let sourceApp {
+                sourceApp.activate()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                guard self != nil else {
+                    completion?()
+                    return
+                }
+                let snapshot = PermissionCoordinator.shared.cachedSnapshot
+                let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext()
+                let plan = InjectionPlanner().plan(
+                    snapshot: snapshot,
+                    isTerminal: shellLike,
+                    needsCursorHID: false,
+                    isMultiLine: text.contains(where: \.isNewline)
+                )
+                if case .refuse(let reason) = plan {
+                    DevTypeLog.eventTap.notice(
+                        "[EventTap] AI inject refused — \(reason, privacy: .public)"
+                    )
+                    completion?()
+                    return
+                }
+
+                let carrier = snippet ?? SnippetModel(
+                    title: "AI",
+                    triggerKeyword: "",
+                    replacementText: text
+                )
+                EventTapEngine.shared.suspendMatching()
+                TextInjectionPipeline.shared.inject(
+                    snippet: carrier,
+                    triggerLength: 0,
+                    swallowedFinalKey: false,
+                    plan: plan,
+                    erasePlan: .empty,
+                    preResolvedText: text,
+                    secureClipboardPaste: true,
+                    completion: {
+                        EventTapEngine.shared.resumeMatching()
+                        completion?()
+                    }
+                )
+            }
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
     }
 
     private func finishDeferredInject(
