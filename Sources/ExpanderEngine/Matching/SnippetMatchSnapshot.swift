@@ -13,12 +13,17 @@ import Foundation
 public final class SnippetMatchSnapshot {
     public let snippets: [SnippetModel]
     public let matcher: AbbreviationMatcher
+    /// Prefix ambiguity, computed here for the same reason the matcher is: the keystroke path
+    /// must never rebuild it. Lets the engine hold a match only when a longer trigger could
+    /// still win, so unambiguous triggers keep firing with zero added latency.
+    public let prefixIndex: TriggerPrefixIndex
     /// Monotonic revision so observers can detect a swap without comparing arrays.
     public let revision: UInt64
 
     public init(snippets: [SnippetModel], revision: UInt64 = 0) {
         self.snippets = snippets
         self.matcher = AbbreviationMatcher(snippets: snippets)
+        self.prefixIndex = TriggerPrefixIndex(snippets: snippets)
         self.revision = revision
     }
 
