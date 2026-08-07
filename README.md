@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/devtype_logo.png" alt="DevType Logo" width="128" height="128">
+  <img src="docs/assets/devtype_logo.png" alt="DevType macOS Text Expander Logo" width="128" height="128">
 </p>
 
 <h1 align="center">DevType</h1>
@@ -18,10 +18,26 @@
 ---
 
 <p align="center">
-  <img src="docs/assets/devtype_social_preview.jpg" alt="DevType Social Preview" width="100%">
+  <img src="docs/assets/devtype_social_preview.jpg" alt="DevType macOS Text Expander Social Preview Banner" width="100%">
 </p>
 
-**DevType** is a high-performance, native macOS menu-bar text expander (`LSUIElement` accessory app) equipped with on-device AI text transformations powered by Apple Foundation Models. Designed for developers, writers, and power users, DevType delivers instant expand-on-match typing automation alongside intelligent text manipulation without sending a single byte of your data to the cloud.
+**DevType** is a fast, lightweight, native macOS text expander and snippet manager built with Swift & AppKit. Equipped with on-device AI text transformations powered by Apple Foundation Models, DevType offers sub-millisecond keyword expansion and offline writing tools with zero cloud telemetry.
+
+Looking for a **privacy-first TextExpander alternative** or an **Espanso GUI for Mac**? DevType combines instant expand-on-match typing automation with local AI proofreading, rewriting, and dynamic mustache/TextExpander macro rendering.
+
+---
+
+## ⚔️ Comparison: DevType vs. Other Mac Text Expanders
+
+| Feature | **DevType** | **TextExpander** | **Espanso** | **Alfred Snippets** |
+|---|:---:|:---:|:---:|:---:|
+| **License** | **Free & MIT Open Source** | Subscription ($40+/yr) | Free (GPL) | Paid Powerpack |
+| **Native macOS App** | ✅ Swift / AppKit | ❌ Electron / Web | ❌ Rust / Cross-platform | ✅ Native |
+| **On-Device AI Transforms** | ✅ Apple Foundation Models | ❌ None | ❌ None | ❌ Cloud Extensions |
+| **Mustache & TE Syntax** | ✅ Dual Engine | ⚠️ TE Only | ⚠️ Espanso YAML | ⚠️ Alfred Tags |
+| **100% Offline & Private** | ✅ No Cloud Telemetry | ❌ Cloud Sync Mandatory | ✅ Offline | ✅ Offline |
+| ** Espanso / TE Importers** | ✅ Built-in XML & YAML | ❌ Manual | ⚠️ Manual | ❌ Manual |
+| **Command Palette (`⌘/`)** | ✅ Snippets, AI, Math, Dates | ❌ None | ❌ Search Only | ⚠️ Palette |
 
 ---
 
@@ -31,20 +47,19 @@
 - 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize) using Apple Foundation Models (macOS 26+). 100% private, zero API keys required.
 - 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy search for snippets, AI tools, date/time offsets, clipboard history, and quick app navigation.
 - 🧩 **Dual Macro Engine**: Full support for both Mustache (`{{date:iso}}`, `{{clipboard}}`, `{{calc: 1+2}}`, `{{cursor}}`) and TextExpander (`%filltext:name=X%`, `%date:us%`, `%|`, `%key:enter%`) template syntaxes.
-- 🖼️ **Rich Attachments**: Paste images directly from snippet triggers with full Espanso `image_path` import support.
-- 📦 **Format Importers**: One-click import from TextExpander 4/5 XML groups and Espanso YAML match configs.
+- 🖼️ **Rich Image Snippets**: Paste images directly from snippet triggers with full Espanso `image_path` import support.
+- 📦 **One-Click Importers**: Seamlessly import existing snippet libraries from TextExpander 4/5 XML groups and Espanso YAML match configs.
 - 🛡️ **Privacy & Fail-Closed Security**: Automatic expansion pause during password entry (`NSSecureTextField`), Secure Event Input locks, IME composition, or in muted apps.
-- 🔑 **Stable Identity TCC**: Packaged `.app` bundle with dedicated self-signed code identity (`com.devtype.app`) so macOS Accessibility & Input Monitoring permissions persist cleanly across updates.
+- 🔑 **Stable Identity TCC**: Packaged `.app` bundle with dedicated code identity (`com.devtype.app`) so macOS Accessibility & Input Monitoring permissions persist cleanly across updates.
 
 ---
 
 ## 🚀 Quick Start & Building
 
-### Prerequisites
-- macOS 14.0 or later (macOS 26+ required for Apple Intelligence AI features)
-- Xcode 15+ or Swift 5.9+ Command Line Tools installed
+### Download Pre-built Release
+Download the latest macOS disk image (`.dmg`) directly from the [DevType GitHub Releases Page](https://github.com/bharathvbcr/DevType/releases/latest).
 
-### Build and Install
+### Building from Source
 
 ```bash
 # 1. One-time setup: Create a stable local signing certificate so TCC grants survive rebuilds
@@ -58,9 +73,6 @@
 open /Applications/DevType.app
 ```
 
-> **Note on Signing & Permissions:**
-> Running raw `swift build` produces a bare Mach-O binary that churns CDHash on every build, resetting macOS TCC permissions. Always use `./Scripts/install-app.sh` to install to `/Applications/DevType.app`.
-
 ---
 
 ## 🔐 Capability Matrix & TCC Permissions
@@ -72,11 +84,6 @@ DevType separates permission requirements cleanly to uphold macOS privacy bounda
 | **Input Monitoring** | `ListenEvent` | `CGPreflightListenEventAccess` | **Required** to create event tap for swallowing trigger keys |
 | **Accessibility** | `Accessibility` | `AXIsProcessTrustedWithOptions` | **Required** for event tap swallowing & AX range text replacement |
 | **Post Events** | `PostEvent` | `CGPreflightPostEventAccess` | *Optional* for HID backspace, `⌘V` paste, and arrow caret movement |
-
-### Permission Setup Flow
-1. Launch DevType and complete the **Setup Wizard** (or press `⌘⇧P` for **Permission Recovery**).
-2. Click **Request** to trigger native macOS permission prompts.
-3. If permissions remain denied, click **Open Settings** to enable DevType in `System Settings → Privacy & Security`.
 
 ---
 
@@ -116,13 +123,19 @@ DevType parses Mustache `{{...}}` tags and TextExpander `%...%` tags seamlessly.
 
 ---
 
-## 🧪 Verification & Smoke Checklist
+## ❓ Frequently Asked Questions (FAQ)
 
-1. Run `./Scripts/install-app.sh` and launch `/Applications/DevType.app`.
-2. Complete Setup Wizard or open **Permission Recovery** (`⌘⇧P`).
-3. Ensure menu status displays **Active** once Input Monitoring & Accessibility are granted.
-4. Open the in-app **Test Expansion** lab (`⌘⇧P` → *Test Expansion*) to test live injection.
-5. Try typing `:test` (or your saved triggers) in TextEdit, Notes, or your code editor of choice.
+### Is DevType free and open source?
+Yes! DevType is completely free and open-source under the MIT License.
+
+### Does DevType collect or send my keystrokes to the cloud?
+No. DevType operates 100% offline. Keystrokes are processed locally in a memory ring buffer for matching triggers. When AI features are used, text is processed locally on-device via Apple Foundation Models without network requests.
+
+### Can I import my existing snippets from TextExpander or Espanso?
+Yes. DevType includes built-in importers for TextExpander 4/5 XML export files and Espanso YAML config files, preserving your triggers, replacements, and image attachments.
+
+### How does DevType handle passwords and secure fields?
+DevType automatically pauses keyword expansion whenever a secure text field (`NSSecureTextField`) is active or when macOS Secure Event Input is locked.
 
 ---
 
