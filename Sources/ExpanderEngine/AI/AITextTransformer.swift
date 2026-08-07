@@ -376,6 +376,7 @@ public actor AITextTransformer {
                 streamPartials: streamPartials,
                 onPartial: onPartial
             )
+            AIDiagnosticsStore.shared.recordSuccess(kind: kind.rawValue)
             once.complete(.success(text))
             return
         } catch let error as AITransformError {
@@ -386,7 +387,7 @@ public actor AITextTransformer {
                 return
             }
         } catch {
-            once.complete(.failure(Self.mapGenerationError(error)))
+            once.complete(.failure(Self.mapGenerationError(error, kind: kind)))
             return
         }
 
@@ -436,11 +437,12 @@ public actor AITextTransformer {
                     onPartial(progress)
                 }
             }
+            AIDiagnosticsStore.shared.recordSuccess(kind: kind.rawValue)
             once.complete(.success(assembled))
         } catch let error as AITransformError {
             once.complete(.failure(error))
         } catch {
-            once.complete(.failure(Self.mapGenerationError(error)))
+            once.complete(.failure(Self.mapGenerationError(error, kind: kind)))
         }
     }
 
@@ -595,10 +597,72 @@ public actor AITextTransformer {
         }
     }
 
-    private static func mapGenerationError(_ error: Error) -> AITransformError {
+    /// Apple attaches a `GenerationError.Context` to every case, and its `debugDescription`
+    /// is the only explanation the framework offers — in particular it is the sole way to
+    /// tell *why* a guardrail fired. `AITransformError` is a flat, `Equatable` enum used for
+    /// UI mapping, so the detail cannot ride along on the case; log it here instead, or the
+    /// information is gone by the time anyone reads a diagnostic report.
+    ///
+    /// The transformed text and the user's selection are deliberately never logged. Apple's
+    /// `debugDescription` describes the violation, not the input.
+    private static func logGenerationFailure(
+        _ generation: LanguageModelSession.GenerationError,
+        kind: AITransformKind
+    ) {
+        let detail: String
+        switch generation {
+        case .guardrailViolation(let context),
+             .exceededContextWindowSize(let context),
+             .rateLimited(let context),
+             .unsupportedLanguageOrLocale(let context),
+             .assetsUnavailable(let context),
+             .decodingFailure(let context),
+             .concurrentRequests(let context),
+             .unsupportedGuide(let context):
+            detail = context.debugDescription
+        case .refusal(_, let context):
+            detail = context.debugDescription
+        @unknown default:
+            detail = generation.localizedDescription
+        }
+        DevTypeLog.store.error(
+            "[AI] transform failed kind=\(kind.rawValue, privacy: .public) detail=\(detail, privacy: .public)"
+        )
+        // OSLog only survives the report's 30-minute lookback; retain it for DiagnosticReport.
+        AIDiagnosticsStore.shared.recordFailure(
+            kind: kind.rawValue,
+            error: Self.caseLabel(generation),
+            detail: detail
+        )
+    }
+
+    /// Short, stable case label for diagnostics (`localizedDescription` is prose).
+    private static func caseLabel(_ generation: LanguageModelSession.GenerationError) -> String {
+        switch generation {
+        case .guardrailViolation: return "guardrailViolation"
+        case .exceededContextWindowSize: return "exceededContextWindowSize"
+        case .rateLimited: return "rateLimited"
+        case .unsupportedLanguageOrLocale: return "unsupportedLanguageOrLocale"
+        case .assetsUnavailable: return "assetsUnavailable"
+        case .decodingFailure: return "decodingFailure"
+        case .refusal: return "refusal"
+        case .concurrentRequests: return "concurrentRequests"
+        case .unsupportedGuide: return "unsupportedGuide"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private static func mapGenerationError(
+        _ error: Error,
+        kind: AITransformKind
+    ) -> AITransformError {
         guard let generation = error as? LanguageModelSession.GenerationError else {
+            DevTypeLog.store.error(
+                "[AI] transform failed kind=\(kind.rawValue, privacy: .public) non-GenerationError=\(error.localizedDescription, privacy: .public)"
+            )
             return .unknown(error.localizedDescription)
         }
+        logGenerationFailure(generation, kind: kind)
         switch generation {
         case .guardrailViolation:
             return .guardrailViolation
