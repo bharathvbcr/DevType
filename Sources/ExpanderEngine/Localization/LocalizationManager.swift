@@ -759,6 +759,8 @@ public final class LocalizationManager: ObservableObject {
             "prefs.snippets.conflict.duplicate": "“%@” is defined more than once — the first match wins (%@).",
             "prefs.snippets.conflict.caseShadow":
                 "“%@” exists in both case-sensitive and case-insensitive forms — one is shadowed (%@).",
+            "prefs.snippets.conflict.prefixShadow":
+                "“%@” fires as soon as you type it, so these can never fire: %@. Rename them so they no longer start with it.",
             "prefs.snippets.rescan": "Re-scan",
             "prefs.hotkeys.inlineSearch": "Command Palette",
             "prefs.hotkeys.inlineSearch.hint":
@@ -1685,6 +1687,8 @@ public final class LocalizationManager: ObservableObject {
             "prefs.snippets.conflict.duplicate": "“%@”이(가) 중복 정의되어 첫 번째 항목만 적용됩니다 (%@).",
             "prefs.snippets.conflict.caseShadow":
                 "“%@”이(가) 대소문자 구분/비구분 양쪽에 존재하여 하나가 가려집니다 (%@).",
+            "prefs.snippets.conflict.prefixShadow":
+                "“%@”은(는) 입력하는 즉시 실행되므로 다음 트리거는 실행될 수 없습니다: %@. 해당 접두사로 시작하지 않도록 이름을 변경하세요.",
             "prefs.snippets.rescan": "다시 검사",
             "prefs.hotkeys.inlineSearch": "명령 팔레트",
             "prefs.hotkeys.inlineSearch.hint":
@@ -2595,6 +2599,8 @@ public final class LocalizationManager: ObservableObject {
             "prefs.snippets.conflict.duplicate": "「%@」が複数定義されています — 最初の一致が優先されます (%@)。",
             "prefs.snippets.conflict.caseShadow":
                 "「%@」が大文字小文字を区別する形と区別しない形の両方にあり、一方が隠れています (%@)。",
+            "prefs.snippets.conflict.prefixShadow":
+                "「%@」は入力した瞬間に実行されるため、次のトリガーは実行できません: %@。この接頭辞で始まらない名前に変更してください。",
             "prefs.snippets.rescan": "再スキャン",
             "prefs.hotkeys.inlineSearch": "コマンドパレット",
             "prefs.hotkeys.inlineSearch.hint":

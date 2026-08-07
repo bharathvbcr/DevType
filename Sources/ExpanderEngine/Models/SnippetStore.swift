@@ -96,6 +96,12 @@ public final class SnippetStore {
             case duplicateTrigger
             /// A case-sensitive and a case-insensitive snippet fold to the same key.
             case caseShadow
+            /// A shorter trigger that fires without a terminator is a prefix of a longer one,
+            /// so the longer trigger can never be typed — the short one always fires first.
+            ///
+            /// `trigger` holds the shadowing (shorter) trigger; `snippetIDs` / `groupNames`
+            /// start with it, followed by every trigger it makes unreachable.
+            case prefixShadow
         }
 
         public let kind: Kind
@@ -103,12 +109,27 @@ public final class SnippetStore {
         public let trigger: String
         public let snippetIDs: [UUID]
         public let groupNames: [String]
+        /// `prefixShadow` only: the triggers `trigger` makes unreachable. Naming them is what
+        /// makes the warning actionable — a group name does not tell you which trigger is dead.
+        public let blockedTriggers: [String]
 
-        public init(kind: Kind, trigger: String, snippetIDs: [UUID], groupNames: [String]) {
+        public init(
+            kind: Kind,
+            trigger: String,
+            snippetIDs: [UUID],
+            groupNames: [String],
+            blockedTriggers: [String] = []
+        ) {
             self.kind = kind
             self.trigger = trigger
             self.snippetIDs = snippetIDs
             self.groupNames = groupNames
+            self.blockedTriggers = blockedTriggers
+        }
+
+        /// Comma-joined `blockedTriggers`, or `nil` when there are none.
+        public var blockedTriggerSummary: String? {
+            blockedTriggers.isEmpty ? nil : blockedTriggers.joined(separator: ", ")
         }
     }
 
@@ -1551,23 +1572,35 @@ public final class SnippetStore {
             let groupName: String
             let trigger: String
             let caseSensitive: Bool
+            /// True when `AbbreviationMatcher` fires this trigger the moment it appears at the
+            /// buffer suffix, with no terminator. Mirrors match rules (1) and (2): a
+            /// punctuation-started trigger fires immediately **regardless** of
+            /// `requireWordBoundary`, and any trigger with the flag off fires immediately too.
+            /// Only these can shadow a longer trigger.
+            let firesWithoutTerminator: Bool
         }
 
         var empties: [Entry] = []
         var byFolded: [String: [Entry]] = [:]
+        var all: [Entry] = []
 
         for group in groups {
             for snippet in group.snippets {
+                let trigger = snippet.triggerKeyword
+                let punctuationStarted = trigger.first.map { !AbbreviationMatcher.isWordCharacter($0) } ?? false
                 let entry = Entry(
                     id: snippet.id,
                     groupName: group.name,
-                    trigger: snippet.triggerKeyword,
-                    caseSensitive: snippet.isCaseSensitive
+                    trigger: trigger,
+                    caseSensitive: snippet.isCaseSensitive,
+                    firesWithoutTerminator: punctuationStarted || !snippet.requireWordBoundary
                 )
-                if snippet.triggerKeyword.isEmpty {
+                if trigger.isEmpty {
                     empties.append(entry)
                 } else {
-                    byFolded[snippet.triggerKeyword.lowercased(), default: []].append(entry)
+                    byFolded[trigger.lowercased(), default: []].append(entry)
+                    // Disabled snippets cannot fire, so they neither shadow nor are shadowed.
+                    if snippet.enabled { all.append(entry) }
                 }
             }
         }
@@ -1618,6 +1651,33 @@ public final class SnippetStore {
                     groupNames: entries.map(\.groupName)
                 ))
             }
+        }
+
+        // Prefix shadowing: a trigger that fires without a terminator makes every longer
+        // trigger starting with it unreachable, because the short one fires on the keystroke
+        // that completes it — the user never gets to type the rest.
+        //
+        // This is invisible without the check: both snippets look fine individually, the
+        // longer one simply never fires. Note it is asymmetric — only the *shorter* trigger's
+        // firing rule matters, since the longer one is never reached.
+        for shadower in all where shadower.firesWithoutTerminator {
+            // Fold exactly as the matcher keys: case-insensitive triggers compare lowercased.
+            let shortKey = shadower.caseSensitive ? shadower.trigger : shadower.trigger.lowercased()
+            var shadowed: [Entry] = []
+            for candidate in all where candidate.id != shadower.id {
+                let longKey = candidate.caseSensitive ? candidate.trigger : candidate.trigger.lowercased()
+                guard longKey.count > shortKey.count, longKey.hasPrefix(shortKey) else { continue }
+                shadowed.append(candidate)
+            }
+            guard !shadowed.isEmpty else { continue }
+            let ordered = shadowed.sorted { $0.trigger < $1.trigger }
+            out.append(TriggerConflict(
+                kind: .prefixShadow,
+                trigger: shadower.trigger,
+                snippetIDs: [shadower.id] + ordered.map(\.id),
+                groupNames: [shadower.groupName] + ordered.map(\.groupName),
+                blockedTriggers: ordered.map(\.trigger)
+            ))
         }
 
         return out.sorted { lhs, rhs in
