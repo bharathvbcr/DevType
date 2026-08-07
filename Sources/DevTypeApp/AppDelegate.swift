@@ -70,52 +70,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         syncSelectionMonitorWithAIPreferences()
         wireTapHealth()
 
-        if ProcessInfo.processInfo.environment["DEVTYPE_MGR_PREVIEW"] != nil {
-            NSApp.setActivationPolicy(.regular)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.openSnippetManager(nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    guard let window = self.snippetWindowController?.window,
-                          let content = window.contentView else { exit(2) }
-                    window.setContentSize(NSSize(width: 985, height: 633))
-                    var tables: [NSTableView] = []
-                    func collect(_ v: NSView) {
-                        if let t = v as? NSTableView { tables.append(t) }
-                        v.subviews.forEach(collect)
-                    }
-                    collect(content)
-                    // Groups table first: row 0 == All Snippets.
-                    tables.first?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-                    content.layoutSubtreeIfNeeded()
-                    // Exercise cell recycling before measuring.
-                    if let snippets = tables.last {
-                        snippets.scrollRowToVisible(min(30, max(0, snippets.numberOfRows - 1)))
-                        content.layoutSubtreeIfNeeded()
-                        snippets.scrollRowToVisible(0)
-                    }
-                    content.layoutSubtreeIfNeeded()
-                    func walk(_ v: NSView) {
-                        if String(describing: type(of: v)).contains("Marquee") {
-                            let stack = v.superview
-                            let title = stack?.subviews.first(where: { $0 is NSTextField }) as? NSTextField
-                            let inner = v.subviews.first?.subviews.compactMap { $0 as? NSTextField }.first
-                            NSLog("DBGROW text=\((inner?.stringValue ?? "?").prefix(16)) w=\(v.bounds.width) innerW=\(inner?.frame.width ?? -1) intrinsic=\(v.intrinsicContentSize.width) stackW=\(stack?.bounds.width ?? -1) titleW=\(title?.bounds.width ?? -1)")
-                        }
-                        v.subviews.forEach(walk)
-                    }
-                    walk(content)
-                    if let out = ProcessInfo.processInfo.environment["DEVTYPE_LAYOUT_SHOT"],
-                       let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
-                        content.cacheDisplay(in: content.bounds, to: rep)
-                        if let data = rep.representation(using: .png, properties: [:]) {
-                            try? data.write(to: URL(fileURLWithPath: out))
-                        }
-                    }
-                    exit(0)
-                }
-            }
-        }
-
         NotificationCenter.default.addObserver(
             forName: .devTypeLanguageChanged,
             object: nil,
