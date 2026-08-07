@@ -209,7 +209,7 @@ public enum TEImporter {
                 let mode = TEAbbreviationMode(rawPlistValue: raw["abbreviationMode"] as? Int ?? 0)
                 let created = raw["creationDate"] as? Date ?? Date()
                 let modified = raw["modificationDate"] as? Date ?? created
-                let id = (raw["uuidString"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
+                _ = (raw["uuidString"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
 
                 switch snippetType {
                 case .plainText: break
