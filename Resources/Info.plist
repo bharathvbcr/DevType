@@ -29,7 +29,7 @@
          both in the packaged bundle from `git describe`, so shipped builds carry a
          real version and DiagnosticReport output can be mapped back to a commit. -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.0.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <!-- §7.5: Sparkle appcast. Update the URL when a release host exists; the
