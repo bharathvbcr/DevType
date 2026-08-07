@@ -169,6 +169,34 @@ final class CommandPaletteMatchingTests: XCTestCase {
         }
     }
 
+    // MARK: - What the palette shows before anything is typed
+
+    /// Registering a command is not the same as making it discoverable: the empty-query
+    /// list is a hardcoded set of IDs, so anything left out of it is invisible until the
+    /// user already knows its name.
+    func testOpeningThePaletteShowsTheTranslationActions() {
+        let ids = Set(CommandPaletteCatalog.matchCommands(query: "", loc: .shared).map(\.id))
+        for id in ["ai.translate", "ai.totelugu", "ai.tohindi"] {
+            XCTAssertTrue(ids.contains(id), "\(id) should be offered on an empty palette.")
+        }
+    }
+
+    /// The suggestion loop skips IDs it cannot resolve (`guard let … else { continue }`),
+    /// so a typo'd entry silently shows nothing rather than failing. Every ID named in
+    /// that list must resolve to a real command.
+    func testEveryDefaultSuggestionResolvesToARealCommand() {
+        let ids = Set(CommandPaletteCatalog.matchCommands(query: "", loc: .shared).map(\.id))
+        let expected = [
+            "date.today", "date.tomorrow", "date.time", "tool.clipboard",
+            "ai.proofread", "ai.translate", "ai.totelugu", "ai.tohindi",
+            "ai.formal", "ai.promptenhance",
+            "nav.preferences", "nav.snippets", "tool.upper", "tool.uuid"
+        ]
+        for id in expected {
+            XCTAssertTrue(ids.contains(id), "\(id) is listed as a default but resolves to nothing.")
+        }
+    }
+
     // MARK: - Translation direction
 
     /// "telugu to english" and "english to telugu" share every token — only word order
