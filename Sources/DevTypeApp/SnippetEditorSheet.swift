@@ -409,10 +409,30 @@ private final class ToggleChip: NSButton {
     }
     private let symbolName: String
     private var hovering = false { didSet { needsDisplay = true } }
+    private var helpText: String = ""
+
+    /// Non-nil when this toggle has no effect for the current trigger.
+    ///
+    /// A control that looks live but changes nothing is worse than no control: it is what
+    /// makes `requireWordBoundary` read as "already on" for a `` ` ``-prefixed trigger, when
+    /// `AbbreviationMatcher` rule (1) never consults it. The stored value is preserved (so
+    /// saving does not silently rewrite the model, and the flag becomes meaningful again if
+    /// the trigger is renamed) — the chip just stops accepting clicks and says why.
+    var inertReason: String? {
+        didSet {
+            isEnabled = inertReason == nil
+            alphaValue = isEnabled ? 1.0 : 0.4
+            toolTip = inertReason ?? helpText
+            setAccessibilityHelp(inertReason ?? helpText)
+            refreshAccessibilityValue()
+            needsDisplay = true
+        }
+    }
 
     init(title: String, symbol: String, isOn: Bool, help: String, target: AnyObject?, action: Selector?) {
         self.symbolName = symbol
         self.isOn = isOn
+        self.helpText = help
         super.init(frame: .zero)
         self.title = title
         self.target = target
@@ -440,6 +460,12 @@ private final class ToggleChip: NSButton {
     /// explicitly above.
     private func refreshAccessibilityValue() {
         let loc = LocalizationManager.shared
+        // VoiceOver must not read an inert toggle as a live "on" — that is the same lie the
+        // dimmed appearance exists to stop telling sighted users.
+        if inertReason != nil {
+            setAccessibilityValue(loc.s("ax.notApplicable"))
+            return
+        }
         setAccessibilityValue(isOn ? loc.s("ax.enabled") : loc.s("ax.disabled"))
     }
 
@@ -1290,6 +1316,13 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private func triggerDidChange() {
         let raw = triggerField.stringValue
         stage.updateTrigger(raw)
+        // Rule (1): a punctuation-started trigger fires the moment it is typed and never
+        // consults `requireWordBoundary`, so the chip must not present itself as live.
+        let firstChar = raw.trimmingCharacters(in: .whitespacesAndNewlines).first
+        let firesInstantly = firstChar.map { !AbbreviationMatcher.isWordCharacter($0) } ?? false
+        boundaryChip?.inertReason = firesInstantly
+            ? loc.s("editor.wordBoundary.inert", String(firstChar ?? " "))
+            : nil
         guideView?.update(trigger: raw, requireWordBoundary: boundaryChip?.isOn ?? true)
         validateTriggerLive()
     }

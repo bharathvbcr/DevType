@@ -166,7 +166,18 @@ public final class EraseExecutor {
     /// everything between the two checks — an AX replace attempt, a macro resolve, a fill-in panel —
     /// can move the caret or change the field. This is the last gate before text is destroyed.
     /// `completion(false)` means the erase was refused and the caller must abort the expand.
-    public func performGuardedErase(plan: ErasePlan, completion: @escaping (Bool) -> Void) {
+    /// - Parameter afterPossibleWrite: pass `true` when an AX write was already **attempted**
+    ///   against this field. `.unavailable` normally means "AX cannot tell us, proceed
+    ///   best-effort", which is the right default for an untouched field. After an attempted
+    ///   write it is not: the attempt may have mutated the field without our being able to
+    ///   verify it (Safari / Chromium / Electron report stale or virtualised AXValue right
+    ///   after a real edit), so erasing and injecting again duplicates the expansion — the
+    ///   `ScholarLMScholarLM` shape. Under this flag, unverifiable state refuses instead.
+    public func performGuardedErase(
+        plan: ErasePlan,
+        afterPossibleWrite: Bool = false,
+        completion: @escaping (Bool) -> Void
+    ) {
         guard plan.backspaceCount > 0 else {
             completion(true)
             return
@@ -177,6 +188,13 @@ public final class EraseExecutor {
         let element = AXContextChecker.shared.focusedElement()
         ax.collapseSelectionToCaret(element: element)
         evaluateErasePrecondition(plan: plan, element: element) { result in
+            if afterPossibleWrite, case .unavailable(let why) = result {
+                DevTypeLog.inject.error(
+                    "[Inject] erase refused after an attempted AX write — cannot verify field (\(why, privacy: .public)). Proceeding would risk injecting twice."
+                )
+                completion(false)
+                return
+            }
             if case .mismatch(let why) = result {
                 DevTypeLog.inject.error(
                     "[Inject] erase aborted before backspaces — \(why, privacy: .public)"
