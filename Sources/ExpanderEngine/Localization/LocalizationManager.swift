@@ -418,6 +418,9 @@ public final class LocalizationManager: ObservableObject {
             "editor.enabled": "Enabled",
             "editor.caseSensitive": "Case Sensitive",
             "editor.wordBoundary": "Word Boundary",
+            "editor.wordBoundary.inert":
+                "Not used for this trigger — it starts with “%@”, so it fires the moment you type it. The prefix already acts as the boundary.",
+            "ax.notApplicable": "not applicable",
             "editor.save": "Save Snippet",
             "editor.error.emptyTrigger": "Enter a trigger to save this snippet.",
             "editor.error.conflict": "“%@” conflicts with existing trigger “%@”.",
@@ -1364,6 +1367,9 @@ public final class LocalizationManager: ObservableObject {
             "editor.enabled": "활성화",
             "editor.caseSensitive": "대소문자 구분",
             "editor.wordBoundary": "단어 경계",
+            "editor.wordBoundary.inert":
+                "이 트리거에는 적용되지 않습니다 — “%@”(으)로 시작하므로 입력하는 즉시 실행됩니다. 접두사가 이미 경계 역할을 합니다.",
+            "ax.notApplicable": "해당 없음",
             "editor.save": "스니펫 저장",
             "editor.error.emptyTrigger": "저장하려면 트리거를 입력하세요.",
             "editor.error.conflict": "“%@”이(가) 기존 트리거 “%@”와(과) 충돌합니다.",
@@ -2276,6 +2282,9 @@ public final class LocalizationManager: ObservableObject {
             "editor.enabled": "有効",
             "editor.caseSensitive": "大文字小文字を区別",
             "editor.wordBoundary": "単語境界",
+            "editor.wordBoundary.inert":
+                "このトリガーでは使用されません — 「%@」で始まるため、入力した瞬間に実行されます。接頭辞がすでに境界として機能します。",
+            "ax.notApplicable": "該当なし",
             "editor.save": "スニペットを保存",
             "editor.error.emptyTrigger": "保存するにはトリガーを入力してください。",
             "editor.error.conflict": "「%@」は既存のトリガー「%@」と競合しています。",

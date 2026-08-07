@@ -651,7 +651,7 @@ public final class TextInjectionPipeline {
 
             // HID fallback: the guarded erase re-verifies that the injected text is still sitting
             // left of the caret before a single backspace is posted.
-            self.eraser.performGuardedErase(plan: undoPlan) { erased in
+            self.eraser.performGuardedErase(plan: undoPlan, afterPossibleWrite: true) { erased in
                 guard erased else {
                     DevTypeLog.inject.notice(
                         "[Inject] §3.1 undo aborted — field no longer holds the injected text"
@@ -1081,7 +1081,12 @@ public final class TextInjectionPipeline {
             break
         }
 
+        // Tracks whether an AX write was *attempted* against this field. A non-`.replaced`
+        // outcome does not prove nothing changed — some hosts mutate and then report a stale
+        // AXValue — so the HID fallback below must not erase on unverifiable state.
+        var attemptedAXWrite = false
         if !shellLike, !preferHID {
+            attemptedAXWrite = true
             let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
                 eraseCount: erasePlan.utf16Count,
@@ -1129,7 +1134,7 @@ public final class TextInjectionPipeline {
         // The guarded erase collapses any stray selection and re-verifies the trigger is still left
         // of the caret, so a half-applied AX edit above cannot be swallowed by backspace #1 and turn
         // the remaining backspaces loose on the user's text.
-        eraser.performGuardedErase(plan: erasePlan) { erased in
+        eraser.performGuardedErase(plan: erasePlan, afterPossibleWrite: attemptedAXWrite) { erased in
             guard erased else {
                 self.refuseInject(
                     "Erase precondition failed before paste — field no longer holds the trigger",
