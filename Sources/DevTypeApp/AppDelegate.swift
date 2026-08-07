@@ -51,6 +51,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        installLastResortExceptionLogger()
         installEditMenu()
 
         // §4.5: one-time migration of the legacy per-snippet `usageCount` field
@@ -659,6 +660,31 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         hotkeyManager.registerAll()
+    }
+
+    /// Records the reason for an otherwise-silent `SIGABRT`.
+    ///
+    /// The two palette crashes that motivated §8.7 shipped `.ips` reports whose only
+    /// application-specific information was `abort() called` — no exception name, no
+    /// reason, because the raiser (`-[NSRemoteView containingWindowWillOrderOnScreen:]`)
+    /// catches and rethrows, which loses AppKit's default logging. Diagnosing them cost a
+    /// debugger session. This puts the name, the reason, and the raising stack into the
+    /// unified log first, so the next one is readable from `log show` alone.
+    ///
+    /// This does not prevent the abort — nothing can, once an exception is uncaught. It
+    /// only makes the crash diagnosable. Preventing a specific crash is the job of an
+    /// ObjC `@catch` at the boundary that raises, as in
+    /// `DTMakeKeyAndOrderFrontCatchingException`.
+    private func installLastResortExceptionLogger() {
+        NSSetUncaughtExceptionHandler { exception in
+            DevTypeLog.app.fault(
+                """
+                [Crash] uncaught \(exception.name.rawValue, privacy: .public): \
+                \(exception.reason ?? "(no reason)", privacy: .public)
+                \(exception.callStackSymbols.joined(separator: "\n"), privacy: .public)
+                """
+            )
+        }
     }
 
     @objc private func toggleInlineSearch(_ sender: Any?) {
