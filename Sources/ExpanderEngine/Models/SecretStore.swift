@@ -16,9 +16,17 @@ import Security
 public final class SecretStore {
     public static let shared = SecretStore()
 
-    /// Keychain service. Distinct from anything the app might store later, so `purgeOrphans`
-    /// can enumerate *only* snippet secrets and never delete an unrelated item.
+    /// Legacy keychain service (§8.9). Items here were created by ad-hoc-signed builds; their
+    /// `change_acl` ACL entry ended up empty, so the §8.10 partition heal is a silent no-op on
+    /// them and every rebuild re-triggers the login-password dialog. Read for migration only.
     public static let service = "com.devtype.app.secret"
+
+    /// Current keychain service (§8.10). Every item here was created by the cert-pinned
+    /// identity, giving it a `change_acl` entry that identity matches — which is what makes the
+    /// partition heal work and rebuilds silent. Distinct from anything the app might store
+    /// later, so `purgeOrphans` can enumerate *only* snippet secrets and never delete an
+    /// unrelated item.
+    public static let serviceV2 = "com.devtype.app.secret.v2"
 
     /// Why a secret operation failed, in a form the UI can act on.
     ///
@@ -177,6 +185,36 @@ public enum KeychainPartitionPolicy {
     }
 }
 
+/// Which keychain service to try, in what order, and when a legacy hit must move (§8.10).
+///
+/// The split exists because the legacy items are *incurable in place*: their `change_acl` ACL
+/// entry lists no applications (a leftover of ad-hoc creation plus Always-Allow surgery), so
+/// the partition heal that keeps current-epoch items silent can never take effect on them —
+/// measured on the real items: no comment written, no partition appended, dialog back on the
+/// next build. The only fix is a fresh item created by the stable cert identity, which is
+/// exactly what migration does the first time a legacy value is successfully read (one last
+/// system dialog) or re-saved in the editor (no dialog at all).
+public enum SecretServiceEpoch: CaseIterable, Equatable {
+    case current
+    case legacy
+
+    public var service: String {
+        switch self {
+        case .current: return SecretStore.serviceV2
+        case .legacy: return SecretStore.service
+        }
+    }
+
+    /// Current first: once an account is migrated, the legacy husk must never shadow it.
+    public static let readOrder: [SecretServiceEpoch] = [.current, .legacy]
+
+    /// A value read out of the legacy service moves to the current one immediately — that
+    /// read may have cost the user a password dialog, and migrating is what makes it the last.
+    public static func shouldMigrate(from epoch: SecretServiceEpoch, readSucceeded: Bool) -> Bool {
+        epoch == .legacy && readSucceeded
+    }
+}
+
 /// The read sequence as a pure state machine, so the retry logic is table-testable without a
 /// keychain. Phases: a silent attempt, a silent attempt after healing, and a final attempt with
 /// the system password dialog allowed (the legitimate fallback when the signing identity itself
@@ -263,10 +301,10 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
         self.diagnostics = diagnostics
     }
 
-    private func baseQuery(account: String?) -> [String: Any] {
+    private func baseQuery(service: String, account: String?) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: SecretStore.service,
+            kSecAttrService as String: service,
         ]
         if let account { query[kSecAttrAccount as String] = account }
         return query
@@ -284,8 +322,8 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     }
 
     /// One query answering everything about an item: status, value, and whether it is a husk.
-    private func fetch(account: String) -> (status: OSStatus, value: String?, tombstone: Bool) {
-        var query = baseQuery(account: account)
+    private func fetch(service: String, account: String) -> (status: OSStatus, value: String?, tombstone: Bool) {
+        var query = baseQuery(service: service, account: account)
         query[kSecReturnData as String] = true
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -304,150 +342,207 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     }
 
     /// The metadata-only update that re-partitions the item to this build. Gated by the item's
-    /// cert-pinned ACL entry, so only code signed like this app gains anything from it.
-    private func healPartition(account: String) {
+    /// cert-pinned ACL entries, so only code signed like this app gains anything from it.
+    private func healPartition(service: String, account: String) {
         let touch: [String: Any] = [kSecAttrComment as String: KeychainPartitionPolicy.healComment]
-        _ = SecItemUpdate(baseQuery(account: account) as CFDictionary, touch as CFDictionary)
+        _ = SecItemUpdate(baseQuery(service: service, account: account) as CFDictionary, touch as CFDictionary)
+    }
+
+    /// Write a live value into one service. Update first: SecItemAdd on an existing account
+    /// returns errSecDuplicateItem, and the delete-then-add alternative loses the value if the
+    /// process dies between the two. A value update also re-partitions the item to this build
+    /// (measured) and resurrects a tombstoned husk — hence the explicit live description.
+    private func write(_ data: Data, service: String, account: String) -> OSStatus {
+        let query = baseQuery(service: service, account: account)
+        let update: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrDescription as String: KeychainPartitionPolicy.liveDescription,
+            kSecAttrComment as String: KeychainPartitionPolicy.healComment,
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if updateStatus != errSecItemNotFound { return updateStatus }
+
+        var insert = query
+        insert[kSecValueData as String] = data
+        insert[kSecAttrDescription as String] = KeychainPartitionPolicy.liveDescription
+        insert[kSecAttrComment as String] = KeychainPartitionPolicy.healComment
+        // This device only, and only while unlocked: a password snippet has no business
+        // travelling to another Mac in a keychain sync or sitting readable in a backup.
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        return SecItemAdd(insert as CFDictionary, nil)
+    }
+
+    /// Best-effort destruction of one service's item: delete when this build may (creator
+    /// only — measured), otherwise overwrite the value in place and mark the husk. Every read
+    /// surface here treats the marker as "absent".
+    private func destroy(service: String, account: String) -> OSStatus {
+        let status = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
+        if status == errSecSuccess || status == errSecItemNotFound { return status }
+
+        let tomb: [String: Any] = [
+            kSecValueData as String: Data(KeychainPartitionPolicy.tombstoneValue.utf8),
+            kSecAttrDescription as String: KeychainPartitionPolicy.tombstoneDescription,
+        ]
+        let tombStatus = SecItemUpdate(
+            baseQuery(service: service, account: account) as CFDictionary,
+            tomb as CFDictionary
+        )
+        // The secret is gone either way the caller cares about; report the destroy result.
+        return tombStatus == errSecSuccess ? errSecSuccess : status
     }
 
     public func set(_ value: String, account: String) -> OSStatus {
         guard let data = value.data(using: .utf8) else { return errSecParam }
         lock.lock(); defer { lock.unlock() }
         return withoutKeychainUI {
-            let query = baseQuery(account: account)
+            let status = write(data, service: SecretStore.serviceV2, account: account)
+            // A save is also a free migration: the plaintext is in hand, so the incurable
+            // legacy copy can be destroyed without ever showing a dialog.
+            if status == errSecSuccess {
+                _ = destroy(service: SecretStore.service, account: account)
+            }
+            return status
+        }
+    }
 
-            // Update first: SecItemAdd on an existing account returns errSecDuplicateItem, and
-            // the delete-then-add alternative loses the value if the process dies between the
-            // two. A value update also re-partitions the item to this build (measured) and
-            // resurrects a tombstoned husk — hence the explicit live description.
-            let update: [String: Any] = [
-                kSecValueData as String: data,
-                kSecAttrDescription as String: KeychainPartitionPolicy.liveDescription,
-                kSecAttrComment as String: KeychainPartitionPolicy.healComment,
-            ]
-            let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-            if updateStatus != errSecItemNotFound { return updateStatus }
+    private enum ReadResult {
+        case absent
+        case value(String?, SecretReadOutcome)
+        case failed(OSStatus)
+    }
 
-            var insert = query
-            insert[kSecValueData as String] = data
-            insert[kSecAttrDescription as String] = KeychainPartitionPolicy.liveDescription
-            insert[kSecAttrComment as String] = KeychainPartitionPolicy.healComment
-            // This device only, and only while unlocked: a password snippet has no business
-            // travelling to another Mac in a keychain sync or sitting readable in a backup.
-            insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            return SecItemAdd(insert as CFDictionary, nil)
+    /// The three-phase read against one service: silent, heal-then-silent, then one attempt
+    /// with the system password dialog allowed — the legitimate fallback when the item exists
+    /// but this identity cannot heal it (legacy items; a regenerated certificate).
+    private func read(epoch: SecretServiceEpoch, account: String) -> ReadResult {
+        let service = epoch.service
+
+        enum SilentEnd {
+            case done(ReadResult)
+            case needUser
+        }
+
+        let silent: SilentEnd = withoutKeychainUI {
+            var result = fetch(service: service, account: account)
+            var phase = KeychainReadPlan.Phase.silent
+            if KeychainReadPlan.step(after: result.status, phase: phase) == .heal {
+                healPartition(service: service, account: account)
+                phase = .healed
+                result = fetch(service: service, account: account)
+            }
+            switch KeychainReadPlan.step(after: result.status, phase: phase) {
+            case .succeed:
+                // A husk reads as "no secret", never as its placeholder value.
+                if result.tombstone { return .done(.absent) }
+                return .done(.value(result.value, phase == .silent ? .ok : .healed))
+            case .fail:
+                // Absent is not a failure worth reporting; anything else is.
+                if result.status == errSecItemNotFound { return .done(.absent) }
+                return .done(.failed(result.status))
+            case .askUser, .heal:
+                return .needUser
+            }
+        }
+
+        if case .done(let result) = silent { return result }
+
+        // The one place the system password dialog is allowed. Answering it (or Always Allow)
+        // is the last time it appears for this item: a legacy hit migrates immediately after.
+        let final = fetch(service: service, account: account)
+        switch KeychainReadPlan.step(after: final.status, phase: .interactive) {
+        case .succeed:
+            if final.tombstone { return .absent }
+            return .value(final.value, .granted)
+        case .fail, .heal, .askUser:
+            return .failed(final.status)
         }
     }
 
     public func value(account: String) -> String? {
         lock.lock(); defer { lock.unlock() }
 
-        enum SilentEnd {
-            case done(value: String?, outcome: SecretReadOutcome?)
-            case needUser
-        }
-
-        // Silent phase, then heal-and-retry, still silent.
-        let silent: SilentEnd = withoutKeychainUI {
-            var result = fetch(account: account)
-            var phase = KeychainReadPlan.Phase.silent
-            if KeychainReadPlan.step(after: result.status, phase: phase) == .heal {
-                healPartition(account: account)
-                phase = .healed
-                result = fetch(account: account)
-            }
-            switch KeychainReadPlan.step(after: result.status, phase: phase) {
-            case .succeed:
-                // A husk reads as "no secret", never as its placeholder value.
-                if result.tombstone { return .done(value: nil, outcome: nil) }
-                return .done(value: result.value, outcome: phase == .silent ? .ok : .healed)
-            case .fail:
-                // Absent is not a failure worth reporting; anything else is.
-                let outcome: SecretReadOutcome? =
-                    result.status == errSecItemNotFound ? nil : .failed(result.status)
-                return .done(value: nil, outcome: outcome)
-            case .askUser, .heal:
-                return .needUser
+        for epoch in SecretServiceEpoch.readOrder {
+            switch read(epoch: epoch, account: account) {
+            case .absent:
+                continue
+            case .value(let value, let outcome):
+                if SecretServiceEpoch.shouldMigrate(from: epoch, readSucceeded: value != nil),
+                   let value, let data = value.data(using: .utf8) {
+                    // Move to a fresh item this identity owns — the fix the legacy item's
+                    // empty change_acl entry makes impossible in place. Destroy the source
+                    // only once the copy definitely exists.
+                    _ = withoutKeychainUI {
+                        let copied = write(data, service: SecretStore.serviceV2, account: account)
+                        if copied == errSecSuccess {
+                            _ = destroy(service: SecretStore.service, account: account)
+                        }
+                        return copied
+                    }
+                }
+                diagnostics.record(outcome)
+                return value
+            case .failed(let status):
+                diagnostics.record(.failed(status))
+                return nil
             }
         }
-
-        if case .done(let value, let outcome) = silent {
-            if let outcome { diagnostics.record(outcome) }
-            return value
-        }
-
-        // Interactive phase: the one place the system password dialog is allowed. Reached only
-        // when the item exists but this signing identity cannot heal it — Always Allow here
-        // re-pins the ACL entry, after which every future build heals silently again.
-        let final = fetch(account: account)
-        switch KeychainReadPlan.step(after: final.status, phase: .interactive) {
-        case .succeed:
-            if final.tombstone { return nil }
-            diagnostics.record(.granted)
-            return final.value
-        case .fail, .heal, .askUser:
-            diagnostics.record(.failed(final.status))
-            return nil
-        }
+        return nil
     }
 
     public func contains(account: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return withoutKeychainUI {
-            var query = baseQuery(account: account)
-            query[kSecReturnAttributes as String] = true
-            query[kSecMatchLimit as String] = kSecMatchLimitOne
-            var item: CFTypeRef?
-            guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-                  let attrs = item as? [String: Any] else {
-                return false
+            for epoch in SecretServiceEpoch.readOrder {
+                var query = baseQuery(service: epoch.service, account: account)
+                query[kSecReturnAttributes as String] = true
+                query[kSecMatchLimit as String] = kSecMatchLimitOne
+                var item: CFTypeRef?
+                guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+                      let attrs = item as? [String: Any] else {
+                    continue
+                }
+                if !KeychainPartitionPolicy.isTombstone(
+                    description: attrs[kSecAttrDescription as String] as? String
+                ) { return true }
             }
-            return !KeychainPartitionPolicy.isTombstone(
-                description: attrs[kSecAttrDescription as String] as? String
-            )
+            return false
         }
     }
 
     public func delete(account: String) -> OSStatus {
         lock.lock(); defer { lock.unlock() }
         return withoutKeychainUI {
-            let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
-            if status == errSecSuccess || status == errSecItemNotFound { return status }
-
-            // The owner check is pinned to the *creating build* (errSecInvalidOwnerEdit from
-            // every other, even after a heal — measured). Destroy the value in place and mark
-            // the husk; every read surface here treats the marker as "absent".
-            let tomb: [String: Any] = [
-                kSecValueData as String: Data(KeychainPartitionPolicy.tombstoneValue.utf8),
-                kSecAttrDescription as String: KeychainPartitionPolicy.tombstoneDescription,
-            ]
-            let tombStatus = SecItemUpdate(
-                baseQuery(account: account) as CFDictionary,
-                tomb as CFDictionary
-            )
-            // The secret is gone either way the caller cares about; report the destroy result.
-            return tombStatus == errSecSuccess ? errSecSuccess : status
+            let current = destroy(service: SecretStore.serviceV2, account: account)
+            let legacy = destroy(service: SecretStore.service, account: account)
+            // "Not found in either" is the caller's success case (idempotent remove); a real
+            // failure in either service is worth surfacing.
+            if current == errSecSuccess || legacy == errSecSuccess { return errSecSuccess }
+            return current == errSecItemNotFound ? legacy : current
         }
     }
 
     public func accounts() -> Set<String> {
         lock.lock(); defer { lock.unlock() }
         return withoutKeychainUI {
-            var query = baseQuery(account: nil)
-            query[kSecReturnAttributes as String] = true
-            query[kSecMatchLimit as String] = kSecMatchLimitAll
+            var found: Set<String> = []
+            for epoch in SecretServiceEpoch.readOrder {
+                var query = baseQuery(service: epoch.service, account: nil)
+                query[kSecReturnAttributes as String] = true
+                query[kSecMatchLimit as String] = kSecMatchLimitAll
 
-            var items: CFTypeRef?
-            guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
-                  let entries = items as? [[String: Any]] else {
-                return []
+                var items: CFTypeRef?
+                guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
+                      let entries = items as? [[String: Any]] else {
+                    continue
+                }
+                for entry in entries {
+                    guard !KeychainPartitionPolicy.isTombstone(
+                        description: entry[kSecAttrDescription as String] as? String
+                    ), let account = entry[kSecAttrAccount as String] as? String else { continue }
+                    found.insert(account)
+                }
             }
-            return Set(entries.compactMap { entry -> String? in
-                guard !KeychainPartitionPolicy.isTombstone(
-                    description: entry[kSecAttrDescription as String] as? String
-                ) else { return nil }
-                return entry[kSecAttrAccount as String] as? String
-            })
+            return found
         }
     }
 }

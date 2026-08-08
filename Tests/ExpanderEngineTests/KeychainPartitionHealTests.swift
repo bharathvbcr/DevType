@@ -50,6 +50,34 @@ final class KeychainPartitionHealTests: XCTestCase {
         }
     }
 
+    // MARK: - Service epochs
+
+    func testCurrentServiceIsAlwaysConsultedFirst() {
+        XCTAssertEqual(
+            SecretServiceEpoch.readOrder, [.current, .legacy],
+            "A migrated secret must never be shadowed by its legacy husk."
+        )
+    }
+
+    func testTheTwoServicesAreDistinctAndLegacyKeepsItsHistoricName() {
+        XCTAssertEqual(SecretServiceEpoch.legacy.service, "com.devtype.app.secret",
+                       "Renaming the legacy service would orphan every existing secret.")
+        XCTAssertEqual(SecretServiceEpoch.current.service, "com.devtype.app.secret.v2")
+        XCTAssertNotEqual(SecretServiceEpoch.legacy.service, SecretServiceEpoch.current.service)
+    }
+
+    func testOnlyASuccessfulLegacyReadTriggersMigration() {
+        XCTAssertTrue(SecretServiceEpoch.shouldMigrate(from: .legacy, readSucceeded: true))
+        XCTAssertFalse(
+            SecretServiceEpoch.shouldMigrate(from: .legacy, readSucceeded: false),
+            "Migrating without the value would write nothing and destroy the original."
+        )
+        XCTAssertFalse(
+            SecretServiceEpoch.shouldMigrate(from: .current, readSucceeded: true),
+            "Current-epoch items are already owned by the stable identity."
+        )
+    }
+
     // MARK: - Tombstones
 
     func testTombstoneIsRecognisedOnlyByItsExactMarker() {
