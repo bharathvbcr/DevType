@@ -807,6 +807,119 @@ final class CapsuleButton: NSButton {
     }
 }
 
+// MARK: - Icon-only capsule
+
+/// Circular, icon-only sibling of `CapsuleButton.secondary`: same frosted fill,
+/// hover, highlight, and focus ring, minus the title. For header affordances that
+/// have no horizontal room for a label — the glyph plus a tooltip carries them.
+final class GlassIconButton: NSButton {
+    private var hovering = false { didSet { needsDisplay = true } }
+    private var symbolImage: NSImage?
+    private let diameter: CGFloat
+
+    override var isEnabled: Bool {
+        didSet { needsDisplay = true }
+    }
+
+    init(
+        symbol: String,
+        accessibilityLabel: String,
+        diameter: CGFloat = 26,
+        target: AnyObject?,
+        action: Selector?
+    ) {
+        self.diameter = diameter
+        super.init(frame: .zero)
+        title = ""
+        self.target = target
+        self.action = action
+        isBordered = false
+        wantsLayer = true
+        focusRingType = .none
+        translatesAutoresizingMaskIntoConstraints = false
+        symbolImage = DevTypeTheme.tintedSymbol(
+            symbol,
+            size: diameter * 0.5,
+            weight: .semibold,
+            color: DevTypeTheme.textPrimary
+        )
+        // §5.1: nothing here is a title AppKit can report, so the label is explicit.
+        setAccessibilityRole(NSAccessibility.Role.button)
+        setAccessibilityLabel(accessibilityLabel)
+
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: diameter, height: diameter)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let radius = rect.height / 2
+        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+
+        // §5.3: contrast overlays rather than white ones, so the frosted fill
+        // survives a light appearance.
+        DevTypeTheme.contrastOverlay(hovering ? 0.11 : 0.065).setFill()
+        path.fill()
+        DevTypeTheme.contrastOverlay(hovering ? 0.28 : 0.20).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        if cell?.isHighlighted == true && isEnabled {
+            NSColor.black.withAlphaComponent(0.18).setFill()
+            path.fill()
+        }
+
+        if window?.firstResponder === self {
+            DevTypeTheme.accent.withAlphaComponent(0.65).setStroke()
+            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: radius - 1, yRadius: radius - 1)
+            ring.lineWidth = 2
+            ring.stroke()
+        }
+
+        guard let symbolImage else { return }
+        let imageSize = symbolImage.size
+        let imageRect = NSRect(
+            x: (bounds.width - imageSize.width) / 2,
+            y: (bounds.height - imageSize.height) / 2,
+            width: imageSize.width,
+            height: imageSize.height
+        )
+        // `NSButton.isFlipped` is true — only the `respectFlipped:` overload
+        // compensates, otherwise the glyph renders upside down.
+        symbolImage.draw(
+            in: imageRect,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: isEnabled ? 1.0 : 0.45,
+            respectFlipped: true,
+            hints: nil
+        )
+    }
+}
+
 // MARK: - Split capsule (primary + disclosure)
 
 /// Primary capsule with a trailing chevron segment. Main click runs `primaryAction`;

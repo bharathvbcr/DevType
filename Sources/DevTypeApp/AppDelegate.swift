@@ -743,6 +743,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// §8.10: the login keychain is locked (auto-lock in Keychain Access, `security
+    /// lock-keychain`, some sleep policies). Same doorway rule as migration: explain first,
+    /// then let macOS show its own unlock dialog, then finish what the user asked for.
+    private func offerKeychainUnlock(thenRetry retry: @escaping () -> Void) {
+        DevTypeAlert.present(
+            title: loc.s("secret.keychainLocked.title"),
+            message: loc.s("secret.keychainLocked.message"),
+            buttons: [loc.s("secret.keychainLocked.unlock"), loc.s("common.cancel")]
+        ) { index in
+            guard index == 0 else { return }
+            if SecretStore.shared.requestKeychainUnlock() {
+                retry()
+            } else {
+                // They cancelled the system dialog; their decision, already visible to them.
+                ToastPanel.show(
+                    LocalizationManager.shared.s("secret.keychainLocked.stillLocked"),
+                    symbol: "lock.fill"
+                )
+            }
+        }
+    }
+
     private func copyToClipboard(_ snippet: SnippetModel) {
         let clipboard = NSPasteboard.general.string(forType: .string)
         let lookup: (String) -> String? = { trigger in
@@ -822,6 +844,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         case .failure(.migrationRequired(let pendingCount)):
             offerSecretMigration(for: snippet, pendingCount: pendingCount) { [weak self] in
+                self?.copyToClipboard(snippet)
+            }
+
+        case .failure(.keychainLocked):
+            offerKeychainUnlock { [weak self] in
                 self?.copyToClipboard(snippet)
             }
 
@@ -1219,6 +1246,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                         )
                     case .failure(.migrationRequired(let pendingCount)):
                         self.offerSecretMigration(for: snippet, pendingCount: pendingCount) { [weak self] in
+                            self?.expandFromSearch(snippet, sourceApp: sourceApp)
+                        }
+                    case .failure(.keychainLocked):
+                        self.offerKeychainUnlock { [weak self] in
                             self?.expandFromSearch(snippet, sourceApp: sourceApp)
                         }
                     case .failure(.authenticationCancelled):

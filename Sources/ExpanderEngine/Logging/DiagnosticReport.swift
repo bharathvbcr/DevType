@@ -211,7 +211,8 @@ public enum DiagnosticReport {
             overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics(),
             aiLines: captureAILines(),
             secretLines: captureSecretLines(
-                pendingMigrationCount: { SecretStore.shared.snippetIDsPendingMigration().count }
+                pendingMigrationCount: { SecretStore.shared.snippetIDsPendingMigration().count },
+                keychainLocked: { SecretStore.shared.isKeychainLocked() }
             ),
             prefixDebounceSummary: EventTapEngine.shared.prefixDebounceDiagnostics()
         )
@@ -232,7 +233,8 @@ public enum DiagnosticReport {
         availability: BiometricGate.Availability? = nil,
         defaults: UserDefaults = .standard,
         accessDiagnostics: SecretAccessDiagnostics = .shared,
-        pendingMigrationCount: (() -> Int)? = nil
+        pendingMigrationCount: (() -> Int)? = nil,
+        keychainLocked: (() -> Bool)? = nil
     ) -> [String] {
         let all = snippets ?? SnippetStore.shared.loadSnippets()
         let resolved = availability ?? BiometricGate.shared.availability()
@@ -256,8 +258,11 @@ public enum DiagnosticReport {
             // problem fired and was absorbed silently, exactly as designed.
             "Keychain last read: \(accessDiagnostics.lastRead().label)",
             // Hermetic by default (tests must never touch the live keychain); the production
-            // capture site below injects the real count.
+            // capture site below injects the real closures.
             "Secrets pending migration: \((pendingMigrationCount ?? { 0 })())",
+            // A locked keychain fails every decrypt while metadata still answers — without
+            // this line those reports read exactly like "the secret vanished".
+            "Keychain: \((keychainLocked ?? { false })() ? "LOCKED" : "unlocked")",
         ]
         // The step trail: every fetch/heal/migrate with its OSStatus, accounts aliased to
         // "item A/B/…" — the exact sequence that produced whatever the user just saw.

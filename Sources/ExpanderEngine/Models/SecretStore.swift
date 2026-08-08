@@ -98,6 +98,13 @@ public final class SecretStore {
         backing.migrateLegacy(allowInteraction: allowInteraction)
     }
 
+    /// See `SecretBackingStore.keychainLocked` — tells "locked" apart from "missing".
+    public func isKeychainLocked() -> Bool { backing.keychainLocked() }
+
+    /// See `SecretBackingStore.requestKeychainUnlock` — explained-first dialog doorway.
+    @discardableResult
+    public func requestKeychainUnlock() -> Bool { backing.requestKeychainUnlock() }
+
     @discardableResult
     public func remove(for id: UUID) -> Result<Void, Failure> {
         let status = backing.delete(account: Self.account(for: id))
@@ -152,6 +159,11 @@ public protocol SecretBackingStore: AnyObject {
     /// Move every legacy item to the current service. `allowInteraction` is the ONE switch in
     /// this API that may put a system dialog on screen — callers own the moment it flips.
     func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary
+    /// Is the backing keychain currently locked? A locked keychain fails every decrypt while
+    /// metadata queries keep working, which without this check masquerades as "no secret".
+    func keychainLocked() -> Bool
+    /// Ask the system to unlock — may show the system unlock dialog, so callers explain first.
+    func requestKeychainUnlock() -> Bool
 }
 
 extension SecretBackingStore {
@@ -160,6 +172,9 @@ extension SecretBackingStore {
     public func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary {
         SecretMigrationSummary()
     }
+    /// An in-memory store has no lock to be behind.
+    public func keychainLocked() -> Bool { false }
+    public func requestKeychainUnlock() -> Bool { true }
 }
 
 // MARK: - Partition policy (§8.10)
@@ -593,6 +608,26 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
             ) else { return nil }
             return entry[kSecAttrAccount as String] as? String
         }.sorted()
+    }
+
+    /// Locked means every decrypt fails while metadata succeeds — the state that used to be
+    /// misreported as "no secret stored". Users enable auto-lock in Keychain Access ("lock
+    /// after N minutes", "lock when sleeping"); DevType must diagnose it, not deny the secret.
+    public func keychainLocked() -> Bool {
+        var status = SecKeychainStatus(0)
+        guard SecKeychainGetStatus(nil, &status) == errSecSuccess else {
+            // No default keychain at all — not a lock problem; let reads speak for themselves.
+            return false
+        }
+        return status & SecKeychainStatus(kSecUnlockStateStatus) == 0
+    }
+
+    /// The system unlock prompt — the login password dialog macOS itself owns. Reached only
+    /// through UI that told the user why (same doorway rule as migration).
+    public func requestKeychainUnlock() -> Bool {
+        let status = SecKeychainUnlock(nil, 0, nil, false)
+        diagnostics.note("keychain unlock request", status)
+        return status == errSecSuccess
     }
 
     /// The one-shot batch that finishes the §8.10 upgrade. Tries every legacy item silently

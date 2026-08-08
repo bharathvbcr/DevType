@@ -360,6 +360,31 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(offer.upperBound < migrateCall.lowerBound)
     }
 
+    /// §8.10: a locked login keychain must be diagnosed as locked, never reported as "no secret
+    /// stored" — and the unlock dialog has exactly one explained doorway, like migration.
+    func testLockedKeychainIsDiagnosedNotDeniedAndUnlockHasOneDoorway() throws {
+        let flow = try source("Sources/DevTypeApp/SecretMenuFlow.swift")
+        guard let lockCheck = flow.range(of: "isKeychainLocked()"),
+              let missing = flow.range(of: ".failure(.secretUnavailable)") else {
+            return XCTFail("SecretMenuFlow no longer has the shape this contract describes.")
+        }
+        XCTAssertTrue(
+            lockCheck.lowerBound < missing.lowerBound,
+            "Check the lock before declaring the secret missing — the fix is 'unlock', not 're-enter'."
+        )
+
+        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
+        XCTAssertEqual(
+            appDelegate.components(separatedBy: "requestKeychainUnlock()").count - 1, 1,
+            "One doorway: offerKeychainUnlock. A second caller is a second surprise dialog."
+        )
+        guard let offer = appDelegate.range(of: "private func offerKeychainUnlock("),
+              let unlockCall = appDelegate.range(of: "requestKeychainUnlock()") else {
+            return XCTFail("AppDelegate no longer has the shape this contract describes.")
+        }
+        XCTAssertTrue(offer.upperBound < unlockCall.lowerBound)
+    }
+
     /// Secrets are filtered at the engine's own setter, not at its callers, so no future caller
     /// can put one back on the typed path.
     func testTypedPathFilterLivesInTheEngineSetter() throws {

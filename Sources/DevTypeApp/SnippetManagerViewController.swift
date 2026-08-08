@@ -550,11 +550,22 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         sortPopup.toolTip = loc.s("manager.sort.hint")
         sortPopup.setAccessibilityLabel(loc.s("manager.sort"))
 
+        // Preferences were reachable only from the menu-bar item, which is easy to
+        // miss once the manager window is the thing you are looking at.
+        let settingsButton = GlassIconButton(
+            symbol: "gearshape",
+            accessibilityLabel: loc.s("manager.settings"),
+            target: self,
+            action: #selector(openSettings)
+        )
+        settingsButton.toolTip = loc.s("manager.settings")
+
         mainView.addSubview(logo)
         mainView.addSubview(titleLabel)
         mainView.addSubview(statsPill)
         mainView.addSubview(sortPopup)
         mainView.addSubview(filterField)
+        mainView.addSubview(settingsButton)
 
         // MARK: Sidebar (groups) — glass card
         let sidebarCard = GlassCardView(tint: DevTypeTheme.accent.withAlphaComponent(0.05))
@@ -799,7 +810,10 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             statsPill.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 10),
             statsPill.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
 
-            filterField.trailingAnchor.constraint(equalTo: mainView.trailingAnchor, constant: -20),
+            settingsButton.trailingAnchor.constraint(equalTo: mainView.trailingAnchor, constant: -20),
+            settingsButton.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
+
+            filterField.trailingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: -10),
             filterField.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
             filterField.widthAnchor.constraint(equalToConstant: 200),
 
@@ -1370,6 +1384,15 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     /// §0.4: JSON / Espanso YAML / CSV export.
     @objc private func exportSnippets() {
         LibraryExporter.present(from: view.window)
+    }
+
+    /// Header gear — opens Preferences ▸ General without a trip to the menu bar.
+    @objc private func openSettings() {
+        if let delegate = NSApp.delegate as? AppDelegate {
+            delegate.openPreferences(nil, tab: .general)
+        } else {
+            PreferencesWindowController.shared.show(tab: .general, hotkeyManager: nil)
+        }
     }
 
     /// §4.5: opens the statistics pane (Preferences ▸ Snippets).
