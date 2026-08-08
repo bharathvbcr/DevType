@@ -358,6 +358,16 @@ final class SourceContractTests: XCTestCase {
             "The row belongs to the scroller now; adding it to the root again reintroduces the "
                 + "unbounded version."
         )
+
+        // An overlay scroller floats over its content, so without a reserved band it is drawn
+        // across the bottom of the pills for as long as the user is scrolling them.
+        XCTAssertTrue(editor.contains("chipsScroll.automaticallyAdjustsContentInsets = false"))
+        XCTAssertTrue(editor.contains("bottom: SnippetEditorSheet.chipScrollerBand"))
+        XCTAssertFalse(
+            editor.contains("chipsRow.bottomAnchor.constraint(equalTo: chipsScroll.contentView.bottomAnchor)"),
+            "Pinned to the bottom the stack stretches across the band and the pills end up under "
+                + "the scroller again."
+        )
     }
 
     /// Copying must never put a modal in the way.
