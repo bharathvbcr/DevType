@@ -593,6 +593,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private let charCountLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10, .medium), color: DevTypeTheme.textTertiary)
     private var editorContainer: NSView!
     private var macroButton: NSButton!
+    /// The attach-image button, disabled while Secret is on: a snippet cannot be both.
+    private weak var imageButton: NSButton?
     private var imagePreviewBar: NSView!
     private let imagePreviewView = NSImageView()
     private let imageNameLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11, .medium), color: DevTypeTheme.textSecondary)
@@ -1313,6 +1315,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             action: #selector(chooseImage(_:))
         )
 
+        imageButton = image
         charCountLabel.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(scroll)
@@ -1758,6 +1761,16 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     /// transition is what tells the user where the value is now going.
     private func applySecretVisibility() {
         let secret = secretChip?.isOn ?? false
+        // A secret and an image are mutually exclusive: `isImageSnippet` and the keychain lookup
+        // would each claim the snippet, and every consumer would pick a different winner. Turning
+        // Secret on drops the attachment, and the attach button is unavailable while it is on.
+        if secret, hasImage {
+            pickedImageURL = nil
+            attachedImagePath = ""
+            updateImageUI()
+        }
+        imageButton?.isEnabled = !secret
+        imageButton?.alphaValue = secret ? 0.4 : 1.0
         secretField.isHidden = !secret
         // Hidden rather than dimmed: two text areas in one slot, one of them live, is exactly the
         // ambiguity that gets a password typed into the wrong one.

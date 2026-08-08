@@ -47,13 +47,6 @@ enum SecretMenuFlow {
     /// Pure policy: which snippets appear in the mouse-only *Copy Secret* submenu, and in what
     /// order? Secrets only, most recently updated first, so the one just added is at the top.
     static func secretMenuEntries(from snippets: [SnippetModel], limit: Int = 20) -> [SnippetModel] {
-        snippets
-            .filter(\.isSecret)
-            .sorted { lhs, rhs in
-                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
-                return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
-            }
-            .prefix(limit)
-            .map { $0 }
+        SecretMenuEntryPolicy.entries(from: snippets, limit: limit)
     }
 }
