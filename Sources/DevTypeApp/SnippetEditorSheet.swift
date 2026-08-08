@@ -571,6 +571,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private var secretChip: ToggleChip!
     /// Secure entry shown in place of the replacement text view while `secretChip` is on.
     private let secretField = NSSecureTextField()
+    /// The replacement text view's scroller, hidden while the secure field has the slot.
+    private weak var replacementScroll: NSScrollView?
     private let errorLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11, .medium), color: DevTypeTheme.accentBright, wrapping: true)
     private let charCountLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10, .medium), color: DevTypeTheme.textTertiary)
     private var editorContainer: NSView!
@@ -808,13 +810,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         chipsRow.spacing = 8
         chipsRow.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(chipsRow)
-        root.addSubview(secretField)
-        NSLayoutConstraint.activate([
-            secretField.leadingAnchor.constraint(equalTo: chipsRow.leadingAnchor),
-            secretField.trailingAnchor.constraint(equalTo: chipsRow.trailingAnchor),
-            secretField.topAnchor.constraint(equalTo: chipsRow.bottomAnchor, constant: 8),
-            secretField.heightAnchor.constraint(equalToConstant: 24),
-        ])
 
         // Inline error
         errorLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1244,6 +1239,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         // §4: an unlabelled NSTextView is announced only as "text entry area".
         replacementView.setAccessibilityLabel(loc.s("ax.editor.replacement"))
         scroll.documentView = replacementView
+        replacementScroll = scroll
 
         let toolbarRule = DevTypeTheme.makeHairline()
 
@@ -1272,6 +1268,10 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         charCountLabel.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(scroll)
+        // The secret field occupies the replacement text view's own slot rather than a row of its
+        // own: it *is* the replacement, and the outer layout pins `chipsRow` directly to the error
+        // label with nothing between them to insert into.
+        container.addSubview(secretField)
         container.addSubview(toolbarRule)
         container.addSubview(macro)
         container.addSubview(image)
@@ -1282,6 +1282,11 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
             scroll.bottomAnchor.constraint(equalTo: toolbarRule.topAnchor, constant: -2),
+
+            secretField.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            secretField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            secretField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            secretField.heightAnchor.constraint(equalToConstant: 24),
 
             toolbarRule.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             toolbarRule.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
@@ -1706,8 +1711,10 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private func applySecretVisibility() {
         let secret = secretChip?.isOn ?? false
         secretField.isHidden = !secret
+        // Hidden rather than dimmed: two text areas in one slot, one of them live, is exactly the
+        // ambiguity that gets a password typed into the wrong one.
+        replacementScroll?.isHidden = secret
         replacementView.isEditable = !secret
-        replacementView.alphaValue = secret ? 0.35 : 1.0
         if secret {
             replacementView.string = ""
             view.window?.makeFirstResponder(secretField)
