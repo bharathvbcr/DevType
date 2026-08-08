@@ -1644,6 +1644,11 @@ public final class SnippetStore {
 
         for group in groups {
             for snippet in group.snippets {
+                // A secret never reaches the matcher (`EventTapEngine.snippets` filters it), so it
+                // can neither shadow another trigger nor be shadowed, and an empty trigger on one
+                // is intentional rather than a mistake to report. Including them here produced
+                // conflicts the user could not act on and warnings about triggers that do nothing.
+                guard snippet.isTypedTriggerExpandable else { continue }
                 let trigger = snippet.triggerKeyword
                 let punctuationStarted = trigger.first.map { !AbbreviationMatcher.isWordCharacter($0) } ?? false
                 let entry = Entry(

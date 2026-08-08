@@ -675,7 +675,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }?.replacementText
         }
 
-        switch SecretMenuFlow.resolveForCopy(snippet, clipboardText: clipboard, lookup: lookup) {
+        // Gated entry point: a secret asks for Touch ID here, before anything is read.
+        SecretMenuFlow.resolve(
+            snippet,
+            clipboardText: clipboard,
+            lookup: lookup,
+            loc: loc
+        ) { [weak self] result in
+            guard let self else { return }
+            self.applyCopyResult(result, for: snippet)
+        }
+    }
+
+    private func applyCopyResult(
+        _ result: Result<String, SecretMenuFlow.ResolveFailure>,
+        for snippet: SnippetModel
+    ) {
+        switch result {
         case .success(let text):
             _ = SecretClipboard.shared.copy(text)
             SnippetStore.shared.incrementUsage(for: snippet.id)
@@ -700,12 +716,40 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             ) { index in
                 if index == 0 { self.openSnippetManager(nil) }
             }
+        case .failure(.imageSnippet(let path)):
+            // Copy the picture itself. The clipboard is the one place an image snippet and a text
+            // snippet mean the same gesture, so refusing here would be an arbitrary hole.
+            guard let image = ImageAttachmentStore.shared.loadImage(path: path) else {
+                ToastPanel.show(
+                    loc.s("snippet.copied.empty"),
+                    symbol: "exclamationmark.triangle.fill"
+                )
+                return
+            }
+            PasteboardBroker.shared.invalidatePendingRestore()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([image])
+            SnippetStore.shared.incrementUsage(for: snippet.id)
+            ToastPanel.show(loc.s("snippet.copied.toast", snippet.displayTitle), symbol: "photo")
+
         case .failure(.emptySnippet):
             // Copying "" would wipe whatever the user already had on the clipboard. A beep alone
             // left the user unsure whether anything had happened at all.
             ToastPanel.show(
                 loc.s("snippet.copied.empty"),
                 symbol: "exclamationmark.triangle.fill"
+            )
+
+        case .failure(.authenticationCancelled):
+            // Silence on purpose. The user dismissed the prompt; telling them they dismissed the
+            // prompt is a dialog about their own decision.
+            break
+
+        case .failure(.authenticationFailed(let reason)):
+            ToastPanel.show(
+                loc.s("secret.auth.failed"),
+                detail: reason,
+                symbol: "exclamationmark.lock.fill"
             )
         }
     }
@@ -1071,27 +1115,41 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // `MacroRenderer`: a password containing `{{` or `%` is not a template, and expanding
             // one would corrupt it silently — or resolve a nested `{{snippet:…}}` inside it.
             if snippet.isSecret {
-                guard let value = SecretStore.shared.secret(for: snippet.id), !value.isEmpty else {
-                    DevTypeAlert.present(
-                        title: loc.s("secret.missing.title"),
-                        message: loc.s("secret.missing.message", snippet.displayTitle),
-                        style: .warning,
-                        buttons: [loc.s("common.ok")],
-                        handler: nil
-                    )
-                    return
+                // Same gate as the copy path, and the same reason for it being in the resolver
+                // rather than here: a second surface reading secrets is a second place to forget.
+                SecretMenuFlow.resolve(snippet, loc: loc) { [weak self] result in
+                    guard let self else { return }
+                    switch result {
+                    case .success(let value):
+                        self.injectSearchExpansion(
+                            snippet: snippet,
+                            resolved: MacroExpansionResult(
+                                text: value,
+                                cursorOffset: nil,
+                                trailingKeys: [],
+                                fillFields: [],
+                                needsFillIn: false
+                            ),
+                            snapshot: snapshot
+                        )
+                    case .failure(.authenticationCancelled):
+                        break
+                    case .failure(.authenticationFailed(let reason)):
+                        ToastPanel.show(
+                            self.loc.s("secret.auth.failed"),
+                            detail: reason,
+                            symbol: "exclamationmark.lock.fill"
+                        )
+                    case .failure:
+                        DevTypeAlert.present(
+                            title: self.loc.s("secret.missing.title"),
+                            message: self.loc.s("secret.missing.message", snippet.displayTitle),
+                            style: .warning,
+                            buttons: [self.loc.s("common.ok")],
+                            handler: nil
+                        )
+                    }
                 }
-                injectSearchExpansion(
-                    snippet: snippet,
-                    resolved: MacroExpansionResult(
-                        text: value,
-                        cursorOffset: nil,
-                        trailingKeys: [],
-                        fillFields: [],
-                        needsFillIn: false
-                    ),
-                    snapshot: snapshot
-                )
                 return
             }
 
@@ -1666,6 +1724,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// §4.5: usage counters live in a coalesced sidecar now — flush the tail of
     /// the current session so a quit does not lose the last few expansions.
+    public func applicationDidResignActive(_ notification: Notification) {
+        // Drop any standing Touch ID authorization when DevType goes to the background. The reuse
+        // window exists so copying two secrets in a row is one prompt, not so that walking away
+        // and coming back is still covered by a check made before you left.
+        BiometricGate.shared.invalidate()
+    }
+
     public func applicationWillTerminate(_ notification: Notification) {
         // Before anything else can fail: quitting must not be the way a copied secret outlives
         // its clear timer, which dies with the process. Still guarded by change-count ownership,

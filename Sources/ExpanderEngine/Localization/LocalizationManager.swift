@@ -304,6 +304,23 @@ public final class LocalizationManager: ObservableObject {
                 "Delete “%@”? Its stored value is removed from the Keychain at the same time, "
                 + "and undoing the delete cannot bring the value back.",
             "menu.copySecret": "Copy Secret",
+            "secret.auth.reason": "reveal “%@”",
+            "secret.auth.failed": "Could not verify it is you",
+            "prefs.secrets.card": "Secrets",
+            "prefs.secrets.requireBiometry": "Require Touch ID to reveal a secret",
+            "prefs.secrets.note.biometry":
+                "%@ is asked for before a secret is copied or inserted, and once more after "
+                + "DevType has been in the background. One check covers a few seconds, so copying "
+                + "two secrets in a row asks once.",
+            "prefs.secrets.note.password":
+                "This Mac has no usable biometrics, so your login password is asked for instead.",
+            "prefs.secrets.note.unavailable":
+                "Unavailable: this Mac has no login password or biometrics set, so there is "
+                + "nothing to check against.",
+            "prefs.secrets.note.scope":
+                "This is a check DevType makes before reading the value. It stops someone at your "
+                + "unlocked Mac from copying a secret; it does not stop software already running "
+                + "as you, which can read the Keychain without asking DevType.",
             "menu.searchSecrets": "Search Secrets…",
             "menu.searchSecrets.placeholder": "Search secrets to copy…",
             "secret.copied.toast": "Copied “%@” — press ⌘V",
@@ -1316,6 +1333,23 @@ public final class LocalizationManager: ObservableObject {
                 "“%@”을(를) 삭제할까요? 저장된 값도 키체인에서 함께 삭제되며, "
                 + "삭제를 실행 취소해도 값은 복구되지 않습니다.",
             "menu.copySecret": "비밀 복사",
+            "secret.auth.reason": "“%@” 표시",
+            "secret.auth.failed": "본인 확인에 실패했습니다",
+            "prefs.secrets.card": "비밀",
+            "prefs.secrets.requireBiometry": "비밀을 표시할 때 Touch ID 요구",
+            "prefs.secrets.note.biometry":
+                "비밀을 복사하거나 삽입하기 전에 %@을(를) 요청하며, DevType이 백그라운드에 있었던 "
+                + "뒤에도 다시 요청합니다. 한 번의 확인이 몇 초 동안 유효하므로 비밀 두 개를 연달아 "
+                + "복사할 때는 한 번만 묻습니다.",
+            "prefs.secrets.note.password":
+                "이 Mac에는 사용할 수 있는 생체 인식이 없으므로 로그인 암호를 대신 요청합니다.",
+            "prefs.secrets.note.unavailable":
+                "사용할 수 없음: 이 Mac에 로그인 암호나 생체 인식이 설정되어 있지 않아 확인할 "
+                + "대상이 없습니다.",
+            "prefs.secrets.note.scope":
+                "이는 DevType이 값을 읽기 전에 수행하는 확인입니다. 잠금 해제된 Mac 앞에 있는 "
+                + "사람이 비밀을 복사하는 것은 막지만, 이미 사용자 권한으로 실행 중인 소프트웨어가 "
+                + "키체인을 읽는 것은 막지 못합니다.",
             "menu.searchSecrets": "비밀 검색…",
             "menu.searchSecrets.placeholder": "복사할 비밀 검색…",
             "secret.copied.toast": "“%@” 복사됨 — ⌘V를 누르세요",
@@ -2290,6 +2324,23 @@ public final class LocalizationManager: ObservableObject {
                 "「%@」を削除しますか？保存された値もキーチェーンから同時に削除され、"
                 + "削除を取り消しても値は戻りません。",
             "menu.copySecret": "シークレットをコピー",
+            "secret.auth.reason": "「%@」を表示",
+            "secret.auth.failed": "本人確認できませんでした",
+            "prefs.secrets.card": "シークレット",
+            "prefs.secrets.requireBiometry": "シークレットの表示に Touch ID を要求",
+            "prefs.secrets.note.biometry":
+                "シークレットをコピーまたは挿入する前に %@ を求め、DevType がバックグラウンドに "
+                + "なった後にも再度求めます。1 回の確認は数秒間有効なので、続けて 2 つコピーする "
+                + "場合は 1 回だけです。",
+            "prefs.secrets.note.password":
+                "この Mac では生体認証を利用できないため、代わりにログインパスワードを求めます。",
+            "prefs.secrets.note.unavailable":
+                "利用できません: この Mac にはログインパスワードも生体認証も設定されていないため、"
+                + "確認する対象がありません。",
+            "prefs.secrets.note.scope":
+                "これは DevType が値を読み取る前に行う確認です。ロック解除された Mac の前にいる "
+                + "人がシークレットをコピーするのは防げますが、すでにユーザー権限で動作している "
+                + "ソフトウェアがキーチェーンを読むことは防げません。",
             "menu.searchSecrets": "シークレットを検索…",
             "menu.searchSecrets.placeholder": "コピーするシークレットを検索…",
             "secret.copied.toast": "「%@」をコピーしました — ⌘V を押してください",
