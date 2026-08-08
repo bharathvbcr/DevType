@@ -385,7 +385,10 @@ final class AIPlumbingTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let monitor = SelectionMonitor(defaults: defaults)
-        let element = AXUIElementCreateApplication(getpid())
+        // A *foreign* pid on purpose: an element belonging to this process is refused outright by
+        // the own-process guard, which is a different rule than the element-change semantics under
+        // test here. See `SelectionHardeningTests.testCacheSurvivesOurOwnPanelTakingFocus`.
+        let element = AXUIElementCreateApplication(1)
         let bundleID = "com.apple.TextEdit"
 
         // Non-empty → cache populated (notification-shaped path, not seedCacheForTesting).
@@ -427,7 +430,8 @@ final class AIPlumbingTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let monitor = SelectionMonitor(defaults: defaults)
-        let elementA = AXUIElementCreateApplication(getpid())
+        // Foreign pids: an own-process element never reaches the element-change branch.
+        let elementA = AXUIElementCreateApplication(1)
         // A second application element for a different PID is a distinct AXUIElement.
         let elementB = AXUIElementCreateApplication(0)
 

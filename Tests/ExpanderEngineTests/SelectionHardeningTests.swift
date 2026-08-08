@@ -546,6 +546,122 @@ final class SelectionHardeningTests: XCTestCase {
         )
     }
 
+    // MARK: - Our own focus must not destroy last-known-good
+
+    /// The second field report of the same symptom, from the other side:
+    ///
+    ///     Last selection read: outcome=noFocus app=com.devtype.app axCandidates=0 chars=0
+    ///     probes=systemWide:noValue appScoped:noValue chain:noValue manualAX:unsupported polls:10
+    ///
+    /// This time the app named is *ours*. DevType was frontmost, so the live ladder had nothing to
+    /// read and the cache was the whole answer — and the cache was gone, wiped by the focus-changed
+    /// notification the user's app fires as it resigns. `handleAXNotification` then evaluated *us*
+    /// as the source: our bundle ID against the allowlist, our panel's field against the cached
+    /// element, each path ending in `clearCache()`.
+    func testOwnFocusNeverMutatesLastKnownGood() {
+        XCTAssertFalse(
+            SelectionMonitor.mayApplyRefresh(
+                frontmostIsOwnProcess: true, focusedElementIsOwnProcess: false
+            ),
+            "The palette calls NSApp.activate. If our being frontmost may invalidate the cache, "
+                + "opening the panel destroys the selection the panel exists to transform."
+        )
+        XCTAssertFalse(
+            SelectionMonitor.mayApplyRefresh(
+                frontmostIsOwnProcess: false, focusedElementIsOwnProcess: true
+            ),
+            "A .nonactivatingPanel holds the focused element while the source app is still "
+                + "frontmost — the frontmost check alone does not cover the inline palette."
+        )
+        XCTAssertFalse(
+            SelectionMonitor.mayApplyRefresh(
+                frontmostIsOwnProcess: true, focusedElementIsOwnProcess: true
+            )
+        )
+        XCTAssertTrue(
+            SelectionMonitor.mayApplyRefresh(
+                frontmostIsOwnProcess: false, focusedElementIsOwnProcess: false
+            ),
+            "Evidence from another process is the only kind that may touch the cache — and it "
+                + "must still be able to, or a real app switch would never invalidate anything."
+        )
+    }
+
+    /// Ownership is read off the element, not inferred from the bundle ID the notification was
+    /// attributed to — that attribution is exactly what goes wrong when we are frontmost.
+    func testElementOwnershipIsResolvedFromThePID() {
+        let own = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        XCTAssertTrue(SelectionMonitor.elementBelongsToOwnProcess(own))
+        // launchd: guaranteed to exist and guaranteed not to be us.
+        XCTAssertFalse(SelectionMonitor.elementBelongsToOwnProcess(AXUIElementCreateApplication(1)))
+    }
+
+    /// End to end through the real refresh funnel: our own panel becoming the focused element is
+    /// an element *change*, and an element change is the branch that clears. The guard has to sit
+    /// at the mutation point, not at one caller.
+    func testCacheSurvivesOurOwnPanelTakingFocus() {
+        let monitor = SelectionMonitor()
+        let sourceElement = AXUIElementCreateApplication(1)
+        monitor.seedCacheForTesting(
+            SelectionMonitor.CachedSelection(
+                text: "the paragraph the user selected",
+                bundleID: "com.google.Chrome",
+                changeToken: 1,
+                timestamp: now
+            ),
+            element: sourceElement
+        )
+
+        monitor.testingApplySelectionRefresh(
+            text: nil,
+            bundleID: "com.devtype.app",
+            element: AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        )
+
+        XCTAssertEqual(
+            monitor.rawCachedSelection()?.text, "the paragraph the user selected",
+            "Wiped here and the AI hotkey reports noFocus against DevType itself, blaming an app "
+                + "that published the selection correctly the whole time."
+        )
+        XCTAssertEqual(monitor.rawCachedSelection()?.bundleID, "com.google.Chrome")
+    }
+
+    /// The guard must not become a licence to keep stale text: a foreign element change still
+    /// invalidates, which is what stops one app's selection being offered inside another.
+    func testForeignElementChangeStillInvalidates() {
+        let monitor = SelectionMonitor()
+        monitor.seedCacheForTesting(
+            SelectionMonitor.CachedSelection(
+                text: "stale",
+                bundleID: "com.google.Chrome",
+                changeToken: 1,
+                timestamp: now
+            ),
+            element: AXUIElementCreateApplication(1)
+        )
+        monitor.testingApplySelectionRefresh(
+            text: nil,
+            bundleID: "com.apple.TextEdit",
+            element: AXUIElementCreateApplication(2)
+        )
+        XCTAssertNil(monitor.rawCachedSelection())
+    }
+
+    /// The 332 ms in the same report: the rescue poked `AXManualAccessibility` on *us*, got the
+    /// `unsupported` every non-Chromium app gets, then slept the main thread through ten polls
+    /// waiting for a tree that was never going to gain a focused element.
+    func testFocusRescueNeverTargetsOurOwnProcess() {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        XCTAssertFalse(AXContextChecker.mayRescueFocus(pid: ownPID, ownPID: ownPID))
+        XCTAssertFalse(AXContextChecker.mayRescueFocus(pid: 0, ownPID: ownPID))
+        XCTAssertFalse(AXContextChecker.mayRescueFocus(pid: -1, ownPID: ownPID))
+        XCTAssertTrue(
+            AXContextChecker.mayRescueFocus(pid: ownPID + 1, ownPID: ownPID),
+            "Every other app still earns the wake-up — that is the Chromium path this whole "
+                + "rescue exists for."
+        )
+    }
+
     // MARK: - Diagnostics
 
     /// The report is the only artifact a user pastes. Everything needed to tell the failure
