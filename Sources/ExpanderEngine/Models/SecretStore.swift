@@ -85,6 +85,19 @@ public final class SecretStore {
         backing.contains(account: Self.account(for: id))
     }
 
+    /// Snippet IDs whose secrets still live in the legacy service (§8.10). Non-empty means the
+    /// one-time migration flow should be offered before those secrets are copied.
+    public func snippetIDsPendingMigration() -> Set<UUID> {
+        Set(backing.legacyAccountsPendingMigration().compactMap(Self.snippetID(forAccount:)))
+    }
+
+    /// Run the migration batch. See `KeychainSecretBackingStore.migrateLegacy` for the dialog
+    /// contract: `allowInteraction: true` is the only way this app ever shows a keychain prompt.
+    @discardableResult
+    public func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary {
+        backing.migrateLegacy(allowInteraction: allowInteraction)
+    }
+
     @discardableResult
     public func remove(for id: UUID) -> Result<Void, Failure> {
         let status = backing.delete(account: Self.account(for: id))
@@ -134,6 +147,19 @@ public protocol SecretBackingStore: AnyObject {
     func contains(account: String) -> Bool
     func delete(account: String) -> OSStatus
     func accounts() -> Set<String>
+    /// Legacy-service accounts that still need migrating (empty for stores with no legacy tier).
+    func legacyAccountsPendingMigration() -> [String]
+    /// Move every legacy item to the current service. `allowInteraction` is the ONE switch in
+    /// this API that may put a system dialog on screen — callers own the moment it flips.
+    func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary
+}
+
+extension SecretBackingStore {
+    /// Stores without a legacy tier (the in-memory test double) have nothing to migrate.
+    public func legacyAccountsPendingMigration() -> [String] { [] }
+    public func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary {
+        SecretMigrationSummary()
+    }
 }
 
 // MARK: - Partition policy (§8.10)
@@ -205,6 +231,14 @@ public enum SecretServiceEpoch: CaseIterable, Equatable {
         }
     }
 
+    /// Short name for the diagnostics trail.
+    public var trailName: String {
+        switch self {
+        case .current: return "v2"
+        case .legacy: return "legacy"
+        }
+    }
+
     /// Current first: once an account is migrated, the legacy husk must never shadow it.
     public static let readOrder: [SecretServiceEpoch] = [.current, .legacy]
 
@@ -265,12 +299,22 @@ public enum SecretReadOutcome: Equatable {
     }
 }
 
-/// Last-read recorder, kept apart from `SecretBackingStore` so the protocol (and its in-memory
-/// test double) stays three operations wide.
+/// Read recorder plus a step trail, kept apart from `SecretBackingStore` so the protocol (and
+/// its in-memory test double) stays three operations wide.
+///
+/// The trail is what turns "it prompted again" into a diagnosis: every fetch, heal, migration
+/// copy and destroy appends one line with its `OSStatus`. Accounts are aliased (`item A`,
+/// `item B`, …) in first-seen order — the report must never carry a real account, because the
+/// account is the snippet's UUID and the report is pasted into chat windows.
 public final class SecretAccessDiagnostics {
     public static let shared = SecretAccessDiagnostics()
+    /// Enough for several full read/migrate cycles; old steps fall off the front.
+    public static let trailCapacity = 48
+
     private let lock = UnfairLock()
     private var last: SecretReadOutcome = .none
+    private var steps: [String] = []
+    private var aliases: [String: String] = [:]
 
     public init() {}
 
@@ -282,6 +326,49 @@ public final class SecretAccessDiagnostics {
     public func lastRead() -> SecretReadOutcome {
         lock.lock(); defer { lock.unlock() }
         return last
+    }
+
+    /// Append one value-free step, e.g. `note("legacy fetch", -25293, account: account)`.
+    public func note(_ step: String, _ status: OSStatus? = nil, account: String? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        var line = step
+        if let account { line = "\(alias(for: account)): \(line)" }
+        if let status { line += " → \(status)" }
+        steps.append(line)
+        if steps.count > Self.trailCapacity {
+            steps.removeFirst(steps.count - Self.trailCapacity)
+        }
+    }
+
+    public func trail() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return steps
+    }
+
+    /// Stable within a run, meaningless outside it. Alias assignment is first-seen order.
+    private func alias(for account: String) -> String {
+        if let existing = aliases[account] { return existing }
+        let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        let index = aliases.count
+        let name = index < letters.count
+            ? "item \(letters[letters.index(letters.startIndex, offsetBy: index)])"
+            : "item #\(index + 1)"
+        aliases[account] = name
+        return name
+    }
+}
+
+/// What one migration pass achieved. `needsUser` is the count of legacy items that could not
+/// be read silently and were skipped because the pass was not allowed to show dialogs.
+public struct SecretMigrationSummary: Equatable {
+    public var migrated: Int
+    public var needsUser: Int
+    public var failed: Int
+
+    public init(migrated: Int = 0, needsUser: Int = 0, failed: Int = 0) {
+        self.migrated = migrated
+        self.needsUser = needsUser
+        self.failed = failed
     }
 }
 
@@ -408,53 +495,52 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     private enum ReadResult {
         case absent
         case value(String?, SecretReadOutcome)
+        case needsUser
         case failed(OSStatus)
     }
 
-    /// The three-phase read against one service: silent, heal-then-silent, then one attempt
-    /// with the system password dialog allowed — the legitimate fallback when the item exists
-    /// but this identity cannot heal it (legacy items; a regenerated certificate).
-    private func read(epoch: SecretServiceEpoch, account: String) -> ReadResult {
+    /// The silent read against one service: a fetch, then heal-and-retry. **Never** shows a
+    /// dialog — a read that cannot complete silently reports `.needsUser` and it is the
+    /// migration flow's job (and no one else's) to decide when the user sees a prompt.
+    private func readSilently(epoch: SecretServiceEpoch, account: String) -> ReadResult {
         let service = epoch.service
-
-        enum SilentEnd {
-            case done(ReadResult)
-            case needUser
-        }
-
-        let silent: SilentEnd = withoutKeychainUI {
+        return withoutKeychainUI {
             var result = fetch(service: service, account: account)
+            diagnostics.note("\(epoch.trailName) fetch", result.status, account: account)
             var phase = KeychainReadPlan.Phase.silent
             if KeychainReadPlan.step(after: result.status, phase: phase) == .heal {
                 healPartition(service: service, account: account)
                 phase = .healed
                 result = fetch(service: service, account: account)
+                diagnostics.note("\(epoch.trailName) fetch after heal", result.status, account: account)
             }
             switch KeychainReadPlan.step(after: result.status, phase: phase) {
             case .succeed:
                 // A husk reads as "no secret", never as its placeholder value.
-                if result.tombstone { return .done(.absent) }
-                return .done(.value(result.value, phase == .silent ? .ok : .healed))
+                if result.tombstone { return .absent }
+                return .value(result.value, phase == .silent ? .ok : .healed)
             case .fail:
                 // Absent is not a failure worth reporting; anything else is.
-                if result.status == errSecItemNotFound { return .done(.absent) }
-                return .done(.failed(result.status))
+                if result.status == errSecItemNotFound { return .absent }
+                return .failed(result.status)
             case .askUser, .heal:
-                return .needUser
+                return .needsUser
             }
         }
+    }
 
-        if case .done(let result) = silent { return result }
-
-        // The one place the system password dialog is allowed. Answering it (or Always Allow)
-        // is the last time it appears for this item: a legacy hit migrates immediately after.
-        let final = fetch(service: service, account: account)
-        switch KeychainReadPlan.step(after: final.status, phase: .interactive) {
-        case .succeed:
-            if final.tombstone { return .absent }
-            return .value(final.value, .granted)
-        case .fail, .heal, .askUser:
-            return .failed(final.status)
+    /// Copy one just-read legacy value into the current service, then destroy the source.
+    /// Destroy only once the copy definitely exists — a failed copy leaves the original alone.
+    private func migrate(_ value: String, account: String) {
+        guard let data = value.data(using: .utf8) else { return }
+        _ = withoutKeychainUI {
+            let copied = write(data, service: SecretStore.serviceV2, account: account)
+            diagnostics.note("migrate copy", copied, account: account)
+            if copied == errSecSuccess {
+                let destroyed = destroy(service: SecretStore.service, account: account)
+                diagnostics.note("migrate destroy legacy", destroyed, account: account)
+            }
+            return copied
         }
     }
 
@@ -462,31 +548,97 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
         lock.lock(); defer { lock.unlock() }
 
         for epoch in SecretServiceEpoch.readOrder {
-            switch read(epoch: epoch, account: account) {
+            switch readSilently(epoch: epoch, account: account) {
             case .absent:
                 continue
             case .value(let value, let outcome):
                 if SecretServiceEpoch.shouldMigrate(from: epoch, readSucceeded: value != nil),
-                   let value, let data = value.data(using: .utf8) {
-                    // Move to a fresh item this identity owns — the fix the legacy item's
-                    // empty change_acl entry makes impossible in place. Destroy the source
-                    // only once the copy definitely exists.
-                    _ = withoutKeychainUI {
-                        let copied = write(data, service: SecretStore.serviceV2, account: account)
-                        if copied == errSecSuccess {
-                            _ = destroy(service: SecretStore.service, account: account)
-                        }
-                        return copied
-                    }
+                   let value {
+                    migrate(value, account: account)
                 }
                 diagnostics.record(outcome)
                 return value
+            case .needsUser:
+                // Structurally incapable of prompting: the answer here is "run the migration
+                // flow", reported through `legacyAccountsPendingMigration`, never a dialog in
+                // the middle of an ordinary copy.
+                diagnostics.record(.failed(errSecInteractionNotAllowed))
+                return nil
             case .failed(let status):
                 diagnostics.record(.failed(status))
                 return nil
             }
         }
         return nil
+    }
+
+    /// Legacy accounts that still hold a live item. Metadata-only, silent, cheap.
+    public func legacyAccountsPendingMigration() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return withoutKeychainUI { legacyAccountsLocked() }
+    }
+
+    private func legacyAccountsLocked() -> [String] {
+        var query = baseQuery(service: SecretStore.service, account: nil)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        var items: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
+              let entries = items as? [[String: Any]] else {
+            return []
+        }
+        return entries.compactMap { entry -> String? in
+            guard !KeychainPartitionPolicy.isTombstone(
+                description: entry[kSecAttrDescription as String] as? String
+            ) else { return nil }
+            return entry[kSecAttrAccount as String] as? String
+        }.sorted()
+    }
+
+    /// The one-shot batch that finishes the §8.10 upgrade. Tries every legacy item silently
+    /// first (heal included); only with `allowInteraction` — granted by the UI *after telling
+    /// the user how many dialogs to expect* — does it fall through to the system prompt, one
+    /// item at a time. This function is the only interactive keychain path in the app.
+    public func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary {
+        lock.lock(); defer { lock.unlock() }
+        var summary = SecretMigrationSummary()
+
+        for account in withoutKeychainUI({ legacyAccountsLocked() }) {
+            switch readSilently(epoch: .legacy, account: account) {
+            case .value(let value, _):
+                guard let value else { summary.failed += 1; continue }
+                migrate(value, account: account)
+                summary.migrated += 1
+                continue
+            case .absent:
+                continue
+            case .failed:
+                summary.failed += 1
+                continue
+            case .needsUser:
+                guard allowInteraction else {
+                    summary.needsUser += 1
+                    continue
+                }
+            }
+
+            // The system password dialog, deliberately: the user was told it was coming.
+            // Answering it is the last time — the value moves to the current service right here.
+            let final = fetch(service: SecretStore.service, account: account)
+            diagnostics.note("legacy fetch with dialog", final.status, account: account)
+            if final.status == errSecSuccess, !final.tombstone, let value = final.value {
+                migrate(value, account: account)
+                summary.migrated += 1
+            } else if final.status == errSecUserCanceled {
+                summary.needsUser += 1
+            } else {
+                summary.failed += 1
+            }
+        }
+        diagnostics.note(
+            "migration pass: \(summary.migrated) migrated, \(summary.needsUser) pending, \(summary.failed) failed"
+        )
+        return summary
     }
 
     public func contains(account: String) -> Bool {
