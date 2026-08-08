@@ -1,4 +1,5 @@
 import XCTest
+@testable import ExpanderEngine
 
 // MARK: - Source-level contract audits for the DevTypeApp executable target
 //
@@ -299,10 +300,17 @@ final class SourceContractTests: XCTestCase {
             model.contains("try c.encode(isSecret ? \"\" : replacementText, forKey: .replacementText)"),
             "Move this out of `encode(to:)` and every exporter becomes a place a password can leak."
         )
-        XCTAssertTrue(
-            model.contains("if isSecret { replacementText = \"\" }"),
-            "Decoding must strip a value smuggled in by a hand-edited or downgraded library."
-        )
+        // The decoder's half is asserted by behaviour rather than by shape: it has already grown
+        // a second field (`imagePath`, once secret-and-image became unrepresentable), and a
+        // contract that pins formatting breaks on every such extension while proving less.
+        let smuggled = """
+        {"id":"6C4A2B1E-0000-4000-8000-000000000001","title":"t","triggerKeyword":";t",
+         "replacementText":"leaked","imagePath":"leaked.png","isSecret":true}
+        """
+        let decoded = try JSONDecoder().decode(SnippetModel.self, from: Data(smuggled.utf8))
+        XCTAssertEqual(decoded.replacementText, "", "A hand-edited library must not reintroduce it.")
+        XCTAssertEqual(decoded.imagePath, "", "Secret and image is an ambiguous state on purpose.")
+        XCTAssertFalse(decoded.isImageSnippet)
     }
 
     /// Secrets are filtered at the engine's own setter, not at its callers, so no future caller
@@ -349,6 +357,51 @@ final class SourceContractTests: XCTestCase {
             editor.contains("root.addSubview(chipsRow)"),
             "The row belongs to the scroller now; adding it to the root again reintroduces the "
                 + "unbounded version."
+        )
+    }
+
+    /// Copying must never put a modal in the way.
+    ///
+    /// The first version showed `DevTypeAlert.info` after every copy. Two problems, and the
+    /// second is the serious one: the user had to dismiss a dialog to get on with a two-second
+    /// task, and an alert *activates DevType*, taking focus off the password field they were
+    /// about to paste into. The confirmation is a non-activating toast that any next action
+    /// dismisses.
+    func testCopyConfirmationIsNeverAModal() throws {
+        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
+        guard let start = appDelegate.range(of: "private func copyToClipboard("),
+              let end = appDelegate.range(
+                  of: "private func flashStatusItem(",
+                  range: start.upperBound..<appDelegate.endIndex
+              ) ?? appDelegate.range(of: "\n    private func", range: start.upperBound..<appDelegate.endIndex)
+        else {
+            return XCTFail("copyToClipboard no longer has the shape this contract describes.")
+        }
+        let body = String(appDelegate[start.upperBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("ToastPanel.show"), "The success path must use the toast.")
+        // `DevTypeAlert.present` survives for the *failure* path, where the user has to go and fix
+        // something and a dismissible banner would be the wrong shape. Only the modal that blocks
+        // a successful copy is forbidden.
+        XCTAssertFalse(
+            body.contains("DevTypeAlert.info"),
+            "A modal on the success path both interrupts the task and steals focus from the "
+                + "field the user is about to paste into."
+        )
+    }
+
+    /// The toast must never become key or activate the app — that is the whole reason it exists.
+    func testToastNeverTakesFocus() throws {
+        let toast = try source("Sources/DevTypeApp/ToastPanel.swift")
+        XCTAssertTrue(toast.contains("override var canBecomeKey: Bool { false }"))
+        XCTAssertTrue(toast.contains("override var canBecomeMain: Bool { false }"))
+        XCTAssertTrue(
+            toast.contains("orderFrontRegardless()"),
+            "Shown without activating; `makeKeyAndOrderFront` would pull focus."
+        )
+        XCTAssertFalse(
+            toast.contains("NSApp.activate"),
+            "Activating for a confirmation is exactly the bug the toast replaces."
         )
     }
 

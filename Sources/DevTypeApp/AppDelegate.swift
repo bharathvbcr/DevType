@@ -591,6 +591,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         secretsSubmenu.removeAllItems()
 
         let secrets = SecretMenuFlow.secretMenuEntries(from: SnippetStore.shared.loadSnippets())
+
+        // Search first, always — a flat list stops being usable well before it stops being
+        // buildable, and this is the entry that scales past the handful shown below it.
+        if !secrets.isEmpty {
+            let search = NSMenuItem(
+                title: loc.s("menu.searchSecrets"),
+                action: #selector(openSecretSearch(_:)),
+                keyEquivalent: ""
+            )
+            search.target = self
+            search.image = DevTypeTheme.menuIcon("magnifyingglass")
+            secretsSubmenu.addItem(search)
+            secretsSubmenu.addItem(NSMenuItem.separator())
+        }
+
         guard !secrets.isEmpty else {
             let empty = NSMenuItem(title: loc.s("menu.copySecret.empty"), action: nil, keyEquivalent: "")
             empty.isEnabled = false
@@ -616,6 +631,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Copy palette narrowed to secrets, for libraries with more of them than a submenu can hold.
+    @objc private func openSecretSearch(_ sender: Any?) {
+        InlineSearchPanel.toggle(mode: .copySecrets) { [weak self] pick, _, _ in
+            guard let self, case .snippet(let snippet) = pick else { return }
+            self.copyToClipboard(snippet)
+        }
+    }
+
     @objc private func copySecretFromMenu(_ sender: NSMenuItem) {
         guard let snippet = sender.representedObject as? SnippetModel else { return }
         copyToClipboard(snippet)
@@ -636,7 +659,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard !insertText.isEmpty else { return }
                 CommandUsageStatsStore.shared.recordUsage(for: command.id)
                 _ = SecretClipboard.shared.copy(insertText)
-                self.flashStatusItem(loc.s("secret.copied.title"))
+                ToastPanel.show(self.loc.s("snippet.copied.toast", self.loc.s(command.titleKey)))
             }
         }
     }
@@ -656,18 +679,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch SecretMenuFlow.resolveForCopy(snippet, clipboardText: clipboard, lookup: lookup) {
         case .success(let text):
-            let clearAt = SecretClipboard.shared.copy(text)
+            _ = SecretClipboard.shared.copy(text)
             SnippetStore.shared.incrementUsage(for: snippet.id)
+            // Never an alert. A modal here made the user dismiss a dialog mid-task, and — because
+            // an alert activates DevType — took focus off the very field they were about to paste
+            // into. The toast neither activates the app nor takes the click.
             if snippet.isSecret {
-                let seconds = Int(SecretClipboard.defaultClearAfter)
-                DevTypeAlert.info(
-                    title: loc.s("secret.copied.title"),
-                    message: loc.s("secret.copied.message", snippet.displayTitle, "\(seconds)")
+                ToastPanel.show(
+                    loc.s("secret.copied.toast", snippet.displayTitle),
+                    detail: loc.s("secret.copied.toast.detail", "\(Int(SecretClipboard.defaultClearAfter))"),
+                    symbol: "key.fill"
                 )
             } else {
-                flashStatusItem(loc.s("secret.copied.title"))
+                ToastPanel.show(loc.s("snippet.copied.toast", snippet.displayTitle))
             }
-            _ = clearAt
         case .failure(.secretUnavailable):
             DevTypeAlert.present(
                 title: loc.s("secret.missing.title"),

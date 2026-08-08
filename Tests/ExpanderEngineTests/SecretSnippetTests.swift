@@ -287,6 +287,60 @@ final class SecretSnippetTests: XCTestCase {
         defer { pasteboard.releaseGlobally() }
         XCTAssertEqual(SecretClipboard().clearIfStillOurs(pasteboard: pasteboard), .nothingToClear)
     }
+    // MARK: - Searching a large secret library
+
+    /// A flat submenu stops being usable long before it stops being buildable, so the copy
+    /// palette can be narrowed to secrets. Narrowing happens *before* ranking: the palette caps
+    /// snippet hits, so filtering afterwards would let ordinary snippets fill the cap and crowd
+    /// out the very thing being searched for.
+    func testSecretsOnlyFilterKeepsGroupsMeaningful() {
+        let groups = [
+            SnippetGroup(name: "General", snippets: [
+                SnippetModel(title: "Address", triggerKeyword: ";a", replacementText: "1 Main St"),
+                SnippetModel(title: "Work login", triggerKeyword: ";w", replacementText: "", isSecret: true),
+            ]),
+            SnippetGroup(name: "Plain only", snippets: [
+                SnippetModel(title: "Sig", triggerKeyword: ";s", replacementText: "—B"),
+            ]),
+            SnippetGroup(name: "Vault", snippets: [
+                SnippetModel(title: "Bank", triggerKeyword: ";b", replacementText: "", isSecret: true),
+                SnippetModel(title: "Router", triggerKeyword: ";r", replacementText: "", isSecret: true),
+            ]),
+        ]
+
+        let filtered = SecretLibraryFilter.secretsOnly(groups)
+
+        XCTAssertEqual(filtered.map(\.name), ["General", "Vault"], "Empty groups are dropped.")
+        XCTAssertEqual(filtered.flatMap(\.snippets).map(\.displayTitle), ["Work login", "Bank", "Router"])
+        XCTAssertTrue(filtered.flatMap(\.snippets).allSatisfy(\.isSecret))
+    }
+
+    func testSecretsOnlyFilterIsEmptyWhenNothingIsSecret() {
+        let groups = [SnippetGroup(name: "General", snippets: [
+            SnippetModel(title: "Address", triggerKeyword: ";a", replacementText: "1 Main St"),
+        ])]
+        XCTAssertTrue(SecretLibraryFilter.secretsOnly(groups).isEmpty)
+    }
+
+    /// The submenu is capped and ordered most-recent-first, so a freshly added secret is at the
+    /// top and a long library still produces a menu that opens instantly.
+    func testSubmenuEntriesAreCappedAndMostRecentFirst() {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let many = (0..<40).map { index in
+            SnippetModel(
+                title: "secret-\(index)",
+                triggerKeyword: ";s\(index)",
+                replacementText: "",
+                updatedAt: base.addingTimeInterval(TimeInterval(index)),
+                isSecret: true
+            )
+        }
+        let entries = SecretMenuEntryPolicy.entries(from: many, limit: 20)
+        XCTAssertEqual(entries.count, 20)
+        XCTAssertEqual(entries.first?.displayTitle, "secret-39")
+        XCTAssertTrue(entries.allSatisfy(\.isSecret))
+    }
+
 }
 
 private extension Result where Success == Void, Failure == SecretStore.Failure {

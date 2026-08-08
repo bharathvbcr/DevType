@@ -42,13 +42,25 @@ enum InlineSearchPanel {
     enum Mode {
         case insert
         case copy
+        /// Copy mode narrowed to secrets. A flat submenu stops being usable somewhere around a
+        /// dozen entries, and this is the surface where typing is available again: by the time
+        /// the panel is up, DevType is frontmost, so the keystrokes are ordinary delivery to our
+        /// own window rather than anything Secure Input withholds.
+        case copySecrets
 
         var placeholderKey: String {
             switch self {
             case .insert: return "search.placeholder"
             case .copy: return "menu.copySnippet"
+            case .copySecrets: return "menu.searchSecrets.placeholder"
             }
         }
+
+        /// Palette commands (date tools, AI, navigation) are noise when the question is "which
+        /// secret", and none of them can produce one.
+        var showsCommands: Bool { self != .copySecrets }
+
+        var showsOnlySecrets: Bool { self == .copySecrets }
     }
 
     /// Result of committing a palette row.
@@ -680,13 +692,14 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        groups = store.loadGroups()
+        groups = visibleGroups(store.loadGroups())
         refreshClipboardCache(force: true)
         aiDisabledReason = AILocaleSupport.disabledReason(loc: loc)
         listenerToken = store.addGroupListener { [weak self] updated in
             DispatchQueue.main.async {
-                self?.groups = updated
-                self?.refreshHits()
+                guard let self else { return }
+                self.groups = self.visibleGroups(updated)
+                self.refreshHits()
             }
         }
         refreshHits()
@@ -735,6 +748,14 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         )
     }
 
+    /// Narrow the library to what this mode is about, before ranking rather than after: the
+    /// snippet limit and the relevance scores both operate on this list, so filtering afterwards
+    /// would let ordinary snippets crowd the secrets out of the top 40.
+    private func visibleGroups(_ groups: [SnippetGroup]) -> [SnippetGroup] {
+        guard mode.showsOnlySecrets else { return groups }
+        return SecretLibraryFilter.secretsOnly(groups)
+    }
+
     private func refreshHits() {
         refreshClipboardCache()
         let query = searchField.stringValue
@@ -750,7 +771,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             semanticBoostIDs: semanticBoostIDs,
             commandUsageBoost: { CommandUsageStatsStore.shared.rankBoost(for: $0) },
             aiDisabledReason: aiDisabledReason,
-            commandLimit: 20,
+            commandLimit: mode.showsCommands ? 20 : 0,
             snippetLimit: 40
         )
 

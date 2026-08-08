@@ -239,3 +239,44 @@ public final class InMemorySecretBackingStore: SecretBackingStore {
         return Set(storage.keys)
     }
 }
+
+// MARK: - Library filtering
+
+/// Pure library filters used by the copy surfaces.
+///
+/// In `ExpanderEngine` rather than next to the panel that calls them so they are reachable from
+/// tests — the app is an `executableTarget` and cannot be imported.
+public enum SecretLibraryFilter {
+
+    /// Groups reduced to their secrets, dropping groups that then hold none.
+    ///
+    /// Applied *before* ranking rather than after. The palette caps snippet hits, so filtering
+    /// afterwards would let ordinary snippets fill the cap and crowd the secrets out of a search
+    /// whose entire purpose is finding one.
+    public static func secretsOnly(_ groups: [SnippetGroup]) -> [SnippetGroup] {
+        groups.compactMap { group in
+            let secrets = group.snippets.filter(\.isSecret)
+            guard !secrets.isEmpty else { return nil }
+            var copy = group
+            copy.snippets = secrets
+            return copy
+        }
+    }
+}
+
+/// Ordering and cap for the mouse-only *Copy Secret* submenu.
+///
+/// Most recently updated first, so a secret just added is at the top; capped so a large library
+/// still yields a menu that opens instantly, with the search entry above it covering the rest.
+public enum SecretMenuEntryPolicy {
+    public static func entries(from snippets: [SnippetModel], limit: Int = 20) -> [SnippetModel] {
+        snippets
+            .filter(\.isSecret)
+            .sorted { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
+            }
+            .prefix(max(0, limit))
+            .map { $0 }
+    }
+}

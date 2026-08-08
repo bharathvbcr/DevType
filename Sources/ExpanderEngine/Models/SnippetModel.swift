@@ -37,7 +37,7 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
     public var isSecret: Bool
 
     /// True when this snippet pastes an image instead of text.
-    public var isImageSnippet: Bool { !imagePath.isEmpty }
+    public var isImageSnippet: Bool { !isSecret && !imagePath.isEmpty }
 
     /// May this snippet expand from a *typed* trigger?
     ///
@@ -106,7 +106,10 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         // A secret's value never lives in the struct, not even transiently: an initialiser that
         // accepted one would put it in every copy, every listener callback, and every `Recent`
         // entry. Callers hand the value to `SecretStore` and the trigger to this.
-        if isSecret { self.replacementText = "" }
+        if isSecret {
+            self.replacementText = ""
+            self.imagePath = ""
+        }
     }
 
     /// Display title for lists: label if present, else title, else trigger.
@@ -145,7 +148,10 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         try c.encode(requireWordBoundary, forKey: .requireWordBoundary)
         try c.encode(isPlainText, forKey: .isPlainText)
         try c.encode(enabled, forKey: .enabled)
-        try c.encode(imagePath, forKey: .imagePath)
+        // Same reasoning as `replacementText`: a snippet that is both a secret and an image is
+        // an ambiguous state every consumer would resolve differently — the copy path reads the
+        // keychain, `isImageSnippet` says to paste a file. Make it unrepresentable on disk.
+        try c.encode(isSecret ? "" : imagePath, forKey: .imagePath)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
         try c.encode(usageCount, forKey: .usageCount)
@@ -179,7 +185,10 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         isSecret = try c.decodeIfPresent(Bool.self, forKey: .isSecret) ?? false
         // Belt and braces against a library written by a build that did not redact, or edited by
         // hand: a snippet that says it is secret never carries a value in memory either.
-        if isSecret { replacementText = "" }
+        if isSecret {
+            replacementText = ""
+            imagePath = ""
+        }
     }
 }
 
