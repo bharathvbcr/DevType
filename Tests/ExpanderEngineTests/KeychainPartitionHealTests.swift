@@ -126,6 +126,61 @@ final class KeychainPartitionHealTests: XCTestCase {
         XCTAssertTrue(SecretReadOutcome.failed(-25293).label.contains("-25293"))
     }
 
+    func testTrailAliasesAccountsAndNeverLeaksThem() {
+        let diagnostics = SecretAccessDiagnostics()
+        let uuid = UUID().uuidString
+        diagnostics.note("legacy fetch", -25293, account: uuid)
+        diagnostics.note("heal", nil, account: uuid)
+        diagnostics.note("v2 fetch", 0, account: UUID().uuidString)
+
+        let trail = diagnostics.trail()
+        XCTAssertEqual(trail, [
+            "item A: legacy fetch → -25293",
+            "item A: heal",
+            "item B: v2 fetch → 0",
+        ])
+        XCTAssertFalse(trail.joined().contains(uuid),
+                       "The account is the snippet UUID; the trail is pasted into reports.")
+    }
+
+    func testTrailDropsOldestStepsPastCapacity() {
+        let diagnostics = SecretAccessDiagnostics()
+        for i in 0..<(SecretAccessDiagnostics.trailCapacity + 10) {
+            diagnostics.note("step \(i)")
+        }
+        let trail = diagnostics.trail()
+        XCTAssertEqual(trail.count, SecretAccessDiagnostics.trailCapacity)
+        XCTAssertEqual(trail.first, "step 10", "Oldest steps fall off the front.")
+        XCTAssertEqual(trail.last, "step \(SecretAccessDiagnostics.trailCapacity + 9)")
+    }
+
+    func testInMemoryStoresHaveNothingToMigrate() {
+        let store = SecretStore(backing: InMemorySecretBackingStore())
+        XCTAssertTrue(store.snippetIDsPendingMigration().isEmpty)
+        XCTAssertEqual(store.migrateLegacy(allowInteraction: true), SecretMigrationSummary())
+    }
+
+    func testReportCarriesThePendingCountAndTrail() {
+        let diagnostics = SecretAccessDiagnostics()
+        diagnostics.note("legacy fetch", -25293, account: UUID().uuidString)
+
+        let suite = "keychain-migration-tests-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: suite)!
+        defer { store.removePersistentDomain(forName: suite) }
+
+        let text = DiagnosticReport.captureSecretLines(
+            snippets: [],
+            availability: .biometry("Touch ID"),
+            defaults: store,
+            accessDiagnostics: diagnostics,
+            pendingMigrationCount: { 2 }
+        ).joined(separator: "\n")
+
+        XCTAssertTrue(text.contains("Secrets pending migration: 2"))
+        XCTAssertTrue(text.contains("trail: item A: legacy fetch → -25293"),
+                      "The trail is the log that turns 'it prompted again' into a diagnosis.")
+    }
+
     func testReportSaysHowTheLastKeychainReadWent() {
         let diagnostics = SecretAccessDiagnostics()
         diagnostics.record(.healed)

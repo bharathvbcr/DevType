@@ -706,6 +706,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Resolve a snippet to text and put it on the clipboard, with an auto-clear timer.
+    /// §8.10: the one-time flow that finishes moving pre-v2 secrets to the current keychain
+    /// service. This alert is the **only doorway to a keychain password dialog** in DevType:
+    /// it says up front how many dialogs are coming (at most one per old secret), and once the
+    /// batch is done they are gone for good — every later copy is silent. An ordinary copy can
+    /// never reach the dialog by itself; `SecretMenuFlow.resolve` fails into here instead.
+    private func offerSecretMigration(for snippet: SnippetModel, pendingCount: Int, thenRetry retry: @escaping () -> Void) {
+        DevTypeAlert.present(
+            title: loc.s("secret.migrate.title"),
+            message: loc.s("secret.migrate.message", "\(pendingCount)"),
+            buttons: [loc.s("secret.migrate.continue"), loc.s("common.cancel")]
+        ) { [weak self] index in
+            guard let self, index == 0 else { return }
+            let summary = SecretStore.shared.migrateLegacy(allowInteraction: true)
+            let stillPending = SecretStore.shared.snippetIDsPendingMigration()
+
+            if !stillPending.contains(snippet.id) {
+                // The one the user actually asked for is upgraded — finish their copy now,
+                // silently, and only mention any stragglers in passing.
+                if summary.needsUser > 0 || summary.failed > 0 {
+                    ToastPanel.show(
+                        loc.s("secret.migrate.partial.toast", "\(stillPending.count)"),
+                        symbol: "exclamationmark.triangle.fill"
+                    )
+                }
+                retry()
+            } else {
+                // Their dialog was cancelled or refused; say so once, quietly, and stop. The
+                // flow re-offers itself the next time this secret is asked for — it never loops
+                // on its own.
+                ToastPanel.show(
+                    loc.s("secret.migrate.declined.toast", snippet.displayTitle),
+                    symbol: "exclamationmark.lock.fill"
+                )
+            }
+        }
+    }
+
     private func copyToClipboard(_ snippet: SnippetModel) {
         let clipboard = NSPasteboard.general.string(forType: .string)
         let lookup: (String) -> String? = { trigger in
@@ -782,6 +819,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 loc.s("snippet.copied.empty"),
                 symbol: "exclamationmark.triangle.fill"
             )
+
+        case .failure(.migrationRequired(let pendingCount)):
+            offerSecretMigration(for: snippet, pendingCount: pendingCount) { [weak self] in
+                self?.copyToClipboard(snippet)
+            }
 
         case .failure(.authenticationCancelled):
             // Silence on purpose. The user dismissed the prompt; telling them they dismissed the
@@ -1175,6 +1217,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                             ),
                             snapshot: snapshot
                         )
+                    case .failure(.migrationRequired(let pendingCount)):
+                        self.offerSecretMigration(for: snippet, pendingCount: pendingCount) { [weak self] in
+                            self?.expandFromSearch(snippet, sourceApp: sourceApp)
+                        }
                     case .failure(.authenticationCancelled):
                         break
                     case .failure(.authenticationFailed(let reason)):

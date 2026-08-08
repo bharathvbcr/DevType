@@ -26,9 +26,22 @@ enum SecretMenuFlow {
         preferenceEnabled: Bool? = nil,
         clipboardText: String? = nil,
         lookup: ((String) -> String?)? = nil,
+        pendingMigration: (() -> Set<UUID>)? = nil,
         loc: LocalizationManager = .shared,
         completion: @escaping (Result<String, ResolveFailure>) -> Void
     ) {
+        // §8.10: a secret still stored the old way cannot be read without a system password
+        // dialog, and an ordinary copy is never allowed to surprise the user with one. Fail
+        // into the migration flow instead, which explains itself before any dialog appears.
+        // Checked before Touch ID so the user is not authenticated into a dead end.
+        if snippet.isSecret {
+            let pending = pendingMigration?() ?? secretStore.snippetIDsPendingMigration()
+            if pending.contains(snippet.id) {
+                completion(.failure(.migrationRequired(pendingCount: pending.count)))
+                return
+            }
+        }
+
         let availability = gate.availability()
         let enabled = preferenceEnabled
             ?? SecretPreferences.requireBiometry(availability: availability)
@@ -115,6 +128,10 @@ enum SecretMenuFlow {
         /// Authentication could not complete — biometry lockout, no password set. Carries the
         /// system's own wording, which is more accurate than anything we would invent.
         case authenticationFailed(String)
+        /// The secret is stored the pre-§8.10 way and reading it needs the one-time migration
+        /// flow — the only place a keychain dialog is allowed. Carries how many secrets that
+        /// flow will cover, so the alert can say how many dialogs to expect at most.
+        case migrationRequired(pendingCount: Int)
 
         /// True when the user already knows what happened because they did it.
         var isSilent: Bool { self == .authenticationCancelled }

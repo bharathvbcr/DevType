@@ -326,6 +326,15 @@ public final class LocalizationManager: ObservableObject {
                 + "as you, which can read the Keychain without asking DevType.",
             "menu.searchSecrets": "Search Secrets…",
             "menu.searchSecrets.placeholder": "Search secrets to copy…",
+            "secret.migrate.title": "Finish upgrading your secrets",
+            "secret.migrate.message":
+                "Some secrets were saved by an earlier version of DevType and macOS guards them "
+                + "with the login keychain password. To finish upgrading them, macOS will ask for "
+                + "that password up to %@ time(s) — once per secret, never again afterwards. "
+                + "After this one-time upgrade, copying secrets is silent.",
+            "secret.migrate.continue": "Upgrade Now",
+            "secret.migrate.partial.toast": "%@ secret(s) still stored the old way",
+            "secret.migrate.declined.toast": "“%@” still needs its one-time upgrade",
             "secret.copied.toast": "Copied “%@” — press ⌘V",
             "secret.copied.toast.detail": "Clipboard clears in %@ seconds.",
             "snippet.copied.toast": "Copied “%@” — press ⌘V",
@@ -1358,6 +1367,14 @@ public final class LocalizationManager: ObservableObject {
                 + "키체인을 읽는 것은 막지 못합니다.",
             "menu.searchSecrets": "비밀 검색…",
             "menu.searchSecrets.placeholder": "복사할 비밀 검색…",
+            "secret.migrate.title": "비밀 업그레이드 완료하기",
+            "secret.migrate.message":
+                "일부 비밀은 이전 버전의 DevType이 저장했으며 macOS가 로그인 키체인 암호로 보호합니다. "
+                + "업그레이드를 완료하기 위해 macOS가 해당 암호를 최대 %@회(비밀당 한 번) 요청하며, "
+                + "이후에는 다시 묻지 않습니다. 이 일회성 업그레이드 후에는 비밀 복사가 조용히 이루어집니다.",
+            "secret.migrate.continue": "지금 업그레이드",
+            "secret.migrate.partial.toast": "%@개의 비밀이 아직 이전 방식으로 저장되어 있습니다",
+            "secret.migrate.declined.toast": "“%@”에는 아직 일회성 업그레이드가 필요합니다",
             "secret.copied.toast": "“%@” 복사됨 — ⌘V를 누르세요",
             "secret.copied.toast.detail": "%@초 후 클립보드가 지워집니다.",
             "snippet.copied.toast": "“%@” 복사됨 — ⌘V를 누르세요",
@@ -2352,6 +2369,15 @@ public final class LocalizationManager: ObservableObject {
                 + "ソフトウェアがキーチェーンを読むことは防げません。",
             "menu.searchSecrets": "シークレットを検索…",
             "menu.searchSecrets.placeholder": "コピーするシークレットを検索…",
+            "secret.migrate.title": "シークレットのアップグレードを完了",
+            "secret.migrate.message":
+                "一部のシークレットは以前のバージョンの DevType が保存したもので、macOS がログイン"
+                + "キーチェーンのパスワードで保護しています。アップグレードを完了するため、macOS が"
+                + "そのパスワードを最大 %@ 回(シークレットごとに 1 回)求めます。以後は求められません。"
+                + "この 1 回限りのアップグレードの後、シークレットのコピーは何も表示せずに行われます。",
+            "secret.migrate.continue": "今すぐアップグレード",
+            "secret.migrate.partial.toast": "%@ 件のシークレットがまだ旧方式で保存されています",
+            "secret.migrate.declined.toast": "「%@」にはまだ 1 回限りのアップグレードが必要です",
             "secret.copied.toast": "「%@」をコピーしました — ⌘V を押してください",
             "secret.copied.toast.detail": "%@ 秒後にクリップボードを消去します。",
             "snippet.copied.toast": "「%@」をコピーしました — ⌘V を押してください",

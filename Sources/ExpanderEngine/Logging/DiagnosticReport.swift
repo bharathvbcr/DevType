@@ -210,7 +210,9 @@ public enum DiagnosticReport {
             injectTelemetryLines: PermissionCoordinator.shared.injectTelemetrySummaryLines(),
             overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics(),
             aiLines: captureAILines(),
-            secretLines: captureSecretLines(),
+            secretLines: captureSecretLines(
+                pendingMigrationCount: { SecretStore.shared.snippetIDsPendingMigration().count }
+            ),
             prefixDebounceSummary: EventTapEngine.shared.prefixDebounceDiagnostics()
         )
     }
@@ -229,7 +231,8 @@ public enum DiagnosticReport {
         snippets: [SnippetModel]? = nil,
         availability: BiometricGate.Availability? = nil,
         defaults: UserDefaults = .standard,
-        accessDiagnostics: SecretAccessDiagnostics = .shared
+        accessDiagnostics: SecretAccessDiagnostics = .shared,
+        pendingMigrationCount: (() -> Int)? = nil
     ) -> [String] {
         let all = snippets ?? SnippetStore.shared.loadSnippets()
         let resolved = availability ?? BiometricGate.shared.availability()
@@ -252,7 +255,13 @@ public enum DiagnosticReport {
             // prompt in a report. "healed partition" here means the self-signed-cert rebuild
             // problem fired and was absorbed silently, exactly as designed.
             "Keychain last read: \(accessDiagnostics.lastRead().label)",
+            // Hermetic by default (tests must never touch the live keychain); the production
+            // capture site below injects the real count.
+            "Secrets pending migration: \((pendingMigrationCount ?? { 0 })())",
         ]
+        // The step trail: every fetch/heal/migrate with its OSStatus, accounts aliased to
+        // "item A/B/…" — the exact sequence that produced whatever the user just saw.
+        + accessDiagnostics.trail().suffix(16).map { "  trail: \($0)" }
     }
 
     static func captureAILines(

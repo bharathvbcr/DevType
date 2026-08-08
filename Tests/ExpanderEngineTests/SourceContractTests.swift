@@ -318,6 +318,48 @@ final class SourceContractTests: XCTestCase {
         XCTAssertFalse(decoded.isImageSnippet)
     }
 
+    /// §8.10: an ordinary secret read must be structurally incapable of showing the login
+    /// keychain dialog. Every `SecItemCopyMatching` in the store runs inside the UI-suppressed
+    /// wrapper except exactly one — the interactive fetch inside `migrateLegacy`, which the UI
+    /// reaches only through an alert that announces the dialogs first.
+    func testKeychainDialogIsReachableOnlyThroughMigration() throws {
+        let store = try source("Sources/ExpanderEngine/Models/SecretStore.swift")
+
+        // The one interactive fetch lives in migrateLegacy, after the allowInteraction guard.
+        guard let migrate = store.range(of: "public func migrateLegacy(allowInteraction:"),
+              let interactive = store.range(of: "legacy fetch with dialog") else {
+            return XCTFail("SecretStore no longer has the shape this contract describes.")
+        }
+        XCTAssertTrue(
+            migrate.upperBound < interactive.lowerBound,
+            "The dialog-capable fetch must live inside migrateLegacy."
+        )
+        XCTAssertEqual(
+            store.components(separatedBy: "legacy fetch with dialog").count - 1, 1,
+            "Exactly one dialog-capable fetch, so 'never surprise-prompts' stays checkable."
+        )
+
+        // value() reports needsUser instead of ever falling through to a prompt.
+        guard let valueFn = store.range(of: "public func value(account:"),
+              let needsUser = store.range(of: "case .needsUser:") else {
+            return XCTFail("value() no longer has the shape this contract describes.")
+        }
+        XCTAssertTrue(valueFn.upperBound < needsUser.lowerBound)
+
+        // And the UI reaches migrateLegacy(allowInteraction: true) only inside the flow that
+        // has just told the user how many dialogs to expect.
+        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
+        XCTAssertEqual(
+            appDelegate.components(separatedBy: "migrateLegacy(allowInteraction: true)").count - 1, 1,
+            "One doorway: offerSecretMigration. A second caller is a second surprise prompt."
+        )
+        guard let offer = appDelegate.range(of: "private func offerSecretMigration("),
+              let migrateCall = appDelegate.range(of: "migrateLegacy(allowInteraction: true)") else {
+            return XCTFail("AppDelegate no longer has the shape this contract describes.")
+        }
+        XCTAssertTrue(offer.upperBound < migrateCall.lowerBound)
+    }
+
     /// Secrets are filtered at the engine's own setter, not at its callers, so no future caller
     /// can put one back on the typed path.
     func testTypedPathFilterLivesInTheEngineSetter() throws {
