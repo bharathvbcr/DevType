@@ -6,6 +6,9 @@ import ServiceManagement
 // MARK: - Main Application Delegate
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
+    private var secretsSubmenu: NSMenu?
+    /// Generation counter so a second flash cannot be wiped by the first one's timer.
+    private var statusFlashToken: UInt64 = 0
     private var snippetWindowController: NSWindowController?
     private var permissionWindowController: NSWindowController?
     private var onboardingWindowController: NSWindowController?
@@ -430,6 +433,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             key: hotkeyMenuKeyEquivalent(),
             modifiers: hotkeyMenuModifiers()
         ))
+        // The two secure-field routes. Neither needs a keystroke DevType has to observe: the menu
+        // is driven by the mouse, the clipboard write is an API call, and the ⌘V is the user's own
+        // key going to their own app. That is the whole reason these exist — inside a password
+        // field Secure Input withholds keyboard events from our tap *and* from hotkey
+        // registration, so the palette shortcut above simply never fires there.
+        menu.addItem(item(
+            loc.s("menu.copySnippet"),
+            "doc.on.clipboard",
+            #selector(openCopyPalette(_:))
+        ))
+
+        let secretsItem = NSMenuItem(title: loc.s("menu.copySecret"), action: nil, keyEquivalent: "")
+        secretsItem.image = DevTypeTheme.menuIcon("key.fill")
+        let secretsMenu = NSMenu()
+        secretsItem.submenu = secretsMenu
+        secretsSubmenu = secretsMenu
+        rebuildSecretsMenu()
+        menu.addItem(secretsItem)
+
         menu.addItem(item(loc.s("menu.import"), "square.and.arrow.down", #selector(importSnippets(_:))))
         // §0.4: export — JSON, Espanso YAML, CSV — next to the existing import.
         menu.addItem(item(loc.s("menu.export"), "square.and.arrow.up", #selector(exportSnippets(_:))))
@@ -561,9 +583,130 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Secrets (mouse-only path for password fields)
+
+    private func rebuildSecretsMenu() {
+        assertMainThread()
+        guard let secretsSubmenu else { return }
+        secretsSubmenu.removeAllItems()
+
+        let secrets = SecretMenuFlow.secretMenuEntries(from: SnippetStore.shared.loadSnippets())
+        guard !secrets.isEmpty else {
+            let empty = NSMenuItem(title: loc.s("menu.copySecret.empty"), action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            secretsSubmenu.addItem(empty)
+            let hint = NSMenuItem(title: loc.s("menu.copySecret.hint"), action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            secretsSubmenu.addItem(hint)
+            return
+        }
+
+        for snippet in secrets {
+            // Title only. The value is not in the model to display even by accident, and the
+            // trigger is omitted because a secret has no typed trigger to advertise.
+            let item = NSMenuItem(
+                title: snippet.displayTitle,
+                action: #selector(copySecretFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.image = DevTypeTheme.menuIcon("key.fill")
+            item.representedObject = snippet
+            secretsSubmenu.addItem(item)
+        }
+    }
+
+    @objc private func copySecretFromMenu(_ sender: NSMenuItem) {
+        guard let snippet = sender.representedObject as? SnippetModel else { return }
+        copyToClipboard(snippet)
+    }
+
+    /// Palette in copy mode: search, pick, and the value lands on the clipboard instead of being
+    /// injected. Reachable from the menu, so it works when the palette *shortcut* cannot fire.
+    @objc private func openCopyPalette(_ sender: Any?) {
+        InlineSearchPanel.toggle(mode: .copy) { [weak self] pick, _, _ in
+            guard let self else { return }
+            switch pick {
+            case .snippet(let snippet):
+                self.copyToClipboard(snippet)
+            case .command(let command, let insertText):
+                // Date / clipboard tools resolve to literal text; copying that is the same
+                // gesture. Anything else (AI, navigation) has no clipboard meaning — ignore it
+                // rather than half-perform it.
+                guard !insertText.isEmpty else { return }
+                CommandUsageStatsStore.shared.recordUsage(for: command.id)
+                _ = SecretClipboard.shared.copy(insertText)
+                self.flashStatusItem(loc.s("secret.copied.title"))
+            }
+        }
+    }
+
+    /// Resolve a snippet to text and put it on the clipboard, with an auto-clear timer.
+    private func copyToClipboard(_ snippet: SnippetModel) {
+        let clipboard = NSPasteboard.general.string(forType: .string)
+        let lookup: (String) -> String? = { trigger in
+            // Secrets are excluded from nested `{{snippet:…}}` lookups: resolving one here would
+            // paste a password into whatever document the outer snippet lands in, with no
+            // explicit gesture naming it.
+            SnippetStore.shared.loadSnippets().first {
+                !$0.isSecret && ($0.triggerKeyword == trigger
+                    || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased()))
+            }?.replacementText
+        }
+
+        switch SecretMenuFlow.resolveForCopy(snippet, clipboardText: clipboard, lookup: lookup) {
+        case .success(let text):
+            let clearAt = SecretClipboard.shared.copy(text)
+            SnippetStore.shared.incrementUsage(for: snippet.id)
+            if snippet.isSecret {
+                let seconds = Int(SecretClipboard.defaultClearAfter)
+                DevTypeAlert.info(
+                    title: loc.s("secret.copied.title"),
+                    message: loc.s("secret.copied.message", snippet.displayTitle, "\(seconds)")
+                )
+            } else {
+                flashStatusItem(loc.s("secret.copied.title"))
+            }
+            _ = clearAt
+        case .failure(.secretUnavailable):
+            DevTypeAlert.present(
+                title: loc.s("secret.missing.title"),
+                message: loc.s("secret.missing.message", snippet.displayTitle),
+                style: .warning,
+                buttons: [loc.s("menu.manage"), loc.s("common.ok")]
+            ) { index in
+                if index == 0 { self.openSnippetManager(nil) }
+            }
+        case .failure(.emptySnippet):
+            // Copying "" would wipe whatever the user already had on the clipboard.
+            NSSound.beep()
+        }
+    }
+
+    /// Non-modal confirmation: the status item wears the message for a moment.
+    ///
+    /// An alert for every plain-snippet copy would be its own annoyance; a secret still gets one
+    /// because the user needs to be told about the clear timer before they go and paste.
+    private func flashStatusItem(_ message: String) {
+        assertMainThread()
+        guard let button = statusItem?.button else { return }
+        statusFlashToken &+= 1
+        let token = statusFlashToken
+        button.title = " \(message)"
+        button.imagePosition = .imageLeading
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self, self.statusFlashToken == token else { return }
+            button.title = ""
+            button.imagePosition = .imageOnly
+        }
+    }
+
     private func recordRecent(_ snippet: SnippetModel) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            // Recent is a one-click *insert*. A secret has no place there — it would put a
+            // password one stray click away, in a menu the user opens for ordinary snippets.
+            guard !snippet.isSecret else { return }
             self.recentSnippets.removeAll { $0.id == snippet.id }
             self.recentSnippets.insert(snippet, at: 0)
             if self.recentSnippets.count > 6 {
@@ -585,8 +728,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func bindSnippetStore() {
-        SnippetStore.shared.addListener { snippets in
+        SnippetStore.shared.addListener { [weak self] snippets in
             EventTapEngine.shared.snippets = snippets
+            DispatchQueue.main.async { self?.rebuildSecretsMenu() }
         }
     }
 
@@ -914,6 +1058,34 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                         || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased())
                 }?.replacementText
             }
+            // A secret is fetched at the moment of use and injected verbatim. Never through
+            // `MacroRenderer`: a password containing `{{` or `%` is not a template, and expanding
+            // one would corrupt it silently — or resolve a nested `{{snippet:…}}` inside it.
+            if snippet.isSecret {
+                guard let value = SecretStore.shared.secret(for: snippet.id), !value.isEmpty else {
+                    DevTypeAlert.present(
+                        title: loc.s("secret.missing.title"),
+                        message: loc.s("secret.missing.message", snippet.displayTitle),
+                        style: .warning,
+                        buttons: [loc.s("common.ok")],
+                        handler: nil
+                    )
+                    return
+                }
+                injectSearchExpansion(
+                    snippet: snippet,
+                    resolved: MacroExpansionResult(
+                        text: value,
+                        cursorOffset: nil,
+                        trailingKeys: [],
+                        fillFields: [],
+                        needsFillIn: false
+                    ),
+                    snapshot: snapshot
+                )
+                return
+            }
+
             let resolved = MacroRenderer.expand(
                 content: snippet.replacementText,
                 lookup: lookup,
@@ -1486,6 +1658,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// §4.5: usage counters live in a coalesced sidecar now — flush the tail of
     /// the current session so a quit does not lose the last few expansions.
     public func applicationWillTerminate(_ notification: Notification) {
+        // Before anything else can fail: quitting must not be the way a copied secret outlives
+        // its clear timer, which dies with the process. Still guarded by change-count ownership,
+        // so quitting never wipes something the user copied after us.
+        SecretClipboard.shared.clearIfStillOurs()
         SnippetStore.shared.flushUsageStats()
         EventTapEngine.shared.shutdownTapThread()
         if let accessibilityObserver {

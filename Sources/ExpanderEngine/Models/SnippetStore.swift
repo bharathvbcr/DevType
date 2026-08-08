@@ -49,7 +49,17 @@ public struct SnippetDocument: Codable, Equatable {
 }
 
 public final class SnippetStore {
-    public static let shared = SnippetStore()
+    /// The one store that owns the whole library, and therefore the only one allowed to decide a
+    /// keychain secret is orphaned.
+    public static let shared = SnippetStore(
+        location: SnippetStore.resolveLocation(defaults: .standard),
+        watcherFactory: SnippetStore.defaultWatcherFactory,
+        secretPurgeEnabled: true
+    )
+
+    private let secretStore: SecretStore
+    /// See `purgeOrphanSecrets`: off for partial / scratch stores, on for `shared`.
+    private let secretPurgeEnabled: Bool
 
     public enum LoadIssue: Equatable {
         case corrupted(backupURL: URL)
@@ -363,8 +373,12 @@ public final class SnippetStore {
         location: Location,
         deviceDefaults: UserDefaults = .standard,
         localSupportDirectory: URL = SnippetStore.defaultLocalSupportDirectory,
-        watcherFactory: @escaping (URL) -> StoreWatching? = { _ in nil }
+        watcherFactory: @escaping (URL) -> StoreWatching? = { _ in nil },
+        secretStore: SecretStore = .shared,
+        secretPurgeEnabled: Bool = false
     ) {
+        self.secretStore = secretStore
+        self.secretPurgeEnabled = secretPurgeEnabled
         self.fileURL = location.fileURL
         self.expectsExistingLibrary = location.expectsExistingLibrary
         self.deviceDefaults = deviceDefaults
@@ -618,9 +632,33 @@ public final class SnippetStore {
         publishSaveFailure(nil)
 
         let flat = sanitized.flatMap(\.snippets)
+
+        // Only after the bytes reached disk. A secret whose snippet is gone from the *saved*
+        // library is unreachable — no UI can ever show it again — so leaving it in the keychain
+        // means the user deleted a password and it silently stayed. Purging before the write
+        // would destroy the value for a save that then failed, which is the worse mistake, so
+        // this deliberately sits under `outcome.didSave`.
+        purgeOrphanSecrets(liveIDs: Set(flat.map(\.id)))
+
         for listener in snippetListeners.values { listener(flat) }
         for listener in groupListenersCopy.values { listener(sanitized) }
         return outcome
+    }
+
+    /// Drop keychain entries for snippets that no longer exist.
+    ///
+    /// Guarded by `secretPurgeEnabled` because a store instance built over a *partial* library —
+    /// the importers' scratch stores, and every test that saves two snippets to a temp directory —
+    /// would otherwise read "these are all the snippets that exist" and delete the real library's
+    /// secrets. Only the shared store, which owns the whole library, is allowed to purge.
+    private func purgeOrphanSecrets(liveIDs: Set<UUID>) {
+        guard secretPurgeEnabled else { return }
+        let removed = secretStore.purgeOrphans(keeping: liveIDs)
+        if removed > 0 {
+            DevTypeLog.store.info(
+                "[Store] purged \(removed, privacy: .public) orphaned secret(s) from the keychain"
+            )
+        }
     }
 
     /// §1.10: `.merge` shim preserving the original signature.

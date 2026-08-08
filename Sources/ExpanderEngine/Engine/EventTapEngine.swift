@@ -365,9 +365,17 @@ public final class EventTapEngine {
             _snapshotRevision = revision
             matchStateLock.unlock()
 
+            // Secrets are filtered out here, at the one door into the matcher, rather than at the
+            // callers. A keychain-backed snippet must never be reachable by typing: Secure Input
+            // means the trigger cannot be seen where it would be wanted, and everywhere else a
+            // trigger that fires on typing would put a password into the chat window the user was
+            // mid-sentence in. Filtering in the setter means no future caller can reintroduce it,
+            // and the value is not in the struct to leak even if one tried.
+            let matchable = newValue.filter(\.isTypedTriggerExpandable)
+
             // Build outside the lock: a rebuild can take milliseconds at large libraries and the
             // tap callback reads this lock on the keystroke path.
-            let snapshot = SnippetMatchSnapshot(snippets: newValue, revision: revision)
+            let snapshot = SnippetMatchSnapshot(snippets: matchable, revision: revision)
 
             matchStateLock.lock()
             // Last writer wins; a slower build must never clobber a newer one.

@@ -299,6 +299,33 @@ public final class LocalizationManager: ObservableObject {
             "menu.import": "Import Snippets…",
             "menu.export": "Export Snippets",
             "menu.inlineSearch": "Command Palette",
+            "menu.copySnippet": "Copy Snippet…",
+            "manager.delete.confirm.secret":
+                "Delete “%@”? Its stored value is removed from the Keychain at the same time, "
+                + "and undoing the delete cannot bring the value back.",
+            "menu.copySecret": "Copy Secret",
+            "menu.copySecret.empty": "No secret snippets yet",
+            "menu.copySecret.hint": "Mark a snippet as Secret to store it in the Keychain",
+            "secret.copied.title": "Copied — press ⌘V to paste",
+            "secret.copied.message":
+                "%@ is on the clipboard and will be cleared in %@ seconds. "
+                + "Secure Input blocks typed triggers and shortcuts inside password fields, "
+                + "so paste it yourself.",
+            "secret.missing.title": "Secret unavailable",
+            "secret.missing.message":
+                "%@ is marked as a secret, but its value could not be read from the Keychain. "
+                + "Open the snippet editor and enter it again.",
+            "secret.saveFailed.title": "Could not save to Keychain",
+            "secret.saveFailed.message":
+                "The Keychain refused to store this secret (status %@). The snippet was saved "
+                + "without a value.",
+            "editor.secret.toggle": "Secret",
+            "editor.secret.help":
+                "Stores the value in the Keychain instead of the snippet library. It is never "
+                + "exported, never shown here again, and never expands from a typed trigger — "
+                + "use Copy Secret in the menu bar, then ⌘V.",
+            "editor.secret.placeholder": "Enter the secret value",
+            "editor.secret.unchanged": "•••••••••••• (stored — type to replace)",
             "menu.recent": "Recent Expansions",
             "menu.recent.empty": "No Recent Expansions",
             "menu.openAtLogin": "Open at Login",
@@ -1278,6 +1305,31 @@ public final class LocalizationManager: ObservableObject {
             "menu.import": "스니펫 가져오기…",
             "menu.export": "스니펫 내보내기",
             "menu.inlineSearch": "명령 팔레트",
+            "menu.copySnippet": "스니펫 복사…",
+            "manager.delete.confirm.secret":
+                "“%@”을(를) 삭제할까요? 저장된 값도 키체인에서 함께 삭제되며, "
+                + "삭제를 실행 취소해도 값은 복구되지 않습니다.",
+            "menu.copySecret": "비밀 복사",
+            "menu.copySecret.empty": "비밀 스니펫이 없습니다",
+            "menu.copySecret.hint": "스니펫을 비밀로 표시하면 키체인에 저장됩니다",
+            "secret.copied.title": "복사됨 — ⌘V로 붙여넣으세요",
+            "secret.copied.message":
+                "%@이(가) 클립보드에 있으며 %@초 후 삭제됩니다. "
+                + "암호 필드에서는 보안 입력이 트리거와 단축키를 차단하므로 직접 붙여넣어야 합니다.",
+            "secret.missing.title": "비밀을 사용할 수 없음",
+            "secret.missing.message":
+                "%@은(는) 비밀로 표시되어 있지만 키체인에서 값을 읽지 못했습니다. "
+                + "스니펫 편집기에서 값을 다시 입력하세요.",
+            "secret.saveFailed.title": "키체인에 저장하지 못함",
+            "secret.saveFailed.message":
+                "키체인이 이 비밀의 저장을 거부했습니다(상태 %@). 스니펫은 값 없이 저장되었습니다.",
+            "editor.secret.toggle": "비밀",
+            "editor.secret.help":
+                "값을 스니펫 라이브러리 대신 키체인에 저장합니다. 내보내지 않으며, 여기에 다시 "
+                + "표시되지 않고, 입력한 트리거로는 확장되지 않습니다. 메뉴 막대의 비밀 복사를 "
+                + "사용한 뒤 ⌘V를 누르세요.",
+            "editor.secret.placeholder": "비밀 값을 입력하세요",
+            "editor.secret.unchanged": "•••••••••••• (저장됨 — 입력하면 교체)",
             "menu.recent": "최근 확장",
             "menu.recent.empty": "최근 확장 없음",
             "menu.openAtLogin": "로그인 시 열기",
@@ -2221,6 +2273,33 @@ public final class LocalizationManager: ObservableObject {
             "menu.import": "スニペットをインポート…",
             "menu.export": "スニペットを書き出す",
             "menu.inlineSearch": "コマンドパレット",
+            "menu.copySnippet": "スニペットをコピー…",
+            "manager.delete.confirm.secret":
+                "「%@」を削除しますか？保存された値もキーチェーンから同時に削除され、"
+                + "削除を取り消しても値は戻りません。",
+            "menu.copySecret": "シークレットをコピー",
+            "menu.copySecret.empty": "シークレットスニペットはありません",
+            "menu.copySecret.hint": "スニペットをシークレットにするとキーチェーンに保存されます",
+            "secret.copied.title": "コピーしました — ⌘V で貼り付け",
+            "secret.copied.message":
+                "%@ はクリップボードにあり、%@ 秒後に消去されます。"
+                + "パスワード欄では安全な入力がトリガーとショートカットを遮断するため、"
+                + "ご自身で貼り付けてください。",
+            "secret.missing.title": "シークレットを利用できません",
+            "secret.missing.message":
+                "%@ はシークレットに設定されていますが、キーチェーンから値を読み取れませんでした。"
+                + "スニペットエディタで再入力してください。",
+            "secret.saveFailed.title": "キーチェーンに保存できません",
+            "secret.saveFailed.message":
+                "キーチェーンがこのシークレットの保存を拒否しました（状態 %@）。"
+                + "スニペットは値なしで保存されました。",
+            "editor.secret.toggle": "シークレット",
+            "editor.secret.help":
+                "値をスニペットライブラリではなくキーチェーンに保存します。書き出されず、"
+                + "ここに再表示されず、入力したトリガーでは展開されません。"
+                + "メニューバーの「シークレットをコピー」を使ってから ⌘V を押してください。",
+            "editor.secret.placeholder": "シークレットの値を入力",
+            "editor.secret.unchanged": "••••••••••••（保存済み — 入力すると置き換え）",
             "menu.recent": "最近の展開",
             "menu.recent.empty": "最近の展開なし",
             "menu.openAtLogin": "ログイン時に開く",
