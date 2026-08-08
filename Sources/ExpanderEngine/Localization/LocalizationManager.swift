@@ -335,6 +335,12 @@ public final class LocalizationManager: ObservableObject {
             "secret.migrate.continue": "Upgrade Now",
             "secret.migrate.partial.toast": "%@ secret(s) still stored the old way",
             "secret.migrate.declined.toast": "“%@” still needs its one-time upgrade",
+            "secret.keychainLocked.title": "Your login keychain is locked",
+            "secret.keychainLocked.message":
+                "The secret is stored safely, but macOS cannot read anything from a locked "
+                + "keychain. Unlock it to continue — macOS will ask for your login password.",
+            "secret.keychainLocked.unlock": "Unlock…",
+            "secret.keychainLocked.stillLocked": "Keychain still locked",
             "secret.copied.toast": "Copied “%@” — press ⌘V",
             "secret.copied.toast.detail": "Clipboard clears in %@ seconds.",
             "snippet.copied.toast": "Copied “%@” — press ⌘V",
@@ -379,6 +385,7 @@ public final class LocalizationManager: ObservableObject {
             "manager.title": "Snippets",
             "manager.subtitle": "Type less. Expand more.",
             "manager.filter": "Filter",
+            "manager.settings": "Preferences",
             "manager.import": "Import",
             "manager.export": "Export",
             "manager.stats.button": "Stats",
@@ -1375,6 +1382,12 @@ public final class LocalizationManager: ObservableObject {
             "secret.migrate.continue": "지금 업그레이드",
             "secret.migrate.partial.toast": "%@개의 비밀이 아직 이전 방식으로 저장되어 있습니다",
             "secret.migrate.declined.toast": "“%@”에는 아직 일회성 업그레이드가 필요합니다",
+            "secret.keychainLocked.title": "로그인 키체인이 잠겨 있습니다",
+            "secret.keychainLocked.message":
+                "비밀은 안전하게 저장되어 있지만 macOS는 잠긴 키체인에서 아무것도 읽을 수 없습니다. "
+                + "계속하려면 잠금을 해제하세요 — macOS가 로그인 암호를 요청합니다.",
+            "secret.keychainLocked.unlock": "잠금 해제…",
+            "secret.keychainLocked.stillLocked": "키체인이 여전히 잠겨 있습니다",
             "secret.copied.toast": "“%@” 복사됨 — ⌘V를 누르세요",
             "secret.copied.toast.detail": "%@초 후 클립보드가 지워집니다.",
             "snippet.copied.toast": "“%@” 복사됨 — ⌘V를 누르세요",
@@ -1417,6 +1430,7 @@ public final class LocalizationManager: ObservableObject {
             "manager.title": "스니펫",
             "manager.subtitle": "적게 입력하고, 더 많이 확장하세요.",
             "manager.filter": "필터",
+            "manager.settings": "환경설정",
             "manager.import": "가져오기",
             "manager.export": "내보내기",
             "manager.stats.button": "통계",
@@ -2378,6 +2392,13 @@ public final class LocalizationManager: ObservableObject {
             "secret.migrate.continue": "今すぐアップグレード",
             "secret.migrate.partial.toast": "%@ 件のシークレットがまだ旧方式で保存されています",
             "secret.migrate.declined.toast": "「%@」にはまだ 1 回限りのアップグレードが必要です",
+            "secret.keychainLocked.title": "ログインキーチェーンがロックされています",
+            "secret.keychainLocked.message":
+                "シークレットは安全に保存されていますが、ロックされたキーチェーンからは macOS は何も"
+                + "読み取れません。続けるにはロックを解除してください — macOS がログインパスワードを"
+                + "求めます。",
+            "secret.keychainLocked.unlock": "ロック解除…",
+            "secret.keychainLocked.stillLocked": "キーチェーンはまだロックされています",
             "secret.copied.toast": "「%@」をコピーしました — ⌘V を押してください",
             "secret.copied.toast.detail": "%@ 秒後にクリップボードを消去します。",
             "snippet.copied.toast": "「%@」をコピーしました — ⌘V を押してください",
@@ -2422,6 +2443,7 @@ public final class LocalizationManager: ObservableObject {
             "manager.title": "スニペット",
             "manager.subtitle": "少ない入力で、より多くを展開。",
             "manager.filter": "フィルター",
+            "manager.settings": "環境設定",
             "manager.import": "インポート",
             "manager.export": "書き出す",
             "manager.stats.button": "統計",

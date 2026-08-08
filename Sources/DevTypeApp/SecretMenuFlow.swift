@@ -97,6 +97,13 @@ enum SecretMenuFlow {
     ) -> Result<String, ResolveFailure> {
         if snippet.isSecret {
             guard let value = secretStore.secret(for: snippet.id), !value.isEmpty else {
+                // A locked login keychain fails every decrypt while metadata still answers —
+                // reporting that as "no secret stored" is a lie with the wrong fix attached.
+                // Lock state is checked only after the read failed, so the common path costs
+                // nothing extra.
+                if secretStore.isKeychainLocked() {
+                    return .failure(.keychainLocked)
+                }
                 return .failure(.secretUnavailable)
             }
             return .success(value)
@@ -132,6 +139,10 @@ enum SecretMenuFlow {
         /// flow — the only place a keychain dialog is allowed. Carries how many secrets that
         /// flow will cover, so the alert can say how many dialogs to expect at most.
         case migrationRequired(pendingCount: Int)
+        /// The login keychain is locked (auto-lock settings, `security lock-keychain`). The
+        /// value exists; nothing can decrypt it until the user unlocks. Distinct from
+        /// `secretUnavailable` because the fix is "unlock", not "re-enter your secret".
+        case keychainLocked
 
         /// True when the user already knows what happened because they did it.
         var isSilent: Bool { self == .authenticationCancelled }
