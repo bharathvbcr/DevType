@@ -304,8 +304,11 @@ public final class LocalizationManager: ObservableObject {
                 "Delete “%@”? Its stored value is removed from the Keychain at the same time, "
                 + "and undoing the delete cannot bring the value back.",
             "menu.copySecret": "Copy Secret",
+            "menu.requireTouchID": "Require %@",
+            "menu.requireTouchID.generic": "Require authentication",
             "secret.auth.reason": "reveal “%@”",
             "secret.auth.failed": "Could not verify it is you",
+            "secret.auth.usePassword": "Use Password…",
             "prefs.secrets.card": "Secrets",
             "prefs.secrets.requireBiometry": "Require Touch ID to reveal a secret",
             "prefs.secrets.note.biometry":
@@ -1333,8 +1336,11 @@ public final class LocalizationManager: ObservableObject {
                 "“%@”을(를) 삭제할까요? 저장된 값도 키체인에서 함께 삭제되며, "
                 + "삭제를 실행 취소해도 값은 복구되지 않습니다.",
             "menu.copySecret": "비밀 복사",
+            "menu.requireTouchID": "%@ 요구",
+            "menu.requireTouchID.generic": "인증 요구",
             "secret.auth.reason": "“%@” 표시",
             "secret.auth.failed": "본인 확인에 실패했습니다",
+            "secret.auth.usePassword": "암호 사용…",
             "prefs.secrets.card": "비밀",
             "prefs.secrets.requireBiometry": "비밀을 표시할 때 Touch ID 요구",
             "prefs.secrets.note.biometry":
@@ -2324,8 +2330,11 @@ public final class LocalizationManager: ObservableObject {
                 "「%@」を削除しますか？保存された値もキーチェーンから同時に削除され、"
                 + "削除を取り消しても値は戻りません。",
             "menu.copySecret": "シークレットをコピー",
+            "menu.requireTouchID": "%@ を要求",
+            "menu.requireTouchID.generic": "認証を要求",
             "secret.auth.reason": "「%@」を表示",
             "secret.auth.failed": "本人確認できませんでした",
+            "secret.auth.usePassword": "パスワードを使用…",
             "prefs.secrets.card": "シークレット",
             "prefs.secrets.requireBiometry": "シークレットの表示に Touch ID を要求",
             "prefs.secrets.note.biometry":

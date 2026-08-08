@@ -49,6 +49,8 @@ public enum DiagnosticReport {
         /// invisible here, so a guardrail refusal left no trace in the artifact people
         /// actually paste. Contains no user text — see `AIDiagnosticsStore`.
         public var aiLines: [String]
+        /// Secret/Touch ID state. Counts and capabilities only — never a value, never a title.
+        public var secretLines: [String]
 
         public init(
             generatedAt: Date = Date(),
@@ -76,6 +78,7 @@ public enum DiagnosticReport {
             injectTelemetryLines: [String] = [],
             overlongTriggerLines: [String] = [],
             aiLines: [String] = [],
+            secretLines: [String] = [],
             prefixDebounceSummary: String? = nil
         ) {
             self.generatedAt = generatedAt
@@ -103,6 +106,7 @@ public enum DiagnosticReport {
             self.injectTelemetryLines = injectTelemetryLines
             self.overlongTriggerLines = overlongTriggerLines
             self.aiLines = aiLines
+            self.secretLines = secretLines
             self.prefixDebounceSummary = prefixDebounceSummary
         }
     }
@@ -206,6 +210,7 @@ public enum DiagnosticReport {
             injectTelemetryLines: PermissionCoordinator.shared.injectTelemetrySummaryLines(),
             overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics(),
             aiLines: captureAILines(),
+            secretLines: captureSecretLines(),
             prefixDebounceSummary: EventTapEngine.shared.prefixDebounceDiagnostics()
         )
     }
@@ -215,6 +220,36 @@ public enum DiagnosticReport {
     ///
     /// Never includes the user's selected text or any model output — only the transform
     /// kind and Apple's own diagnostic string.
+    /// Secret / Touch ID state for the report.
+    ///
+    /// Counts and capabilities only. Not a title, not a trigger, and obviously not a value — the
+    /// report is pasted into chat windows and issue trackers, and a list of what someone keeps
+    /// passwords for is itself worth protecting.
+    static func captureSecretLines(
+        snippets: [SnippetModel]? = nil,
+        availability: BiometricGate.Availability? = nil,
+        defaults: UserDefaults = .standard
+    ) -> [String] {
+        let all = snippets ?? SnippetStore.shared.loadSnippets()
+        let resolved = availability ?? BiometricGate.shared.availability()
+        let gateOn = SecretPreferences.requireBiometry(defaults: defaults, availability: resolved)
+
+        let capability: String
+        switch resolved {
+        case .biometry(let name): capability = "available (\(name))"
+        case .passwordOnly: capability = "password only — no enrolled biometrics on this Mac"
+        case .unavailable: capability = "unavailable — no login password or biometrics set"
+        }
+
+        return [
+            "Secret snippets: \(all.filter { $0.isSecret }.count)",
+            "Biometry: \(capability)",
+            "Require authentication: \(gateOn ? "on" : "off")",
+            "Reuse window: \(Int(BiometricGate.reuseWindow))s",
+            "Clipboard auto-clear: \(Int(SecretClipboard.defaultClearAfter))s",
+        ]
+    }
+
     static func captureAILines(
         store: AIDiagnosticsStore = .shared,
         enabled: Bool = AIPreferences.isEnabled
@@ -334,6 +369,17 @@ public enum DiagnosticReport {
 
         // Prefix-debounce lifecycle. "races-absorbed" is the line to read when a report claims
         // a double expansion: each count is a timer/keystroke collision the coordinator resolved.
+        // "It asks for my password instead of Touch ID" is not diagnosable from anything else in
+        // this report: whether the gate is on, and whether this Mac can do biometry at all, are
+        // the two facts that separate a policy bug from a Mac with no enrolled finger.
+        lines.append("")
+        lines.append("-- Secrets --")
+        if context.secretLines.isEmpty {
+            lines.append("(not captured)")
+        } else {
+            lines.append(contentsOf: context.secretLines)
+        }
+
         lines.append("")
         lines.append("-- Prefix debounce --")
         lines.append(context.prefixDebounceSummary ?? "(not captured)")

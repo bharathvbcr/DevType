@@ -90,6 +90,15 @@ final class PreferencesWindowController: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    /// Re-read the secrets preference into its switch.
+    ///
+    /// The same setting is reachable from the Copy Secret menu, and a window showing the opposite
+    /// of what is in force is worse than no window — the user would toggle it back and change
+    /// nothing, twice.
+    func refreshSecretsCard() {
+        preferences?.refreshSecretsCard()
+    }
 }
 
 // MARK: - Flipped scroll document
@@ -753,6 +762,13 @@ final class PreferencesViewController: NSViewController,
         stackInCard(card, views: [row, note, scope])
         stack.addArrangedSubview(card)
         pinWidth(of: [card], to: stack)
+    }
+
+    func refreshSecretsCard() {
+        let availability = BiometricGate.shared.availability()
+        requireBiometrySwitch.state =
+            SecretPreferences.requireBiometry(availability: availability) ? .on : .off
+        requireBiometrySwitch.isEnabled = availability.canGate
     }
 
     @objc private func requireBiometryChanged() {

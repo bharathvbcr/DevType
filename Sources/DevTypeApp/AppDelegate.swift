@@ -611,6 +611,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             let hint = NSMenuItem(title: loc.s("menu.copySecret.hint"), action: nil, keyEquivalent: "")
             hint.isEnabled = false
             secretsSubmenu.addItem(hint)
+            appendBiometryToggle(to: secretsSubmenu)
             return
         }
 
@@ -627,6 +628,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             item.representedObject = snippet
             secretsSubmenu.addItem(item)
         }
+        appendBiometryToggle(to: secretsSubmenu)
     }
 
     /// Copy palette narrowed to secrets, for libraries with more of them than a submenu can hold.
@@ -634,6 +636,47 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         InlineSearchPanel.toggle(mode: .copySecrets) { [weak self] pick, _, _ in
             guard let self, case .snippet(let snippet) = pick else { return }
             self.copyToClipboard(snippet)
+        }
+    }
+
+    /// The Touch ID switch, in the menu where the prompt actually appears.
+    ///
+    /// It also lives in Preferences → Snippets, which is the right home for it — but a user who
+    /// has just been asked to authenticate is looking at *this* menu, not at Preferences, and a
+    /// setting you cannot find is a setting that does not exist. Checkable, so its current state
+    /// is legible at a glance rather than only after opening a window.
+    private func appendBiometryToggle(to menu: NSMenu) {
+        let availability = BiometricGate.shared.availability()
+        guard availability.canGate else { return }
+
+        let title: String
+        switch availability {
+        case .biometry(let name): title = loc.s("menu.requireTouchID", name)
+        case .passwordOnly, .unavailable: title = loc.s("menu.requireTouchID.generic")
+        }
+
+        menu.addItem(NSMenuItem.separator())
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(toggleRequireBiometry(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.state = SecretPreferences.requireBiometry(availability: availability) ? .on : .off
+        menu.addItem(item)
+    }
+
+    @objc private func toggleRequireBiometry(_ sender: NSMenuItem) {
+        let availability = BiometricGate.shared.availability()
+        let enabled = !SecretPreferences.requireBiometry(availability: availability)
+        SecretPreferences.setRequireBiometry(enabled)
+        // Turning it on must bite immediately rather than after the current reuse window.
+        BiometricGate.shared.invalidate()
+        rebuildSecretsMenu()
+        // The same switch lives in Preferences; an open window must not show the opposite of what
+        // is now in force.
+        if PreferencesWindowController.shared.window?.isVisible == true {
+            PreferencesWindowController.shared.refreshSecretsCard()
         }
     }
 
