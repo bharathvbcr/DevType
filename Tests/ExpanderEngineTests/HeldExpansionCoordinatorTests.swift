@@ -346,8 +346,20 @@ final class HeldExpansionCoordinatorTests: XCTestCase {
                             break
                         }
                     case 6, 7:
-                        // Stale timers: claims against arbitrary old generations must be no-ops.
-                        _ = coordinator.claimForTimeout(generation: next() % 50)
+                        // Late timers firing against an old generation. A low number is only
+                        // *usually* stale: at the start of the storm the live generation is a low
+                        // number too, so this claim sometimes lands on a real hold and consumes
+                        // it. Counting it is what makes the accounting below exact — discarding
+                        // the result made this test fail on roughly one schedule in three, with
+                        // telemetry one ahead of the tally, and the product code innocent.
+                        if coordinator.claimForTimeout(generation: next() % 50) != nil {
+                            consumptions.mutate { $0 += 1 }
+                        }
+                        // A generation that can never have been issued must always be a no-op —
+                        // the original intent of this case, now stated so it cannot drift.
+                        XCTAssertNil(
+                            coordinator.claimForTimeout(generation: UInt64.max - next() % 1000)
+                        )
                     default:
                         if coordinator.cancelAll(reason: .bufferReset) {
                             consumptions.mutate { $0 += 1 }

@@ -24,6 +24,13 @@ public extension SelectionReader {
         case appMuted(String)
         /// No AX probe resolved a focused element (common in Electron / some web views).
         case noFocusedElement
+        /// DevType itself was frontmost and nothing had been captured from the app behind it.
+        ///
+        /// Distinct from `.noFocusedElement` because the advice is opposite. That one says "click
+        /// into the text and select it" — advice that, given here, sends the user to click inside
+        /// *our own panel*. The real situation is that the command was invoked with DevType in
+        /// front and no live selection anywhere to read.
+        case noSourceSelection
         /// Focus was readable and there genuinely is nothing selected (or only whitespace).
         case emptySelection
         /// The selection is past `SelectionReader.maxSelectionCharacters`. Carries its length.
@@ -36,6 +43,7 @@ public extension SelectionReader {
             case .secureInputActive: return "secureInput"
             case .appMuted: return "appMuted"
             case .noFocusedElement: return "noFocus"
+            case .noSourceSelection: return "noSource"
             case .emptySelection: return "emptySelection"
             case .selectionTooLarge: return "tooLarge"
             }
@@ -45,7 +53,7 @@ public extension SelectionReader {
             switch self {
             case .emptySelection: return "ai.alert.noSelection.title"
             case .accessibilityUntrusted, .secureInputActive, .appMuted, .noFocusedElement,
-                 .selectionTooLarge:
+                 .noSourceSelection, .selectionTooLarge:
                 return "ai.selection.unavailable.title"
             }
         }
@@ -56,6 +64,7 @@ public extension SelectionReader {
             case .secureInputActive: return "ai.selection.fail.secureInput"
             case .appMuted: return "ai.selection.fail.muted"
             case .noFocusedElement: return "ai.selection.fail.noFocus"
+            case .noSourceSelection: return "ai.selection.fail.noSource"
             case .emptySelection: return "ai.alert.noSelection.message"
             case .selectionTooLarge: return "ai.selection.fail.tooLarge"
             }
@@ -75,7 +84,8 @@ public extension SelectionReader {
                     "\(characters)",
                     "\(SelectionReader.maxSelectionCharacters)"
                 )
-            case .accessibilityUntrusted, .secureInputActive, .noFocusedElement, .emptySelection:
+            case .accessibilityUntrusted, .secureInputActive, .noFocusedElement,
+                 .noSourceSelection, .emptySelection:
                 return loc.s(messageKey)
             }
         }
@@ -220,7 +230,7 @@ public extension SelectionReader {
         focusAvailable: Bool,
         candidates: [Candidate],
         cached: SelectionMonitor.CachedSelection?,
-        cacheMaxAge: TimeInterval = SelectionMonitor.defaultTTL,
+        cacheMaxAge: TimeInterval? = nil,
         now: Date = Date(),
         isMuted: (String) -> Bool = { AppMuteStore.shared.isMuted($0) },
         isWeakAX: (String) -> Bool = { SelectionReader.isWeakAXApp(bundleID: $0) }
@@ -258,7 +268,10 @@ public extension SelectionReader {
 
         if let cached,
            !isBlankSelection(cached.text),
-           cached.isFresh(asOf: now, maxAge: cacheMaxAge),
+           cached.isFresh(
+               asOf: now,
+               maxAge: cacheMaxAge ?? Self.cacheMaxAge(frontmostIsOwnProcess: frontmostIsOwnProcess)
+           ),
            !isMuted(cached.bundleID),
            cacheMatchesFrontmost(
                cachedBundleID: cached.bundleID,
@@ -289,10 +302,29 @@ public extension SelectionReader {
             )
         }
 
+        // Name the situation the user is actually in. With DevType frontmost and nothing captured,
+        // "no text field has keyboard focus — click into the text and select it" points at our own
+        // panel; the honest answer is that the command was invoked with nothing behind it to read.
+        if frontmostIsOwnProcess, candidates.allSatisfy({ isBlankSelection($0.text) }) {
+            return .failure(.noSourceSelection)
+        }
         if !focusAvailable, candidates.isEmpty {
             return .failure(.noFocusedElement)
         }
         return .failure(.emptySelection)
+    }
+
+    /// Pure policy: how old a cached selection may be before this command refuses it.
+    ///
+    /// Two tiers, because the clock means two different things. With the user's app frontmost the
+    /// selection can change at any keystroke, so the cache is a bridge across a few hundred
+    /// milliseconds and `defaultTTL` is generous already. With *DevType* frontmost the user is in
+    /// our panel and cannot be changing that selection — and the moment they activate any other
+    /// app, `SelectionMonitor` clears the entry outright rather than ageing it. Holding both cases
+    /// to six seconds is what turned "select text, open the palette, read the options, choose one"
+    /// into `outcome=noFocus`.
+    static func cacheMaxAge(frontmostIsOwnProcess: Bool) -> TimeInterval {
+        frontmostIsOwnProcess ? SelectionMonitor.ownFocusTTL : SelectionMonitor.defaultTTL
     }
 
     /// Final size check on a selection that has otherwise won the gate.

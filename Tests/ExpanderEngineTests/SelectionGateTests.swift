@@ -292,19 +292,66 @@ final class SelectionGateTests: XCTestCase {
     }
 
     func testStaleCacheIsNotUsed() {
+        let ownFocusAge = SelectionReader.cacheMaxAge(frontmostIsOwnProcess: true)
         let outcome = evaluate(
             frontmostIsOwnProcess: true,
             candidates: [],
-            cached: cached("old", age: SelectionMonitor.defaultTTL + 0.5)
+            cached: cached("old", age: ownFocusAge + 0.5)
         )
         XCTAssertNil(outcome.result)
 
         let justInside = evaluate(
             frontmostIsOwnProcess: true,
             candidates: [],
-            cached: cached("recent", age: SelectionMonitor.defaultTTL - 0.5)
+            cached: cached("recent", age: ownFocusAge - 0.5)
         )
         XCTAssertEqual(justInside.result?.text, "recent")
+    }
+
+    /// The age limit is two-tiered, and the split is load-bearing in both directions.
+    ///
+    /// Six seconds while the user's own app is frontmost: the selection can change at any
+    /// keystroke there. Longer once *we* are frontmost: nothing the user does inside our panel can
+    /// change the selection behind it, and activating any other app clears the entry outright
+    /// rather than ageing it — so holding both to six seconds is what made "select text, open the
+    /// palette, read the options, choose one" fail with `noFocus`.
+    func testCacheAgeLimitIsLongerOnlyWhileWeOwnTheFocus() {
+        let foreign = SelectionReader.cacheMaxAge(frontmostIsOwnProcess: false)
+        let own = SelectionReader.cacheMaxAge(frontmostIsOwnProcess: true)
+
+        XCTAssertEqual(foreign, SelectionMonitor.defaultTTL, "The typed path's budget must not move.")
+        XCTAssertGreaterThan(own, foreign)
+        XCTAssertLessThanOrEqual(
+            own, 300,
+            "Bounded on purpose: a panel left open all afternoon must not transform this "
+                + "morning's paragraph."
+        )
+
+        // The longer tier is not a licence for the ordinary path: the user's app frontmost with a
+        // cache entry older than the typed-path TTL still refuses.
+        XCTAssertNil(
+            evaluate(
+                frontmostBundleID: "com.apple.Safari",
+                candidates: [],
+                cached: cached("old", bundleID: "com.apple.Safari", age: foreign + 0.5)
+            ).result
+        )
+        // An explicit `cacheMaxAge` from a caller still wins over the policy.
+        XCTAssertNil(
+            SelectionReader.evaluate(
+                axTrusted: true,
+                secureInputActive: false,
+                frontmostBundleID: "com.devtype.app",
+                frontmostIsOwnProcess: true,
+                focusAvailable: false,
+                candidates: [],
+                cached: cached("recent", age: 2),
+                cacheMaxAge: 1,
+                now: now,
+                isMuted: { _ in false },
+                isWeakAX: { _ in false }
+            ).result
+        )
     }
 
     /// A clock that jumps backwards (NTP correction, sleep/wake) must not turn a cache entry
@@ -404,6 +451,7 @@ final class SelectionGateTests: XCTestCase {
             .secureInputActive,
             .appMuted("com.apple.Safari"),
             .noFocusedElement,
+            .noSourceSelection,
             .emptySelection,
             .selectionTooLarge(999_999),
         ]
@@ -455,7 +503,7 @@ final class SelectionGateTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "devtype.tests.selection.raw")!
         defaults.removePersistentDomain(forName: "devtype.tests.selection.raw")
         defaults.set(true, forKey: SelectionMonitor.featureEnabledDefaultsKey)
-        let monitor = SelectionMonitor(defaults: defaults)
+        let monitor = SelectionMonitor(defaults: defaults, environment: .fixed())
 
         let seed = SelectionMonitor.CachedSelection(
             text: "chrome text",
