@@ -55,7 +55,12 @@ enum SnippetEditorSheet {
     /// exactly the problem: while scrolling, the bar was drawn across the bottom of the pills.
     /// Giving it a band of its own is cheaper than hiding it, and hiding it would leave the
     /// overflowing chips with no affordance at all.
-    static let chipScrollerBand: CGFloat = 12
+    ///
+    /// Sized by eye rather than by the scroller's own metrics: `NSScroller.scrollerWidth` reports
+    /// the bar alone (~11pt at overlay size), which leaves it touching the pills above and the
+    /// error line below. The extra clearance is the difference between "not overlapping" and
+    /// "not crowded".
+    static let chipScrollerBand: CGFloat = 20
 
     static let panelWidth: CGFloat = 520
     static let panelHeight: CGFloat = 690
@@ -1058,7 +1063,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             // edge is whatever is left over.
             editorContainer.bottomAnchor.constraint(equalTo: behaviorCaption.topAnchor, constant: -12),
             behaviorCaption.leadingAnchor.constraint(equalTo: nameCaption.leadingAnchor),
-            behaviorCaption.bottomAnchor.constraint(equalTo: chipsScroll.topAnchor, constant: -7),
+            behaviorCaption.bottomAnchor.constraint(equalTo: chipsScroll.topAnchor, constant: -9),
             chipsScroll.leadingAnchor.constraint(equalTo: titleField.leadingAnchor),
             // The trailing edge is the whole point: without it the row had nothing telling it
             // where the panel ends, so it overflowed instead of scrolling.
@@ -1066,7 +1071,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             chipsScroll.heightAnchor.constraint(
                 equalToConstant: SnippetEditorSheet.chipRowHeight + SnippetEditorSheet.chipScrollerBand
             ),
-            chipsScroll.bottomAnchor.constraint(equalTo: errorLabel.topAnchor, constant: -8),
+            chipsScroll.bottomAnchor.constraint(equalTo: errorLabel.topAnchor, constant: -10),
 
             // §3: anchored UP from the divider rather than DOWN from the chips.
             // Top-anchored, a two-line error grew straight through the hairline
