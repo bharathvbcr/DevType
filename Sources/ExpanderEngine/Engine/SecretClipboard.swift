@@ -62,11 +62,19 @@ public final class SecretClipboard {
         _ secret: String,
         clearAfter: TimeInterval = defaultClearAfter,
         pasteboard: NSPasteboard = .general,
+        broker: PasteboardBroker? = .shared,
         schedule: ((@escaping () -> Void, TimeInterval) -> Void)? = nil
     ) -> Date? {
         guard !secret.isEmpty else { return nil }
 
         cancelPendingClear()
+
+        // Before the write, not after: an expansion's restore may still be scheduled, and it would
+        // put the pre-expansion clipboard back over this secret. Worse, the markers set below make
+        // `holdsOurPayload` read this write as our own payload, so the restore would consider
+        // overwriting it *safe*. The hold window is 8 s under Secure Input — which is exactly when
+        // a secret is being copied.
+        broker?.invalidatePendingRestore()
 
         pasteboard.clearContents()
         pasteboard.setString(secret, forType: .string)

@@ -339,6 +339,91 @@ final class SecretSnippetStressTests: XCTestCase {
         }
         XCTAssertEqual(failure, .secretUnavailable)
     }
+    // MARK: - Clipboard ownership under contention
+
+    /// The expansion pipeline and the secret path both write `NSPasteboard.general`. Hammer them
+    /// together: every secret copy must invalidate whatever restore was pending, and the
+    /// generation counter must never go backwards, or a stale restore becomes live again.
+    func testSecretCopiesAlwaysInvalidatePendingRestoresUnderContention() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("devtype.tests.secret.own.\(UUID())"))
+        defer { pasteboard.releaseGlobally() }
+
+        let broker = PasteboardBroker()
+        let clipboard = SecretClipboard()
+        let lock = NSLock()
+        var lastSeen: UInt64 = broker.currentRestoreGeneration()
+
+        DispatchQueue.concurrentPerform(iterations: 6) { worker in
+            for step in 0..<150 {
+                let before = broker.currentRestoreGeneration()
+                if (worker &+ step) % 4 == 0 {
+                    // Stand-in for an expansion claiming the board.
+                    _ = broker.beginRestoreGeneration()
+                } else {
+                    clipboard.copy(
+                        "secret-\(worker)-\(step)",
+                        clearAfter: 600,
+                        pasteboard: pasteboard,
+                        broker: broker
+                    ) { _, _ in }
+                    XCTAssertGreaterThan(
+                        broker.currentRestoreGeneration(), before,
+                        "A copy that does not invalidate leaves a scheduled restore able to "
+                            + "overwrite the secret."
+                    )
+                }
+
+                lock.lock()
+                let current = broker.currentRestoreGeneration()
+                XCTAssertGreaterThanOrEqual(current, lastSeen, "The generation went backwards.")
+                lastSeen = max(lastSeen, current)
+                lock.unlock()
+            }
+        }
+    }
+
+    /// Randomised: whatever a secret snippet is handed, the three fields that would make it
+    /// ambiguous or leaky must come out empty — in memory and after a round trip.
+    func testSecretsNeverCarryValueImageOrTransform() throws {
+        var rng = Rng(seed: 0x0A11_B1AB_5EC2)
+        let transforms = ["", "proofread", "translate", "promptenhance", "custom"]
+
+        for iteration in 0..<3_000 {
+            let secret = rng.bool()
+            var snippet = SnippetModel(
+                title: "row-\(iteration)",
+                triggerKeyword: ";t\(iteration)",
+                replacementText: Self.hostileValues[rng.int(Self.hostileValues.count)],
+                imagePath: rng.bool() ? "attachment-\(iteration).png" : "",
+                aiTransform: transforms[rng.int(transforms.count)],
+                isSecret: secret
+            )
+            // Force every field back in, the way a hand-edited library would.
+            if rng.bool() {
+                snippet.replacementText = "forced"
+                snippet.imagePath = "forced.png"
+                snippet.aiTransform = "proofread"
+            }
+
+            let decoded = try JSONDecoder().decode(
+                SnippetModel.self,
+                from: JSONEncoder().encode(snippet)
+            )
+            if secret {
+                XCTAssertEqual(decoded.replacementText, "", "iteration \(iteration)")
+                XCTAssertEqual(decoded.imagePath, "", "iteration \(iteration)")
+                XCTAssertEqual(decoded.aiTransform, "", "iteration \(iteration)")
+                XCTAssertFalse(decoded.isImageSnippet)
+                XCTAssertFalse(decoded.isTypedTriggerExpandable)
+            } else {
+                XCTAssertEqual(decoded.replacementText, snippet.replacementText)
+                XCTAssertEqual(decoded.imagePath, snippet.imagePath)
+                XCTAssertEqual(decoded.aiTransform, snippet.aiTransform)
+                XCTAssertTrue(decoded.isTypedTriggerExpandable)
+            }
+        }
+    }
+
 }
 
 /// The copy resolution lives in the app target, which tests cannot import. This mirrors its secret

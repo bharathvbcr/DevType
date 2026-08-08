@@ -186,11 +186,16 @@ enum ToastPanel {
         let events: NSEvent.EventTypeMask = [
             .leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown, .scrollWheel,
         ]
-        if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { _ in dismiss() }) {
+        // Hopped to the next runloop turn rather than run inline: `dismiss()` removes these
+        // very monitors, and tearing down an event monitor from inside its own callback is asking
+        // the handler block to be released while it is still executing.
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { _ in
+            DispatchQueue.main.async { dismiss() }
+        }) {
             monitors.append(global)
         }
         if let local = NSEvent.addLocalMonitorForEvents(matching: events, handler: { event in
-            dismiss()
+            DispatchQueue.main.async { dismiss() }
             return event
         }) {
             monitors.append(local)

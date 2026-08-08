@@ -341,6 +341,92 @@ final class SecretSnippetTests: XCTestCase {
         XCTAssertTrue(entries.allSatisfy(\.isSecret))
     }
 
+    // MARK: - Not losing the secret to the expansion pipeline
+
+    /// The bug this pins: an expansion schedules a clipboard restore, the user copies a secret
+    /// inside that window, and the restore puts the pre-expansion clipboard back over it. The
+    /// concealed markers make it worse rather than better — `holdsOurPayload` reads a deliberate
+    /// concealed write as *our* payload, so the restore considers overwriting it safe. Under
+    /// Secure Input the hold is 8 s, which is exactly when secrets are copied.
+    func testCopyingASecretAbandonsAnyPendingExpansionRestore() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("devtype.tests.secret.\(UUID())"))
+        defer { pasteboard.releaseGlobally() }
+
+        let broker = PasteboardBroker()
+        let before = broker.currentRestoreGeneration()
+
+        SecretClipboard().copy("hunter2", clearAfter: 60, pasteboard: pasteboard, broker: broker) { _, _ in }
+
+        XCTAssertGreaterThan(
+            broker.currentRestoreGeneration(), before,
+            "A bumped generation is what makes an already-scheduled restore a no-op. Without it "
+                + "the user pastes the pre-expansion clipboard into a password field."
+        )
+    }
+
+    /// The other direction: a later expansion must not adopt a concealed payload as "the user's
+    /// clipboard" and faithfully restore it afterwards — that resurrects a password onto the
+    /// board after `SecretClipboard` cleared it, with nothing left to clear it again.
+    func testAConcealedBoardIsNeverAdoptedAsTheUsersClipboard() {
+        XCTAssertFalse(
+            PasteboardBroker.mayAdoptAsUserClipboard(types: [.string, PasteboardBroker.concealedType])
+        )
+        XCTAssertTrue(PasteboardBroker.mayAdoptAsUserClipboard(types: [.string]))
+        XCTAssertTrue(
+            PasteboardBroker.mayAdoptAsUserClipboard(types: [.string, PasteboardBroker.transientType]),
+            "Transient alone is not a secret marker — ordinary expansion payloads carry it."
+        )
+        XCTAssertTrue(
+            PasteboardBroker.mayAdoptAsUserClipboard(types: nil),
+            "An empty board has nothing to protect and nothing to restore."
+        )
+    }
+
+    /// `writeUserClipboardString` and `SecretClipboard` must share one invalidation, so a future
+    /// deliberate-write path cannot be added without it.
+    func testInvalidatingTheRestoreBumpsTheGeneration() {
+        let broker = PasteboardBroker()
+        let first = broker.currentRestoreGeneration()
+        broker.invalidatePendingRestore()
+        let second = broker.currentRestoreGeneration()
+        broker.invalidatePendingRestore()
+
+        XCTAssertGreaterThan(second, first)
+        XCTAssertGreaterThan(broker.currentRestoreGeneration(), second)
+    }
+
+    // MARK: - Unrepresentable states
+
+    /// A secret carries no AI transform. Nothing routes one to the model today; the field merely
+    /// existing on a secret is an invitation for some future path to send a password off to be
+    /// rewritten.
+    func testSecretsCarryNoAITransformOrImage() throws {
+        var snippet = SnippetModel(
+            title: "pw",
+            triggerKeyword: ";pw",
+            replacementText: "value",
+            imagePath: "shot.png",
+            aiTransform: "proofread",
+            isSecret: true
+        )
+        XCTAssertEqual(snippet.aiTransform, "")
+        XCTAssertEqual(snippet.imagePath, "")
+        XCTAssertEqual(snippet.replacementText, "")
+        XCTAssertFalse(snippet.isImageSnippet)
+
+        // Forced back in the way a hand-edited library would, then round-tripped.
+        snippet.aiTransform = "proofread"
+        snippet.imagePath = "shot.png"
+        snippet.replacementText = "value"
+        let decoded = try JSONDecoder().decode(
+            SnippetModel.self,
+            from: JSONEncoder().encode(snippet)
+        )
+        XCTAssertEqual(decoded.aiTransform, "")
+        XCTAssertEqual(decoded.imagePath, "")
+        XCTAssertEqual(decoded.replacementText, "")
+    }
+
 }
 
 private extension Result where Success == Void, Failure == SecretStore.Failure {

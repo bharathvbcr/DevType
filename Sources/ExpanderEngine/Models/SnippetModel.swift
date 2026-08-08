@@ -109,6 +109,10 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         if isSecret {
             self.replacementText = ""
             self.imagePath = ""
+            // No AI transform either. Nothing routes a secret to the model today, but the field
+            // existing on a secret is an invitation for some future path to read it and send a
+            // password off to be rewritten. Unrepresentable beats guarded-everywhere.
+            self.aiTransform = ""
         }
     }
 
@@ -158,7 +162,7 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         try c.encode(tags, forKey: .tags)
         try c.encode(includeApps, forKey: .includeApps)
         try c.encode(excludeApps, forKey: .excludeApps)
-        try c.encode(aiTransform, forKey: .aiTransform)
+        try c.encode(isSecret ? "" : aiTransform, forKey: .aiTransform)
         try c.encode(isSecret, forKey: .isSecret)
     }
 
@@ -188,6 +192,7 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         if isSecret {
             replacementText = ""
             imagePath = ""
+            aiTransform = ""
         }
     }
 }

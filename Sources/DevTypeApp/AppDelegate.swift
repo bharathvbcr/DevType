@@ -7,8 +7,6 @@ import ServiceManagement
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var secretsSubmenu: NSMenu?
-    /// Generation counter so a second flash cannot be wiped by the first one's timer.
-    private var statusFlashToken: UInt64 = 0
     private var snippetWindowController: NSWindowController?
     private var permissionWindowController: NSWindowController?
     private var onboardingWindowController: NSWindowController?
@@ -703,26 +701,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 if index == 0 { self.openSnippetManager(nil) }
             }
         case .failure(.emptySnippet):
-            // Copying "" would wipe whatever the user already had on the clipboard.
-            NSSound.beep()
-        }
-    }
-
-    /// Non-modal confirmation: the status item wears the message for a moment.
-    ///
-    /// An alert for every plain-snippet copy would be its own annoyance; a secret still gets one
-    /// because the user needs to be told about the clear timer before they go and paste.
-    private func flashStatusItem(_ message: String) {
-        assertMainThread()
-        guard let button = statusItem?.button else { return }
-        statusFlashToken &+= 1
-        let token = statusFlashToken
-        button.title = " \(message)"
-        button.imagePosition = .imageLeading
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self, self.statusFlashToken == token else { return }
-            button.title = ""
-            button.imagePosition = .imageOnly
+            // Copying "" would wipe whatever the user already had on the clipboard. A beep alone
+            // left the user unsure whether anything had happened at all.
+            ToastPanel.show(
+                loc.s("snippet.copied.empty"),
+                symbol: "exclamationmark.triangle.fill"
+            )
         }
     }
 

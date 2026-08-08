@@ -111,6 +111,34 @@ public final class PasteboardBroker {
         return token
     }
 
+    /// Abandon any scheduled restore, because someone else now owns the pasteboard on purpose.
+    ///
+    /// Any code that deliberately writes the *user's* clipboard must call this first. Without it
+    /// a restore scheduled by the previous expansion fires afterwards and puts the old contents
+    /// back over the new write — and `holdsOurPayload` makes that worse rather than better,
+    /// because a deliberate write that carries our concealed / transient markers (which
+    /// `SecretClipboard` sets, correctly, so clipboard managers skip it) reads to `restore` as
+    /// "our own payload, safe to overwrite". A secret copied inside the restore window was being
+    /// silently replaced by the pre-expansion clipboard, and the window is 8 s under Secure
+    /// Input — precisely when secrets are used.
+    public func invalidatePendingRestore() {
+        _ = beginRestoreGeneration()
+        restoreLock.lock()
+        pendingTicket = nil
+        restoreLock.unlock()
+    }
+
+    /// Pure policy: may the contents currently on the board be adopted as "the user's clipboard"
+    /// and restored after an expansion?
+    ///
+    /// Not when they are concealed. A concealed payload is either a secret the user copied or a
+    /// leftover of ours; restoring either one later would put a password back on the pasteboard
+    /// *after* `SecretClipboard` cleared it, with nothing left to clear it again.
+    public static func mayAdoptAsUserClipboard(types: [NSPasteboard.PasteboardType]?) -> Bool {
+        guard let types else { return true }
+        return !types.contains(concealedType)
+    }
+
     public func currentRestoreGeneration() -> UInt64 {
         restoreLock.lock()
         defer { restoreLock.unlock() }
@@ -201,10 +229,7 @@ public final class PasteboardBroker {
     /// Invalidates any in-flight expansion restore so a later restore cannot clobber
     /// the copied text, and so `changeCount` tracking stays coherent with ownership.
     public func writeUserClipboardString(_ string: String) {
-        _ = beginRestoreGeneration()
-        restoreLock.lock()
-        pendingTicket = nil
-        restoreLock.unlock()
+        invalidatePendingRestore()
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(string, forType: .string)
@@ -633,6 +658,12 @@ public final class PasteboardBroker {
             DevTypeLog.inject.debug(
                 "[Inject] §1.7 abandoning stale clipboard ticket — pasteboard changed since our last paste"
             )
+        }
+        guard PasteboardBroker.mayAdoptAsUserClipboard(types: pasteboard.types) else {
+            DevTypeLog.inject.info(
+                "[Inject] clipboard holds a concealed payload — not adopting it as the user's clipboard"
+            )
+            return nil
         }
         return PasteboardBroker.snapshotPasteboard(pasteboard)
     }
