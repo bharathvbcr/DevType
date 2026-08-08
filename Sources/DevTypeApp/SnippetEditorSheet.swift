@@ -68,6 +68,14 @@ enum SnippetEditorSheet {
             defer: false
         )
         DevTypeTheme.styleFloatingPanel(panel)
+        // This panel is a fixed-size, non-resizable sheet, and nothing inside it should be able to
+        // change that. Without the clamp, AppKit sizes a borderless window from its content view's
+        // *fitting* size, which counts every label's intrinsic width — so one label fed by
+        // user-typed text (the live preview) was enough to make the editor grow as you typed.
+        // The individual causes are fixed at the source; this makes the next one impossible.
+        let fixedSize = NSSize(width: panelWidth, height: panelHeight)
+        panel.contentMinSize = fixedSize
+        panel.contentMaxSize = fixedSize
 
         let controller = SnippetEditorController(
             existing: existing,
@@ -144,6 +152,7 @@ private final class ExpansionStageView: NSView {
         chip.layer?.borderWidth = 1
         chipLabel.translatesAutoresizingMaskIntoConstraints = false
         chipLabel.lineBreakMode = .byTruncatingTail
+        chipLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         chip.addSubview(chipLabel)
 
         caret.wantsLayer = true
@@ -157,6 +166,13 @@ private final class ExpansionStageView: NSView {
 
         previewLabel.translatesAutoresizingMaskIntoConstraints = false
         previewLabel.lineBreakMode = .byTruncatingTail
+        // A label's intrinsic width counts toward the content view's fitting size, and a
+        // borderless panel is sized from that — so a label that wants to be 900pt wide *widens
+        // the window*. That is the "editor grows as I type" bug: this strip previews the
+        // replacement text, so every character typed pushed the panel out. Let it be compressed
+        // and truncated instead; `lineBreakMode` above is what makes that read correctly.
+        previewLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        previewLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         fillPill.isHidden = true
 
         addSubview(chip)
@@ -227,7 +243,7 @@ private final class ExpansionStageView: NSView {
             previewLabel.stringValue = "—"
             previewLabel.textColor = DevTypeTheme.textTertiary
         } else {
-            previewLabel.stringValue = rendered
+            previewLabel.stringValue = MacroPreview.clampedForStage(rendered)
             previewLabel.textColor = DevTypeTheme.textSecondary
         }
         if let fillInsText {
@@ -809,7 +825,35 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         chipsRow.alignment = .centerY
         chipsRow.spacing = 8
         chipsRow.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(chipsRow)
+
+        // The row is wider than the panel. `ToggleChip.intrinsicContentSize` says as much in its
+        // own comment — "any wider and the four chips stop fitting on one row inside the 480pt
+        // content width" — and Secret is the fifth. The row had only a leading constraint, so the
+        // overflow simply ran off the edge with no way to reach it.
+        //
+        // Scrolled rather than wrapped: a second line would have to come out of the composer's
+        // height, which is the part of this panel worth the space, and every chip stays on the
+        // baseline the caption labels.
+        let chipsScroll = NSScrollView()
+        chipsScroll.translatesAutoresizingMaskIntoConstraints = false
+        chipsScroll.hasHorizontalScroller = true
+        chipsScroll.hasVerticalScroller = false
+        chipsScroll.autohidesScrollers = true
+        chipsScroll.scrollerStyle = .overlay
+        chipsScroll.borderType = .noBorder
+        chipsScroll.drawsBackground = false
+        chipsScroll.horizontalScrollElasticity = .allowed
+        chipsScroll.verticalScrollElasticity = .none
+        chipsScroll.documentView = chipsRow
+        root.addSubview(chipsScroll)
+
+        NSLayoutConstraint.activate([
+            // Pin the row inside the clip view so the stack keeps its intrinsic width (that is
+            // what there is to scroll) while its height matches the visible strip.
+            chipsRow.leadingAnchor.constraint(equalTo: chipsScroll.contentView.leadingAnchor),
+            chipsRow.topAnchor.constraint(equalTo: chipsScroll.contentView.topAnchor),
+            chipsRow.bottomAnchor.constraint(equalTo: chipsScroll.contentView.bottomAnchor),
+        ])
 
         // Inline error
         errorLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -988,9 +1032,13 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             // edge is whatever is left over.
             editorContainer.bottomAnchor.constraint(equalTo: behaviorCaption.topAnchor, constant: -12),
             behaviorCaption.leadingAnchor.constraint(equalTo: nameCaption.leadingAnchor),
-            behaviorCaption.bottomAnchor.constraint(equalTo: chipsRow.topAnchor, constant: -7),
-            chipsRow.leadingAnchor.constraint(equalTo: titleField.leadingAnchor),
-            chipsRow.bottomAnchor.constraint(equalTo: errorLabel.topAnchor, constant: -8),
+            behaviorCaption.bottomAnchor.constraint(equalTo: chipsScroll.topAnchor, constant: -7),
+            chipsScroll.leadingAnchor.constraint(equalTo: titleField.leadingAnchor),
+            // The trailing edge is the whole point: without it the row had nothing telling it
+            // where the panel ends, so it overflowed instead of scrolling.
+            chipsScroll.trailingAnchor.constraint(equalTo: titleField.trailingAnchor),
+            chipsScroll.heightAnchor.constraint(equalToConstant: 26),
+            chipsScroll.bottomAnchor.constraint(equalTo: errorLabel.topAnchor, constant: -8),
 
             // §3: anchored UP from the divider rather than DOWN from the chips.
             // Top-anchored, a two-line error grew straight through the hairline

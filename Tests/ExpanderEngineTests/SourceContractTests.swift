@@ -312,4 +312,44 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(engine.contains("newValue.filter(\\.isTypedTriggerExpandable)"))
     }
 
+    // MARK: - Editor panel must not resize itself
+
+    /// The editor is a fixed-size borderless panel, and AppKit sizes such a window from its
+    /// content view's *fitting* size — which counts every label's intrinsic width. The live
+    /// preview strip is fed by the replacement text, so without these guards the panel grew wider
+    /// with every character typed.
+    func testEditorCannotBeGrownByItsOwnContent() throws {
+        let editor = try source("Sources/DevTypeApp/SnippetEditorSheet.swift")
+
+        XCTAssertTrue(
+            editor.contains("previewLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)"),
+            "Restore this and the preview label's intrinsic width widens the window again."
+        )
+        XCTAssertTrue(
+            editor.contains("MacroPreview.clampedForStage(rendered)"),
+            "The stage must be handed a bounded string, not the whole replacement."
+        )
+        XCTAssertTrue(
+            editor.contains("panel.contentMaxSize = fixedSize"),
+            "The backstop that makes the next such bug impossible rather than merely fixed."
+        )
+    }
+
+    /// The behaviour chips outgrew the panel the moment a fifth was added, and the row had no
+    /// trailing constraint, so the overflow ran off the edge unreachable. It scrolls now — the
+    /// trailing edge is the part that makes that true.
+    func testBehaviourChipsAreBoundedByThePanelWidth() throws {
+        let editor = try source("Sources/DevTypeApp/SnippetEditorSheet.swift")
+        XCTAssertTrue(editor.contains("chipsScroll.documentView = chipsRow"))
+        XCTAssertTrue(
+            editor.contains("chipsScroll.trailingAnchor.constraint(equalTo: titleField.trailingAnchor)"),
+            "Without a trailing edge the row overflows instead of scrolling."
+        )
+        XCTAssertFalse(
+            editor.contains("root.addSubview(chipsRow)"),
+            "The row belongs to the scroller now; adding it to the root again reintroduces the "
+                + "unbounded version."
+        )
+    }
+
 }

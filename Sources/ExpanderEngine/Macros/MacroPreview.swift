@@ -9,6 +9,26 @@ import Foundation
 /// a placeholder instead of churning.
 public enum MacroPreview {
 
+    /// Longest preview the editor's one-line stage will ever be asked to lay out.
+    ///
+    /// The stage is a fixed-height strip showing "trigger → what it becomes". Handing it the whole
+    /// replacement made the *window* grow: a single-line label's intrinsic width counts toward the
+    /// content view's fitting size, and a borderless panel is sized from that — so typing a long
+    /// replacement widened the editor as you went. Truncating at the source bounds the layout, and
+    /// as a bonus stops the text system measuring a 50 KB string on every keystroke.
+    public static let stagePreviewLimit = 160
+
+    /// Preview text clamped for a single-line display, with an ellipsis when it was cut.
+    ///
+    /// Counts *characters*, not UTF-16 units, so a run of emoji cannot be sliced through a
+    /// surrogate pair — and returns the input untouched when it already fits, so the common case
+    /// allocates nothing.
+    public static func clampedForStage(_ text: String, limit: Int = stagePreviewLimit) -> String {
+        guard limit > 0 else { return "" }
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + "…"
+    }
+
     public static func render(_ content: String, now: Date = Date()) -> String {
         let tokens = MacroParser.parse(content)
         var out = ""
