@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Show toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Build & Package DMG
+        env:
+          DEVTYPE_SKIP_NOTARIZE: '1'
+          DEVTYPE_SKIP_AUTO_CERT: '1'
+        run: |
+          ./Scripts/release.sh
+
+      - name: Locate DMG
+        id: dmg
+        run: |
+          DMG_PATH=$(find dist -name "DevType-*.dmg" | head -n 1)
+          if [ -z "$DMG_PATH" ]; then
+            echo "error: no DMG found under dist/"
+            exit 1
+          fi
+          echo "dmg_path=$DMG_PATH" >> $GITHUB_OUTPUT
+          echo "dmg_name=$(basename $DMG_PATH)" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.dmg.outputs.dmg_path }}
+          name: DevType ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

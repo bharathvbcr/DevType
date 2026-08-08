@@ -33,17 +33,27 @@ die() { echo "error: $*" >&2; exit 1; }
 
 # --- 1. Identity check ------------------------------------------------------
 if [[ "${SKIP_NOTARIZE}" != "1" ]]; then
-  if [[ -z "${DEVTYPE_SIGN_IDENTITY:-}" ]]; then
-    echo "Available signing identities:"
-    security find-identity -p codesigning -v || true
-    die "set DEVTYPE_SIGN_IDENTITY to your 'Developer ID Application: ...' identity"
+  HAS_DEV_ID=0
+  if [[ -n "${DEVTYPE_SIGN_IDENTITY:-}" ]]; then
+    case "${DEVTYPE_SIGN_IDENTITY}" in
+      "Developer ID Application"*) HAS_DEV_ID=1 ;;
+      *) echo "warning: DEVTYPE_SIGN_IDENTITY is not 'Developer ID Application...'; falling back to local signing" ;;
+    esac
+  else
+    if security find-identity -p codesigning -v 2>/dev/null | grep -q "Developer ID Application"; then
+      HAS_DEV_ID=1
+      DEVTYPE_SIGN_IDENTITY="$(security find-identity -p codesigning -v 2>/dev/null | grep "Developer ID Application" | head -n 1 | sed 's/.*"\(.*\)".*/\1/')"
+      export DEVTYPE_SIGN_IDENTITY
+    fi
   fi
-  case "${DEVTYPE_SIGN_IDENTITY}" in
-    "Developer ID Application"*) ;;
-    *) die "DEVTYPE_SIGN_IDENTITY must be a 'Developer ID Application' identity to notarize (got '${DEVTYPE_SIGN_IDENTITY}')" ;;
-  esac
-  xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1 \
-    || die "notarytool profile '${NOTARY_PROFILE}' not found. Run: xcrun notarytool store-credentials ${NOTARY_PROFILE} --apple-id <id> --team-id <team> --password <app-specific-pw>"
+
+  if [[ "${HAS_DEV_ID}" -eq 1 ]]; then
+    xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1 \
+      || die "notarytool profile '${NOTARY_PROFILE}' not found. Run: xcrun notarytool store-credentials ${NOTARY_PROFILE} --apple-id <id> --team-id <team> --password <app-specific-pw>"
+  else
+    echo "==> No Developer ID Application identity available; proceeding with local signing (DEVTYPE_SKIP_NOTARIZE=1)"
+    SKIP_NOTARIZE="1"
+  fi
 fi
 
 # --- 2. Build release + package with hardened runtime -----------------------
