@@ -228,7 +228,8 @@ public enum DiagnosticReport {
     static func captureSecretLines(
         snippets: [SnippetModel]? = nil,
         availability: BiometricGate.Availability? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        accessDiagnostics: SecretAccessDiagnostics = .shared
     ) -> [String] {
         let all = snippets ?? SnippetStore.shared.loadSnippets()
         let resolved = availability ?? BiometricGate.shared.availability()
@@ -247,6 +248,10 @@ public enum DiagnosticReport {
             "Require authentication: \(gateOn ? "on" : "off")",
             "Reuse window: \(Int(BiometricGate.reuseWindow))s",
             "Clipboard auto-clear: \(Int(SecretClipboard.defaultClearAfter))s",
+            // §8.10: tells "keychain asked for the login password" apart from every other
+            // prompt in a report. "healed partition" here means the self-signed-cert rebuild
+            // problem fired and was absorbed silently, exactly as designed.
+            "Keychain last read: \(accessDiagnostics.lastRead().label)",
         ]
     }
 

@@ -67,8 +67,8 @@ public final class SecretStore {
     /// Fetch the secret for a snippet, or `nil` when there is none / it cannot be read.
     ///
     /// Deliberately not `throws`: every caller is at the point of pasting, where the only useful
-    /// distinction is "have a value" vs "do not". `lastReadStatus` carries the detail for the one
-    /// caller that reports it.
+    /// distinction is "have a value" vs "do not". `SecretAccessDiagnostics` carries the detail
+    /// for the diagnostic report.
     public func secret(for id: UUID) -> String? {
         backing.value(account: Self.account(for: id))
     }
@@ -128,15 +128,140 @@ public protocol SecretBackingStore: AnyObject {
     func accounts() -> Set<String>
 }
 
+// MARK: - Partition policy (§8.10)
+
+/// Why the file-based keychain asks for the login password after every rebuild, and what this
+/// app does about it. Established empirically on this machine (macOS 27, 2026-08-08), because
+/// TN3137 documents only that the file-based access model "is completely different" — the
+/// partition mechanics below appear in no Apple document we could find.
+///
+/// Since macOS 10.12, reading a file-based item requires passing **two** checks:
+///
+/// 1. The ACL application entry — for this app, cert-pinned:
+///    `identifier "com.devtype.app" and certificate root = H"…"`. Stable across rebuilds.
+/// 2. The **partition list** (`partition_id` ACL entry). For apps signed by an Apple-issued
+///    certificate this records `teamid:…`, which is stable. For a self-signed certificate
+///    macOS falls back to recording the per-build `cdhash:…` — so the check breaks on every
+///    rebuild, and "Always Allow" (which edits this list, hence the password field in that
+///    dialog) authorizes one build only.
+///
+/// The measured escape: a **metadata-only `SecItemUpdate`** by an app that matches check 1
+/// appends the caller's partition to the list — silently, and without touching the value. An
+/// app that fails check 1 can vandalize the value (the `encrypt` entry is open) but its
+/// partition never grants a read, so healing is gated by the certificate exactly like the read
+/// itself. `KeychainSecretBackingStore.value` heals and retries before it ever lets the system
+/// put a password dialog on screen.
+///
+/// Deletion has no such escape: `SecItemDelete` is owner-checked against the *creating build*
+/// (`errSecInvalidOwnerEdit` from any other, even after a heal), so cross-build deletes destroy
+/// the value in place and leave a marked husk instead — see `tombstoneDescription`.
+public enum KeychainPartitionPolicy {
+    /// `kSecAttrComment` written by the heal update. The write is what heals; the text is
+    /// honest labeling for anyone inspecting the item in Keychain Access.
+    public static let healComment = "Managed by DevType"
+
+    /// `kSecAttrDescription` ("Kind" in Keychain Access) for a live secret.
+    public static let liveDescription = "DevType secret"
+
+    /// `kSecAttrDescription` marking an item whose value was destroyed because the item itself
+    /// could not be deleted (owner build gone). Husks are invisible to every API here.
+    public static let tombstoneDescription = "DevType retired secret"
+
+    /// What a tombstoned item's value is overwritten with. Non-empty on purpose:
+    /// `SecItemUpdate` silently ignores an empty `kSecValueData`, leaving the secret intact —
+    /// measured, not guessed.
+    public static let tombstoneValue = "retired"
+
+    public static func isTombstone(description: String?) -> Bool {
+        description == tombstoneDescription
+    }
+}
+
+/// The read sequence as a pure state machine, so the retry logic is table-testable without a
+/// keychain. Phases: a silent attempt, a silent attempt after healing, and a final attempt with
+/// the system password dialog allowed (the legitimate fallback when the signing identity itself
+/// changed — Always Allow then re-pins the ACL entry and later builds heal silently again).
+public enum KeychainReadPlan {
+    public enum Phase: Equatable { case silent, healed, interactive }
+    public enum Step: Equatable {
+        /// Value in hand; stop.
+        case succeed
+        /// No value to be had; stop.
+        case fail
+        /// Metadata-touch the item to re-partition it, then retry silently.
+        case heal
+        /// Allow the system password dialog and retry once.
+        case askUser
+    }
+
+    public static func step(after status: OSStatus, phase: Phase) -> Step {
+        if status == errSecSuccess { return .succeed }
+        // Absent is absent — no amount of healing or prompting invents an item.
+        if status == errSecItemNotFound { return .fail }
+        switch phase {
+        case .silent: return .heal
+        case .healed: return .askUser
+        case .interactive: return .fail
+        }
+    }
+}
+
+/// How the most recent keychain read went — the one fact the diagnostic report needs to tell
+/// "policy bug" apart from "user has no enrolled finger" apart from "keychain said no".
+/// Never carries an account, a title, or a value.
+public enum SecretReadOutcome: Equatable {
+    case none
+    case ok
+    case healed
+    case granted
+    case failed(OSStatus)
+
+    public var label: String {
+        switch self {
+        case .none: return "no reads this run"
+        case .ok: return "ok"
+        case .healed: return "ok (healed partition after rebuild)"
+        case .granted: return "ok (user granted via password dialog)"
+        case .failed(let status): return "failed (\(status))"
+        }
+    }
+}
+
+/// Last-read recorder, kept apart from `SecretBackingStore` so the protocol (and its in-memory
+/// test double) stays three operations wide.
+public final class SecretAccessDiagnostics {
+    public static let shared = SecretAccessDiagnostics()
+    private let lock = UnfairLock()
+    private var last: SecretReadOutcome = .none
+
+    public init() {}
+
+    public func record(_ outcome: SecretReadOutcome) {
+        lock.lock(); defer { lock.unlock() }
+        last = outcome
+    }
+
+    public func lastRead() -> SecretReadOutcome {
+        lock.lock(); defer { lock.unlock() }
+        return last
+    }
+}
+
 /// Login-keychain generic passwords.
 ///
-/// Deliberately *not* the data-protection keychain (`kSecUseDataProtectionKeychain`): that
-/// requires a keychain-access-group entitlement, and this bundle ships without entitlements, so
-/// every call would fail with `errSecMissingEntitlement`. The file-based keychain ACLs the item to
-/// this app's code signature, which is cert-pinned by `Scripts/install-app.sh` and therefore
-/// survives rebuilds.
+/// Deliberately *not* the data-protection keychain (`kSecUseDataProtectionKeychain`): per
+/// TN3137 its access groups "must be authorized by a provisioning profile", and a self-signed
+/// bundle cannot carry one — a probe binary claiming the entitlement is killed outright
+/// (SIGKILL from AMFI). The file-based keychain ACLs the item to this app's code signature,
+/// which is cert-pinned by `Scripts/make-signing-cert.sh`; the per-rebuild partition problem
+/// that signature cannot solve is handled by `KeychainPartitionPolicy` healing.
 public final class KeychainSecretBackingStore: SecretBackingStore {
-    public init() {}
+    private let lock = UnfairLock()
+    private let diagnostics: SecretAccessDiagnostics
+
+    public init(diagnostics: SecretAccessDiagnostics = .shared) {
+        self.diagnostics = diagnostics
+    }
 
     private func baseQuery(account: String?) -> [String: Any] {
         var query: [String: Any] = [
@@ -147,58 +272,183 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
         return query
     }
 
-    public func set(_ value: String, account: String) -> OSStatus {
-        guard let data = value.data(using: .utf8) else { return errSecParam }
-        let query = baseQuery(account: account)
-
-        // Update first: SecItemAdd on an existing account returns errSecDuplicateItem, and the
-        // add/delete-then-add alternative loses the value if the process dies between the two.
-        let update: [String: Any] = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        if updateStatus != errSecItemNotFound { return updateStatus }
-
-        var insert = query
-        insert[kSecValueData as String] = data
-        // This device only, and only while unlocked: a password snippet has no business
-        // travelling to another Mac in a keychain sync or sitting readable in a backup.
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        return SecItemAdd(insert as CFDictionary, nil)
+    /// Run `body` with keychain UI suppressed, restoring the previous state after. Suppression
+    /// is what turns "partition mismatch" into a status we can heal instead of a password
+    /// dialog the user has to read.
+    private func withoutKeychainUI<T>(_ body: () -> T) -> T {
+        var previous: DarwinBoolean = true
+        SecKeychainGetUserInteractionAllowed(&previous)
+        SecKeychainSetUserInteractionAllowed(false)
+        defer { SecKeychainSetUserInteractionAllowed(previous.boolValue) }
+        return body()
     }
 
-    public func value(account: String) -> String? {
+    /// One query answering everything about an item: status, value, and whether it is a husk.
+    private func fetch(account: String) -> (status: OSStatus, value: String?, tombstone: Bool) {
         var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
+        query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else {
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let attrs = item as? [String: Any] else {
+            return (status, nil, false)
+        }
+        let tombstone = KeychainPartitionPolicy.isTombstone(
+            description: attrs[kSecAttrDescription as String] as? String
+        )
+        let value = (attrs[kSecValueData as String] as? Data)
+            .flatMap { String(data: $0, encoding: .utf8) }
+        return (status, value, tombstone)
+    }
+
+    /// The metadata-only update that re-partitions the item to this build. Gated by the item's
+    /// cert-pinned ACL entry, so only code signed like this app gains anything from it.
+    private func healPartition(account: String) {
+        let touch: [String: Any] = [kSecAttrComment as String: KeychainPartitionPolicy.healComment]
+        _ = SecItemUpdate(baseQuery(account: account) as CFDictionary, touch as CFDictionary)
+    }
+
+    public func set(_ value: String, account: String) -> OSStatus {
+        guard let data = value.data(using: .utf8) else { return errSecParam }
+        lock.lock(); defer { lock.unlock() }
+        return withoutKeychainUI {
+            let query = baseQuery(account: account)
+
+            // Update first: SecItemAdd on an existing account returns errSecDuplicateItem, and
+            // the delete-then-add alternative loses the value if the process dies between the
+            // two. A value update also re-partitions the item to this build (measured) and
+            // resurrects a tombstoned husk — hence the explicit live description.
+            let update: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrDescription as String: KeychainPartitionPolicy.liveDescription,
+                kSecAttrComment as String: KeychainPartitionPolicy.healComment,
+            ]
+            let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+            if updateStatus != errSecItemNotFound { return updateStatus }
+
+            var insert = query
+            insert[kSecValueData as String] = data
+            insert[kSecAttrDescription as String] = KeychainPartitionPolicy.liveDescription
+            insert[kSecAttrComment as String] = KeychainPartitionPolicy.healComment
+            // This device only, and only while unlocked: a password snippet has no business
+            // travelling to another Mac in a keychain sync or sitting readable in a backup.
+            insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            return SecItemAdd(insert as CFDictionary, nil)
+        }
+    }
+
+    public func value(account: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+
+        enum SilentEnd {
+            case done(value: String?, outcome: SecretReadOutcome?)
+            case needUser
+        }
+
+        // Silent phase, then heal-and-retry, still silent.
+        let silent: SilentEnd = withoutKeychainUI {
+            var result = fetch(account: account)
+            var phase = KeychainReadPlan.Phase.silent
+            if KeychainReadPlan.step(after: result.status, phase: phase) == .heal {
+                healPartition(account: account)
+                phase = .healed
+                result = fetch(account: account)
+            }
+            switch KeychainReadPlan.step(after: result.status, phase: phase) {
+            case .succeed:
+                // A husk reads as "no secret", never as its placeholder value.
+                if result.tombstone { return .done(value: nil, outcome: nil) }
+                return .done(value: result.value, outcome: phase == .silent ? .ok : .healed)
+            case .fail:
+                // Absent is not a failure worth reporting; anything else is.
+                let outcome: SecretReadOutcome? =
+                    result.status == errSecItemNotFound ? nil : .failed(result.status)
+                return .done(value: nil, outcome: outcome)
+            case .askUser, .heal:
+                return .needUser
+            }
+        }
+
+        if case .done(let value, let outcome) = silent {
+            if let outcome { diagnostics.record(outcome) }
+            return value
+        }
+
+        // Interactive phase: the one place the system password dialog is allowed. Reached only
+        // when the item exists but this signing identity cannot heal it — Always Allow here
+        // re-pins the ACL entry, after which every future build heals silently again.
+        let final = fetch(account: account)
+        switch KeychainReadPlan.step(after: final.status, phase: .interactive) {
+        case .succeed:
+            if final.tombstone { return nil }
+            diagnostics.record(.granted)
+            return final.value
+        case .fail, .heal, .askUser:
+            diagnostics.record(.failed(final.status))
             return nil
         }
-        return String(data: data, encoding: .utf8)
     }
 
     public func contains(account: String) -> Bool {
-        var query = baseQuery(account: account)
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+        lock.lock(); defer { lock.unlock() }
+        return withoutKeychainUI {
+            var query = baseQuery(account: account)
+            query[kSecReturnAttributes as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+                  let attrs = item as? [String: Any] else {
+                return false
+            }
+            return !KeychainPartitionPolicy.isTombstone(
+                description: attrs[kSecAttrDescription as String] as? String
+            )
+        }
     }
 
     public func delete(account: String) -> OSStatus {
-        SecItemDelete(baseQuery(account: account) as CFDictionary)
+        lock.lock(); defer { lock.unlock() }
+        return withoutKeychainUI {
+            let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+            if status == errSecSuccess || status == errSecItemNotFound { return status }
+
+            // The owner check is pinned to the *creating build* (errSecInvalidOwnerEdit from
+            // every other, even after a heal — measured). Destroy the value in place and mark
+            // the husk; every read surface here treats the marker as "absent".
+            let tomb: [String: Any] = [
+                kSecValueData as String: Data(KeychainPartitionPolicy.tombstoneValue.utf8),
+                kSecAttrDescription as String: KeychainPartitionPolicy.tombstoneDescription,
+            ]
+            let tombStatus = SecItemUpdate(
+                baseQuery(account: account) as CFDictionary,
+                tomb as CFDictionary
+            )
+            // The secret is gone either way the caller cares about; report the destroy result.
+            return tombStatus == errSecSuccess ? errSecSuccess : status
+        }
     }
 
     public func accounts() -> Set<String> {
-        var query = baseQuery(account: nil)
-        query[kSecReturnAttributes as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        lock.lock(); defer { lock.unlock() }
+        return withoutKeychainUI {
+            var query = baseQuery(account: nil)
+            query[kSecReturnAttributes as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitAll
 
-        var items: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
-              let entries = items as? [[String: Any]] else {
-            return []
+            var items: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
+                  let entries = items as? [[String: Any]] else {
+                return []
+            }
+            return Set(entries.compactMap { entry -> String? in
+                guard !KeychainPartitionPolicy.isTombstone(
+                    description: entry[kSecAttrDescription as String] as? String
+                ) else { return nil }
+                return entry[kSecAttrAccount as String] as? String
+            })
         }
-        return Set(entries.compactMap { $0[kSecAttrAccount as String] as? String })
     }
 }
 
