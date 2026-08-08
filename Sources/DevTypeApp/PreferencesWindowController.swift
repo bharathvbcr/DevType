@@ -256,6 +256,7 @@ final class PreferencesViewController: NSViewController,
 
     // AI
     private let aiEnabledSwitch = NSSwitch()
+    private let requireBiometrySwitch = NSSwitch()
     private let aiAvailabilityLabel = DevTypeTheme.makeLabel(
         "",
         font: DevTypeTheme.font(11),
@@ -709,7 +710,60 @@ final class PreferencesViewController: NSViewController,
 
     // MARK: Snippets (§4.5 / §0.4 / §1.9)
 
+    /// Touch ID gate for secrets, on the tab that owns snippets.
+    ///
+    /// The note under the switch says what the check is *worth*, not just what it does. A security
+    /// control whose limits are not stated invites the user to rely on it for more than it covers.
+    private func buildSecretsCard(into stack: NSStackView) {
+        let availability = BiometricGate.shared.availability()
+        let card = makeCard(title: loc.s("prefs.secrets.card"), symbol: "key.fill")
+
+        requireBiometrySwitch.state =
+            SecretPreferences.requireBiometry(availability: availability) ? .on : .off
+        requireBiometrySwitch.isEnabled = availability.canGate
+
+        let row = makeToggleRow(
+            title: loc.s("prefs.secrets.requireBiometry"),
+            toggle: requireBiometrySwitch,
+            action: #selector(requireBiometryChanged)
+        )
+
+        let detail: String
+        switch availability {
+        case .biometry(let name): detail = loc.s("prefs.secrets.note.biometry", name)
+        case .passwordOnly: detail = loc.s("prefs.secrets.note.password")
+        case .unavailable: detail = loc.s("prefs.secrets.note.unavailable")
+        }
+        let note = DevTypeTheme.makeLabel(
+            detail,
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        note.translatesAutoresizingMaskIntoConstraints = false
+
+        let scope = DevTypeTheme.makeLabel(
+            loc.s("prefs.secrets.note.scope"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        scope.translatesAutoresizingMaskIntoConstraints = false
+
+        stackInCard(card, views: [row, note, scope])
+        stack.addArrangedSubview(card)
+        pinWidth(of: [card], to: stack)
+    }
+
+    @objc private func requireBiometryChanged() {
+        SecretPreferences.setRequireBiometry(requireBiometrySwitch.state == .on)
+        // Turning it on must take effect now, not after the current reuse window expires.
+        BiometricGate.shared.invalidate()
+    }
+
     private func buildSnippets(into stack: NSStackView) {
+        buildSecretsCard(into: stack)
+
         addChild(stats)
         let statsView = stats.view
         statsView.translatesAutoresizingMaskIntoConstraints = false

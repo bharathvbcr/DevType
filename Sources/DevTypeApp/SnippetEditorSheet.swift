@@ -1816,7 +1816,11 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
     @objc private func saveTapped() {
         let trigger = triggerField.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !trigger.isEmpty else {
+        // A secret is reachable only by an explicit gesture — the menu, or the copy palette — so
+        // its trigger can never fire and demanding one made the user invent a keyword for
+        // something that does nothing with it.
+        let requiresTrigger = !(secretChip?.isOn ?? false)
+        guard !trigger.isEmpty || !requiresTrigger else {
             showError(loc.s("editor.error.emptyTrigger"))
             return
         }
@@ -1827,7 +1831,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             return
         }
         let caseSensitive = caseChip.isOn
-        if let conflict = validate(trigger, caseSensitive) {
+        if requiresTrigger, let conflict = validate(trigger, caseSensitive) {
             showError(conflict)
             return
         }

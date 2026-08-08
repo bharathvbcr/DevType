@@ -427,6 +427,35 @@ final class SecretSnippetTests: XCTestCase {
         XCTAssertEqual(decoded.replacementText, "")
     }
 
+    // MARK: - Triggers a secret can never use
+
+    /// A secret is reachable only by an explicit gesture, so its trigger can never fire. It must
+    /// therefore neither shadow another trigger nor be reported as an unusable empty one — both
+    /// were warnings the user could do nothing about.
+    func testSecretsAreExcludedFromTriggerConflicts() {
+        let shared = ";pw"
+        let groups = [SnippetGroup(name: "General", snippets: [
+            SnippetModel(title: "Real", triggerKeyword: shared, replacementText: "text"),
+            SnippetModel(title: "Secret", triggerKeyword: shared, replacementText: "", isSecret: true),
+            SnippetModel(title: "No trigger", triggerKeyword: "", replacementText: "", isSecret: true),
+        ])]
+
+        let conflicts = SnippetStore.triggerConflicts(in: groups)
+
+        XCTAssertTrue(
+            conflicts.isEmpty,
+            "A secret cannot fire, so it collides with nothing and its empty trigger is "
+                + "intentional. Got: \(conflicts)"
+        )
+
+        // The detector still works for snippets that *can* fire.
+        let real = [SnippetGroup(name: "General", snippets: [
+            SnippetModel(title: "A", triggerKeyword: shared, replacementText: "one"),
+            SnippetModel(title: "B", triggerKeyword: shared, replacementText: "two"),
+        ])]
+        XCTAssertFalse(SnippetStore.triggerConflicts(in: real).isEmpty)
+    }
+
 }
 
 private extension Result where Success == Void, Failure == SecretStore.Failure {

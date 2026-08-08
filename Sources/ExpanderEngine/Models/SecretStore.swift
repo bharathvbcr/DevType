@@ -280,3 +280,30 @@ public enum SecretMenuEntryPolicy {
             .map { $0 }
     }
 }
+
+// MARK: - Preferences
+
+/// User-facing switches for secret handling.
+public enum SecretPreferences {
+    public static let requireBiometryKey = "devtype.secrets.requireBiometry"
+
+    /// Ask for Touch ID (or the login password) before revealing a secret.
+    ///
+    /// Defaults to **on** wherever the machine can evaluate a policy. The failure modes are not
+    /// symmetric: the cost of an unwanted prompt is one touch, and the cost of a missing one is
+    /// that anyone who walks up to an unlocked Mac can lift a password out of a menu. Someone who
+    /// finds the prompt tiresome can turn it off in one click; someone whose password walked out
+    /// of the building cannot undo that.
+    public static func requireBiometry(
+        defaults: UserDefaults = .standard,
+        availability: BiometricGate.Availability
+    ) -> Bool {
+        guard availability.canGate else { return false }
+        guard defaults.object(forKey: requireBiometryKey) != nil else { return true }
+        return defaults.bool(forKey: requireBiometryKey)
+    }
+
+    public static func setRequireBiometry(_ enabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: requireBiometryKey)
+    }
+}

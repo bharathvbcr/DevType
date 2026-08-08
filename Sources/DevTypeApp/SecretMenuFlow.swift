@@ -11,7 +11,67 @@ import ExpanderEngine
 /// their app with nothing of ours in the path.
 enum SecretMenuFlow {
 
-    /// Resolve what a snippet should put on the clipboard.
+    /// Resolve a snippet to text, asking for Touch ID first when the snippet is a secret.
+    ///
+    /// **Every** read of a secret goes through here — the menu, the copy palette, the insert
+    /// palette. Putting the gate in the resolver rather than at each call site is what makes it
+    /// impossible for the next surface that wants a secret to forget it; `SourceContractTests`
+    /// pins that no one calls `SecretStore.secret(for:)` directly.
+    ///
+    /// Completion is on the main queue, always, so callers can touch AppKit without thinking.
+    static func resolve(
+        _ snippet: SnippetModel,
+        secretStore: SecretStore = .shared,
+        gate: BiometricGate = .shared,
+        preferenceEnabled: Bool? = nil,
+        clipboardText: String? = nil,
+        lookup: ((String) -> String?)? = nil,
+        loc: LocalizationManager = .shared,
+        completion: @escaping (Result<String, ResolveFailure>) -> Void
+    ) {
+        let availability = gate.availability()
+        let enabled = preferenceEnabled
+            ?? SecretPreferences.requireBiometry(availability: availability)
+
+        guard BiometricGate.shouldGate(
+            isSecret: snippet.isSecret,
+            preferenceEnabled: enabled,
+            availability: availability
+        ) else {
+            completion(
+                resolveForCopy(
+                    snippet,
+                    secretStore: secretStore,
+                    clipboardText: clipboardText,
+                    lookup: lookup
+                )
+            )
+            return
+        }
+
+        // The prompt names the snippet, never its value: this string is rendered by macOS in a
+        // system dialog and, on a shared screen, is the one part of this flow everyone can read.
+        gate.authorize(reason: loc.s("secret.auth.reason", snippet.displayTitle)) { outcome in
+            switch outcome {
+            case .authorized:
+                completion(
+                    resolveForCopy(
+                        snippet,
+                        secretStore: secretStore,
+                        clipboardText: clipboardText,
+                        lookup: lookup
+                    )
+                )
+            case .cancelled:
+                completion(.failure(.authenticationCancelled))
+            case .failed(let reason):
+                completion(.failure(.authenticationFailed(reason)))
+            }
+        }
+    }
+
+    /// Resolve without asking. Not for direct use by UI: `resolve` is the gated entry point, and
+    /// this exists only as the step that runs *after* authorization has been established.
     ///
     /// A secret is fetched from the keychain and used **verbatim** — never run through
     /// `MacroRenderer`. A password containing `{{` or `%` is not a template, and expanding one
@@ -28,6 +88,11 @@ enum SecretMenuFlow {
             }
             return .success(value)
         }
+        // An image snippet has no text to render. Reporting it as "empty" was wrong twice: it is
+        // not empty, and the advice implied there was something to go and fix.
+        if snippet.isImageSnippet {
+            return .failure(.imageSnippet(snippet.imagePath))
+        }
         let rendered = MacroRenderer.expand(
             content: snippet.replacementText,
             lookup: lookup ?? { _ in nil },
@@ -40,8 +105,19 @@ enum SecretMenuFlow {
     enum ResolveFailure: Error, Equatable {
         /// Marked secret, but the keychain has nothing (or refused to answer).
         case secretUnavailable
+        /// An image snippet: copyable, but as image data rather than as text.
+        case imageSnippet(String)
         /// A plain snippet that renders to nothing — copying "" would silently wipe the clipboard.
         case emptySnippet
+        /// The user dismissed the Touch ID prompt. Their own decision, already visible to them:
+        /// callers must stay silent rather than answer it with a dialog of our own.
+        case authenticationCancelled
+        /// Authentication could not complete — biometry lockout, no password set. Carries the
+        /// system's own wording, which is more accurate than anything we would invent.
+        case authenticationFailed(String)
+
+        /// True when the user already knows what happened because they did it.
+        var isSilent: Bool { self == .authenticationCancelled }
     }
 
     /// Pure policy: which snippets appear in the mouse-only *Copy Secret* submenu, and in what

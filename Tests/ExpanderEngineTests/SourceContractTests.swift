@@ -284,11 +284,16 @@ final class SourceContractTests: XCTestCase {
             "The secret branch must return before the renderer is reached."
         )
 
+        // Every secret read funnels through `SecretMenuFlow.resolve`, which is where the
+        // Touch ID gate lives. A surface that reached into `SecretStore` directly would be a
+        // path around the gate — and the next one to be added would copy whichever example it
+        // found first.
         let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
-        XCTAssertTrue(
-            appDelegate.contains("SecretStore.shared.secret(for: snippet.id)"),
-            "The insert path must fetch the value at the moment of use, not carry it in the model."
+        XCTAssertFalse(
+            appDelegate.contains("SecretStore.shared.secret("),
+            "Read secrets through `SecretMenuFlow.resolve`, never straight from the store."
         )
+        XCTAssertTrue(appDelegate.contains("SecretMenuFlow.resolve("))
     }
 
     /// The library file is the thing this feature exists to keep a password out of. The redaction
@@ -379,13 +384,15 @@ final class SourceContractTests: XCTestCase {
     /// dismisses.
     func testCopyConfirmationIsNeverAModal() throws {
         let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
-        guard let start = appDelegate.range(of: "private func copyToClipboard("),
+        // The switch moved out of `copyToClipboard` when the resolve step became asynchronous
+        // for the Touch ID gate; the contract is about wherever the *result* is applied.
+        guard let start = appDelegate.range(of: "private func applyCopyResult("),
               let end = appDelegate.range(
-                  of: "private func flashStatusItem(",
+                  of: "\n    private func",
                   range: start.upperBound..<appDelegate.endIndex
-              ) ?? appDelegate.range(of: "\n    private func", range: start.upperBound..<appDelegate.endIndex)
+              )
         else {
-            return XCTFail("copyToClipboard no longer has the shape this contract describes.")
+            return XCTFail("applyCopyResult no longer has the shape this contract describes.")
         }
         let body = String(appDelegate[start.upperBound..<end.lowerBound])
 
