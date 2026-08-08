@@ -357,6 +357,42 @@ final class SecretConsolidationTests: XCTestCase {
         )
     }
 
+    /// The §8.11 post-mortem test: two independent store instances over the same archive and
+    /// tier — the two-writer shape that lost a secret. After the storm, every account must be
+    /// readable somewhere; a keychain copy may only be gone if the archive answers for it.
+    func testTwoWritersOverOneArchiveLoseNothing() {
+        let tier = InMemorySecretBackingStore()
+        let url = directory.appendingPathComponent(ConsolidatedSecretBackingStore.archiveFileName)
+        let a = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+        let b = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+
+        let accounts = (0..<12).map { _ in UUID().uuidString }
+        for (index, account) in accounts.enumerated() {
+            _ = tier.set("seed-\(index)", account: account) // §8.10-era residents
+        }
+
+        // Both writers consolidate and read concurrently, interleaving on the same file.
+        DispatchQueue.concurrentPerform(iterations: 24) { i in
+            let store = i % 2 == 0 ? a : b
+            switch i % 3 {
+            case 0: _ = store.consolidateIntoFile()
+            case 1: _ = store.value(account: accounts[i % accounts.count])
+            default: _ = store.set("rewritten-\(i)", account: accounts[i % accounts.count])
+            }
+        }
+
+        // The invariant that was violated: nothing may be lost. Every account readable.
+        let survivor = ConsolidatedSecretBackingStore(
+            fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics()
+        )
+        for account in accounts {
+            XCTAssertNotNil(
+                survivor.value(account: account),
+                "account \(account.prefix(8))… lost — the two-writer clobber is back"
+            )
+        }
+    }
+
     // MARK: - Fuzz
 
     /// Random interleaving of every operation against a model dictionary: the store must agree

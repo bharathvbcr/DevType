@@ -389,18 +389,26 @@ final class SourceContractTests: XCTestCase {
     /// in both consolidation and the ordinary save. Reordering either is how secrets get lost.
     func testTierCopyIsDroppedOnlyAfterTheArchiveIsVerified() throws {
         let store = try source("Sources/ExpanderEngine/Models/SecretStore.swift")
+        // Anchor inside ConsolidatedSecretBackingStore: the keychain tier has a `set` of its
+        // own, earlier in the file, with none of this machinery.
+        guard let classStart = store.range(of: "final class ConsolidatedSecretBackingStore") else {
+            return XCTFail("ConsolidatedSecretBackingStore is gone; rewrite this contract.")
+        }
+        let consolidated = store[classStart.upperBound...]
         for function in ["public func set(_ value: String, account:", "private func consolidateLocked("] {
-            guard let start = store.range(of: function) else {
+            guard let start = consolidated.range(of: function) else {
                 return XCTFail("SecretStore no longer has the shape this contract describes.")
             }
-            let body = store[start.upperBound...]
+            let body = consolidated[start.upperBound...]
             guard let save = body.range(of: "saveArchive(entries)"),
+                  let verify = body.range(of: "verifiedOnDisk(account:"),
                   let drop = body.range(of: "tier.delete(account:") else {
                 return XCTFail("\(function) no longer has the shape this contract describes.")
             }
             XCTAssertTrue(
-                save.lowerBound < drop.lowerBound,
-                "\(function): the keychain copy must outlive anything not yet safely sealed."
+                save.lowerBound < verify.lowerBound && verify.lowerBound < drop.lowerBound,
+                "\(function): save, then prove the entry decrypts from the bytes on disk, and "
+                + "only then drop the keychain copy. Reordering this is how §8.11 lost a secret."
             )
         }
 

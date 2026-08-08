@@ -880,6 +880,36 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         return .entries(entries)
     }
 
+    /// Cross-process exclusive lock around every read-modify-write of the archive. The
+    /// in-process `lock` already serializes this instance; this guards the window a *second
+    /// writer* (another DevType process, a probe, a future tool) could use to clobber a
+    /// load-modify-save in flight — the §8.11 post-mortem shape that cost one secret its
+    /// value. Never nested: callers hold it around the whole load→save→verify sequence.
+    private func withArchiveLock<T>(_ body: () -> T) -> T {
+        let directory = fileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let lockPath = fileURL.appendingPathExtension("lock").path
+        let fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { return body() }
+        defer { close(fd) }
+        _ = flock(fd, LOCK_EX)
+        defer { _ = flock(fd, LOCK_UN) }
+        return body()
+    }
+
+    /// The only sanctioned way to drop a keychain copy: reload the archive **from disk** and
+    /// prove the entry that is about to replace it decrypts from those reloaded bytes. A save
+    /// that merely returned true is not proof — the file can have been clobbered since.
+    private func verifiedOnDisk(account: String, expecting value: String, key: SymmetricKey) -> Bool {
+        guard case .entries(let reloaded) = loadArchive(),
+              let blob = reloaded[account],
+              EncryptedSecretArchive.open(blob, key: key) == value else {
+            diagnostics.note("archive reload-verify failed — keychain copy kept", account: account)
+            return false
+        }
+        return true
+    }
+
     /// Atomic write (temp + rename via `.atomic`), owner-only permissions.
     private func saveArchive(_ entries: [String: String]) -> Bool {
         guard let data = EncryptedSecretArchive.encode(entries) else { return false }
@@ -948,31 +978,33 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
 
     public func set(_ value: String, account: String) -> OSStatus {
         lock.lock(); defer { lock.unlock() }
+        return withArchiveLock {
+            var entries: [String: String]
+            switch loadArchive() {
+            case .entries(let existing): entries = existing
+            case .missing: entries = [:]
+            case .unreadable:
+                guard quarantineUnreadableArchive() else { return tier.set(value, account: account) }
+                entries = [:]
+            }
 
-        var entries: [String: String]
-        switch loadArchive() {
-        case .entries(let existing): entries = existing
-        case .missing: entries = [:]
-        case .unreadable:
-            guard quarantineUnreadableArchive() else { return tier.set(value, account: account) }
-            entries = [:]
+            // Seal, verify the seal opens, persist — and only then drop any keychain copy. Any
+            // failure on this path falls back to a keychain item: storage may regress a tier
+            // for one value, but a save never fails harder than §8.10 did.
+            guard let key = masterKey(createIfNeeded: true),
+                  let blob = EncryptedSecretArchive.seal(value, key: key),
+                  EncryptedSecretArchive.open(blob, key: key) == value else {
+                return tierFallbackSet(value, account: account, entries: entries)
+            }
+            entries[account] = blob
+            guard saveArchive(entries),
+                  verifiedOnDisk(account: account, expecting: value, key: key) else {
+                return tierFallbackSet(value, account: account, entries: entries)
+            }
+            diagnostics.note("sealed into archive", account: account)
+            _ = tier.delete(account: account)
+            return errSecSuccess
         }
-
-        // Seal, verify the seal opens, persist — and only then drop any keychain copy. Any
-        // failure on this path falls back to a keychain item: storage may regress a tier for
-        // one value, but a save never fails harder than §8.10 did.
-        guard let key = masterKey(createIfNeeded: true),
-              let blob = EncryptedSecretArchive.seal(value, key: key),
-              EncryptedSecretArchive.open(blob, key: key) == value else {
-            return tierFallbackSet(value, account: account, entries: entries)
-        }
-        entries[account] = blob
-        guard saveArchive(entries) else {
-            return tierFallbackSet(value, account: account, entries: entries)
-        }
-        diagnostics.note("sealed into archive", account: account)
-        _ = tier.delete(account: account)
-        return errSecSuccess
     }
 
     /// The fallback save, with the staleness hole the fuzz found closed: a stale sealed copy
@@ -1028,10 +1060,12 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
 
     public func delete(account: String) -> OSStatus {
         lock.lock(); defer { lock.unlock() }
-        var removedFromArchive = false
-        if case .entries(var entries) = loadArchive(), entries[account] != nil {
+        let removedFromArchive: Bool = withArchiveLock {
+            guard case .entries(var entries) = loadArchive(), entries[account] != nil else {
+                return false
+            }
             entries.removeValue(forKey: account)
-            removedFromArchive = saveArchive(entries)
+            return saveArchive(entries)
         }
         let tierStatus = tier.delete(account: account)
         if removedFromArchive || tierStatus == errSecSuccess { return errSecSuccess }
@@ -1052,23 +1086,27 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     // MARK: Consolidation
 
     /// Move one just-read value into the archive; the tier copy is dropped only after the
-    /// saved blob is verified to open. Best-effort: failure leaves the tier copy untouched.
+    /// entry is verified to decrypt **from the bytes on disk** (`verifiedOnDisk`), under the
+    /// cross-process archive lock. Best-effort: any failure leaves the tier copy untouched.
     private func consolidateLocked(account: String, value: String) {
-        var entries: [String: String]
-        switch loadArchive() {
-        case .entries(let existing): entries = existing
-        case .missing: entries = [:]
-        case .unreadable:
-            guard quarantineUnreadableArchive() else { return }
-            entries = [:]
+        withArchiveLock {
+            var entries: [String: String]
+            switch loadArchive() {
+            case .entries(let existing): entries = existing
+            case .missing: entries = [:]
+            case .unreadable:
+                guard quarantineUnreadableArchive() else { return }
+                entries = [:]
+            }
+            guard let key = masterKey(createIfNeeded: true),
+                  let blob = EncryptedSecretArchive.seal(value, key: key),
+                  EncryptedSecretArchive.open(blob, key: key) == value else { return }
+            entries[account] = blob
+            guard saveArchive(entries),
+                  verifiedOnDisk(account: account, expecting: value, key: key) else { return }
+            diagnostics.note("consolidated into archive", account: account)
+            _ = tier.delete(account: account)
         }
-        guard let key = masterKey(createIfNeeded: true),
-              let blob = EncryptedSecretArchive.seal(value, key: key),
-              EncryptedSecretArchive.open(blob, key: key) == value else { return }
-        entries[account] = blob
-        guard saveArchive(entries) else { return }
-        diagnostics.note("consolidated into archive", account: account)
-        _ = tier.delete(account: account)
     }
 
     public func consolidateIntoFile() -> SecretConsolidationSummary {

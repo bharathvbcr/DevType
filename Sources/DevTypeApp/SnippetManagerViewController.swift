@@ -798,6 +798,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         mainView.addSubview(primaryStack)
         mainView.addSubview(utilityStack)
 
+        // The gear takes 36pt out of the header's trailing run, so the filter is
+        // no longer a hard 200pt — it keeps that width when there is room and
+        // gives way to the sort popup and the title before anything overlaps.
+        let preferredFilterWidth = filterField.widthAnchor.constraint(equalToConstant: 200)
+        preferredFilterWidth.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
             logo.leadingAnchor.constraint(equalTo: mainView.leadingAnchor, constant: 20),
             logo.topAnchor.constraint(equalTo: mainView.topAnchor, constant: 40),
@@ -815,7 +821,8 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
             filterField.trailingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: -10),
             filterField.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
-            filterField.widthAnchor.constraint(equalToConstant: 200),
+            filterField.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
+            preferredFilterWidth,
 
             sortPopup.trailingAnchor.constraint(equalTo: filterField.leadingAnchor, constant: -10),
             sortPopup.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
