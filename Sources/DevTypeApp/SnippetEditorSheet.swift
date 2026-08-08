@@ -45,6 +45,18 @@ enum SnippetEditorSheet {
     /// §1 / §3: sized once here so the panel and its glass container can never
     /// disagree. The extra height over the old 500×548 buys the new-snippet
     /// guide strip and a materially taller replacement editor.
+    /// Height of the behaviour pill row itself — `ToggleChip.intrinsicContentSize.height` plus a
+    /// hair, so a focus ring is not clipped.
+    static let chipRowHeight: CGFloat = 26
+
+    /// Strip reserved *below* the pills for the horizontal overlay scroller.
+    ///
+    /// Overlay scrollers float over their content rather than taking layout space, which is
+    /// exactly the problem: while scrolling, the bar was drawn across the bottom of the pills.
+    /// Giving it a band of its own is cheaper than hiding it, and hiding it would leave the
+    /// overflowing chips with no affordance at all.
+    static let chipScrollerBand: CGFloat = 12
+
     static let panelWidth: CGFloat = 520
     static let panelHeight: CGFloat = 690
 
@@ -846,6 +858,16 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         chipsScroll.drawsBackground = false
         chipsScroll.horizontalScrollElasticity = .allowed
         chipsScroll.verticalScrollElasticity = .none
+        // An overlay scroller draws *on top of* the content it scrolls, so mid-scroll it sat
+        // across the bottom of the pills. Reserve a band for it instead: the content inset keeps
+        // the document out of the strip the scroller appears in, so the two never share pixels.
+        chipsScroll.automaticallyAdjustsContentInsets = false
+        chipsScroll.contentInsets = NSEdgeInsets(
+            top: 0,
+            left: 0,
+            bottom: SnippetEditorSheet.chipScrollerBand,
+            right: 0
+        )
         chipsScroll.documentView = chipsRow
         root.addSubview(chipsScroll)
 
@@ -854,7 +876,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             // what there is to scroll) while its height matches the visible strip.
             chipsRow.leadingAnchor.constraint(equalTo: chipsScroll.contentView.leadingAnchor),
             chipsRow.topAnchor.constraint(equalTo: chipsScroll.contentView.topAnchor),
-            chipsRow.bottomAnchor.constraint(equalTo: chipsScroll.contentView.bottomAnchor),
+            // Height, not a bottom pin: pinned to the bottom the stack would stretch across the
+            // scroller's band and put the pills back under it.
+            chipsRow.heightAnchor.constraint(equalToConstant: SnippetEditorSheet.chipRowHeight),
         ])
 
         // Inline error
@@ -1039,7 +1063,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             // The trailing edge is the whole point: without it the row had nothing telling it
             // where the panel ends, so it overflowed instead of scrolling.
             chipsScroll.trailingAnchor.constraint(equalTo: titleField.trailingAnchor),
-            chipsScroll.heightAnchor.constraint(equalToConstant: 26),
+            chipsScroll.heightAnchor.constraint(
+                equalToConstant: SnippetEditorSheet.chipRowHeight + SnippetEditorSheet.chipScrollerBand
+            ),
             chipsScroll.bottomAnchor.constraint(equalTo: errorLabel.topAnchor, constant: -8),
 
             // §3: anchored UP from the divider rather than DOWN from the chips.
