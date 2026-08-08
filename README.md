@@ -38,6 +38,7 @@ Looking for a **privacy-first TextExpander alternative** or an **Espanso GUI for
 | **100% Offline & Private** | ✅ No Cloud Telemetry | ❌ Cloud Sync Mandatory | ✅ Offline | ✅ Offline |
 | ** Espanso / TE Importers** | ✅ Built-in XML & YAML | ❌ Manual | ⚠️ Manual | ❌ Manual |
 | **Command Palette (`⌘/`)** | ✅ Snippets, AI, Math, Dates | ❌ None | ❌ Search Only | ⚠️ Palette |
+| **Encrypted Secret Snippets** | ✅ AES-GCM + Touch ID | ❌ None | ❌ Plaintext YAML | ❌ None |
 
 ---
 
@@ -50,6 +51,7 @@ Looking for a **privacy-first TextExpander alternative** or an **Espanso GUI for
 - 🖼️ **Rich Image Snippets**: Paste images directly from snippet triggers with full Espanso `image_path` import support.
 - 📦 **One-Click Importers**: Seamlessly import existing snippet libraries from TextExpander 4/5 XML groups and Espanso YAML match configs.
 - 🛡️ **Privacy & Fail-Closed Security**: Automatic expansion pause during password entry (`NSSecureTextField`), Secure Event Input locks, IME composition, or in muted apps.
+- 🔒 **Secret Snippets**: Store passwords AES-GCM-encrypted, gated behind Touch ID, copied from the menu bar with an auto-clearing concealed clipboard — never in the library file, exports, or diagnostics. See [SECRETS.md](SECRETS.md).
 - 🔑 **Stable Identity TCC**: Packaged `.app` bundle with dedicated code identity (`com.devtype.app`) so macOS Accessibility & Input Monitoring permissions persist cleanly across updates.
 
 ---
@@ -98,6 +100,30 @@ Run Apple Foundation Models text transformations on-device with zero cloud telem
 
 ---
 
+## 🔒 Secret Snippets (Passwords)
+
+Mark any snippet **Secret** in the editor and its value moves out of the snippet library
+entirely — AES-GCM-sealed in an encrypted archive, with a single master key in the login
+keychain, gated behind **Touch ID**.
+
+- **Copy, don't type**: secrets never expand from typed triggers — macOS Secure Event Input
+  withholds keystrokes in password fields, and a typo firing a password into a chat window is
+  the failure a password snippet must never have. Use **menu bar → Copy Secret ▸** or
+  **Search Secrets…**, then paste with your own `⌘V` (which works inside password fields).
+- **Touch ID first**: each copy asks for Touch ID (password fallback available, one 30-second
+  reuse window). Toggle under **Preferences → Snippets → Secrets** or at the bottom of the
+  **Copy Secret** menu.
+- **Auto-clearing clipboard**: copies are marked concealed (clipboard managers ignore them)
+  and cleared after 90 seconds — unless you've already copied something else.
+- **Nothing leaks by construction**: the value is absent from `snippets.json`, every export,
+  the editor after save, and the diagnostic report — enforced in the encoder and asserted by
+  tests, not by call-site discipline.
+
+Full design, threat model, dialog policy, and the measured macOS keychain behaviour behind
+it: **[SECRETS.md](SECRETS.md)**.
+
+---
+
 ## 🧩 Template Engine Reference
 
 DevType parses Mustache `{{...}}` tags and TextExpander `%...%` tags seamlessly.
@@ -135,7 +161,10 @@ No. DevType operates 100% offline. Keystrokes are processed locally in a memory 
 Yes. DevType includes built-in importers for TextExpander 4/5 XML export files and Espanso YAML config files, preserving your triggers, replacements, and image attachments.
 
 ### How does DevType handle passwords and secure fields?
-DevType automatically pauses keyword expansion whenever a secure text field (`NSSecureTextField`) is active or when macOS Secure Event Input is locked.
+Two ways. Typing safety: DevType automatically pauses keyword expansion whenever a secure text field (`NSSecureTextField`) is active or macOS Secure Event Input is locked. Storage: **secret snippets** hold passwords AES-GCM-encrypted behind Touch ID and copy them from the menu bar with an auto-clearing clipboard — see [SECRETS.md](SECRETS.md).
+
+### Where are secret snippet values stored?
+In an encrypted archive (`secrets.enc`, AES-GCM, owner-only permissions) whose 256-bit master key is the only item DevType keeps in the login keychain. Values never appear in the snippet library, exports, the editor after saving, or the diagnostic report. They are device-only: restored to another Mac, the archive cannot be decrypted without the key.
 
 ---
 
