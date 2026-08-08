@@ -241,6 +241,22 @@ public final class AXContextChecker {
             )
         }
 
+        // §8.8: never run the rescue against ourselves. The wake-up is Chromium's opt-in switch and
+        // DevType is not Chromium — it answers `attributeUnsupported` — and the settle poll then
+        // sleeps the main thread for the whole budget waiting for a tree that already exists and
+        // has no focused element in it. Field report: `manualAX:unsupported polls:10`, 332 ms, for
+        // a `noFocus` that was decided before the first poll. When we are frontmost the answer the
+        // explicit paths want comes from `SelectionMonitor`'s cache, not from our own UI: an
+        // own-process element only ever wins the gate as a last resort, and if our app had a
+        // focused one the first probe would already have returned it.
+        guard Self.mayRescueFocus(pid: pid) else {
+            return FocusProbeResult(
+                candidates: [],
+                summary: first.summary + " manualAX:ownProcess",
+                manualAccessibility: nil
+            )
+        }
+
         let state = ensureManualAccessibility(pid: pid)
         guard Self.shouldSettlePollAfterManualAccessibility(state) else {
             return FocusProbeResult(
@@ -400,6 +416,18 @@ public final class AXContextChecker {
         _ state: ManualAccessibilityState
     ) -> Bool {
         state != .invalidPID
+    }
+
+    /// Pure policy: is this pid a target the focus rescue (wake-up + settle poll) may run against?
+    ///
+    /// Our own process never is. The rescue exists to wake another app's accessibility tree and
+    /// wait for it; against ourselves it is a guaranteed `unsupported` round-trip followed by up to
+    /// `manualAccessibilitySettleSeconds` of main-thread sleep on a gesture the user is waiting on.
+    public static func mayRescueFocus(
+        pid: pid_t,
+        ownPID: pid_t = ProcessInfo.processInfo.processIdentifier
+    ) -> Bool {
+        pid > 0 && pid != ownPID
     }
 
     /// Pure: settle-poll deadline, never past the caller's overall read budget.

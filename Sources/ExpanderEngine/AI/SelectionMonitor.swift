@@ -278,6 +278,14 @@ public final class SelectionMonitor {
 
     private func reregisterForFrontmostApp() {
         precondition(Thread.isMainThread)
+
+        // Before `unregisterAXObserver()`: when *we* are frontmost there is nothing to observe and
+        // nothing to invalidate. Rebinding here would tear the observer off the app whose selection
+        // the cache describes and point it at our own panel — the state the app-switch observer
+        // already refuses to enter, reachable from the other direction by toggling the AI feature
+        // on in Preferences (DevType frontmost by definition) or by starting up while frontmost.
+        guard !Self.isOwnProcessFrontmost() else { return }
+
         unregisterAXObserver()
 
         guard isFeatureEnabled, AXContextChecker.shared.isProcessTrusted() else {
@@ -389,6 +397,25 @@ public final class SelectionMonitor {
             clearCache()
             return
         }
+
+        // §8.8: DevType coming forward — the palette, the AI action panel, an alert — is not evidence
+        // about the user's selection, and every check below would evaluate it as if it were: our
+        // bundle ID against the mute list and the typed-path allowlist, our panel's search field
+        // against the cached element. Each of those paths ends in `clearCache()`.
+        //
+        // That is how last-known-good was being destroyed at precisely the moment the explicit
+        // paths reach for it. The app the user just left fires `AXFocusedUIElementChanged` as it
+        // resigns focus, the notification lands here with *us* frontmost, and the selection the
+        // panel exists to transform is wiped microseconds before `SelectionReader` asks for it —
+        // reported as `outcome=noFocus app=com.devtype.app systemWide:noValue`, i.e. blamed on an
+        // app that had published the selection correctly all along.
+        //
+        // `installAppSwitchObserver` already encodes this rule for real activations; this is the
+        // same invariant on the notification path. Nothing is leaked by holding the entry: a real
+        // switch to another app still clears it, the TTL still retires it, and the typed path still
+        // consumes it single-use.
+        guard !Self.isOwnProcessFrontmost() else { return }
+
         let bundleID = AXContextChecker.shared.frontmostApplicationBundleIdentifier() ?? ""
         if !bundleID.isEmpty, AppMuteStore.shared.isMuted(bundleID) {
             clearCache()
@@ -399,6 +426,42 @@ public final class SelectionMonitor {
             return
         }
         refreshCacheFromFocus(bundleID: bundleID)
+    }
+
+    // MARK: - Own-process guard
+
+    /// Pure policy: may an AX refresh observed under these conditions touch last-known-good?
+    ///
+    /// Only when the evidence comes from another process. DevType owning focus says nothing about
+    /// whether the user still has text selected in the app behind our panel — and "says nothing"
+    /// must mean *leave the cache alone*, not "clear it", because the explicit AI paths reach for
+    /// the cache in exactly that state (`SelectionGate.evaluate`, precedence rule 3).
+    ///
+    /// Both inputs matter and neither implies the other: a hotkey palette that calls
+    /// `NSApp.activate` makes us frontmost, while a `.nonactivatingPanel` takes the focused element
+    /// without ever becoming frontmost.
+    public static func mayApplyRefresh(
+        frontmostIsOwnProcess: Bool,
+        focusedElementIsOwnProcess: Bool
+    ) -> Bool {
+        !frontmostIsOwnProcess && !focusedElementIsOwnProcess
+    }
+
+    static func isOwnProcessFrontmost() -> Bool {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier
+            == ProcessInfo.processInfo.processIdentifier
+    }
+
+    /// True when `element` is owned by DevType itself.
+    ///
+    /// An element whose pid cannot be read counts as *not* ours, which keeps invalidation working
+    /// for genuinely foreign elements; the cost of that choice is bounded by
+    /// `SelectionGate.cacheMatchesFrontmost`, which will not hand another app's cached text to a
+    /// third app anyway.
+    static func elementBelongsToOwnProcess(_ element: AXUIElement) -> Bool {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success else { return false }
+        return pid == ProcessInfo.processInfo.processIdentifier
     }
 
     /// Pure policy: may this refresh pay for the range / attributed / marker attributes?
@@ -453,6 +516,17 @@ public final class SelectionMonitor {
     /// - Focus moved to a **different** AX element → clear, then store only if the new
     ///   element has a non-empty selection.
     private func applySelectionRefresh(text: String?, bundleID: String, element: AXUIElement?) {
+        // §8.8: enforced at the mutation funnel rather than at each caller — nothing observed while
+        // DevType owns the focus — frontmost, or merely holding the focused element behind a
+        // `.nonactivatingPanel` like the inline search palette — may store *or* invalidate
+        // last-known-good. Our own search field is a different element than the cached one, so
+        // without this the refresh below reads as "focus moved" and clears the selection the
+        // palette was opened to transform.
+        guard Self.mayApplyRefresh(
+            frontmostIsOwnProcess: Self.isOwnProcessFrontmost(),
+            focusedElementIsOwnProcess: element.map(Self.elementBelongsToOwnProcess) ?? false
+        ) else { return }
+
         lock.lock()
         let previousElement = cacheElement
         lock.unlock()
