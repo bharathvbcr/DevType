@@ -500,3 +500,60 @@ final class SelectionCacheStressTests: XCTestCase {
         XCTAssertFalse(store.recentSelectionReads().isEmpty)
     }
 }
+
+/// The editor stage's preview clamp. Pure, so the rule that keeps a fixed-size panel fixed is
+/// testable without a window server.
+final class MacroPreviewClampTests: XCTestCase {
+
+    func testShortPreviewsAreReturnedUntouched() {
+        XCTAssertEqual(MacroPreview.clampedForStage("hello"), "hello")
+        XCTAssertEqual(MacroPreview.clampedForStage(""), "")
+        let exact = String(repeating: "a", count: MacroPreview.stagePreviewLimit)
+        XCTAssertEqual(
+            MacroPreview.clampedForStage(exact), exact,
+            "Exactly at the limit is not over it — an off-by-one here adds an ellipsis to text "
+                + "that fits."
+        )
+    }
+
+    func testLongPreviewsAreClampedWithAnEllipsis() {
+        let long = String(repeating: "b", count: MacroPreview.stagePreviewLimit + 40)
+        let clamped = MacroPreview.clampedForStage(long)
+        XCTAssertEqual(clamped.count, MacroPreview.stagePreviewLimit + 1)
+        XCTAssertTrue(clamped.hasSuffix("…"))
+    }
+
+    /// Counted in characters, not UTF-16 units: slicing a family emoji or a flag through the
+    /// middle produces replacement glyphs in the one place the user is watching their text.
+    ///
+    /// Asserted against `text.count` rather than the repeat count on purpose — a run of bare
+    /// combining marks coalesces into a *single* grapheme, so "170 copies" is not 170 characters
+    /// and such a string needs no clamping at all. Assuming otherwise was this test's own bug.
+    func testClampNeverSplitsAGrapheme() {
+        for unit in ["👩‍👩‍👧‍👦", "🇯🇵", "é", "が", "\u{0301}", "a\u{0301}"] {
+            let text = String(repeating: unit, count: MacroPreview.stagePreviewLimit + 10)
+            let clamped = MacroPreview.clampedForStage(text)
+
+            XCTAssertFalse(
+                clamped.unicodeScalars.contains("\u{FFFD}"),
+                "\(unit.debugDescription) was sliced through a cluster."
+            )
+            if text.count > MacroPreview.stagePreviewLimit {
+                XCTAssertEqual(clamped.count, MacroPreview.stagePreviewLimit + 1)
+                XCTAssertTrue(clamped.hasSuffix("…"))
+                XCTAssertEqual(
+                    String(clamped.dropLast()),
+                    String(text.prefix(MacroPreview.stagePreviewLimit)),
+                    "The kept portion must be a grapheme-wise prefix of the input."
+                )
+            } else {
+                XCTAssertEqual(clamped, text, "Nothing over the limit, nothing to clamp.")
+            }
+        }
+    }
+
+    func testZeroLimitIsHandledRatherThanTrapping() {
+        XCTAssertEqual(MacroPreview.clampedForStage("anything", limit: 0), "")
+        XCTAssertEqual(MacroPreview.clampedForStage("anything", limit: -5), "")
+    }
+}
