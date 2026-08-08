@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -45,7 +46,9 @@ public final class SecretStore {
 
     private let backing: SecretBackingStore
 
-    public init(backing: SecretBackingStore = KeychainSecretBackingStore()) {
+    /// §8.11: the live store is file-first with the keychain reduced to one master-key item.
+    /// Tests always inject a backing — the default touches the real keychain and filesystem.
+    public init(backing: SecretBackingStore = ConsolidatedSecretBackingStore()) {
         self.backing = backing
     }
 
@@ -105,6 +108,17 @@ public final class SecretStore {
     @discardableResult
     public func requestKeychainUnlock() -> Bool { backing.requestKeychainUnlock() }
 
+    /// §8.11: sweep keychain-resident secrets into the encrypted archive. Silent by
+    /// construction; the app calls it at launch, when v2 reads are known-good for the
+    /// running identity — exactly the moment to move them.
+    @discardableResult
+    public func consolidateSecrets() -> SecretConsolidationSummary {
+        backing.consolidateIntoFile()
+    }
+
+    /// One value-free line for the diagnostic report describing where secrets live.
+    public func storageDescription() -> String { backing.storageDescription() }
+
     @discardableResult
     public func remove(for id: UUID) -> Result<Void, Failure> {
         let status = backing.delete(account: Self.account(for: id))
@@ -120,9 +134,11 @@ public final class SecretStore {
     /// Returns the number of items removed.
     @discardableResult
     public func purgeOrphans(keeping liveIDs: Set<UUID>) -> Int {
-        let live = Set(liveIDs.map(Self.account(for:)))
+        // Through `orphanAccounts`, which owns the rule the loop here once skipped: an account
+        // that does not parse as a UUID is *not* ours to delete. Latent until §8.11 put the
+        // master key — the first non-UUID account — under the same service.
         var removed = 0
-        for account in backing.accounts() where !live.contains(account) {
+        for account in Self.orphanAccounts(stored: backing.accounts(), liveIDs: liveIDs) {
             if backing.delete(account: account) == errSecSuccess { removed += 1 }
         }
         return removed
@@ -164,6 +180,11 @@ public protocol SecretBackingStore: AnyObject {
     func keychainLocked() -> Bool
     /// Ask the system to unlock — may show the system unlock dialog, so callers explain first.
     func requestKeychainUnlock() -> Bool
+    /// §8.11: move keychain-resident secrets into the encrypted archive. Silent; safe to call
+    /// every launch (no-op once everything is consolidated).
+    func consolidateIntoFile() -> SecretConsolidationSummary
+    /// One value-free line for the diagnostic report describing where secrets live.
+    func storageDescription() -> String
 }
 
 extension SecretBackingStore {
@@ -175,6 +196,23 @@ extension SecretBackingStore {
     /// An in-memory store has no lock to be behind.
     public func keychainLocked() -> Bool { false }
     public func requestKeychainUnlock() -> Bool { true }
+    /// Nothing to consolidate in a store without a keychain tier.
+    public func consolidateIntoFile() -> SecretConsolidationSummary { SecretConsolidationSummary() }
+    public func storageDescription() -> String { "in-memory" }
+}
+
+/// What one consolidation pass achieved. `remaining` counts keychain-resident secrets that
+/// could not be moved yet (unreadable silently, or no master key while the keychain is locked).
+public struct SecretConsolidationSummary: Equatable {
+    public var moved: Int
+    public var remaining: Int
+    public var failed: Int
+
+    public init(moved: Int = 0, remaining: Int = 0, failed: Int = 0) {
+        self.moved = moved
+        self.remaining = remaining
+        self.failed = failed
+    }
 }
 
 // MARK: - Partition policy (§8.10)
@@ -731,6 +769,386 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
             }
             return found
         }
+    }
+}
+
+// MARK: - Encrypted archive (§8.11)
+
+/// The sealing/opening codec for the secrets archive, split from all I/O so every byte-level
+/// property is testable without a file or a keychain.
+///
+/// Why an archive at all: with one keychain item *per secret*, every secret carries its own
+/// ACL and partition destiny — and securityd's file-keychain behaviour proved erratic enough
+/// (§8.10: a heal that landed on one item and skipped its twin) that "should never prompt" was
+/// not "cannot". With the values AES-GCM-sealed in a file DevType owns and only a single
+/// random master key in the keychain, the entire dialog surface is one item, and reads after
+/// the first per launch touch no keychain at all.
+public enum EncryptedSecretArchive {
+    public static let version = 1
+
+    struct Payload: Codable {
+        let version: Int
+        let entries: [String: String]
+    }
+
+    /// Seal one value. Nonce is fresh-random per call (CryptoKit), so equal plaintexts yield
+    /// different blobs; `combined` carries nonce + ciphertext + tag in one base64 string.
+    public static func seal(_ value: String, key: SymmetricKey) -> String? {
+        guard let box = try? AES.GCM.seal(Data(value.utf8), using: key),
+              let combined = box.combined else { return nil }
+        return combined.base64EncodedString()
+    }
+
+    /// Open one blob. Any tamper — flipped bit, truncation, wrong key — fails the GCM tag and
+    /// returns nil rather than plausible garbage.
+    public static func open(_ blob: String, key: SymmetricKey) -> String? {
+        guard let data = Data(base64Encoded: blob),
+              let box = try? AES.GCM.SealedBox(combined: data),
+              let plain = try? AES.GCM.open(box, using: key) else { return nil }
+        return String(data: plain, encoding: .utf8)
+    }
+
+    /// Deterministic encoding (sorted keys) so an unchanged archive is byte-identical.
+    public static func encode(_ entries: [String: String]) -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try? encoder.encode(Payload(version: version, entries: entries))
+    }
+
+    /// nil for anything this build cannot vouch for — malformed bytes *or a future version*.
+    /// The caller preserves what it cannot read; overwriting an archive some newer build wrote
+    /// would destroy secrets this build merely fails to understand.
+    public static func decode(_ data: Data) -> [String: String]? {
+        guard let payload = try? JSONDecoder().decode(Payload.self, from: data),
+              payload.version == version else { return nil }
+        return payload.entries
+    }
+}
+
+/// §8.11: file-first secret storage with the keychain reduced to one master-key item.
+///
+/// Layout: `secrets.enc` in Application Support holds the sealed values; the 256-bit master
+/// key is a keychain item under the proven v2 service with the non-UUID account below — which
+/// `SecretStore.orphanAccounts` already refuses to purge, `snippetIDsPendingMigration` cannot
+/// mistake for a snippet, and the §8.10 silent/heal machinery keeps readable across rebuilds.
+/// Trust anchor is unchanged: the file is useless without the key, and the key is ACL'd to
+/// this app exactly as every secret item was. What changes is arithmetic: one keychain object
+/// instead of N, at most one silent read per launch instead of one per copy.
+///
+/// The keychain tier stays underneath as fallback and migration source. An item leaves the
+/// keychain only after its file copy has been decrypt-verified; a save that cannot reach the
+/// master key (locked keychain) falls back to a keychain item, never fails harder than §8.10.
+public final class ConsolidatedSecretBackingStore: SecretBackingStore {
+    public static let masterKeyAccount = "com.devtype.masterkey"
+    public static let archiveFileName = "secrets.enc"
+
+    private let lock = UnfairLock()
+    private let tier: SecretBackingStore
+    private let diagnostics: SecretAccessDiagnostics
+    private let fileURL: URL
+    /// Instance-scoped so probes and witnesses can use their own account: a foreign-owned husk
+    /// squatting on the real account would trap the app in read-back-refusal fallback forever.
+    private let masterAccount: String
+    private var cachedKey: SymmetricKey?
+
+    public init(
+        fileURL: URL? = nil,
+        tier: SecretBackingStore? = nil,
+        diagnostics: SecretAccessDiagnostics = .shared,
+        masterKeyAccount: String = ConsolidatedSecretBackingStore.masterKeyAccount
+    ) {
+        self.fileURL = fileURL
+            ?? SnippetStore.defaultLocalSupportDirectory
+                .appendingPathComponent(Self.archiveFileName)
+        self.tier = tier ?? KeychainSecretBackingStore(diagnostics: diagnostics)
+        self.diagnostics = diagnostics
+        self.masterAccount = masterKeyAccount
+    }
+
+    // MARK: File I/O (always under `lock`)
+
+    private enum Archive {
+        case missing
+        case entries([String: String])
+        /// Bytes exist that this build cannot vouch for. Never overwritten in place.
+        case unreadable
+    }
+
+    private func loadArchive() -> Archive {
+        guard let data = try? Data(contentsOf: fileURL) else { return .missing }
+        guard let entries = EncryptedSecretArchive.decode(data) else { return .unreadable }
+        return .entries(entries)
+    }
+
+    /// Atomic write (temp + rename via `.atomic`), owner-only permissions.
+    private func saveArchive(_ entries: [String: String]) -> Bool {
+        guard let data = EncryptedSecretArchive.encode(entries) else { return false }
+        let directory = fileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            try data.write(to: fileURL, options: [.atomic])
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: fileURL.path
+            )
+            return true
+        } catch {
+            diagnostics.note("archive save failed")
+            return false
+        }
+    }
+
+    /// An unreadable archive is moved aside, never deleted: those bytes may be secrets sealed
+    /// by a newer build, and forensics beat tidiness. Returns true when the path is clear.
+    private func quarantineUnreadableArchive() -> Bool {
+        let aside = fileURL.appendingPathExtension("unreadable")
+        try? FileManager.default.removeItem(at: aside)
+        do {
+            try FileManager.default.moveItem(at: fileURL, to: aside)
+            diagnostics.note("archive quarantined as unreadable")
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    // MARK: Master key (always under `lock`)
+
+    private func masterKey(createIfNeeded: Bool) -> SymmetricKey? {
+        if let cachedKey { return cachedKey }
+        if let stored = tier.value(account: masterAccount) {
+            guard let raw = Data(base64Encoded: stored), raw.count == 32 else {
+                diagnostics.note("master key malformed")
+                return nil
+            }
+            let key = SymmetricKey(data: raw)
+            cachedKey = key
+            return key
+        }
+        guard createIfNeeded else { return nil }
+        let key = SymmetricKey(size: .bits256)
+        let encoded = key.withUnsafeBytes { Data($0) }.base64EncodedString()
+        let status = tier.set(encoded, account: masterAccount)
+        diagnostics.note("master key created", status)
+        guard status == errSecSuccess else { return nil }
+
+        // Read-back verification, and it is load-bearing: a keychain write can succeed against
+        // an item this identity cannot read (the encrypt ACL entry is open; decrypt is not).
+        // Trusting an unverified key would seal archives that die with this process — every
+        // launch minting a new key, every restart losing every secret. No read-back, no key:
+        // the store stays on per-item keychain fallback, which loses nothing.
+        guard tier.value(account: masterAccount) == encoded else {
+            diagnostics.note("master key read-back failed — staying on keychain fallback")
+            return nil
+        }
+        cachedKey = key
+        return key
+    }
+
+    // MARK: SecretBackingStore
+
+    public func set(_ value: String, account: String) -> OSStatus {
+        lock.lock(); defer { lock.unlock() }
+
+        var entries: [String: String]
+        switch loadArchive() {
+        case .entries(let existing): entries = existing
+        case .missing: entries = [:]
+        case .unreadable:
+            guard quarantineUnreadableArchive() else { return tier.set(value, account: account) }
+            entries = [:]
+        }
+
+        // Seal, verify the seal opens, persist — and only then drop any keychain copy. Any
+        // failure on this path falls back to a keychain item: storage may regress a tier for
+        // one value, but a save never fails harder than §8.10 did.
+        guard let key = masterKey(createIfNeeded: true),
+              let blob = EncryptedSecretArchive.seal(value, key: key),
+              EncryptedSecretArchive.open(blob, key: key) == value else {
+            return tierFallbackSet(value, account: account, entries: entries)
+        }
+        entries[account] = blob
+        guard saveArchive(entries) else {
+            return tierFallbackSet(value, account: account, entries: entries)
+        }
+        diagnostics.note("sealed into archive", account: account)
+        _ = tier.delete(account: account)
+        return errSecSuccess
+    }
+
+    /// The fallback save, with the staleness hole the fuzz found closed: a stale sealed copy
+    /// left in the archive would shadow the newer tier value on every read — the user's edited
+    /// secret silently reverting. Tier write first (the new value must be durable before
+    /// anything is evicted), then best-effort eviction of the stale entry.
+    private func tierFallbackSet(
+        _ value: String, account: String, entries: [String: String]
+    ) -> OSStatus {
+        let status = tier.set(value, account: account)
+        if status == errSecSuccess, entries[account] != nil {
+            var pruned = entries
+            pruned.removeValue(forKey: account)
+            if !saveArchive(pruned) {
+                diagnostics.note("stale archive entry could not be evicted", account: account)
+            }
+        }
+        return status
+    }
+
+    public func value(account: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+
+        if case .entries(let entries) = loadArchive(), let blob = entries[account] {
+            guard let key = masterKey(createIfNeeded: false) else {
+                // Sealed value present but no key: locked keychain (recoverable via the unlock
+                // flow) or a deleted master key (not). The trail + report tell them apart.
+                diagnostics.note("sealed value but master key unavailable", account: account)
+                diagnostics.record(.failed(errSecInteractionNotAllowed))
+                return nil
+            }
+            guard let value = EncryptedSecretArchive.open(blob, key: key) else {
+                diagnostics.note("archive decrypt failed", account: account)
+                diagnostics.record(.failed(errSecDecode))
+                return nil
+            }
+            diagnostics.record(.ok)
+            return value
+        }
+
+        // Not in the archive: the keychain tier (with all its §8.10 healing) is the source —
+        // and a successful read is immediately consolidated so the next one never comes here.
+        guard let value = tier.value(account: account) else { return nil }
+        consolidateLocked(account: account, value: value)
+        return value
+    }
+
+    public func contains(account: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if case .entries(let entries) = loadArchive(), entries[account] != nil { return true }
+        return tier.contains(account: account)
+    }
+
+    public func delete(account: String) -> OSStatus {
+        lock.lock(); defer { lock.unlock() }
+        var removedFromArchive = false
+        if case .entries(var entries) = loadArchive(), entries[account] != nil {
+            entries.removeValue(forKey: account)
+            removedFromArchive = saveArchive(entries)
+        }
+        let tierStatus = tier.delete(account: account)
+        if removedFromArchive || tierStatus == errSecSuccess { return errSecSuccess }
+        return tierStatus
+    }
+
+    public func accounts() -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        var found = Set(tier.accounts())
+        // The master key is infrastructure, not a secret anyone stored.
+        found.remove(masterAccount)
+        if case .entries(let entries) = loadArchive() {
+            found.formUnion(entries.keys)
+        }
+        return found
+    }
+
+    // MARK: Consolidation
+
+    /// Move one just-read value into the archive; the tier copy is dropped only after the
+    /// saved blob is verified to open. Best-effort: failure leaves the tier copy untouched.
+    private func consolidateLocked(account: String, value: String) {
+        var entries: [String: String]
+        switch loadArchive() {
+        case .entries(let existing): entries = existing
+        case .missing: entries = [:]
+        case .unreadable:
+            guard quarantineUnreadableArchive() else { return }
+            entries = [:]
+        }
+        guard let key = masterKey(createIfNeeded: true),
+              let blob = EncryptedSecretArchive.seal(value, key: key),
+              EncryptedSecretArchive.open(blob, key: key) == value else { return }
+        entries[account] = blob
+        guard saveArchive(entries) else { return }
+        diagnostics.note("consolidated into archive", account: account)
+        _ = tier.delete(account: account)
+    }
+
+    public func consolidateIntoFile() -> SecretConsolidationSummary {
+        lock.lock(); defer { lock.unlock() }
+        var summary = SecretConsolidationSummary()
+
+        for account in tier.accounts().sorted() where account != masterAccount {
+            // Snippet secrets only: anything else under the service is not ours to move.
+            guard SecretStore.snippetID(forAccount: account) != nil else { continue }
+            guard let value = tier.value(account: account) else {
+                summary.remaining += 1
+                continue
+            }
+            let before = countLocked()
+            consolidateLocked(account: account, value: value)
+            if countLocked() > before || archiveHasLocked(account: account) {
+                summary.moved += 1
+            } else {
+                summary.failed += 1
+            }
+        }
+        if summary != SecretConsolidationSummary() {
+            diagnostics.note(
+                "consolidation: \(summary.moved) moved, \(summary.remaining) remaining, \(summary.failed) failed"
+            )
+        }
+        // Warm the master key into the in-process cache while the keychain is likely unlocked
+        // (launch = login). The user's keychain auto-locks — measured mid-session — and with
+        // the key cached, copies keep decrypting the archive straight through a locked
+        // keychain instead of surfacing the unlock flow.
+        if masterKey(createIfNeeded: false) != nil {
+            diagnostics.note("master key warmed")
+        }
+        return summary
+    }
+
+    private func countLocked() -> Int {
+        if case .entries(let entries) = loadArchive() { return entries.count }
+        return 0
+    }
+
+    private func archiveHasLocked(account: String) -> Bool {
+        if case .entries(let entries) = loadArchive() { return entries[account] != nil }
+        return false
+    }
+
+    // MARK: Pass-through to the keychain tier
+
+    public func legacyAccountsPendingMigration() -> [String] {
+        tier.legacyAccountsPendingMigration()
+    }
+
+    public func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary {
+        let summary = tier.migrateLegacy(allowInteraction: allowInteraction)
+        // Freshly migrated values are v2 keychain items; sweep them straight into the archive
+        // so the migration flow ends with everything in its final home.
+        _ = consolidateIntoFile()
+        return summary
+    }
+
+    public func keychainLocked() -> Bool { tier.keychainLocked() }
+    public func requestKeychainUnlock() -> Bool { tier.requestKeychainUnlock() }
+
+    public func storageDescription() -> String {
+        lock.lock(); defer { lock.unlock() }
+        let sealed = countLocked()
+        let keychainResident = tier.accounts().filter {
+            $0 != masterAccount && SecretStore.snippetID(forAccount: $0) != nil
+        }.count
+        let keyState: String
+        if cachedKey != nil || tier.value(account: masterAccount) != nil {
+            keyState = "present"
+        } else if tier.contains(account: masterAccount) {
+            // The item exists but this identity cannot read it — the write-only ACL shape the
+            // read-back guard protects against. Fallback mode; nothing is lost.
+            keyState = "present but UNREADABLE — keychain fallback in use"
+        } else {
+            keyState = sealed > 0 ? "MISSING with sealed secrets" : "not yet created"
+        }
+        return "archive: \(sealed) sealed, keychain-resident: \(keychainResident), master key: \(keyState)"
     }
 }
 

@@ -59,6 +59,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // into the coalesced sidecar the stats pane reads from.
         SnippetStore.shared.migrateLegacyUsageCounts()
 
+        // §8.11: sweep keychain-resident secrets into the encrypted archive. Launch is the
+        // moment v2 items are silently readable by the running identity, so this never shows
+        // a dialog — after it, copies read the archive and touch no keychain at all.
+        // Off the main thread because securityd can *stall* (not just fail) on items with a
+        // mismatched identity — measured with a probe; launch must be unwedgeable.
+        DispatchQueue.global(qos: .utility).async {
+            SecretStore.shared.consolidateSecrets()
+        }
+
         let identity = ProcessIdentity.shared
         DevTypeLog.app.info(
             "[App] launch bundleID=\(identity.bundleIdentifier, privacy: .public) packaged=\(identity.isPackaged, privacy: .public) path=\(identity.bundlePath, privacy: .public)"

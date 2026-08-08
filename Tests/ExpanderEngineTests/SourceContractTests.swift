@@ -385,6 +385,34 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(offer.upperBound < unlockCall.lowerBound)
     }
 
+    /// §8.11: a keychain copy may be dropped only after the sealed copy is saved and verified —
+    /// in both consolidation and the ordinary save. Reordering either is how secrets get lost.
+    func testTierCopyIsDroppedOnlyAfterTheArchiveIsVerified() throws {
+        let store = try source("Sources/ExpanderEngine/Models/SecretStore.swift")
+        for function in ["public func set(_ value: String, account:", "private func consolidateLocked("] {
+            guard let start = store.range(of: function) else {
+                return XCTFail("SecretStore no longer has the shape this contract describes.")
+            }
+            let body = store[start.upperBound...]
+            guard let save = body.range(of: "saveArchive(entries)"),
+                  let drop = body.range(of: "tier.delete(account:") else {
+                return XCTFail("\(function) no longer has the shape this contract describes.")
+            }
+            XCTAssertTrue(
+                save.lowerBound < drop.lowerBound,
+                "\(function): the keychain copy must outlive anything not yet safely sealed."
+            )
+        }
+
+        // And the master key is never trusted without the read-back that proves this identity
+        // can decrypt with it tomorrow.
+        guard let create = store.range(of: "diagnostics.note(\"master key created\""),
+              let readBack = store.range(of: "master key read-back failed") else {
+            return XCTFail("masterKey(createIfNeeded:) no longer has the shape this contract describes.")
+        }
+        XCTAssertTrue(create.lowerBound < readBack.lowerBound)
+    }
+
     /// Secrets are filtered at the engine's own setter, not at its callers, so no future caller
     /// can put one back on the typed path.
     func testTypedPathFilterLivesInTheEngineSetter() throws {

@@ -212,7 +212,8 @@ public enum DiagnosticReport {
             aiLines: captureAILines(),
             secretLines: captureSecretLines(
                 pendingMigrationCount: { SecretStore.shared.snippetIDsPendingMigration().count },
-                keychainLocked: { SecretStore.shared.isKeychainLocked() }
+                keychainLocked: { SecretStore.shared.isKeychainLocked() },
+                storageDescription: { SecretStore.shared.storageDescription() }
             ),
             prefixDebounceSummary: EventTapEngine.shared.prefixDebounceDiagnostics()
         )
@@ -234,7 +235,8 @@ public enum DiagnosticReport {
         defaults: UserDefaults = .standard,
         accessDiagnostics: SecretAccessDiagnostics = .shared,
         pendingMigrationCount: (() -> Int)? = nil,
-        keychainLocked: (() -> Bool)? = nil
+        keychainLocked: (() -> Bool)? = nil,
+        storageDescription: (() -> String)? = nil
     ) -> [String] {
         let all = snippets ?? SnippetStore.shared.loadSnippets()
         let resolved = availability ?? BiometricGate.shared.availability()
@@ -263,6 +265,8 @@ public enum DiagnosticReport {
             // A locked keychain fails every decrypt while metadata still answers — without
             // this line those reports read exactly like "the secret vanished".
             "Keychain: \((keychainLocked ?? { false })() ? "LOCKED" : "unlocked")",
+            // §8.11: where the values actually live, and whether the master key is intact.
+            "Storage: \((storageDescription ?? { "in-memory" })())",
         ]
         // The step trail: every fetch/heal/migrate with its OSStatus, accounts aliased to
         // "item A/B/…" — the exact sequence that produced whatever the user just saw.
