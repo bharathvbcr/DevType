@@ -220,9 +220,16 @@ private final class SnippetRowView: NSView {
         enableSwitch.state = snippet.enabled ? .on : .off
         titleLabel.stringValue = snippet.displayTitle
         titleLabel.textColor = snippet.enabled ? DevTypeTheme.textPrimary : DevTypeTheme.textTertiary
-        let preview = snippet.isImageSnippet
-            ? "🖼 \(snippet.imagePath)"
-            : snippet.replacementText.replacingOccurrences(of: "\n", with: " ↵ ")
+        // A secret has no `replacementText` to show — by construction, not by redaction here.
+        // The mask is so the row does not read as an empty snippet the user should go fix.
+        let preview: String
+        if snippet.isImageSnippet {
+            preview = "🖼 \(snippet.imagePath)"
+        } else if snippet.isSecret {
+            preview = "🔑 \(snippet.maskedReplacement)"
+        } else {
+            preview = snippet.replacementText.replacingOccurrences(of: "\n", with: " ↵ ")
+        }
         previewLabel.stringValue = preview
         previewLabel.textColor = snippet.enabled ? DevTypeTheme.textSecondary : DevTypeTheme.textTertiary
         // Recycled cells inherit whatever the pointer is doing to *this* row now,
@@ -232,7 +239,9 @@ private final class SnippetRowView: NSView {
         // A replacement long enough to truncate is the common case for address,
         // degree, and paragraph snippets — surface the whole thing on hover
         // instead of making the user open the editor to read it.
-        toolTip = snippet.isImageSnippet ? snippet.imagePath : snippet.replacementText
+        toolTip = snippet.isImageSnippet
+            ? snippet.imagePath
+            : (snippet.isSecret ? snippet.maskedReplacement : snippet.replacementText)
 
         // An empty trigger used to render as "·", which the pill drew as a lone
         // dot in a circle and read as a rendering glitch. An em dash in the muted
@@ -1111,9 +1120,16 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         guard selectedRow >= 0 && selectedRow < snippets.count else { return }
         let snippet = snippets[selectedRow]
 
+        // A secret's deletion is not undoable in the way the rest of this manager is: the
+        // keychain purge follows the save, and the value is not in the undo snapshot to restore
+        // (that is the point of the feature). Say so before it happens rather than after.
+        let message = snippet.isSecret
+            ? loc.s("manager.delete.confirm.secret", snippet.displayTitle)
+            : loc.s("manager.delete.confirm.message", snippet.displayTitle)
+
         DevTypeAlert.confirm(
             title: loc.s("manager.delete.confirm.title"),
-            message: loc.s("manager.delete.confirm.message", snippet.displayTitle),
+            message: message,
             confirmTitle: loc.s("manager.delete"),
             destructive: true,
             window: view.window
@@ -1136,6 +1152,9 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         guard row >= 0, row < snippets.count else { return }
         let source = snippets[row]
         guard let (gi, _) = groupIndex(for: source.id) else { return }
+        // A duplicate gets a new UUID, so it cannot inherit the original's keychain entry — and
+        // copying the value across would be a second, unasked-for place the secret lives. The
+        // copy is deliberately a plain, empty snippet the user can fill in.
         let copy = SnippetModel(
             title: source.title,
             label: source.label.isEmpty ? "" : source.label + " copy",

@@ -568,6 +568,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private var caseChip: ToggleChip!
     private var boundaryChip: ToggleChip!
     private var plainChip: ToggleChip!
+    private var secretChip: ToggleChip!
+    /// Secure entry shown in place of the replacement text view while `secretChip` is on.
+    private let secretField = NSSecureTextField()
     private let errorLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11, .medium), color: DevTypeTheme.accentBright, wrapping: true)
     private let charCountLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10, .medium), color: DevTypeTheme.textTertiary)
     private var editorContainer: NSView!
@@ -783,12 +786,35 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             help: loc.s("editor.plainText.help"),
             target: self, action: #selector(chipTapped(_:))
         )
-        let chipsRow = NSStackView(views: [enabledChip, caseChip, boundaryChip, plainChip])
+        secretChip = ToggleChip(
+            title: loc.s("editor.secret.toggle"), symbol: "key.fill",
+            isOn: seed?.isSecret ?? false,
+            help: loc.s("editor.secret.help"),
+            target: self, action: #selector(chipTapped(_:))
+        )
+        // Editing an existing secret shows an empty field with a "stored" placeholder: the value
+        // is in the keychain and is deliberately never fetched to populate this view. Leaving the
+        // field untouched keeps what is stored; typing replaces it.
+        secretField.placeholderString = loc.s(
+            (seed?.isSecret ?? false) ? "editor.secret.unchanged" : "editor.secret.placeholder"
+        )
+        secretField.translatesAutoresizingMaskIntoConstraints = false
+        secretField.font = DevTypeTheme.font(13, .regular)
+        secretField.isHidden = !(seed?.isSecret ?? false)
+
+        let chipsRow = NSStackView(views: [enabledChip, caseChip, boundaryChip, plainChip, secretChip])
         chipsRow.orientation = .horizontal
         chipsRow.alignment = .centerY
         chipsRow.spacing = 8
         chipsRow.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(chipsRow)
+        root.addSubview(secretField)
+        NSLayoutConstraint.activate([
+            secretField.leadingAnchor.constraint(equalTo: chipsRow.leadingAnchor),
+            secretField.trailingAnchor.constraint(equalTo: chipsRow.trailingAnchor),
+            secretField.topAnchor.constraint(equalTo: chipsRow.bottomAnchor, constant: 8),
+            secretField.heightAnchor.constraint(equalToConstant: 24),
+        ])
 
         // Inline error
         errorLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1002,7 +1028,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         enabledChip.nextKeyView = caseChip
         caseChip.nextKeyView = boundaryChip
         boundaryChip.nextKeyView = plainChip
-        plainChip.nextKeyView = cancelButton
+        plainChip.nextKeyView = secretChip
+        secretChip.nextKeyView = cancelButton
         cancelButton.nextKeyView = saveButton
         saveButton.nextKeyView = titleField
 
@@ -1014,6 +1041,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     }
 
     override func viewDidLoad() {
+        defer { applySecretVisibility() }
         super.viewDidLoad()
         triggerDidChange()
     }
@@ -1657,6 +1685,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         // Case sensitivity changes what counts as a conflict, and Word Boundary
         // changes the firing rule the guide explains — both re-run live.
         if sender === caseChip || sender === boundaryChip { triggerDidChange() }
+        if sender === secretChip { applySecretVisibility() }
     }
 
     func focusInitialField() {
@@ -1668,6 +1697,23 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     }
 
     @objc private func cancelTapped() { onFinish(nil, nil) }
+
+    /// A secret's value is typed into a secure field, never into the plain text view.
+    ///
+    /// The text view is left in place but emptied and disabled: a value already typed there
+    /// before the toggle was flipped must not survive into the library, and the visible
+    /// transition is what tells the user where the value is now going.
+    private func applySecretVisibility() {
+        let secret = secretChip?.isOn ?? false
+        secretField.isHidden = !secret
+        replacementView.isEditable = !secret
+        replacementView.alphaValue = secret ? 0.35 : 1.0
+        if secret {
+            replacementView.string = ""
+            view.window?.makeFirstResponder(secretField)
+        }
+        refreshPreview()
+    }
 
     @objc private func saveTapped() {
         let trigger = triggerField.stringValue.trimmingCharacters(in: .whitespaces)
@@ -1728,8 +1774,61 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         snippet.isPlainText = plainChip.isOn
         snippet.enabled = enabledChip.isOn
         snippet.aiTransform = selectedAITransform
+
+        if !applySecret(to: &snippet) { return }
+
         snippet.updatedAt = Date()
         onFinish(snippet, selectedGroupID)
+    }
+
+    /// Route the value to the keychain (or back out of it), returning false to abort the save.
+    ///
+    /// Ordering matters and is the whole point: the keychain write happens *before* the snippet is
+    /// handed on, so a refused write (locked keychain, denied prompt) stops the save instead of
+    /// producing a snippet that claims to hold a secret it never stored. The reverse direction —
+    /// un-ticking Secret — deletes the stored value rather than orphaning it.
+    private func applySecret(to snippet: inout SnippetModel) -> Bool {
+        let wantsSecret = secretChip?.isOn ?? false
+        let typed = secretField.stringValue
+
+        guard wantsSecret else {
+            if existing?.isSecret == true { SecretStore.shared.remove(for: snippet.id) }
+            snippet.isSecret = false
+            return true
+        }
+
+        snippet.isSecret = true
+        // The value never round-trips through the model, so a secret snippet's
+        // `replacementText` is empty from here on — including in the copy handed to listeners.
+        snippet.replacementText = ""
+
+        if typed.isEmpty {
+            // Untouched field on an existing secret: keep what is stored. On a *new* secret it
+            // means there is nothing to store, which is a snippet that would paste nothing.
+            if existing?.isSecret == true, SecretStore.shared.hasSecret(for: snippet.id) {
+                return true
+            }
+            showError(loc.s("editor.secret.placeholder"))
+            view.window?.makeFirstResponder(secretField)
+            return false
+        }
+
+        switch SecretStore.shared.store(typed, for: snippet.id) {
+        case .success:
+            // Clear the field so the value does not sit in a live NSSecureTextField after save.
+            secretField.stringValue = ""
+            return true
+        case .failure(let failure):
+            let detail = failure.status.map(String.init) ?? "—"
+            DevTypeAlert.present(
+                title: loc.s("secret.saveFailed.title"),
+                message: loc.s("secret.saveFailed.message", detail),
+                style: .warning,
+                buttons: [loc.s("common.ok")],
+                handler: nil
+            )
+            return false
+        }
     }
 
     private func showError(_ message: String) {

@@ -33,6 +33,24 @@ enum InlineSearchPanel {
     // So the fix is not to avoid the callout but to survive it: see the
     // `DTMakeKeyAndOrderFrontCatchingException` call in `open`.
 
+    /// What committing a row does.
+    ///
+    /// `copy` exists because the palette's *shortcut* cannot fire inside a password field —
+    /// Secure Input withholds the keystroke from hotkey registration — so this mode is reached
+    /// from the menu bar with the mouse, and the picked value goes to the clipboard for the
+    /// user's own ⌘V rather than being injected.
+    enum Mode {
+        case insert
+        case copy
+
+        var placeholderKey: String {
+            switch self {
+            case .insert: return "search.placeholder"
+            case .copy: return "menu.copySnippet"
+            }
+        }
+    }
+
     /// Result of committing a palette row.
     enum Pick {
         case snippet(SnippetModel)
@@ -50,9 +68,10 @@ enum InlineSearchPanel {
     static func toggle(
         store: SnippetStore = .shared,
         loc: LocalizationManager = .shared,
+        mode: Mode = .insert,
         onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Outcome) -> Void
     ) {
-        if isOpen { close() } else { open(store: store, loc: loc, onPick: onPick) }
+        if isOpen { close() } else { open(store: store, loc: loc, mode: mode, onPick: onPick) }
     }
 
     static func close() {
@@ -66,6 +85,7 @@ enum InlineSearchPanel {
     private static func open(
         store: SnippetStore,
         loc: LocalizationManager,
+        mode: Mode = .insert,
         onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Outcome) -> Void
     ) {
         let sourceApp = NSWorkspace.shared.frontmostApplication
@@ -91,6 +111,7 @@ enum InlineSearchPanel {
         let controller = InlineSearchController(
             store: store,
             loc: loc,
+            mode: mode,
             onPick: { pick in
                 close()
                 onPick(pick, sourceApp, sourceSelection)
@@ -346,6 +367,9 @@ private final class SearchHitCellView: NSView {
         if hit.snippet.isImageSnippet {
             previewText = "🖼 \(hit.snippet.imagePath)"
             previewLabel.stringValue = previewText
+        } else if hit.snippet.isSecret {
+            previewText = "🔑 \(hit.snippet.maskedReplacement)"
+            previewLabel.stringValue = previewText
         } else {
             previewText = MacroPreview.render(hit.snippet.replacementText)
                 .replacingOccurrences(of: "\n", with: " ")
@@ -449,6 +473,7 @@ private final class SearchHitCellView: NSView {
 private final class InlineSearchController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private let store: SnippetStore
     private let loc: LocalizationManager
+    private let mode: InlineSearchPanel.Mode
     private let onPick: (InlineSearchPanel.Pick) -> Void
     private let onCancel: () -> Void
 
@@ -473,11 +498,13 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     init(
         store: SnippetStore,
         loc: LocalizationManager,
+        mode: InlineSearchPanel.Mode = .insert,
         onPick: @escaping (InlineSearchPanel.Pick) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.store = store
         self.loc = loc
+        self.mode = mode
         self.onPick = onPick
         self.onCancel = onCancel
         super.init(nibName: nil, bundle: nil)
@@ -506,7 +533,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         magnifier.imageScaling = .scaleProportionallyUpOrDown
 
         searchField.placeholderAttributedString = NSAttributedString(
-            string: loc.s("search.placeholder"),
+            string: loc.s(mode.placeholderKey),
             attributes: [
                 .foregroundColor: DevTypeTheme.textTertiary,
                 .font: DevTypeTheme.font(20, .light)

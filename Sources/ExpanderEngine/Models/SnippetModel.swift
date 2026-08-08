@@ -28,8 +28,30 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
     /// On-device AI transform kind id (empty = plain snippet). Backward-compatible via `decodeIfPresent`.
     public var aiTransform: String
 
+    /// The replacement text lives in the keychain (`SecretStore`), not in this struct.
+    ///
+    /// `replacementText` is empty for a secret both on disk and in memory: it is fetched at the
+    /// moment of use and dropped. That is what keeps a password out of the library JSON, out of
+    /// every export, out of the editor's text view, and out of the diagnostic report — none of
+    /// which had to learn a new rule, because there is nothing there to leak.
+    public var isSecret: Bool
+
     /// True when this snippet pastes an image instead of text.
     public var isImageSnippet: Bool { !imagePath.isEmpty }
+
+    /// May this snippet expand from a *typed* trigger?
+    ///
+    /// Never, for a secret. Two independent reasons, either sufficient:
+    ///
+    /// 1. It cannot work where it is wanted. macOS Secure Event Input withholds keystrokes from
+    ///    every event tap while a password field has focus (TN2150), so the trigger is never seen.
+    /// 2. It is dangerous everywhere else. A trigger that fires on typing fires in the chat window
+    ///    and the shared document too — the one place a password must never appear is wherever the
+    ///    user did not deliberately ask for it. An explicit gesture (menu, palette) cannot misfire.
+    public var isTypedTriggerExpandable: Bool { !isSecret }
+
+    /// What the UI may show in place of the value. Never the value itself.
+    public var maskedReplacement: String { String(repeating: "•", count: 12) }
 
     /// §4.4: App-scope test for the matcher / injection layers.
     /// `nil` or empty `bundleID` means "unknown frontmost app" — such a context only
@@ -60,7 +82,8 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         tags: [String] = [],
         includeApps: [String] = [],
         excludeApps: [String] = [],
-        aiTransform: String = ""
+        aiTransform: String = "",
+        isSecret: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -79,6 +102,11 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         self.includeApps = includeApps
         self.excludeApps = excludeApps
         self.aiTransform = aiTransform
+        self.isSecret = isSecret
+        // A secret's value never lives in the struct, not even transiently: an initialiser that
+        // accepted one would put it in every copy, every listener callback, and every `Recent`
+        // entry. Callers hand the value to `SecretStore` and the trigger to this.
+        if isSecret { self.replacementText = "" }
     }
 
     /// Display title for lists: label if present, else title, else trigger.
@@ -96,6 +124,36 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         case tags, includeApps, excludeApps
         // On-device AI — absent in every pre-existing library file.
         case aiTransform
+        // Keychain-backed secrets — absent in every library written before them.
+        case isSecret
+    }
+
+    /// Encoding is where the guarantee is enforced, not at the call sites.
+    ///
+    /// Every path that writes a library — `saveSnippets`, `exportLibraryData`, the JSON/CSV/YAML
+    /// exporters, the conflict snapshots — runs through this one method. Redacting here means a
+    /// future writer cannot forget to, and `replacementText` for a secret is written as the empty
+    /// string rather than omitted so a downgraded build still reads a well-formed snippet.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encode(label, forKey: .label)
+        try c.encode(triggerKeyword, forKey: .triggerKeyword)
+        try c.encode(isSecret ? "" : replacementText, forKey: .replacementText)
+        try c.encode(isCaseSensitive, forKey: .isCaseSensitive)
+        try c.encode(requireWordBoundary, forKey: .requireWordBoundary)
+        try c.encode(isPlainText, forKey: .isPlainText)
+        try c.encode(enabled, forKey: .enabled)
+        try c.encode(imagePath, forKey: .imagePath)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encode(usageCount, forKey: .usageCount)
+        try c.encode(tags, forKey: .tags)
+        try c.encode(includeApps, forKey: .includeApps)
+        try c.encode(excludeApps, forKey: .excludeApps)
+        try c.encode(aiTransform, forKey: .aiTransform)
+        try c.encode(isSecret, forKey: .isSecret)
     }
 
     public init(from decoder: Decoder) throws {
@@ -118,6 +176,10 @@ public struct SnippetModel: Codable, Identifiable, Equatable {
         includeApps = try c.decodeIfPresent([String].self, forKey: .includeApps) ?? []
         excludeApps = try c.decodeIfPresent([String].self, forKey: .excludeApps) ?? []
         aiTransform = try c.decodeIfPresent(String.self, forKey: .aiTransform) ?? ""
+        isSecret = try c.decodeIfPresent(Bool.self, forKey: .isSecret) ?? false
+        // Belt and braces against a library written by a build that did not redact, or edited by
+        // hand: a snippet that says it is secret never carries a value in memory either.
+        if isSecret { replacementText = "" }
     }
 }
 

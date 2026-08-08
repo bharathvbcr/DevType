@@ -267,4 +267,49 @@ final class SourceContractTests: XCTestCase {
             )
         }
     }
+    // MARK: - Secrets
+
+    /// A password is not a template. Every route that resolves a secret must use the stored value
+    /// verbatim — running one through `MacroRenderer` would corrupt any value containing `{{`, and
+    /// could resolve a nested `{{snippet:…}}` inside it.
+    func testSecretResolutionNeverGoesThroughTheMacroRenderer() throws {
+        let flow = try source("Sources/DevTypeApp/SecretMenuFlow.swift")
+        guard let secretBranch = flow.range(of: "if snippet.isSecret {"),
+              let renderCall = flow.range(of: "MacroRenderer.expand") else {
+            return XCTFail("SecretMenuFlow no longer has the shape this contract describes.")
+        }
+        XCTAssertTrue(
+            secretBranch.upperBound < renderCall.lowerBound,
+            "The secret branch must return before the renderer is reached."
+        )
+
+        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
+        XCTAssertTrue(
+            appDelegate.contains("SecretStore.shared.secret(for: snippet.id)"),
+            "The insert path must fetch the value at the moment of use, not carry it in the model."
+        )
+    }
+
+    /// The library file is the thing this feature exists to keep a password out of. The redaction
+    /// lives in `encode(to:)` precisely so no writer has to remember it — assert it is still there
+    /// rather than trusting that every future exporter looks it up.
+    func testSecretRedactionStaysInTheEncoder() throws {
+        let model = try source("Sources/ExpanderEngine/Models/SnippetModel.swift")
+        XCTAssertTrue(
+            model.contains("try c.encode(isSecret ? \"\" : replacementText, forKey: .replacementText)"),
+            "Move this out of `encode(to:)` and every exporter becomes a place a password can leak."
+        )
+        XCTAssertTrue(
+            model.contains("if isSecret { replacementText = \"\" }"),
+            "Decoding must strip a value smuggled in by a hand-edited or downgraded library."
+        )
+    }
+
+    /// Secrets are filtered at the engine's own setter, not at its callers, so no future caller
+    /// can put one back on the typed path.
+    func testTypedPathFilterLivesInTheEngineSetter() throws {
+        let engine = try source("Sources/ExpanderEngine/Engine/EventTapEngine.swift")
+        XCTAssertTrue(engine.contains("newValue.filter(\\.isTypedTriggerExpandable)"))
+    }
+
 }
