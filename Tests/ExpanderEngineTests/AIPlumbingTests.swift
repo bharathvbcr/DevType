@@ -368,7 +368,7 @@ final class AIPlumbingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let monitor = SelectionMonitor(defaults: defaults)
+        let monitor = SelectionMonitor(defaults: defaults, environment: .fixed())
         let stale = SelectionMonitor.CachedSelection(
             text: "stale selection",
             bundleID: "com.apple.TextEdit",
@@ -384,7 +384,7 @@ final class AIPlumbingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let monitor = SelectionMonitor(defaults: defaults)
+        let monitor = SelectionMonitor(defaults: defaults, environment: .fixed())
         // A *foreign* pid on purpose: an element belonging to this process is refused outright by
         // the own-process guard, which is a different rule than the element-change semantics under
         // test here. See `SelectionHardeningTests.testCacheSurvivesOurOwnPanelTakingFocus`.
@@ -429,7 +429,7 @@ final class AIPlumbingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let monitor = SelectionMonitor(defaults: defaults)
+        let monitor = SelectionMonitor(defaults: defaults, environment: .fixed())
         // Foreign pids: an own-process element never reaches the element-change branch.
         let elementA = AXUIElementCreateApplication(1)
         // A second application element for a different PID is a distinct AXUIElement.
@@ -456,7 +456,7 @@ final class AIPlumbingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let monitor = SelectionMonitor(defaults: defaults)
+        let monitor = SelectionMonitor(defaults: defaults, environment: .fixed())
         let now = Date()
         monitor.seedCacheForTesting(
             SelectionMonitor.CachedSelection(
@@ -488,7 +488,7 @@ final class AIPlumbingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let monitor = SelectionMonitor(defaults: defaults)
+        let monitor = SelectionMonitor(defaults: defaults, environment: .fixed())
         let now = Date()
         // Chrome is seeded as false-success / weak-AX.
         monitor.seedCacheForTesting(

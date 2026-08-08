@@ -600,7 +600,7 @@ final class SelectionHardeningTests: XCTestCase {
     /// an element *change*, and an element change is the branch that clears. The guard has to sit
     /// at the mutation point, not at one caller.
     func testCacheSurvivesOurOwnPanelTakingFocus() {
-        let monitor = SelectionMonitor()
+        let monitor = SelectionMonitor(environment: .fixed())
         let sourceElement = AXUIElementCreateApplication(1)
         monitor.seedCacheForTesting(
             SelectionMonitor.CachedSelection(
@@ -626,10 +626,65 @@ final class SelectionHardeningTests: XCTestCase {
         XCTAssertEqual(monitor.rawCachedSelection()?.bundleID, "com.google.Chrome")
     }
 
+    /// The other half of the invariant, now reachable end to end: with DevType *frontmost*, even a
+    /// refresh carrying a foreign element and real text must not touch the entry. This is the
+    /// palette case — `NSApp.activate` has run, the app the user left is still firing
+    /// notifications, and none of it is evidence about their selection any more.
+    ///
+    /// Untestable before the environment seam: a test process cannot make itself frontmost, so
+    /// this branch was only ever covered as a pure function.
+    func testFrontmostOwnProcessMakesEveryRefreshInert() {
+        let monitor = SelectionMonitor(environment: .fixed(ownProcessFrontmost: true))
+        let original = SelectionMonitor.CachedSelection(
+            text: "the paragraph the user selected",
+            bundleID: "com.google.Chrome",
+            changeToken: 7,
+            timestamp: now
+        )
+        monitor.seedCacheForTesting(original, element: AXUIElementCreateApplication(1))
+
+        // A different foreign element with real text: normally a store, here a no-op.
+        monitor.testingApplySelectionRefresh(
+            text: "something from the app behind us",
+            bundleID: "com.apple.TextEdit",
+            element: AXUIElementCreateApplication(2)
+        )
+        XCTAssertEqual(monitor.rawCachedSelection(), original)
+
+        // And a foreign element-change with no text: normally a clear, here a no-op.
+        monitor.testingApplySelectionRefresh(
+            text: nil,
+            bundleID: "com.apple.TextEdit",
+            element: AXUIElementCreateApplication(3)
+        )
+        XCTAssertEqual(monitor.rawCachedSelection(), original)
+    }
+
+    /// Secure Input blocks the typed path's *read* without destroying the entry — the explicit
+    /// paths re-check it live at command time and own that decision themselves.
+    func testSecureInputHidesTheEntryFromTheTypedPathWithoutDestroyingIt() {
+        let monitor = SelectionMonitor(environment: .fixed(secureInput: true))
+        let entry = SelectionMonitor.CachedSelection(
+            text: "still here",
+            bundleID: "com.apple.Safari",
+            changeToken: 1,
+            timestamp: Date()
+        )
+        monitor.seedCacheForTesting(entry, element: AXUIElementCreateApplication(1))
+
+        XCTAssertNil(monitor.cachedSelection(rejectWeakAX: false))
+        XCTAssertFalse(monitor.hasWeakAXBlockedSelection())
+        XCTAssertEqual(
+            monitor.rawCachedSelection(), entry,
+            "A password field somewhere on the system is a reason to withhold the entry, not to "
+                + "throw the user's selection away."
+        )
+    }
+
     /// The guard must not become a licence to keep stale text: a foreign element change still
     /// invalidates, which is what stops one app's selection being offered inside another.
     func testForeignElementChangeStillInvalidates() {
-        let monitor = SelectionMonitor()
+        let monitor = SelectionMonitor(environment: .fixed())
         monitor.seedCacheForTesting(
             SelectionMonitor.CachedSelection(
                 text: "stale",
@@ -659,6 +714,115 @@ final class SelectionHardeningTests: XCTestCase {
             AXContextChecker.mayRescueFocus(pid: ownPID + 1, ownPID: ownPID),
             "Every other app still earns the wake-up — that is the Chromium path this whole "
                 + "rescue exists for."
+        )
+    }
+
+    // MARK: - Naming the situation the user is actually in
+
+    /// `.noFocusedElement` says "click into the text, select it, then try again". Given while our
+    /// own panel is frontmost, that sends the user to click inside *our* window. The DevType-owns-
+    /// focus case is a different situation and gets its own message.
+    func testDevTypeFrontmostWithNothingCapturedIsItsOwnFailure() {
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.devtype.app",
+            frontmostIsOwnProcess: true,
+            focusAvailable: false,
+            candidates: [],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.failure, .noSourceSelection)
+        XCTAssertEqual(outcome.failure?.diagnosticLabel, "noSource")
+
+        // A foreign app that publishes no tree is still the Electron case, unchanged.
+        let foreign = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.google.antigravity",
+            frontmostIsOwnProcess: false,
+            focusAvailable: false,
+            candidates: [],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(foreign.failure, .noFocusedElement)
+    }
+
+    /// The new failure must not open a new door for the synthetic ⌘C. A copy sent while DevType is
+    /// frontmost lands on our own panel.
+    func testClipboardFallbackStaysClosedForTheOwnFocusFailure() {
+        XCTAssertFalse(
+            SelectionReader.shouldAttemptClipboardFallback(
+                failure: .noSourceSelection,
+                frontmostIsOwnProcess: true,
+                canPostEvents: true,
+                secureInputActive: false
+            )
+        )
+        XCTAssertFalse(
+            SelectionReader.shouldAttemptClipboardFallback(
+                failure: .noSourceSelection,
+                frontmostIsOwnProcess: false,
+                canPostEvents: true,
+                secureInputActive: false
+            ),
+            "Only `.noFocusedElement` earns the copy — the fallback exists for apps with no tree, "
+                + "not for a command invoked with nothing behind it."
+        )
+    }
+
+    // MARK: - Cache attribution and evidence
+
+    /// A cache entry is labelled with the app that owns the *element*, never with whatever is
+    /// frontmost at that instant. The two disagree exactly when it matters — mid app-switch — and
+    /// `SelectionGate.cacheMatchesFrontmost` trusts the label to decide the text may be used in
+    /// that app, so a wrong one both leaks app A's selection into app B and walks around a mute.
+    func testCacheOwnerIsResolvedFromTheElement() {
+        // launchd owns no bundle: unresolvable, so the caller's fallback label is used rather
+        // than an empty one.
+        XCTAssertNil(SelectionMonitor.bundleID(owning: AXUIElementCreateApplication(1)))
+        // Our own process resolves to *something* stable (the test host), never to a crash.
+        let own = SelectionMonitor.bundleID(
+            owning: AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        )
+        XCTAssertEqual(own, NSRunningApplication.current.bundleIdentifier)
+    }
+
+    /// Two rules that only exist as code shape, asserted as code shape.
+    ///
+    /// 1. A failed AX round-trip is not evidence of focus loss. `focusedElement()` collapses
+    ///    "nothing is focused" and "the read failed" into one `nil`; Chromium answers
+    ///    `.cannotComplete` mid-transition routinely, and clearing on it wipes a good cache.
+    /// 2. The typed-path allowlist is a *read* filter (`cachedSelection`), not a retention rule.
+    ///    Clearing the shared entry on it silently disabled the explicit paths outside the list.
+    func testMonitorRefreshEvidenceRulesAreEnforcedInSource() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/ExpanderEngine/AI/SelectionMonitor.swift")
+        let source = SourceContractTests.strippingComments(
+            try String(contentsOf: url, encoding: .utf8)
+        )
+        XCTAssertTrue(
+            source.contains("queryFocusedElement()"),
+            "The refresh must use the typed focus query so `.axFailure` can be told apart from "
+                + "`.missing`."
+        )
+        XCTAssertFalse(
+            source.contains("guard let element = AXContextChecker.shared.focusedElement() else {"),
+            "Back to the untyped query means back to treating an AX timeout as focus loss."
+        )
+        XCTAssertFalse(
+            source.contains("if !AIPreferences.isTypedPathAllowed(bundleID: bundleID) {\n            clearCache()"),
+            "The allowlist must not destroy the entry the explicit paths read through "
+                + "`rawCachedSelection()`."
         )
     }
 

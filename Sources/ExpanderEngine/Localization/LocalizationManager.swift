@@ -854,6 +854,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.selection.fail.noFocus":
                 "No text field has keyboard focus, so there is no selection to read. "
                 + "Click into the text, select it, then try again.",
+            "ai.selection.fail.noSource":
+                "DevType is in front, so there is no selected text behind it to read. "
+                + "Switch to your text, select it, then use the shortcut again.",
             "ai.selection.fail.tooLarge":
                 "That selection is %@ characters, past the %@-character limit for AI actions. "
                 + "Select a smaller passage and try again.",
@@ -1808,6 +1811,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.selection.fail.noFocus":
                 "키보드 포커스를 가진 텍스트 필드가 없어 읽을 선택 영역이 없습니다. "
                 + "텍스트를 클릭해 선택한 뒤 다시 시도하세요.",
+            "ai.selection.fail.noSource":
+                "DevType이 앞에 있어 뒤쪽에서 읽을 선택 영역이 없습니다. "
+                + "원하는 텍스트가 있는 앱으로 이동해 선택한 뒤 단축키를 다시 사용하세요.",
             "ai.selection.fail.tooLarge":
                 "선택한 텍스트가 %@자로, AI 작업 한도인 %@자를 초과합니다. "
                 + "더 짧은 부분을 선택한 뒤 다시 시도하세요.",
@@ -2748,6 +2754,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.selection.fail.noFocus":
                 "キーボードフォーカスのあるテキスト欄がないため、読み取る選択範囲がありません。"
                 + "テキストをクリックして選択してからお試しください。",
+            "ai.selection.fail.noSource":
+                "DevType が前面にあるため、その背後に読み取れる選択範囲がありません。"
+                + "目的のテキストがあるアプリに切り替えて選択し、もう一度ショートカットを使ってください。",
             "ai.selection.fail.tooLarge":
                 "選択範囲が %@ 文字あり、AI 操作の上限 %@ 文字を超えています。"
                 + "もっと短い範囲を選択してからお試しください。",

@@ -21,6 +21,21 @@ public final class SelectionMonitor {
     /// Long enough to type a short trigger; single-use + same-element carry the safety.
     public static let defaultTTL: TimeInterval = 6.0
 
+    /// How long it remains usable to an *explicit* command while DevType itself owns the focus.
+    ///
+    /// Six seconds is the right budget for the typed path, where the clock runs while the user is
+    /// still in their app and the selection can change under us at any keystroke. It is the wrong
+    /// budget once our own panel is frontmost: nothing the user does in DevType can alter the
+    /// selection behind it, and *any* return to another app — including back to the source —
+    /// clears the cache outright through `didActivateApplication`. So the only way to consume a
+    /// stale entry here is for the source app to change its own selection with the user parked in
+    /// our UI, and the panel shows the text before a single character is written.
+    ///
+    /// Bounded rather than infinite because a panel left open all afternoon should not transform
+    /// this morning's paragraph. Two minutes covers "open the palette, get distracted, come back";
+    /// past that, re-selecting is the honest answer.
+    public static let ownFocusTTL: TimeInterval = 120.0
+
     /// Minimum spacing between full-ladder cache refreshes.
     ///
     /// The monitor runs from an AX notification many apps fire on *every keystroke*, so the full
@@ -63,9 +78,66 @@ public final class SelectionMonitor {
     private var isRunning = false
 
     private let defaults: UserDefaults
+    private let environment: Environment
 
-    public init(defaults: UserDefaults = .standard) {
+    /// The live-system facts this class consults, behind an injectable seam.
+    ///
+    /// Each was read through a global, and each is a property of the *machine and its preferences*
+    /// rather than of the monitor: `IsSecureEventInputEnabled()` flips whenever anything anywhere
+    /// focuses a password field, the frontmost app is whatever the user last clicked, and the mute
+    /// list and typed-path allowlist live in `UserDefaults.standard`. That made the
+    /// unit tests non-hermetic in the worst way — green on a quiet desktop, seven failures when a
+    /// notification banner happened to be up while the suite ran, and no relation to the code
+    /// under test. It also left the own-frontmost branch of `mayApplyRefresh` untestable through
+    /// the funnel, since a test process cannot make itself frontmost.
+    public struct Environment {
+        public var isSecureInputActive: () -> Bool
+        public var isOwnProcessFrontmost: () -> Bool
+        public var isMuted: (String) -> Bool
+        public var isTypedPathAllowed: (String) -> Bool
+
+        public init(
+            isSecureInputActive: @escaping () -> Bool,
+            isOwnProcessFrontmost: @escaping () -> Bool,
+            isMuted: @escaping (String) -> Bool,
+            isTypedPathAllowed: @escaping (String) -> Bool
+        ) {
+            self.isSecureInputActive = isSecureInputActive
+            self.isOwnProcessFrontmost = isOwnProcessFrontmost
+            self.isMuted = isMuted
+            self.isTypedPathAllowed = isTypedPathAllowed
+        }
+
+        /// What the app runs with: every fact read live at the moment it matters.
+        public static let live = Environment(
+            isSecureInputActive: { AXContextChecker.isSecureEventInputEnabledLive() },
+            isOwnProcessFrontmost: { SelectionMonitor.isOwnProcessFrontmost() },
+            isMuted: { AppMuteStore.shared.isMuted($0) },
+            isTypedPathAllowed: { AIPreferences.isTypedPathAllowed(bundleID: $0) }
+        )
+
+        /// A pinned desktop and pinned preferences, for tests that are about the cache rather
+        /// than about the machine they run on. Without this a developer who has muted an app —
+        /// or a password field open anywhere on the system — reddens a suite that has nothing to
+        /// do with either.
+        public static func fixed(
+            secureInput: Bool = false,
+            ownProcessFrontmost: Bool = false,
+            muted: Set<String> = [],
+            typedPathAllowlist: Set<String> = []
+        ) -> Environment {
+            Environment(
+                isSecureInputActive: { secureInput },
+                isOwnProcessFrontmost: { ownProcessFrontmost },
+                isMuted: { muted.contains($0) },
+                isTypedPathAllowed: { typedPathAllowlist.isEmpty || typedPathAllowlist.contains($0) }
+            )
+        }
+    }
+
+    public init(defaults: UserDefaults = .standard, environment: Environment = .live) {
         self.defaults = defaults
+        self.environment = environment
     }
 
     deinit {
@@ -119,10 +191,10 @@ public final class SelectionMonitor {
 
         guard let snapshot, snapshot.isFresh(asOf: now, maxAge: maxAge) else { return nil }
         guard !snapshot.text.isEmpty else { return nil }
-        if AppMuteStore.shared.isMuted(snapshot.bundleID) { return nil }
-        if !AIPreferences.isTypedPathAllowed(bundleID: snapshot.bundleID) { return nil }
+        if environment.isMuted(snapshot.bundleID) { return nil }
+        if !environment.isTypedPathAllowed(snapshot.bundleID) { return nil }
         if rejectWeakAX, SelectionReader.isWeakAXApp(bundleID: snapshot.bundleID) { return nil }
-        if AXContextChecker.isSecureEventInputEnabledLive() { return nil }
+        if environment.isSecureInputActive() { return nil }
         return snapshot
     }
 
@@ -153,9 +225,9 @@ public final class SelectionMonitor {
 
         guard let snapshot, snapshot.isFresh(asOf: now, maxAge: maxAge) else { return false }
         guard !snapshot.text.isEmpty else { return false }
-        if AppMuteStore.shared.isMuted(snapshot.bundleID) { return false }
-        if !AIPreferences.isTypedPathAllowed(bundleID: snapshot.bundleID) { return false }
-        if AXContextChecker.isSecureEventInputEnabledLive() { return false }
+        if environment.isMuted(snapshot.bundleID) { return false }
+        if !environment.isTypedPathAllowed(snapshot.bundleID) { return false }
+        if environment.isSecureInputActive() { return false }
         return SelectionReader.isWeakAXApp(bundleID: snapshot.bundleID)
     }
 
@@ -284,7 +356,7 @@ public final class SelectionMonitor {
         // the cache describes and point it at our own panel — the state the app-switch observer
         // already refuses to enter, reachable from the other direction by toggling the AI feature
         // on in Preferences (DevType frontmost by definition) or by starting up while frontmost.
-        guard !Self.isOwnProcessFrontmost() else { return }
+        guard !environment.isOwnProcessFrontmost() else { return }
 
         unregisterAXObserver()
 
@@ -292,7 +364,7 @@ public final class SelectionMonitor {
             clearCache()
             return
         }
-        if AXContextChecker.isSecureEventInputEnabledLive() {
+        if environment.isSecureInputActive() {
             clearCache()
             return
         }
@@ -303,14 +375,13 @@ public final class SelectionMonitor {
         }
         let pid = app.processIdentifier
         let bundleID = app.bundleIdentifier ?? ""
-        if !bundleID.isEmpty, AppMuteStore.shared.isMuted(bundleID) {
+        if !bundleID.isEmpty, environment.isMuted(bundleID) {
             clearCache()
             return
         }
-        if !AIPreferences.isTypedPathAllowed(bundleID: bundleID) {
-            clearCache()
-            return
-        }
+        // Not gated on `isTypedPathAllowed` — see `handleAXNotification`. Refusing to *observe* a
+        // non-allowlisted app leaves the explicit paths with no cache at all in that app, which is
+        // not what the allowlist means; `cachedSelection(…)` filters the typed path on read.
 
         // Ask a Chromium app to publish its accessibility tree *now*, on the app switch, rather
         // than when the user is already waiting on a hotkey. Without the tree there is no
@@ -393,7 +464,7 @@ public final class SelectionMonitor {
             clearCache()
             return
         }
-        if AXContextChecker.isSecureEventInputEnabledLive() {
+        if environment.isSecureInputActive() {
             clearCache()
             return
         }
@@ -414,17 +485,19 @@ public final class SelectionMonitor {
         // same invariant on the notification path. Nothing is leaked by holding the entry: a real
         // switch to another app still clears it, the TTL still retires it, and the typed path still
         // consumes it single-use.
-        guard !Self.isOwnProcessFrontmost() else { return }
+        guard !environment.isOwnProcessFrontmost() else { return }
 
         let bundleID = AXContextChecker.shared.frontmostApplicationBundleIdentifier() ?? ""
-        if !bundleID.isEmpty, AppMuteStore.shared.isMuted(bundleID) {
+        if !bundleID.isEmpty, environment.isMuted(bundleID) {
             clearCache()
             return
         }
-        if !AIPreferences.isTypedPathAllowed(bundleID: bundleID) {
-            clearCache()
-            return
-        }
+        // Deliberately *not* gated on `isTypedPathAllowed`. That allowlist scopes the typed
+        // trigger path, and `cachedSelection(…)` already enforces it on read. Enforcing it here
+        // instead destroyed the entry the *explicit* paths depend on — the hotkey and the palette
+        // read through `rawCachedSelection()` precisely because a hotkey types nothing into the
+        // selection and so does not need the allowlist's protection. Configuring an allowlist
+        // used to silently disable Prompt Enhance everywhere outside it.
         refreshCacheFromFocus(bundleID: bundleID)
     }
 
@@ -464,6 +537,16 @@ public final class SelectionMonitor {
         return pid == ProcessInfo.processInfo.processIdentifier
     }
 
+    /// Bundle ID of the app that owns `element`, or `nil` when the pid is unreadable or the
+    /// process has no bundle. Callers fall back to the frontmost app's ID — a guess is better
+    /// than an unlabelled entry, and every consumer re-checks the label against the app it is
+    /// about to act in.
+    static func bundleID(owning element: AXUIElement) -> String? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
+        return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+    }
+
     /// Pure policy: may this refresh pay for the range / attributed / marker attributes?
     ///
     /// Only when the cheap primary attribute found nothing (the ladder cannot improve on a hit)
@@ -483,10 +566,36 @@ public final class SelectionMonitor {
     }
 
     private func refreshCacheFromFocus(bundleID: String, now: Date = Date()) {
-        guard let element = AXContextChecker.shared.focusedElement() else {
+        // Typed query, not `focusedElement()`: that collapses "this app has no focused element"
+        // and "the AX round-trip failed" into the same `nil`, and only the first is evidence.
+        // Chromium answers `.cannotComplete` mid-transition all the time — the whole
+        // manual-accessibility dance exists because of it — and treating that as focus loss wipes
+        // a good cache on an app that is about to answer perfectly well. Same principle as the
+        // delivery-evidence rule: a failed read condemns nothing.
+        let element: AXUIElement
+        switch AXContextChecker.shared.queryFocusedElement() {
+        case .available(let resolved):
+            element = resolved
+        case .missing:
+            // The app answered, and the answer was "nothing is focused". That is evidence.
+            clearCache()
+            return
+        case .axFailure, .untrusted:
+            return
+        }
+
+        // Label the entry with the app that owns the *element*, never with whatever happens to be
+        // frontmost at this instant. The two disagree exactly when it matters — mid app-switch the
+        // system-wide focused element still resolves into the app being left — and a mislabelled
+        // entry is not a cosmetic problem: `SelectionGate.cacheMatchesFrontmost` uses the label to
+        // decide the text may be used *in that app*, so a wrong one both leaks app A's selection
+        // into app B and walks around a mute on A.
+        let owner = Self.bundleID(owning: element) ?? bundleID
+        if !owner.isEmpty, environment.isMuted(owner) {
             clearCache()
             return
         }
+
         // Cheap attribute first: this runs from an AX notification that many apps fire on every
         // keystroke, and the extra round-trips are wasted whenever the primary one answers.
         let primary = SelectionReader.copySelectedText(from: element, allowFallbackAttributes: false)
@@ -506,7 +615,7 @@ public final class SelectionMonitor {
             lock.unlock()
             text = SelectionReader.copySelectedText(from: element, allowFallbackAttributes: true)
         }
-        applySelectionRefresh(text: text, bundleID: bundleID, element: element)
+        applySelectionRefresh(text: text, bundleID: owner, element: element)
     }
 
     /// Shared refresh logic used by live AX notifications and unit tests.
@@ -523,7 +632,7 @@ public final class SelectionMonitor {
         // without this the refresh below reads as "focus moved" and clears the selection the
         // palette was opened to transform.
         guard Self.mayApplyRefresh(
-            frontmostIsOwnProcess: Self.isOwnProcessFrontmost(),
+            frontmostIsOwnProcess: environment.isOwnProcessFrontmost(),
             focusedElementIsOwnProcess: element.map(Self.elementBelongsToOwnProcess) ?? false
         ) else { return }
 
