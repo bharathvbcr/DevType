@@ -177,21 +177,47 @@ public protocol BiometricAuthenticating: AnyObject {
 }
 
 public final class LocalAuthenticationAuthenticator: BiometricAuthenticating {
+    /// One `evaluatePolicy` call, behind a closure so the escalation sequence below can be driven
+    /// deterministically in tests. A real Mac cannot be asked to produce a biometry lockout or a
+    /// "user tapped Enter Password" on demand, and those are exactly the branches worth pinning.
+    public typealias PolicyEvaluator = (
+        _ policy: LAPolicy,
+        _ reason: String,
+        _ fallbackTitle: String,
+        _ completion: @escaping (Bool, Error?) -> Void
+    ) -> Void
+
     /// One context, reused, so macOS can apply its own reuse rules on top of ours; replaced after
     /// `invalidate()` because an `LAContext` remembers its last successful evaluation.
     private var context = LAContext()
     private let lock = UnfairLock()
+    private let availabilityProbe: () -> BiometricGate.Availability
+    private let evaluator: PolicyEvaluator?
+    private let fallbackTitle: () -> String
 
-    public init() {}
+    public init(
+        availabilityProbe: (() -> BiometricGate.Availability)? = nil,
+        evaluator: PolicyEvaluator? = nil,
+        fallbackTitle: @escaping () -> String = { LocalizationManager.shared.s("secret.auth.usePassword") }
+    ) {
+        self.availabilityProbe = availabilityProbe ?? LocalAuthenticationAuthenticator.probeAvailability
+        self.evaluator = evaluator
+        self.fallbackTitle = fallbackTitle
+    }
 
     public func availability() -> BiometricGate.Availability {
+        availabilityProbe()
+    }
+
+    static func probeAvailability() -> BiometricGate.Availability {
         // A fresh context: `canEvaluatePolicy` caches, and a stale answer here would claim Touch
-        // ID on a Mac where the user has since removed their fingerprints.
+        // ID on a Mac where the user has since removed their fingerprints — or, after five failed
+        // fingers, keep claiming biometry that is now locked out.
         let probe = LAContext()
         var error: NSError?
 
         if probe.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) {
-            return .biometry(Self.biometryName(probe))
+            return .biometry(biometryName(probe))
         }
         // Biometry unavailable is not the end of it: `.deviceOwnerAuthentication` still gates on
         // the login password, which is the honest fallback on a Mac with no Touch ID.
@@ -201,18 +227,79 @@ public final class LocalAuthenticationAuthenticator: BiometricAuthenticating {
         return .unavailable
     }
 
+    // MARK: - Policy choice
+
+    /// Which policy to *start* with.
+    ///
+    /// This is the bug that shipped: `.deviceOwnerAuthentication` means "biometry **or** the
+    /// password", and on macOS the system answers it with the password sheet — so a Mac with a
+    /// perfectly good Touch ID sensor asked for a typed password every single time.
+    /// `.deviceOwnerAuthenticationWithBiometrics` is the one that presents Touch ID. The password
+    /// is still reachable, but as a deliberate fallback (see `shouldEscalateToPassword`) rather
+    /// than as the default answer.
+    public static func initialPolicy(for availability: BiometricGate.Availability) -> LAPolicy {
+        switch availability {
+        case .biometry: return .deviceOwnerAuthenticationWithBiometrics
+        case .passwordOnly, .unavailable: return .deviceOwnerAuthentication
+        }
+    }
+
+    /// After a *biometric* attempt failed, may we offer the password instead?
+    ///
+    /// Yes for everything that means "biometry cannot answer this" — the user asked for the
+    /// password, the sensor is locked out after five failures, the fingerprints went away since we
+    /// probed. No for the user's own dismissal, and no for a finger that simply did not match:
+    /// macOS lets them try again in its own UI, and escalating there would turn a mis-read into a
+    /// password prompt the user did not ask for.
+    public static func shouldEscalateToPassword(after error: Error?) -> Bool {
+        guard let error = error as? LAError else { return false }
+        switch error.code {
+        case .userFallback, .biometryLockout, .biometryNotAvailable, .biometryNotEnrolled:
+            return true
+        default:
+            return false
+        }
+    }
+
     public func evaluate(reason: String, completion: @escaping (BiometricGate.Outcome) -> Void) {
+        let availability = availabilityProbe()
+        let policy = Self.initialPolicy(for: availability)
+
+        run(policy: policy, reason: reason) { [weak self] success, error in
+            guard let self else { return completion(.cancelled) }
+            if success { return completion(.authorized) }
+
+            // One escalation, never a loop: only a biometric attempt can escalate, and it
+            // escalates to the policy that has no biometry left to fail.
+            guard policy == .deviceOwnerAuthenticationWithBiometrics,
+                  Self.shouldEscalateToPassword(after: error) else {
+                return completion(Self.outcome(for: error))
+            }
+            self.run(policy: .deviceOwnerAuthentication, reason: reason) { success, error in
+                completion(success ? .authorized : Self.outcome(for: error))
+            }
+        }
+    }
+
+    private func run(
+        policy: LAPolicy,
+        reason: String,
+        completion: @escaping (Bool, Error?) -> Void
+    ) {
+        let title = fallbackTitle()
+        if let evaluator {
+            return evaluator(policy, reason, title, completion)
+        }
+
         lock.lock()
         let context = self.context
         lock.unlock()
 
-        // `.deviceOwnerAuthentication` rather than `…WithBiometrics`: it prompts for Touch ID
-        // first and falls back to the login password, so a wet finger or a Mac without a sensor
-        // is an inconvenience rather than a locked door.
-        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
-            if success { return completion(.authorized) }
-            completion(Self.outcome(for: error))
-        }
+        // Name the fallback button ourselves. Left unset, macOS labels it "Enter Password" only
+        // in some configurations and hides it in others, so the way out of a failed finger was
+        // not reliably visible.
+        context.localizedFallbackTitle = policy == .deviceOwnerAuthenticationWithBiometrics ? title : ""
+        context.evaluatePolicy(policy, localizedReason: reason, reply: completion)
     }
 
     public func invalidate() {
@@ -238,8 +325,8 @@ public final class LocalAuthenticationAuthenticator: BiometricAuthenticating {
             // The finger did not match and macOS already said so in its own UI.
             return .cancelled
         case .userFallback:
-            // Only reachable with a policy that has no password fallback of its own; treated as a
-            // cancel so it cannot be mistaken for an authorization.
+            // Reached only when the password escalation itself was declined or unavailable;
+            // treated as a cancel so it cannot be mistaken for an authorization.
             return .cancelled
         default:
             return .failed(error.localizedDescription)

@@ -255,4 +255,214 @@ final class BiometricGateTests: XCTestCase {
                 + "means 'keep what is stored'."
         )
     }
+    // MARK: - Which policy actually gets used
+
+    /// The shipped bug, as one assertion. `.deviceOwnerAuthentication` means "biometry **or** the
+    /// password", and macOS answers it with the password sheet — so a Mac with a working Touch ID
+    /// sensor asked for a typed password every single time.
+    func testBiometryIsAskedForWhenTheMacHasIt() {
+        XCTAssertEqual(
+            LocalAuthenticationAuthenticator.initialPolicy(for: .biometry("Touch ID")),
+            .deviceOwnerAuthenticationWithBiometrics,
+            "This is the policy that presents Touch ID. The other one presents a password field."
+        )
+        XCTAssertEqual(
+            LocalAuthenticationAuthenticator.initialPolicy(for: .passwordOnly),
+            .deviceOwnerAuthentication,
+            "With no biometry there is nothing else to ask for."
+        )
+        XCTAssertEqual(
+            LocalAuthenticationAuthenticator.initialPolicy(for: .unavailable),
+            .deviceOwnerAuthentication
+        )
+    }
+
+    /// The password must stay reachable — a wet finger should be an inconvenience, not a locked
+    /// door — but only as a deliberate second step.
+    func testOnlyBiometryDeadEndsEscalateToThePassword() {
+        for code in [LAError.userFallback, .biometryLockout, .biometryNotAvailable, .biometryNotEnrolled] {
+            XCTAssertTrue(
+                LocalAuthenticationAuthenticator.shouldEscalateToPassword(after: LAError(code)),
+                "\(code) means biometry cannot answer; the user needs the other route."
+            )
+        }
+        for code in [LAError.userCancel, .appCancel, .systemCancel, .authenticationFailed] {
+            XCTAssertFalse(
+                LocalAuthenticationAuthenticator.shouldEscalateToPassword(after: LAError(code)),
+                "\(code) is a dismissal or a retryable mis-read — macOS handles it in its own UI, "
+                    + "and escalating would spring a password prompt the user never asked for."
+            )
+        }
+        XCTAssertFalse(LocalAuthenticationAuthenticator.shouldEscalateToPassword(after: nil))
+    }
+
+    // MARK: - The escalation sequence, driven deterministically
+
+    /// Records every policy the authenticator evaluates, so the *order* is assertable without a
+    /// real sensor.
+    private func recordingAuthenticator(
+        availability: BiometricGate.Availability,
+        results: [(Bool, Error?)]
+    ) -> (LocalAuthenticationAuthenticator, () -> [LAPolicy]) {
+        var scripted = results
+        var seen: [LAPolicy] = []
+        let authenticator = LocalAuthenticationAuthenticator(
+            availabilityProbe: { availability },
+            evaluator: { policy, _, _, completion in
+                seen.append(policy)
+                let next = scripted.isEmpty ? (false, nil) : scripted.removeFirst()
+                completion(next.0, next.1)
+            },
+            fallbackTitle: { "Use Password…" }
+        )
+        return (authenticator, { seen })
+    }
+
+    func testTouchIDSucceedsWithoutEverAskingForAPassword() {
+        let (authenticator, policies) = recordingAuthenticator(
+            availability: .biometry("Touch ID"),
+            results: [(true, nil)]
+        )
+        var outcome: BiometricGate.Outcome?
+        authenticator.evaluate(reason: "r") { outcome = $0 }
+
+        XCTAssertEqual(outcome, .authorized)
+        XCTAssertEqual(
+            policies(), [.deviceOwnerAuthenticationWithBiometrics],
+            "A successful finger must not be followed by a password prompt."
+        )
+    }
+
+    func testTappingUsePasswordFallsThroughToTheLoginPassword() {
+        let (authenticator, policies) = recordingAuthenticator(
+            availability: .biometry("Touch ID"),
+            results: [(false, LAError(.userFallback)), (true, nil)]
+        )
+        var outcome: BiometricGate.Outcome?
+        authenticator.evaluate(reason: "r") { outcome = $0 }
+
+        XCTAssertEqual(outcome, .authorized)
+        XCTAssertEqual(
+            policies(),
+            [.deviceOwnerAuthenticationWithBiometrics, .deviceOwnerAuthentication]
+        )
+    }
+
+    func testLockoutFallsThroughRatherThanDeadEnding() {
+        let (authenticator, policies) = recordingAuthenticator(
+            availability: .biometry("Touch ID"),
+            results: [(false, LAError(.biometryLockout)), (true, nil)]
+        )
+        var outcome: BiometricGate.Outcome?
+        authenticator.evaluate(reason: "r") { outcome = $0 }
+
+        XCTAssertEqual(outcome, .authorized)
+        XCTAssertEqual(policies().count, 2)
+    }
+
+    /// A dismissal is the end of it. Escalating a cancel would mean the user says "no" and gets
+    /// asked again in a different form, which is how a prompt becomes something people click
+    /// through without reading.
+    func testCancellingStopsThere() {
+        let (authenticator, policies) = recordingAuthenticator(
+            availability: .biometry("Touch ID"),
+            results: [(false, LAError(.userCancel))]
+        )
+        var outcome: BiometricGate.Outcome?
+        authenticator.evaluate(reason: "r") { outcome = $0 }
+
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertEqual(policies(), [.deviceOwnerAuthenticationWithBiometrics])
+    }
+
+    /// One escalation, never a loop: the password attempt cannot escalate again.
+    func testEscalationHappensAtMostOnce() {
+        let (authenticator, policies) = recordingAuthenticator(
+            availability: .biometry("Touch ID"),
+            results: [(false, LAError(.userFallback)), (false, LAError(.userFallback))]
+        )
+        var outcome: BiometricGate.Outcome?
+        authenticator.evaluate(reason: "r") { outcome = $0 }
+
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertEqual(policies().count, 2, "A third prompt would be an escalation loop.")
+    }
+
+    /// A Mac with no sensor goes straight to the password and does not pretend otherwise.
+    func testPasswordOnlyMacAsksOnce() {
+        let (authenticator, policies) = recordingAuthenticator(
+            availability: .passwordOnly,
+            results: [(true, nil)]
+        )
+        var outcome: BiometricGate.Outcome?
+        authenticator.evaluate(reason: "r") { outcome = $0 }
+
+        XCTAssertEqual(outcome, .authorized)
+        XCTAssertEqual(policies(), [.deviceOwnerAuthentication])
+    }
+
+    // MARK: - The diagnostic report
+
+    /// "It asks for my password instead of Touch ID" was not diagnosable from the report at all:
+    /// whether the gate is on, and whether this Mac can do biometry, are the two facts that
+    /// separate a policy bug from a Mac with no enrolled finger.
+    func testReportCarriesEnoughToDiagnoseAWrongPrompt() {
+        let (store, suite) = defaults()
+        defer { store.removePersistentDomain(forName: suite) }
+
+        let lines = DiagnosticReport.captureSecretLines(
+            snippets: [
+                SnippetModel(title: "Work login", triggerKeyword: ";pw", replacementText: "", isSecret: true),
+                SnippetModel(title: "Address", triggerKeyword: ";addr", replacementText: "1 Main St"),
+            ],
+            availability: .biometry("Touch ID"),
+            defaults: store
+        )
+        let text = lines.joined(separator: "\n")
+
+        XCTAssertTrue(text.contains("Secret snippets: 1"))
+        XCTAssertTrue(text.contains("Biometry: available (Touch ID)"))
+        XCTAssertTrue(text.contains("Require authentication: on"))
+    }
+
+    func testReportNamesTheMacsActualCapability() {
+        let (store, suite) = defaults()
+        defer { store.removePersistentDomain(forName: suite) }
+
+        let passwordOnly = DiagnosticReport.captureSecretLines(
+            snippets: [], availability: .passwordOnly, defaults: store
+        ).joined(separator: "\n")
+        XCTAssertTrue(passwordOnly.contains("password only"))
+
+        let unavailable = DiagnosticReport.captureSecretLines(
+            snippets: [], availability: .unavailable, defaults: store
+        ).joined(separator: "\n")
+        XCTAssertTrue(unavailable.contains("unavailable"))
+        XCTAssertTrue(
+            unavailable.contains("Require authentication: off"),
+            "Never report a gate as on where the machine cannot evaluate one."
+        )
+    }
+
+    /// The report is pasted into chat windows and issue trackers. A list of what someone keeps
+    /// passwords *for* is worth protecting even when the passwords themselves are not in it.
+    func testReportNeverNamesASecret() {
+        let (store, suite) = defaults()
+        defer { store.removePersistentDomain(forName: suite) }
+
+        let secret = SnippetModel(
+            title: "Barclays business banking",
+            triggerKeyword: ";bank",
+            replacementText: "",
+            isSecret: true
+        )
+        let text = DiagnosticReport.captureSecretLines(
+            snippets: [secret], availability: .biometry("Touch ID"), defaults: store
+        ).joined(separator: "\n")
+
+        XCTAssertFalse(text.contains("Barclays"), "A title is a hint about what the value unlocks.")
+        XCTAssertFalse(text.contains(";bank"))
+        XCTAssertFalse(text.contains(secret.id.uuidString))
+    }
+
 }
