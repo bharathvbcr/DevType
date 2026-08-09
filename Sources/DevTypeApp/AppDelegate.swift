@@ -330,8 +330,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
             button.image = DevTypeTheme.statusItemImage(
-                kind: .paused,
-                tint: DevTypeTheme.statusGray,
+                badge: (.paused, DevTypeTheme.statusGray),
                 accessibilityLabel: loc.s("status.paused")
             )
             button.imagePosition = .imageOnly
@@ -1634,12 +1633,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // §0.3: a blocked or conflicted library also deserves the attention state.
         let libraryUnhealthy = LibraryHealthMonitor.shared.condition != nil
 
+        // The working state earns no badge: a permanently lit indicator carries no
+        // information and only dulls the states that do. Note this is narrower than
+        // `!needsAttention` — `.active` is also the kind reported while an inject is
+        // degraded, where `urgent` turns the badge orange, and that warning has to
+        // survive. `.paused` and `.secure` keep their badges: they are not failures
+        // but they are not "typing works", either.
+        let quiet = display == .active && !urgent
+        let badge: (kind: EngineDisplayStatusKind, tint: NSColor)? = quiet ? nil : (kind, color)
+
         if let button = statusItem?.button {
             // §5.2: shape channel inside the badge, so state survives greyscale
             // and colour-blind vision.
             button.image = DevTypeTheme.statusItemImage(
-                kind: kind,
-                tint: color,
+                badge: badge,
                 highlighted: statusMenuOpen,
                 accessibilityLabel: name
             )
