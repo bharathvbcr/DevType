@@ -303,23 +303,27 @@ enum DevTypeTheme {
     // MARK: Menu-bar mark
 
     /// Canonical menu-bar icon metrics. The badge is a fixed size and the canvas
-    /// never changes width, so the icon does not shift sideways in the menu bar
-    /// every time the engine changes state.
+    /// grows to the right *only* to make room for it, so the monogram occupies the
+    /// same rect either way and the icon never shifts for a mere change of glyph.
     private enum StatusMark {
-        static let canvas = NSSize(width: 22, height: 18)
+        static let height: CGFloat = 18
         /// Square the monogram is fitted into; the `D` is 0.9 as wide as it is tall.
         static let markRect = NSRect(x: 0, y: 1.5, width: 15, height: 15)
         static let badgeDiameter: CGFloat = 9
         /// Transparent gap punched between mark and badge so the badge reads as a
         /// badge over any menu-bar backdrop, not just a dark one.
         static let badgeGap: CGFloat = 1.1
+        static let badgedWidth: CGFloat = 22
         static var badgeRect: NSRect {
             NSRect(
-                x: canvas.width - badgeDiameter,
+                x: badgedWidth - badgeDiameter,
                 y: 0,
                 width: badgeDiameter,
                 height: badgeDiameter
             )
+        }
+        static func canvas(badged: Bool) -> NSSize {
+            NSSize(width: badged ? badgedWidth : markRect.width, height: height)
         }
     }
 
@@ -475,16 +479,30 @@ enum DevTypeTheme {
     /// AppKit draws over a selected menu background. The old raster icon had no
     /// such handling and sank into the selection.
     ///
-    /// §5.2: `kind` selects the badge glyph and `accessibilityLabel` carries the
-    /// state for VoiceOver, so colour is one of three channels rather than the
-    /// only one.
+    /// §5.2: `badge` carries the glyph *and* its tint together — a badge is never
+    /// one without the other — and `accessibilityLabel` carries the state for
+    /// VoiceOver, so colour is one of three channels rather than the only one.
+    ///
+    /// A `nil` badge is the bare monogram, which is how the plain working state is
+    /// drawn: an indicator that is present whenever nothing is wrong says nothing,
+    /// and it competed with the states that do need attention. Absence is still a
+    /// channel — every state that is not "plainly working" badges loudly — and the
+    /// text title, tooltip and AX value still name the state for anyone who cannot
+    /// or does not want to read it off a shape.
     static func statusItemImage(
-        kind: EngineDisplayStatusKind,
-        tint: NSColor,
+        badge: (kind: EngineDisplayStatusKind, tint: NSColor)?,
         highlighted: Bool = false,
         accessibilityLabel: String? = nil
     ) -> NSImage {
-        let image = NSImage(size: StatusMark.canvas, flipped: false) { rect in
+        let image = NSImage(size: StatusMark.canvas(badged: badge != nil), flipped: false) { rect in
+            let ink = highlighted ? NSColor.selectedMenuItemTextColor : NSColor.labelColor
+
+            guard let badge else {
+                ink.setFill()
+                brandMarkPath(in: StatusMark.markRect).fill()
+                return true
+            }
+
             let badgeRect = StatusMark.badgeRect
 
             // Punch the badge's clearance out of the mark rather than laying an
@@ -497,11 +515,11 @@ enum DevTypeTheme {
             ))
             clip.windingRule = .evenOdd
             clip.addClip()
-            (highlighted ? NSColor.selectedMenuItemTextColor : NSColor.labelColor).setFill()
+            ink.setFill()
             brandMarkPath(in: StatusMark.markRect).fill()
             NSGraphicsContext.restoreGraphicsState()
 
-            drawStatusBadge(kind, tint: tint, in: badgeRect)
+            drawStatusBadge(badge.kind, tint: badge.tint, in: badgeRect)
             return true
         }
         image.isTemplate = false
