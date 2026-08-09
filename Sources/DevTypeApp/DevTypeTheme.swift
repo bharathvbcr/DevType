@@ -465,12 +465,23 @@ enum DevTypeTheme {
     /// way a template image would. `cacheMode = .never` keeps a cached rendition
     /// from freezing the icon at the appearance it was first drawn under.
     ///
+    /// Appearance is the only thing AppKit resolves for us. A status button does
+    /// *not* flip its effective appearance while its menu is open — measured, not
+    /// assumed: `effectiveAppearance` stays `NSAppearanceNameAqua` with
+    /// `isHighlighted == true`. Only template images get the system's inversion,
+    /// which is why the selection fill is dark under a light menu bar. So the
+    /// caller tells us when the menu is open and the mark switches to
+    /// `selectedMenuItemTextColor` (white in both appearances), the same ink
+    /// AppKit draws over a selected menu background. The old raster icon had no
+    /// such handling and sank into the selection.
+    ///
     /// §5.2: `kind` selects the badge glyph and `accessibilityLabel` carries the
     /// state for VoiceOver, so colour is one of three channels rather than the
     /// only one.
     static func statusItemImage(
         kind: EngineDisplayStatusKind,
         tint: NSColor,
+        highlighted: Bool = false,
         accessibilityLabel: String? = nil
     ) -> NSImage {
         let image = NSImage(size: StatusMark.canvas, flipped: false) { rect in
@@ -486,7 +497,7 @@ enum DevTypeTheme {
             ))
             clip.windingRule = .evenOdd
             clip.addClip()
-            NSColor.labelColor.setFill()
+            (highlighted ? NSColor.selectedMenuItemTextColor : NSColor.labelColor).setFill()
             brandMarkPath(in: StatusMark.markRect).fill()
             NSGraphicsContext.restoreGraphicsState()
 

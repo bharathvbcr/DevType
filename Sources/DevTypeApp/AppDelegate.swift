@@ -6,6 +6,7 @@ import ServiceManagement
 // MARK: - Main Application Delegate
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
+    private var statusMenuOpen = false
     private var secretsSubmenu: NSMenu?
     private var snippetWindowController: NSWindowController?
     private var permissionWindowController: NSWindowController?
@@ -350,6 +351,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshStatusItemUI()
     }
 
+    /// True while the status menu is open, i.e. while AppKit is painting the
+    /// selection fill behind the button. `refreshStatusItemUI()` reads it when it
+    /// picks the monogram's ink.
+    fileprivate var isStatusMenuOpen: Bool {
+        get { statusMenuOpen }
+        set {
+            guard statusMenuOpen != newValue else { return }
+            statusMenuOpen = newValue
+            refreshStatusItemUI()
+        }
+    }
+
     private func makeMenuHeaderView() -> NSView {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
         let wrapper = NSView(frame: NSRect(x: 0, y: 0, width: 252, height: 58))
@@ -407,6 +420,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        // The status button does not flip its appearance while the menu is open,
+        // so the icon has to be redrawn against the (dark) selection fill itself.
+        menu.delegate = self
 
         let headerItem = NSMenuItem()
         headerItem.view = makeMenuHeaderView()
@@ -1624,6 +1640,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = DevTypeTheme.statusItemImage(
                 kind: kind,
                 tint: color,
+                highlighted: statusMenuOpen,
                 accessibilityLabel: name
             )
             // §5.2: text channel. Always on under Differentiate Without Color;
@@ -1963,5 +1980,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             LibraryHealthMonitor.shared.removeObserver(libraryHealthToken)
         }
         DevTypeLog.app.info("[App] terminate — usage stats flushed")
+    }
+}
+
+// MARK: - Status menu open/close
+
+extension AppDelegate: NSMenuDelegate {
+    /// AppKit paints the selection fill behind the status button while the menu is
+    /// open but leaves a non-template image untouched, so the monogram is redrawn
+    /// in the selected-menu ink for as long as the menu is up.
+    public func menuWillOpen(_ menu: NSMenu) {
+        isStatusMenuOpen = true
+    }
+
+    public func menuDidClose(_ menu: NSMenu) {
+        isStatusMenuOpen = false
     }
 }
