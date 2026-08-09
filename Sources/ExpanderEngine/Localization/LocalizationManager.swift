@@ -957,6 +957,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.palette.title": "AI Transform",
             "ai.palette.subtitle": "Choose an action for the selected text.",
             "ai.palette.selectionPreview": "Selected text",
+            "ai.palette.clipboardSubtitle":
+                "Verify the copied text, then choose an AI action.",
+            "ai.palette.clipboardPreview": "Copied text; selection could not be verified",
             "ai.palette.hint.pick": "Return to run · Esc to cancel",
             "ai.typed.selectionUnavailable":
                 "No usable selection for a typed AI trigger. Select the text and use the AI hotkey instead.",
@@ -1980,6 +1983,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.palette.title": "AI 변환",
             "ai.palette.subtitle": "선택한 텍스트에 적용할 동작을 고르세요.",
             "ai.palette.selectionPreview": "선택한 텍스트",
+            "ai.palette.clipboardSubtitle":
+                "복사된 텍스트를 확인한 뒤 AI 동작을 선택하세요.",
+            "ai.palette.clipboardPreview": "복사된 텍스트; 선택 여부를 확인할 수 없음",
             "ai.palette.hint.pick": "Return으로 실행 · Esc로 취소",
             "ai.typed.selectionUnavailable":
                 "입력형 AI 트리거에 쓸 수 있는 선택이 없습니다. 텍스트를 선택한 뒤 AI 단축키를 사용하세요.",
@@ -2993,6 +2999,9 @@ public final class LocalizationManager: ObservableObject {
             "ai.palette.title": "AI 変換",
             "ai.palette.subtitle": "選択したテキストに対する操作を選んでください。",
             "ai.palette.selectionPreview": "選択したテキスト",
+            "ai.palette.clipboardSubtitle":
+                "コピーされたテキストを確認してから AI 操作を選んでください。",
+            "ai.palette.clipboardPreview": "コピーされたテキスト（選択範囲は確認できません）",
             "ai.palette.hint.pick": "Return で実行 · Esc でキャンセル",
             "ai.typed.selectionUnavailable":
                 "入力型 AI トリガーに使える選択がありません。テキストを選択して AI ショートカットを使ってください。",

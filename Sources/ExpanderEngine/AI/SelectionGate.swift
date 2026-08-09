@@ -327,6 +327,38 @@ public extension SelectionReader {
         frontmostIsOwnProcess ? SelectionMonitor.ownFocusTTL : SelectionMonitor.defaultTTL
     }
 
+    /// Bounded focus-restoration policy for selection-dependent commands launched from a
+    /// DevType panel. The UI layer owns scheduling; the engine owns every transition so nil
+    /// frontmost state, termination, invalid budgets, and focus theft are directly testable.
+    enum SourceFocusRetryDecision: Equatable, Sendable {
+        /// The original source process is frontmost; it is safe to start a pinned selection read.
+        case read
+        /// Try again after `sourceFocusPollInterval`, carrying this decremented budget.
+        case wait(remainingPolls: Int)
+        /// Do not read or post input. The source is gone or the bounded budget is exhausted.
+        case fail
+    }
+
+    static let sourceFocusMaxPolls = 25
+    static let sourceFocusPollInterval: TimeInterval = 0.02
+
+    static func sourceFocusRetryDecision(
+        sourcePID: pid_t,
+        frontmostPID: pid_t?,
+        sourceTerminated: Bool,
+        remainingPolls: Int
+    ) -> SourceFocusRetryDecision {
+        guard sourcePID > 0,
+              !sourceTerminated,
+              remainingPolls >= 0,
+              remainingPolls <= sourceFocusMaxPolls else {
+            return .fail
+        }
+        if frontmostPID == sourcePID { return .read }
+        guard remainingPolls > 0 else { return .fail }
+        return .wait(remainingPolls: remainingPolls - 1)
+    }
+
     /// Final size check on a selection that has otherwise won the gate.
     ///
     /// Deliberately at the end rather than as a candidate filter: an oversized selection is the
@@ -357,10 +389,14 @@ public extension SelectionReader {
         failure: Failure,
         frontmostIsOwnProcess: Bool,
         canPostEvents: Bool,
-        secureInputActive: Bool
+        secureInputActive: Bool,
+        sourceAppStillFrontmost: Bool
     ) -> Bool {
         guard case .noFocusedElement = failure else { return false }
-        return !frontmostIsOwnProcess && canPostEvents && !secureInputActive
+        return !frontmostIsOwnProcess
+            && canPostEvents
+            && !secureInputActive
+            && sourceAppStillFrontmost
     }
 
     /// Pure: turn a copy-capture outcome into a selection outcome, or `nil` to keep the

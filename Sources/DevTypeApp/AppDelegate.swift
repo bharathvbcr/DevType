@@ -1127,15 +1127,89 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             return
         }
-        guard case .selection(let resolved) = selection else {
-            let failure = selection.failure ?? .emptySelection
-            DevTypeAlert.info(
-                title: failure.title(loc: loc),
-                message: failure.message(loc: loc)
+
+        switch selection {
+        case .selection(let resolved):
+            startPaletteAITransform(
+                resolved,
+                kind: kind,
+                customInstructions: customInstructions,
+                sourceApp: sourceApp
             )
-            sourceApp?.activate()
-            return
+
+        case .failure(.noFocusedElement):
+            // The command palette captured before stealing focus, but some custom editors
+            // (including Codex) publish no focused AX element. Do not synthesize ⌘C merely
+            // because the general palette opened: wait until the user explicitly chooses an AI
+            // action, return focus to the source, then use the same brokered fallback as the
+            // dedicated AI hotkey. Polling the actual frontmost pid is load-bearing — posting
+            // before activation completes would copy from DevType's own search field.
+            guard let sourceApp else {
+                presentPaletteSelectionFailure(.noFocusedElement, sourceApp: nil)
+                return
+            }
+            sourceApp.activate()
+            retryPaletteAISelectionAfterFocus(
+                kind: kind,
+                customInstructions: customInstructions,
+                sourceApp: sourceApp
+            )
+
+        case .failure(let failure):
+            presentPaletteSelectionFailure(failure, sourceApp: sourceApp)
         }
+    }
+
+    /// Wait for AppKit to finish activating the source before a fallback that may post ⌘C.
+    /// Transition policy and bounds live in `SelectionReader`; this method only schedules.
+    private func retryPaletteAISelectionAfterFocus(
+        kind: AITransformKind,
+        customInstructions: String?,
+        sourceApp: NSRunningApplication,
+        remainingPolls: Int = SelectionReader.sourceFocusMaxPolls
+    ) {
+        switch SelectionReader.sourceFocusRetryDecision(
+            sourcePID: sourceApp.processIdentifier,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            sourceTerminated: sourceApp.isTerminated,
+            remainingPolls: remainingPolls
+        ) {
+        case .wait(let nextRemainingPolls):
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + SelectionReader.sourceFocusPollInterval
+            ) { [weak self] in
+                self?.retryPaletteAISelectionAfterFocus(
+                    kind: kind,
+                    customInstructions: customInstructions,
+                    sourceApp: sourceApp,
+                    remainingPolls: nextRemainingPolls
+                )
+            }
+
+        case .read:
+            switch SelectionReader.readSelectionForExplicitAIAction() {
+            case .selection(let resolved):
+                startPaletteAITransform(
+                    resolved,
+                    kind: kind,
+                    customInstructions: customInstructions,
+                    sourceApp: sourceApp
+                )
+            case .failure(let failure):
+                presentPaletteSelectionFailure(failure, sourceApp: sourceApp)
+            }
+
+        case .fail:
+            presentPaletteSelectionFailure(.noFocusedElement, sourceApp: sourceApp)
+        }
+    }
+
+    private func startPaletteAITransform(
+        _ resolved: SelectionReader.Result,
+        kind: AITransformKind,
+        customInstructions: String?,
+        sourceApp: NSRunningApplication?
+    ) {
         AITransformFlow.run(
             input: resolved.text,
             kind: kind,
@@ -1146,6 +1220,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] text, app in
             self?.injectAIReplacement(text: text, sourceApp: app)
         }
+    }
+
+    private func presentPaletteSelectionFailure(
+        _ failure: SelectionReader.Failure,
+        sourceApp: NSRunningApplication?
+    ) {
+        DevTypeAlert.info(
+            title: failure.title(loc: loc),
+            message: failure.message(loc: loc)
+        )
+        sourceApp?.activate()
     }
 
     /// Insert resolved palette text (date tools / clipboard) with eraseCount 0, like hotkey insertText.

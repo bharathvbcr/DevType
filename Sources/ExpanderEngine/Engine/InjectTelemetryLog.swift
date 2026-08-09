@@ -101,10 +101,31 @@ public final class InjectTelemetryLog {
         }
     }
 
+    /// §8.12: how long our payload actually stayed on the pasteboard when nothing proved the host
+    /// read it.
+    ///
+    /// The wrong-text-pasted bug was invisible in every existing counter: the expansion recorded
+    /// `postedUnverified` (a normal-looking outcome) while the user watched their old clipboard
+    /// appear. These numbers make the *residency* itself reportable, so a recurrence can be read
+    /// off a diagnostic report instead of reconstructed from timestamps.
+    public struct ClipboardHoldCounters: Equatable {
+        /// Pastes released with no evidence the host ever read the board.
+        public var unverifiedHolds: Int = 0
+        /// Of those, how many were extended because the app had stopped answering AX.
+        public var stallExtensions: Int = 0
+        /// Longest observed residency, milliseconds.
+        public var maxHeldMillis: Int = 0
+
+        public init() {}
+
+        public var isEmpty: Bool { unverifiedHolds == 0 && stallExtensions == 0 }
+    }
+
     public let capacity: Int
     private let lock = UnfairLock()
     private var entries: [Entry] = []
     private var duplicateRisk: [String: DuplicateRiskCounters] = [:]
+    private var clipboardHolds: [String: ClipboardHoldCounters] = [:]
 
     public init(capacity: Int = InjectTelemetryLog.defaultCapacity) {
         self.capacity = max(1, capacity)
@@ -195,6 +216,35 @@ public final class InjectTelemetryLog {
         return duplicateRisk
     }
 
+    // MARK: - Clipboard residency (§8.12)
+
+    public func recordUnverifiedClipboardHold(bundleID: String?, heldFor seconds: TimeInterval) {
+        let millis = Int((max(0, seconds) * 1000).rounded())
+        mutateClipboardHold(bundleID: bundleID) {
+            $0.unverifiedHolds += 1
+            $0.maxHeldMillis = max($0.maxHeldMillis, millis)
+        }
+    }
+
+    public func recordClipboardHoldExtension(bundleID: String?) {
+        mutateClipboardHold(bundleID: bundleID) { $0.stallExtensions += 1 }
+    }
+
+    public func clipboardHoldsByBundle() -> [String: ClipboardHoldCounters] {
+        lock.lock()
+        defer { lock.unlock() }
+        return clipboardHolds
+    }
+
+    private func mutateClipboardHold(bundleID: String?, _ body: (inout ClipboardHoldCounters) -> Void) {
+        let key = bundleID?.isEmpty == false ? bundleID! : "(unknown)"
+        lock.lock()
+        var counters = clipboardHolds[key] ?? ClipboardHoldCounters()
+        body(&counters)
+        clipboardHolds[key] = counters
+        lock.unlock()
+    }
+
     private func mutateDuplicateRisk(bundleID: String?, _ body: (inout DuplicateRiskCounters) -> Void) {
         let key = bundleID?.isEmpty == false ? bundleID! : "(unknown)"
         lock.lock()
@@ -275,6 +325,24 @@ public final class InjectTelemetryLog {
                         + "suppressed-AX-misses=\(counters.suppressedMissVerdicts) "
                         + "type-ahead-replays=\(counters.typeAheadReplays)"
                         + "(\(counters.typeAheadCharacters) chars)"
+                )
+            }
+        }
+
+        let holds = clipboardHoldsByBundle()
+            .filter { !$0.value.isEmpty }
+            .sorted { lhs, rhs in
+                lhs.value.maxHeldMillis == rhs.value.maxHeldMillis
+                    ? lhs.key < rhs.key
+                    : lhs.value.maxHeldMillis > rhs.value.maxHeldMillis
+            }
+        if !holds.isEmpty {
+            lines.append("Clipboard residency (payload held with no proof the app read it):")
+            for (bundle, counters) in holds {
+                lines.append(
+                    "  \(bundle): unverified-holds=\(counters.unverifiedHolds) "
+                        + "stall-extensions=\(counters.stallExtensions) "
+                        + "longest=\(counters.maxHeldMillis)ms"
                 )
             }
         }

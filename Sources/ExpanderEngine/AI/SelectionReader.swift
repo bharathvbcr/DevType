@@ -19,6 +19,15 @@ import Foundation
 /// Policy lives in `SelectionGate.swift` (`evaluate`); this file is the I/O around it.
 public enum SelectionReader {
 
+    /// Internal capability for the only path allowed to synthesize copy. Keeping this private
+    /// prevents ordinary selection reads from acquiring the behavior through a Boolean toggle.
+    private enum ClipboardFallbackPolicy {
+        case disabled
+        case explicitAIAction
+
+        var isAuthorized: Bool { self == .explicitAIAction }
+    }
+
     // MARK: - Budgets and limits
 
     /// Longer AX messaging timeout used for a single retry after `.cannotComplete`.
@@ -93,22 +102,63 @@ public enum SelectionReader {
         }
     }
 
-    /// Read the current selection, with a typed reason when there is none.
-    ///
-    /// Never returns a blank-but-non-empty selection: see `isBlankSelection`.
-    ///
-    /// - Parameter allowClipboardFallback: permit the brokered ⌘C capture as a last resort when
-    ///   the app exposes no focused AX element at all. **Off by default** — a synthetic ⌘C is an
-    ///   observable action in the target app (menu-bar flash, clipboard-manager entry), so only
-    ///   the explicit AI hotkey path opts in; the palette-open read must never post keys.
+    /// Read the current selection through Accessibility, with a typed reason when there is none.
+    /// This ordinary entry point can never synthesize keyboard input.
     public static func readSelection(
         checker: AXContextChecker = .shared,
         muteStore: AppMuteStore = .shared,
         monitor: SelectionMonitor = .shared,
         now: Date = Date(),
         diagnostics: AIDiagnosticsStore? = .shared,
-        allowClipboardFallback: Bool = false,
         clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)? = nil
+    ) -> Outcome {
+        readSelectionImpl(
+            checker: checker,
+            muteStore: muteStore,
+            monitor: monitor,
+            now: now,
+            diagnostics: diagnostics,
+            clipboardFallbackPolicy: .disabled,
+            clipboardCapture: clipboardCapture
+        )
+    }
+
+    /// Read for a user-invoked AI action, permitting the brokered ⌘C tier only when AX exposes
+    /// no focused element. This name is intentionally explicit: a caller cannot silently turn a
+    /// general selection read into synthetic input by flipping a Boolean.
+    ///
+    /// A copy answer remains semantically ambiguous in AX-invisible editors: it may be selected
+    /// text or the editor's copy-current-line behavior. The `.clipboard` result source preserves
+    /// that provenance for diagnostics and UI; callers must not relabel it as AX-verified.
+    public static func readSelectionForExplicitAIAction(
+        checker: AXContextChecker = .shared,
+        muteStore: AppMuteStore = .shared,
+        monitor: SelectionMonitor = .shared,
+        now: Date = Date(),
+        diagnostics: AIDiagnosticsStore? = .shared,
+        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)? = nil
+    ) -> Outcome {
+        readSelectionImpl(
+            checker: checker,
+            muteStore: muteStore,
+            monitor: monitor,
+            now: now,
+            diagnostics: diagnostics,
+            clipboardFallbackPolicy: .explicitAIAction,
+            clipboardCapture: clipboardCapture
+        )
+    }
+
+    /// Canonical implementation for both public capabilities. Never returns a blank-but-non-empty
+    /// selection; see `isBlankSelection`.
+    private static func readSelectionImpl(
+        checker: AXContextChecker,
+        muteStore: AppMuteStore,
+        monitor: SelectionMonitor,
+        now: Date,
+        diagnostics: AIDiagnosticsStore?,
+        clipboardFallbackPolicy: ClipboardFallbackPolicy,
+        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)?
     ) -> Outcome {
         let started = Date()
         let deadline = started.addingTimeInterval(readBudgetSeconds)
@@ -222,15 +272,23 @@ public enum SelectionReader {
         // Tier of last resort: a brokered ⌘C, only when the app published no focused element at
         // all and the caller explicitly opted in. Secure Input is re-checked live — it can have
         // been engaged in the time the AX ladder spent failing.
-        if allowClipboardFallback,
+        if clipboardFallbackPolicy.isAuthorized,
            case .failure(let failure) = outcome,
+           let frontmostPID,
            shouldAttemptClipboardFallback(
                failure: failure,
                frontmostIsOwnProcess: frontmostIsOwnProcess,
                canPostEvents: CGPreflightPostEventAccess(),
-               secureInputActive: AXContextChecker.isSecureEventInputEnabledLive()
+               secureInputActive: AXContextChecker.isSecureEventInputEnabledLive(),
+               sourceAppStillFrontmost: PasteboardBroker.frontmostProcessMatches(
+                   expectedPID: frontmostPID,
+                   actualPID: NSWorkspace.shared.frontmostApplication?.processIdentifier
+               )
            ) {
-            let capture = clipboardCapture?() ?? PasteboardBroker.shared.captureSelectionViaCopy()
+            let capture = clipboardCapture?()
+                ?? PasteboardBroker.shared.captureSelectionViaCopy(
+                    expectedFrontmostPID: frontmostPID
+                )
             probeSummary += " clipboard:\(capture.diagnosticLabel)"
             if case .captured(let text) = capture,
                let rescued = outcomeForClipboardCapture(text: text, bundleID: frontmostBundleID) {
