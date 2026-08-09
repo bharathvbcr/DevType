@@ -692,7 +692,6 @@ public final class LocalizationManager: ObservableObject {
             "ax.symbol.disclosureOpen": "Show less",
             "ax.symbol.warning": "Warning",
             "ax.symbol.close": "Close",
-            "ax.symbol.devtype": "DevType",
 
             // §5.1: composite row / control labels.
             "ax.enabled": "Enabled",
@@ -1731,7 +1730,6 @@ public final class LocalizationManager: ObservableObject {
             "ax.symbol.disclosureOpen": "간략히 보기",
             "ax.symbol.warning": "경고",
             "ax.symbol.close": "닫기",
-            "ax.symbol.devtype": "DevType",
 
             "ax.enabled": "활성화됨",
             "ax.disabled": "비활성화됨",
@@ -2747,7 +2745,6 @@ public final class LocalizationManager: ObservableObject {
             "ax.symbol.disclosureOpen": "詳細を隠す",
             "ax.symbol.warning": "警告",
             "ax.symbol.close": "閉じる",
-            "ax.symbol.devtype": "DevType",
 
             "ax.enabled": "有効",
             "ax.disabled": "無効",

@@ -124,24 +124,9 @@ enum DevTypeAccessibility {
         "chevron.down": "ax.symbol.disclosureClosed",
         "chevron.up": "ax.symbol.disclosureOpen",
         "exclamationmark.triangle.fill": "ax.symbol.warning",
-        "xmark": "ax.symbol.close",
-        "character.cursor.ibeam": "ax.symbol.devtype"
+        "xmark": "ax.symbol.close"
     ]
 
-    // MARK: Non-colour status channel (§5.2)
-
-    /// A short glyph that identifies engine state without relying on the dot colour.
-    /// Rendered into the status item image and appended to the menu title so the
-    /// state survives greyscale, colour-blind vision, and VoiceOver.
-    static func statusGlyph(for display: EngineDisplayStatusKind) -> String {
-        switch display {
-        case .active: return "●"
-        case .secure: return "◍"
-        case .paused: return "‖"
-        case .needsPermissions: return "!"
-        case .tapFailed: return "✕"
-        }
-    }
 }
 
 /// Local mirror of `EngineDisplayStatus` so this file does not need to import
