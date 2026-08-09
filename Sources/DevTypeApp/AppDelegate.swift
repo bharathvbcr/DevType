@@ -328,7 +328,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            button.image = DevTypeTheme.statusItemImage(dotColor: DevTypeTheme.statusGray)
+            button.image = DevTypeTheme.statusItemImage(
+                kind: .paused,
+                tint: DevTypeTheme.statusGray,
+                accessibilityLabel: loc.s("status.paused")
+            )
             button.imagePosition = .imageOnly
             // §5.1: the app's only permanent affordance used to set image +
             // imagePosition and nothing else — completely unlabeled over AX.
@@ -1618,8 +1622,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // §5.2: shape channel inside the badge, so state survives greyscale
             // and colour-blind vision.
             button.image = DevTypeTheme.statusItemImage(
-                dotColor: color,
-                glyph: DevTypeAccessibility.statusGlyph(for: kind),
+                kind: kind,
+                tint: color,
                 accessibilityLabel: name
             )
             // §5.2: text channel. Always on under Differentiate Without Color;

@@ -300,73 +300,201 @@ enum DevTypeTheme {
         return nil
     }
 
-    static func loadStatusIcon() -> NSImage? {
-        if let path = Bundle.main.path(forResource: "StatusIcon", ofType: "png"),
-           let image = NSImage(contentsOfFile: path) {
-            image.size = NSSize(width: 18, height: 18)
-            image.isTemplate = false
-            return image
+    // MARK: Menu-bar mark
+
+    /// Canonical menu-bar icon metrics. The badge is a fixed size and the canvas
+    /// never changes width, so the icon does not shift sideways in the menu bar
+    /// every time the engine changes state.
+    private enum StatusMark {
+        static let canvas = NSSize(width: 22, height: 18)
+        /// Square the monogram is fitted into; the `D` is 0.9 as wide as it is tall.
+        static let markRect = NSRect(x: 0, y: 1.5, width: 15, height: 15)
+        static let badgeDiameter: CGFloat = 9
+        /// Transparent gap punched between mark and badge so the badge reads as a
+        /// badge over any menu-bar backdrop, not just a dark one.
+        static let badgeGap: CGFloat = 1.1
+        static var badgeRect: NSRect {
+            NSRect(
+                x: canvas.width - badgeDiameter,
+                y: 0,
+                width: badgeDiameter,
+                height: badgeDiameter
+            )
         }
-        return load3DLogoImage(size: NSSize(width: 18, height: 18))
     }
 
-    /// Menu-bar icon: brand mark with a small engine-state dot in the corner.
+    /// DevType's monogram as vector geometry: a `D` whose counter holds the code
+    /// chevron, laid out on a 90×100 grid (y-up) and fitted into `rect`.
     ///
-    /// §5.2: the dot is no longer the only channel. `glyph` stamps a shape into
-    /// the badge (● active, ‖ paused, ! needs permissions, ✕ tap failed, ◍
-    /// secure) so the state survives greyscale, colour-blind vision, and a
-    /// user who turned on Differentiate Without Color. `accessibilityLabel`
-    /// carries the state for VoiceOver.
+    /// The menu-bar icon used to be `Resources/StatusIcon.png` — a 36px raster of
+    /// the glossy 3D app icon — scaled into an 18pt slot. That is exactly enough
+    /// pixels for a 2× display and none above it, and the artwork is a near-black
+    /// rounded square with bevels and glow, so it read as a smudge on a dark menu
+    /// bar, a sticker on a light one, and mush at any size. Vector geometry filled
+    /// with a colour resolved from the drawing appearance is crisp at every scale
+    /// factor and flips with the menu bar.
+    private static func brandMarkPath(in rect: NSRect) -> NSBezierPath {
+        let scale = min(rect.width / 90, rect.height / 100)
+        var transform = AffineTransform(
+            translationByX: rect.midX - 45 * scale,
+            byY: rect.midY - 50 * scale
+        )
+        transform.scale(scale)
+
+        func at(_ x: CGFloat, _ y: CGFloat) -> NSPoint { NSPoint(x: x, y: y) }
+
+        // Outer contour: flat left stem with softened corners, round right bowl.
+        let path = NSBezierPath()
+        path.move(to: at(6, 100))
+        path.line(to: at(38, 100))
+        path.curve(to: at(90, 50), controlPoint1: at(66, 100), controlPoint2: at(90, 78))
+        path.curve(to: at(38, 0), controlPoint1: at(90, 22), controlPoint2: at(66, 0))
+        path.line(to: at(6, 0))
+        path.curve(to: at(0, 6), controlPoint1: at(2.7, 0), controlPoint2: at(0, 2.7))
+        path.line(to: at(0, 94))
+        path.curve(to: at(6, 100), controlPoint1: at(0, 97.3), controlPoint2: at(2.7, 100))
+        path.close()
+
+        // Counter: the same contour inset by the stroke weight, cut out even-odd.
+        let weight: CGFloat = 16
+        path.move(to: at(weight, 100 - weight))
+        path.line(to: at(38, 100 - weight))
+        path.curve(
+            to: at(90 - weight, 50),
+            controlPoint1: at(62, 100 - weight),
+            controlPoint2: at(90 - weight, 76)
+        )
+        path.curve(
+            to: at(38, weight),
+            controlPoint1: at(90 - weight, 24),
+            controlPoint2: at(62, weight)
+        )
+        path.line(to: at(weight, weight))
+        path.close()
+
+        // The chevron inside the counter — the app icon's `</>` reduced to the one
+        // stroke that still reads at 18pt. Six points: outer V, then inner V back.
+        path.move(to: at(29, 75))
+        path.line(to: at(65, 50))
+        path.line(to: at(29, 25))
+        path.line(to: at(29, 38.4))
+        path.line(to: at(45.7, 50))
+        path.line(to: at(29, 61.6))
+        path.close()
+
+        path.windingRule = .evenOdd
+        path.transform(using: transform)
+        return path
+    }
+
+    /// Draws the engine-state badge: a tinted disc carrying a vector glyph.
+    ///
+    /// §5.2: colour is not the only channel. The glyph used to be a text
+    /// character (`‖`, `◍`, `✕`) set at 8pt inside a 10pt circle, where `◍`
+    /// collapsed into a blob and every glyph was drawn in fixed near-black
+    /// regardless of the disc behind it. These are drawn as geometry instead, in
+    /// whichever of black/white contrasts with the resolved tint, so the state
+    /// survives greyscale, colour-blind vision, and Differentiate Without Color.
+    private static func drawStatusBadge(_ kind: EngineDisplayStatusKind, tint: NSColor, in rect: NSRect) {
+        tint.setFill()
+        NSBezierPath(ovalIn: rect).fill()
+
+        let resolved = tint.usingColorSpace(.sRGB)
+        let luminance = resolved.map {
+            0.2126 * $0.redComponent + 0.7152 * $0.greenComponent + 0.0722 * $0.blueComponent
+        } ?? 0.5
+        let ink: NSColor = luminance > 0.5 ? .black : .white
+        ink.setFill()
+        ink.setStroke()
+
+        // Glyphs are specified on a 10-unit grid so they scale with the badge.
+        let unit = rect.width / 10
+        let cx = rect.midX, cy = rect.midY
+        func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint { NSPoint(x: x, y: y) }
+
+        switch kind {
+        case .active:
+            // A bare disc is the "●" of the quiet state — nothing to stamp.
+            break
+        case .paused:
+            let barWidth = 1.4 * unit, barHeight = 4.6 * unit, gap = 1.3 * unit
+            NSBezierPath(rect: NSRect(
+                x: cx - gap / 2 - barWidth, y: cy - barHeight / 2,
+                width: barWidth, height: barHeight
+            )).fill()
+            NSBezierPath(rect: NSRect(
+                x: cx + gap / 2, y: cy - barHeight / 2,
+                width: barWidth, height: barHeight
+            )).fill()
+        case .secure:
+            let ring = NSBezierPath(ovalIn: NSRect(
+                x: cx - 2.6 * unit, y: cy - 2.6 * unit,
+                width: 5.2 * unit, height: 5.2 * unit
+            ))
+            ring.lineWidth = 1.5 * unit
+            ring.stroke()
+        case .needsPermissions:
+            let barWidth = 1.6 * unit
+            NSBezierPath(rect: NSRect(
+                x: cx - barWidth / 2, y: cy - 0.4 * unit,
+                width: barWidth, height: 3.2 * unit
+            )).fill()
+            NSBezierPath(ovalIn: NSRect(
+                x: cx - barWidth / 2, y: cy - 2.9 * unit,
+                width: barWidth, height: barWidth
+            )).fill()
+        case .tapFailed:
+            let arm = 1.9 * unit
+            let cross = NSBezierPath()
+            cross.move(to: point(cx - arm, cy - arm))
+            cross.line(to: point(cx + arm, cy + arm))
+            cross.move(to: point(cx - arm, cy + arm))
+            cross.line(to: point(cx + arm, cy - arm))
+            cross.lineWidth = 1.5 * unit
+            cross.lineCapStyle = .round
+            cross.stroke()
+        }
+    }
+
+    /// Menu-bar icon: the monogram with an engine-state badge in the corner.
+    ///
+    /// The image is not a template — the badge carries colour that templating
+    /// would flatten — so the monogram is filled with `NSColor.labelColor`
+    /// resolved inside the drawing handler. AppKit re-runs that handler under the
+    /// destination's appearance, so the mark tracks a light or dark menu bar the
+    /// way a template image would. `cacheMode = .never` keeps a cached rendition
+    /// from freezing the icon at the appearance it was first drawn under.
+    ///
+    /// §5.2: `kind` selects the badge glyph and `accessibilityLabel` carries the
+    /// state for VoiceOver, so colour is one of three channels rather than the
+    /// only one.
     static func statusItemImage(
-        dotColor: NSColor?,
-        glyph: String? = nil,
+        kind: EngineDisplayStatusKind,
+        tint: NSColor,
         accessibilityLabel: String? = nil
     ) -> NSImage {
-        let base = loadStatusIcon()
-            ?? symbol("character.cursor.ibeam", size: 16, weight: .semibold)
-            ?? NSImage()
-        // A glyph needs a slightly bigger badge to stay legible at menu-bar size.
-        let showGlyph = glyph != nil
-        let dotDiameter: CGFloat = showGlyph ? 10 : 8
-        let size = NSSize(width: showGlyph ? 24 : 22, height: 18)
-        let image = NSImage(size: size, flipped: false) { rect in
-            let baseRect = NSRect(
-                x: 0,
-                y: (rect.height - 18) / 2,
-                width: 18,
-                height: 18
-            )
-            base.draw(in: baseRect)
-            if let dotColor {
-                let dotRect = NSRect(
-                    x: rect.width - dotDiameter - 0.5,
-                    y: 0.5,
-                    width: dotDiameter,
-                    height: dotDiameter
-                )
-                NSColor(calibratedWhite: 0, alpha: 0.55).setFill()
-                NSBezierPath(ovalIn: dotRect.insetBy(dx: -1.2, dy: -1.2)).fill()
-                dotColor.setFill()
-                NSBezierPath(ovalIn: dotRect).fill()
-                if let glyph, !glyph.isEmpty {
-                    let attributes: [NSAttributedString.Key: Any] = [
-                        .font: NSFont.systemFont(ofSize: dotDiameter - 2.0, weight: .bold),
-                        .foregroundColor: NSColor(calibratedWhite: 0, alpha: 0.92)
-                    ]
-                    let text = glyph as NSString
-                    let textSize = text.size(withAttributes: attributes)
-                    text.draw(
-                        at: NSPoint(
-                            x: dotRect.midX - textSize.width / 2,
-                            y: dotRect.midY - textSize.height / 2
-                        ),
-                        withAttributes: attributes
-                    )
-                }
-            }
+        let image = NSImage(size: StatusMark.canvas, flipped: false) { rect in
+            let badgeRect = StatusMark.badgeRect
+
+            // Punch the badge's clearance out of the mark rather than laying an
+            // opaque ring over it: a ring has to pick a colour, and the old
+            // black-at-55% ring was invisible on a dark menu bar.
+            NSGraphicsContext.saveGraphicsState()
+            let clip = NSBezierPath(rect: rect.insetBy(dx: -4, dy: -4))
+            clip.append(NSBezierPath(
+                ovalIn: badgeRect.insetBy(dx: -StatusMark.badgeGap, dy: -StatusMark.badgeGap)
+            ))
+            clip.windingRule = .evenOdd
+            clip.addClip()
+            NSColor.labelColor.setFill()
+            brandMarkPath(in: StatusMark.markRect).fill()
+            NSGraphicsContext.restoreGraphicsState()
+
+            drawStatusBadge(kind, tint: tint, in: badgeRect)
             return true
         }
         image.isTemplate = false
+        image.cacheMode = .never
         if let accessibilityLabel { image.accessibilityDescription = accessibilityLabel }
         return image
     }
