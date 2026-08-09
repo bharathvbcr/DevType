@@ -21,12 +21,13 @@ enum AIActionPanel {
 
     static func present(
         input: String,
+        source: SelectionReader.Source,
         loc: LocalizationManager = .shared,
         onPick: @escaping (AITransformKind, NSRunningApplication?) -> Void,
         onCancel: (() -> Void)? = nil
     ) {
         if isOpen { close() }
-        open(input: input, loc: loc, onPick: onPick, onCancel: onCancel)
+        open(input: input, source: source, loc: loc, onPick: onPick, onCancel: onCancel)
     }
 
     static func close(resumeMatching: Bool = true) {
@@ -41,6 +42,7 @@ enum AIActionPanel {
 
     private static func open(
         input: String,
+        source: SelectionReader.Source,
         loc: LocalizationManager,
         onPick: @escaping (AITransformKind, NSRunningApplication?) -> Void,
         onCancel: (() -> Void)?
@@ -65,6 +67,7 @@ enum AIActionPanel {
 
         let controller = AIActionController(
             input: input,
+            source: source,
             loc: loc,
             onPick: { kind in
                 close(resumeMatching: true)
@@ -162,6 +165,7 @@ enum AIActionPanel {
 
 private final class AIActionController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private let inputPreview: String
+    private let source: SelectionReader.Source
     private let loc: LocalizationManager
     private let onPick: (AITransformKind) -> Void
     private let onCancel: () -> Void
@@ -174,6 +178,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
 
     init(
         input: String,
+        source: SelectionReader.Source,
         loc: LocalizationManager,
         onPick: @escaping (AITransformKind) -> Void,
         onCancel: @escaping () -> Void
@@ -184,6 +189,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         self.inputPreview = preview.count > 120
             ? String(preview.prefix(117)) + "…"
             : preview
+        self.source = source
         self.loc = loc
         self.onPick = onPick
         self.onCancel = onCancel
@@ -214,7 +220,9 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         )
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         let subtitleLabel = DevTypeTheme.makeLabel(
-            loc.s("ai.palette.subtitle"),
+            loc.s(source == .clipboard
+                ? "ai.palette.clipboardSubtitle"
+                : "ai.palette.subtitle"),
             font: DevTypeTheme.font(10.5),
             color: DevTypeTheme.textTertiary
         )
@@ -238,7 +246,9 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         )
         previewLabel.translatesAutoresizingMaskIntoConstraints = false
         previewLabel.lineBreakMode = .byTruncatingTail
-        previewLabel.setAccessibilityLabel(loc.s("ai.palette.selectionPreview"))
+        previewLabel.setAccessibilityLabel(loc.s(source == .clipboard
+            ? "ai.palette.clipboardPreview"
+            : "ai.palette.selectionPreview"))
         root.addSubview(previewLabel)
 
         let divider = DevTypeTheme.makeHairline()

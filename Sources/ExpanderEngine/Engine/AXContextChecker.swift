@@ -87,6 +87,31 @@ public final class AXContextChecker {
         AXUIElementSetMessagingTimeout(element, seconds)
     }
 
+    /// §8.12: is this process servicing AX messages *right now*?
+    ///
+    /// `.cannotComplete` from an app-level attribute read is the OS's "this app's main run loop is
+    /// not answering" — `SelectionReader` already draws exactly this line between a stalled app and
+    /// an empty answer. Every other status, a hard refusal included, means the process replied.
+    ///
+    /// Used as a stall witness by the pasteboard residency policy: a host that has stopped
+    /// answering has not processed our synthetic ⌘V either, so releasing the payload on schedule
+    /// would hand it the user's restored clipboard. Answering "responding" on any doubt is
+    /// deliberate — this may only ever *extend* a hold, and an extension that fires on a healthy
+    /// app costs the user a stale clipboard for a fraction of a second.
+    ///
+    /// Costs one AX round trip bounded by `timeoutSeconds`. Never called on the keystroke path.
+    public static func appRespondsToAX(
+        pid: pid_t,
+        timeoutSeconds: Float = messagingTimeoutSeconds
+    ) -> Bool {
+        guard pid > 0 else { return true }
+        let appElement = AXUIElementCreateApplication(pid)
+        applyMessagingTimeout(to: appElement, seconds: timeoutSeconds)
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(appElement, kAXRoleAttribute as CFString, &value)
+        return status != .cannotComplete
+    }
+
     /// System-wide AX element with messaging timeout applied.
     public func systemWideElement() -> AXUIElement {
         let systemWide = AXUIElementCreateSystemWide()

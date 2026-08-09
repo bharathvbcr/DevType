@@ -1752,11 +1752,6 @@ public final class TextInjectionPipeline {
         HIDKeyPoster.keyCode(forTrailingKeyName: name)
     }
 
-    @discardableResult
-    public func postCmdVKeyEvents() -> Bool {
-        hid.postCmdVKeyEvents()
-    }
-
     public func sendBackspaces(count: Int) {
         hid.sendBackspaces(count: count)
     }

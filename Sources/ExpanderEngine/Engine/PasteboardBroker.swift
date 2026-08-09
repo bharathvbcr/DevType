@@ -74,6 +74,44 @@ public final class PasteboardBroker {
         var targetChangeCount: Int
     }
 
+    /// §8.12: everything the release decision needs, captured at the moment ⌘V was posted.
+    ///
+    /// Residency is a property of the *keystroke*, not of whichever code path happens to finish
+    /// first, so the deadline is absolute. The previous `deferBy:` delay was measured from wherever
+    /// the caller stood: an outcome reached in 0 ms and one reached in 300 ms both waited the same
+    /// extra interval, so the actual time the bytes spent on the board was never a stated number.
+    private struct PayloadResidency {
+        /// When ⌘V finished posting.
+        let postedAt: Date
+        /// Minimum time on the board when nothing proves the host read it.
+        let unverifiedHold: TimeInterval
+        /// Hard cap including stall extensions. Never below `unverifiedHold`.
+        let ceiling: TimeInterval
+        /// Process the ⌘V was aimed at, for the stall probe. `nil` disables the probe.
+        let targetPID: pid_t?
+        /// Whether that process was answering AX when we posted. Without a positive baseline a
+        /// silent app is just an app that never speaks AX, not a stalled one, and extending on
+        /// that would hold every expansion in an AX-dead host to the ceiling.
+        let hostRespondedAtPaste: Bool
+        let bundleID: String?
+
+        var deadline: Date { postedAt.addingTimeInterval(unverifiedHold) }
+        var hardDeadline: Date { postedAt.addingTimeInterval(max(ceiling, unverifiedHold)) }
+
+        /// A retry posts a second ⌘V, which owes its own full residency — the first keystroke
+        /// having aged out is not evidence about this one.
+        func restarted(at postedAt: Date) -> PayloadResidency {
+            PayloadResidency(
+                postedAt: postedAt,
+                unverifiedHold: unverifiedHold,
+                ceiling: ceiling,
+                targetPID: targetPID,
+                hostRespondedAtPaste: hostRespondedAtPaste,
+                bundleID: bundleID
+            )
+        }
+    }
+
     // MARK: - State
 
     private let hid: HIDKeyPoster
@@ -213,6 +251,61 @@ public final class PasteboardBroker {
         }
     }
 
+    // MARK: - Payload residency policy (§8.12)
+
+    /// How much longer our payload must stay on the pasteboard, given how the paste ended.
+    ///
+    /// The question this answers is **not** "did the text arrive" but "has the host read the
+    /// bytes yet" — and only one outcome answers it:
+    ///
+    /// - `.delivered`: AX found the text in the field, so the host demonstrably read the board.
+    ///   Restore immediately; the user gets their clipboard back as fast as ever.
+    /// - `.notPosted`: no ⌘V exists, so there is nothing to be consumed. Restore immediately.
+    /// - `.unavailable`: ⌘V went out and AX could tell us nothing. This is the Electron/Chromium
+    ///   case, the majority of real pastes, and it is *zero* evidence — hold for the full residency.
+    /// - `.failed`: AX is readable and the text is absent. That is evidence about the *field*, not
+    ///   about the pasteboard: a host that has not yet dequeued the keystroke reads exactly the
+    ///   same. Hold.
+    ///
+    /// Returns 0 rather than a negative interval when the residency has already elapsed — by the
+    /// time a slow verification ladder finishes, it usually has.
+    public static func remainingPayloadResidency(
+        result: PasteDeliveryResult,
+        elapsedSincePaste: TimeInterval,
+        unverifiedHold: TimeInterval
+    ) -> TimeInterval {
+        switch result {
+        case .delivered, .notPosted:
+            return 0
+        case .failed, .unavailable:
+            return max(0, unverifiedHold - max(0, elapsedSincePaste))
+        }
+    }
+
+    /// May an unverified paste keep the payload *past* its residency because the target app has
+    /// stopped answering AX?
+    ///
+    /// A frozen host is the failure mode a fixed residency cannot cover: our ⌘V sits in its event
+    /// queue for as long as its main thread is busy, and no timer chosen in advance is long enough.
+    /// An app that is not servicing AX is not servicing its event queue either, so "still stalled"
+    /// is a live reason to believe the keystroke has not been consumed.
+    ///
+    /// Three conditions, all required, because the cost of a false extension is the user's
+    /// clipboard staying wrong:
+    /// 1. the host answered AX when we posted — otherwise silence is its normal state and proves
+    ///    nothing (a check that could not run must not read as a check that ran);
+    /// 2. it is not answering now;
+    /// 3. we are still inside the hard ceiling.
+    public static func shouldExtendResidencyForStalledHost(
+        hostRespondedAtPaste: Bool,
+        hostRespondsNow: Bool,
+        elapsedSincePaste: TimeInterval,
+        ceiling: TimeInterval = InjectTiming.unverifiedPayloadResidencyCeiling
+    ) -> Bool {
+        guard hostRespondedAtPaste, !hostRespondsNow else { return false }
+        return elapsedSincePaste < ceiling
+    }
+
     public static func label(for result: PasteDeliveryResult) -> String {
         switch result {
         case .notPosted: return "notPosted"
@@ -303,28 +396,62 @@ public final class PasteboardBroker {
             ?? restoreDelay(bundleID: bundleID, payloadBytes: text.utf8.count)
         let holdTimeoutValue = holdTimeoutOverride
             ?? max(timing.holdTimeout(bundleID: bundleID), restoreDelayValue)
+        // §8.12: the board must stay readable for the *host*, which is a different and longer
+        // question than how long we keep interrogating AX. `atLeast` keeps an explicit caller
+        // override (the 8 s secure-clipboard window) from being clamped down to the ceiling.
+        let unverifiedHold = timing.unverifiedPayloadResidency(
+            bundleID: bundleID,
+            payloadBytes: text.utf8.count,
+            atLeast: restoreDelayValue
+        )
+        // The ⌘V goes to whoever is frontmost when it is posted; resolving the pid here rather
+        // than at release time means a later app switch cannot re-point the stall probe at an
+        // innocent process.
+        let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        // Free responsiveness baseline: `baseline` is a completed AX read of this app's focused
+        // element taken moments ago by the caller. If it answered, the app was alive; if it never
+        // speaks AX, the stall probe stays disarmed rather than firing on every expansion.
+        let hostRespondedAtPaste = baseline != nil
 
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.prePasteSettleDelay) {
             self.hid.postCmdVKeyEventsAsync { posted in
                 guard posted else {
-                    // §8.1: one restore scheduler for all three former copies of this if/else.
-                    self.finishOwnership(
+                    // No ⌘V exists, so nothing is waiting to read the board — only an explicit
+                    // manual-paste window can keep the payload up.
+                    self.releaseOwnership(
                         ticket,
-                        deferBy: leaveClipboardOnFailure ? restoreDelayValue : nil
+                        result: .notPosted,
+                        residency: nil,
+                        notBefore: leaveClipboardOnFailure
+                            ? Date().addingTimeInterval(restoreDelayValue)
+                            : nil
                     )
                     completion(.notPosted)
                     return
                 }
 
+                let residency = PayloadResidency(
+                    postedAt: Date(),
+                    unverifiedHold: unverifiedHold,
+                    ceiling: max(InjectTiming.unverifiedPayloadResidencyCeiling, unverifiedHold),
+                    targetPID: targetPID,
+                    hostRespondedAtPaste: hostRespondedAtPaste,
+                    bundleID: bundleID
+                )
+
                 guard let expectedText, !expectedText.isEmpty else {
+                    // Nothing to verify, so this paste can never produce read evidence: it always
+                    // owes the full residency.
                     if completeBeforeRestore {
                         completion(.unavailable)
-                        self.finishOwnership(ticket, deferBy: restoreDelayValue)
+                        self.releaseOwnership(ticket, result: .unavailable, residency: residency)
                     } else {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelayValue) {
-                            self.finishOwnership(ticket, deferBy: nil)
-                            completion(.unavailable)
-                        }
+                        self.releaseOwnership(
+                            ticket,
+                            result: .unavailable,
+                            residency: residency,
+                            onReleased: { completion(.unavailable) }
+                        )
                     }
                     return
                 }
@@ -340,6 +467,7 @@ public final class PasteboardBroker {
                     holdStarted: Date(),
                     holdTimeout: holdTimeoutValue,
                     ticket: ticket,
+                    residency: residency,
                     leaveClipboardOnFailure: leaveClipboardOnFailure,
                     completion: completion
                 )
@@ -358,6 +486,7 @@ public final class PasteboardBroker {
         holdStarted: Date,
         holdTimeout: TimeInterval,
         ticket: ClipboardTicket,
+        residency: PayloadResidency,
         leaveClipboardOnFailure: Bool,
         consecutiveFailures: Int = 0,
         completion: @escaping (PasteDeliveryResult) -> Void
@@ -414,7 +543,8 @@ public final class PasteboardBroker {
                     bundleID: bundleID,
                     role: focusedRole
                 )
-                self.finishOwnership(ticket, deferBy: nil)
+                // §8.12: the one outcome that proves the host read the board. Restore at once.
+                self.releaseOwnership(ticket, result: .delivered, residency: residency)
                 completion(.delivered)
 
             case .failConfirmed:
@@ -426,14 +556,20 @@ public final class PasteboardBroker {
                     elapsed=\(Int(elapsed * 1000), privacy: .public)ms
                     """
                 )
-                self.finishOwnership(
+                self.releaseOwnership(
                     ticket,
-                    deferBy: leaveClipboardOnFailure ? holdTimeout : nil
+                    result: .failed,
+                    residency: residency,
+                    notBefore: leaveClipboardOnFailure
+                        ? Date().addingTimeInterval(holdTimeout)
+                        : nil
                 )
                 completion(.failed)
 
             case .giveUpUnverified:
-                self.finishOwnership(ticket, deferBy: nil)
+                // §8.12: no evidence at all that the host read the board — the payload owes its
+                // full residency, and a stalled host extends it further.
+                self.releaseOwnership(ticket, result: .unavailable, residency: residency)
                 completion(.unavailable)
 
             case .retryPaste:
@@ -450,13 +586,19 @@ public final class PasteboardBroker {
                 InjectTelemetryLog.shared.recordPasteRetry(bundleID: bundleID)
                 self.hid.postCmdVKeyEventsAsync { posted in
                     guard posted else {
-                        self.finishOwnership(
+                        self.releaseOwnership(
                             ticket,
-                            deferBy: leaveClipboardOnFailure ? holdTimeout : nil
+                            result: .failed,
+                            residency: residency,
+                            notBefore: leaveClipboardOnFailure
+                                ? Date().addingTimeInterval(holdTimeout)
+                                : nil
                         )
                         completion(.failed)
                         return
                     }
+                    // §8.12: a retry is a *new* keystroke, so the residency clock restarts. The
+                    // first ⌘V having aged out says nothing about when this one will be consumed.
                     self.runPasteHoldLoop(
                         expectedText: expectedText,
                         baseline: baseline,
@@ -468,6 +610,7 @@ public final class PasteboardBroker {
                         holdStarted: holdStarted,
                         holdTimeout: holdTimeout,
                         ticket: ticket,
+                        residency: residency.restarted(at: Date()),
                         leaveClipboardOnFailure: leaveClipboardOnFailure,
                         consecutiveFailures: 0,
                         completion: completion
@@ -486,6 +629,7 @@ public final class PasteboardBroker {
                     holdStarted: holdStarted,
                     holdTimeout: holdTimeout,
                     ticket: ticket,
+                    residency: residency,
                     leaveClipboardOnFailure: leaveClipboardOnFailure,
                     consecutiveFailures: failures,
                     completion: completion
@@ -545,7 +689,7 @@ public final class PasteboardBroker {
                 targetChangeCount: pasteboard.changeCount
             )
             registerPendingTicket(emptyTicket)
-            finishOwnership(emptyTicket, deferBy: nil)
+            releaseOwnership(emptyTicket, result: .notPosted, residency: nil)
             completion(.notPosted)
             return
         }
@@ -565,21 +709,35 @@ public final class PasteboardBroker {
             + (pasteboard.data(forType: .png)?.count ?? 0)
         let restoreDelayValue = calculateImageRestoreDelay(payloadBytes: payloadBytes)
         let holdTimeoutValue = max(restoreDelayValue, InjectTiming.imageDeliveryHoldTimeout)
+        // §8.12: an image snippet that pastes the user's old clipboard is the same defect wearing
+        // a different payload type, so it gets the same residency floor. Image bytes are a poor
+        // proxy for host read time, hence `max` with the size-derived delay rather than a swap.
+        let unverifiedHold = max(restoreDelayValue, InjectTiming.unverifiedPayloadResidencyFloor)
+        let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.prePasteSettleDelay) {
             let baseline = self.verifier.captureFocusedTextObservation()
             self.hid.postCmdVKeyEventsAsync { posted in
                 guard posted else {
-                    self.finishOwnership(ticket, deferBy: nil)
+                    self.releaseOwnership(ticket, result: .notPosted, residency: nil)
                     completion(.notPosted)
                     return
                 }
+                let residency = PayloadResidency(
+                    postedAt: Date(),
+                    unverifiedHold: unverifiedHold,
+                    ceiling: max(InjectTiming.unverifiedPayloadResidencyCeiling, unverifiedHold),
+                    targetPID: targetPID,
+                    hostRespondedAtPaste: baseline != nil,
+                    bundleID: bundleID
+                )
                 self.runImageHoldLoop(
                     baseline: baseline,
                     bundleID: bundleID,
                     holdStarted: Date(),
                     holdTimeout: holdTimeoutValue,
                     ticket: ticket,
+                    residency: residency,
                     completion: completion
                 )
             }
@@ -592,13 +750,14 @@ public final class PasteboardBroker {
         holdStarted: Date,
         holdTimeout: TimeInterval,
         ticket: ClipboardTicket,
+        residency: PayloadResidency,
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteDeliverySettleDelay) {
             let elapsed = Date().timeIntervalSince(holdStarted)
             if self.focusedFieldChanged(since: baseline) {
                 self.timing.recordDeliveryLatency(elapsed, bundleID: bundleID)
-                self.finishOwnership(ticket, deferBy: nil)
+                self.releaseOwnership(ticket, result: .delivered, residency: residency)
                 completion(.delivered)
                 return
             }
@@ -609,13 +768,14 @@ public final class PasteboardBroker {
                     holdStarted: holdStarted,
                     holdTimeout: holdTimeout,
                     ticket: ticket,
+                    residency: residency,
                     completion: completion
                 )
                 return
             }
             // Held long enough. AX saw nothing change, which for an image is weak evidence at
             // best — report unverified rather than failed, and never re-paste (see the doc above).
-            self.finishOwnership(ticket, deferBy: nil)
+            self.releaseOwnership(ticket, result: .unavailable, residency: residency)
             completion(.unavailable)
         }
     }
@@ -682,16 +842,135 @@ public final class PasteboardBroker {
         restoreLock.unlock()
     }
 
-    /// §8.1: the single restore scheduler. `deferBy` non-nil means "leave the payload up for a
-    /// manual ⌘V first" — the three identical `if leaveClipboardOnFailure { asyncAfter … } else
-    /// { … }` blocks the broker inherited all collapse into this.
-    private func finishOwnership(_ ticket: ClipboardTicket, deferBy delay: TimeInterval?) {
-        guard let delay, delay > 0 else {
-            restore(ticket)
+    /// §8.1 / §8.12: the single pasteboard release. Every path that finishes with our payload on
+    /// the board goes through here, and none of them decides its own timing.
+    ///
+    /// - Parameters:
+    ///   - result: how the paste ended — the only input that can authorise an immediate release.
+    ///   - residency: the ⌘V's residency, `nil` when no ⌘V was ever posted.
+    ///   - notBefore: an independent floor, used by `leaveClipboardOnFailure` to keep a concealed
+    ///     payload up for a manual ⌘V. Composed with residency by `max`, never by replacement —
+    ///     a caller asking for an 8 s secure-paste window must not shorten it to the residency,
+    ///     and the residency must not be shortened to a caller's smaller number either.
+    ///   - onReleased: run after the user's clipboard is back, for callers whose contract is
+    ///     "tell me when the board is theirs again".
+    private func releaseOwnership(
+        _ ticket: ClipboardTicket,
+        result: PasteDeliveryResult,
+        residency: PayloadResidency?,
+        notBefore: Date? = nil,
+        onReleased: (() -> Void)? = nil
+    ) {
+        var deadline = notBefore ?? .distantPast
+        if let residency {
+            let remaining = PasteboardBroker.remainingPayloadResidency(
+                result: result,
+                elapsedSincePaste: Date().timeIntervalSince(residency.postedAt),
+                unverifiedHold: residency.unverifiedHold
+            )
+            deadline = max(deadline, Date().addingTimeInterval(remaining))
+        }
+        releaseWhenDue(
+            ticket,
+            result: result,
+            residency: residency,
+            notBefore: deadline,
+            onReleased: onReleased
+        )
+    }
+
+    /// Belt to the ceiling's braces. The ceiling is expressed in wall-clock time, and wall clock
+    /// is not monotonic — an NTP step backwards during a hold would keep `elapsed` under the
+    /// ceiling indefinitely. A plain count cannot be argued with.
+    public static let maxStallExtensions = 16
+
+    /// Waits out the deadline, then re-asks the stall question before letting go.
+    private func releaseWhenDue(
+        _ ticket: ClipboardTicket,
+        result: PasteDeliveryResult,
+        residency: PayloadResidency?,
+        notBefore: Date,
+        extensionsUsed: Int = 0,
+        onReleased: (() -> Void)?
+    ) {
+        // A newer expansion (or a deliberate user-clipboard write) owns the board now. Bail before
+        // spending an AX round trip on a ticket `restore` would refuse anyway.
+        guard currentRestoreGeneration() == ticket.generation else {
+            onReleased?()
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            self.restore(ticket)
+
+        let wait = notBefore.timeIntervalSinceNow
+        if wait > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
+                self.releaseWhenDue(
+                    ticket,
+                    result: result,
+                    residency: residency,
+                    notBefore: notBefore,
+                    extensionsUsed: extensionsUsed,
+                    onReleased: onReleased
+                )
+            }
+            return
+        }
+
+        if let residency,
+           extensionsUsed < Self.maxStallExtensions,
+           Self.wantsStallExtension(result: result, residency: residency) {
+            let elapsed = Date().timeIntervalSince(residency.postedAt)
+            if PasteboardBroker.shouldExtendResidencyForStalledHost(
+                hostRespondedAtPaste: residency.hostRespondedAtPaste,
+                hostRespondsNow: residency.targetPID.map { AXContextChecker.appRespondsToAX(pid: $0) } ?? true,
+                elapsedSincePaste: elapsed,
+                ceiling: max(residency.ceiling, residency.unverifiedHold)
+            ) {
+                InjectTelemetryLog.shared.recordClipboardHoldExtension(bundleID: residency.bundleID)
+                DevTypeLog.inject.notice(
+                    """
+                    [Inject] §8.12 holding the payload past its \
+                    \(Int(residency.unverifiedHold * 1000), privacy: .public)ms residency — \
+                    \(residency.bundleID ?? "(unknown)", privacy: .public) has stopped answering AX, \
+                    so it has not consumed ⌘V yet \
+                    (elapsed=\(Int(elapsed * 1000), privacy: .public)ms)
+                    """
+                )
+                let next = min(
+                    Date().addingTimeInterval(InjectTiming.stalledHostResidencyProbeInterval),
+                    residency.hardDeadline
+                )
+                releaseWhenDue(
+                    ticket,
+                    result: result,
+                    residency: residency,
+                    notBefore: next,
+                    extensionsUsed: extensionsUsed + 1,
+                    onReleased: onReleased
+                )
+                return
+            }
+        }
+
+        if let residency, result != .delivered, result != .notPosted {
+            InjectTelemetryLog.shared.recordUnverifiedClipboardHold(
+                bundleID: residency.bundleID,
+                heldFor: Date().timeIntervalSince(residency.postedAt)
+            )
+        }
+        restore(ticket)
+        onReleased?()
+    }
+
+    /// Only outcomes with no read evidence can be extended — `.delivered` already proved the read
+    /// and `.notPosted` has nothing to be read.
+    private static func wantsStallExtension(
+        result: PasteDeliveryResult,
+        residency: PayloadResidency
+    ) -> Bool {
+        guard residency.targetPID != nil, residency.hostRespondedAtPaste else { return false }
+        switch result {
+        case .delivered, .notPosted: return false
+        case .failed, .unavailable: return true
         }
     }
 
@@ -716,6 +995,10 @@ public final class PasteboardBroker {
         case noStringOnBoard
         /// The key events could not be posted (Post Events revoked mid-session).
         case postFailed
+        /// The app that owned the selection lost focus before ⌘C could be posted.
+        case sourceAppChanged
+        /// Secure Event Input became active after the reader's earlier preflight.
+        case secureInputActive
 
         public var diagnosticLabel: String {
             switch self {
@@ -723,8 +1006,16 @@ public final class PasteboardBroker {
             case .boardUnchanged: return "unchanged"
             case .noStringOnBoard: return "noString"
             case .postFailed: return "postFailed"
+            case .sourceAppChanged: return "sourceChanged"
+            case .secureInputActive: return "secureInput"
             }
         }
+    }
+
+    /// Pure identity check shared by the reader's early gate and the broker's immediate pre-post
+    /// gate. Unknown and non-process ids fail closed; equality alone is insufficient for pid 0.
+    public static func frontmostProcessMatches(expectedPID: pid_t, actualPID: pid_t?) -> Bool {
+        expectedPID > 0 && actualPID == expectedPID
     }
 
     /// Pure: restore only when the board still shows the copy we observed. Anything else means
@@ -754,18 +1045,61 @@ public final class PasteboardBroker {
     /// this when AX could not even resolve a focused element, never on a readable-but-empty
     /// selection.
     ///
-    /// - Parameter postCopy: the ⌘C itself, injectable so tests can simulate the target app.
+    /// - Parameters:
+    ///   - expectedFrontmostPID: Process that owned the selection before AX probing. Required so
+    ///     callers cannot accidentally post an unpinned copy.
+    ///   - frontmostPIDProvider: Live process lookup immediately before posting; injectable only
+    ///     so the focus-theft branch can be tested without moving the user's real focus.
+    ///   - secureInputProvider: Live Secure Input lookup at the same boundary.
+    ///   - postCopy: The ⌘C itself, injectable so tests can simulate the target app.
     public func captureSelectionViaCopy(
         pasteboard: NSPasteboard = .general,
+        expectedFrontmostPID: pid_t,
         timeout: TimeInterval = copyCaptureTimeout,
         pollInterval: TimeInterval = copyCapturePollInterval,
+        frontmostPIDProvider: () -> pid_t? = {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+        },
+        secureInputProvider: () -> Bool = {
+            AXContextChecker.isSecureEventInputEnabledLive()
+        },
         postCopy: (() -> Bool)? = nil
     ) -> CopyCaptureOutcome {
         let snapshot = acquireUserClipboardSnapshot(pasteboard: pasteboard)
         let baseline = pasteboard.changeCount
 
-        let posted = postCopy.map { $0() } ?? hid.postCmdCKeyEvents()
-        guard posted else { return .postFailed }
+        // Snapshotting can traverse several clipboard representations. Re-check both volatile
+        // gates after that work and immediately before input posting, not merely on reader entry.
+        guard !secureInputProvider() else { return .secureInputActive }
+        guard Self.frontmostProcessMatches(
+            expectedPID: expectedFrontmostPID,
+            actualPID: frontmostPIDProvider()
+        ) else {
+            return .sourceAppChanged
+        }
+
+        let posted: Bool
+        if let postCopy {
+            posted = postCopy()
+        } else {
+            posted = hid.postCmdCKeyEvents {
+                !secureInputProvider()
+                    && Self.frontmostProcessMatches(
+                        expectedPID: expectedFrontmostPID,
+                        actualPID: frontmostPIDProvider()
+                    )
+            }
+        }
+        guard posted else {
+            if secureInputProvider() { return .secureInputActive }
+            if !Self.frontmostProcessMatches(
+                expectedPID: expectedFrontmostPID,
+                actualPID: frontmostPIDProvider()
+            ) {
+                return .sourceAppChanged
+            }
+            return .postFailed
+        }
 
         let deadline = Date().addingTimeInterval(timeout)
         while pasteboard.changeCount == baseline, Date() < deadline {

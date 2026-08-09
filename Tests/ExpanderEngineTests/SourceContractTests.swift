@@ -39,6 +39,26 @@ final class SourceContractTests: XCTestCase {
         return Self.strippingComments(text)
     }
 
+    private func sourceFilesContaining(_ token: String) throws -> Set<String> {
+        let sourcesRoot = Self.repoRoot.appendingPathComponent("Sources", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: sourcesRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            XCTFail("Could not enumerate source files at \(sourcesRoot.path)")
+            return []
+        }
+
+        var matches: Set<String> = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            guard let text = try? String(contentsOf: url, encoding: .utf8),
+                  Self.strippingComments(text).contains(token) else { continue }
+            matches.insert(String(url.path.dropFirst(Self.repoRoot.path.count + 1)))
+        }
+        return matches
+    }
+
     /// Removes `//` line comments and `/* */` blocks. Deliberately simple: it does not parse
     /// string literals, which is safe here because every token these tests search for is code.
     static func strippingComments(_ text: String) -> String {
@@ -111,14 +131,14 @@ final class SourceContractTests: XCTestCase {
         )
     }
 
-    /// The palette command handlers must consume the captured selection, never re-read it.
-    /// A live read here is always nil, and for `.textOp` it silently fell through to the
-    /// clipboard — transforming the wrong text with no error shown.
+    /// The initial palette dispatcher must consume the captured selection, never re-read while
+    /// DevType's panel is still key. Selection-dependent AI recovery lives in `runPaletteAI`,
+    /// after the panel closes and the source app has explicitly been reactivated.
     func testPaletteCommandHandlersDoNotReReadSelectionLive() throws {
         let text = try source("Sources/DevTypeApp/AppDelegate.swift")
 
         guard let start = offset(of: "private func handlePaletteCommand", in: text),
-              let end = offset(of: "private func injectPaletteText", in: text) ?? offset(of: "private func presentAIPalette", in: text)
+              let end = offset(of: "private func runPaletteAI", in: text)
         else {
             return XCTFail("Could not locate the palette command handling region in AppDelegate.")
         }
@@ -149,9 +169,138 @@ final class SourceContractTests: XCTestCase {
 
         XCTAssertFalse(
             region.contains("SelectionReader.read"),
-            "Palette command handlers must use the selection captured by InlineSearchPanel at "
-                + "panel-open time. A live SelectionReader read runs while our own panel is key "
-                + "and always returns nil (and for .textOp silently falls back to the clipboard)."
+            "The palette dispatcher must use the selection captured by InlineSearchPanel at "
+                + "panel-open time. A live read while our own panel is key always resolves the "
+                + "wrong app; only runPaletteAI may retry after restoring source focus."
+        )
+    }
+
+    /// Codex currently exposes no focused AX candidate for its composer. The selection captured
+    /// while opening the command palette therefore arrives here as `noFocusedElement`. Once the
+    /// user explicitly chooses an AI action, DevType must return focus to the source app and retry
+    /// through the same brokered-copy fallback used by the dedicated AI hotkey.
+    func testPaletteAIRecoversNoFocusAfterReactivatingTheSourceApp() throws {
+        let text = try source("Sources/DevTypeApp/AppDelegate.swift")
+
+        guard let start = offset(of: "private func runPaletteAI", in: text),
+              let end = offset(of: "private func injectPaletteText", in: text),
+              start < end else {
+            return XCTFail("Could not locate the palette AI handling region in AppDelegate.")
+        }
+        let region = String(
+            text[text.index(text.startIndex, offsetBy: start)..<text.index(text.startIndex, offsetBy: end)]
+        )
+
+        XCTAssertTrue(
+            region.contains("case .failure(.noFocusedElement)"),
+            "Palette AI must distinguish a missing AX tree from real empty selection."
+        )
+        guard let activateOffset = offset(of: "sourceApp.activate()", in: region),
+              let fallbackOffset = offset(
+                  of: "SelectionReader.readSelectionForExplicitAIAction()",
+                  in: region
+              ) else {
+            return XCTFail(
+                "Palette AI must reactivate the source app, then retry with the brokered "
+                    + "clipboard fallback after a no-focus capture."
+            )
+        }
+        XCTAssertLessThan(
+            activateOffset,
+            fallbackOffset,
+            "The selection retry must run only after focus has returned to the source app."
+        )
+    }
+
+    /// The first recovery fix checked focus in AppDelegate and then entered a selection read
+    /// that can spend 1.5 seconds probing AX before it posts its fallback copy. Focus can change
+    /// inside that window. The original source pid must therefore be carried through the reader
+    /// and revalidated by the clipboard broker immediately before it posts ⌘C.
+    func testClipboardFallbackPinsTheOriginalSourceThroughTheCopyPost() throws {
+        let reader = try source("Sources/ExpanderEngine/AI/SelectionReader.swift")
+        let broker = try source("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
+
+        XCTAssertTrue(
+            reader.contains("expectedFrontmostPID: frontmostPID"),
+            "SelectionReader must pass the source pid captured before AX probing to the copy broker."
+        )
+        XCTAssertTrue(
+            broker.contains("expectedFrontmostPID"),
+            "PasteboardBroker must accept a pinned source pid for immediate pre-post validation."
+        )
+        XCTAssertTrue(
+            broker.contains("sourceAppChanged"),
+            "A focus change must be diagnosable, not collapsed into a generic post failure."
+        )
+    }
+
+    /// Focus polling is policy, not AppDelegate UI glue. Keeping the transition table in the
+    /// engine makes termination, exhausted budgets, nil frontmost state, and matching pids
+    /// directly unit-testable instead of relying on source-shape assertions alone.
+    func testPaletteFocusRecoveryUsesTheCanonicalSelectionPolicy() throws {
+        let text = try source("Sources/DevTypeApp/AppDelegate.swift")
+        XCTAssertTrue(
+            text.contains("SelectionReader.sourceFocusRetryDecision("),
+            "AppDelegate must delegate focus recovery decisions to the tested engine policy."
+        )
+    }
+
+    /// Synthetic copy is not a general selection-reader option. A Boolean at the public boundary
+    /// lets any future caller turn it on without naming the user gesture that authorizes it. Keep
+    /// the ordinary reader AX-only and expose one deliberately named AI-only entry point.
+    func testClipboardFallbackRequiresTheExplicitAIEntryPoint() throws {
+        let reader = try source("Sources/ExpanderEngine/AI/SelectionReader.swift")
+        XCTAssertFalse(
+            reader.contains("allowClipboardFallback: Bool"),
+            "A public Boolean makes synthetic copy an ambient option instead of an explicit-AI capability."
+        )
+        XCTAssertTrue(
+            reader.contains("readSelectionForExplicitAIAction("),
+            "The fallback must be reachable only through a deliberately named explicit-AI entry point."
+        )
+
+        for path in [
+            "Sources/DevTypeApp/AITransformFlow.swift",
+            "Sources/DevTypeApp/AppDelegate.swift",
+        ] {
+            let text = try source(path)
+            XCTAssertTrue(
+                text.contains("SelectionReader.readSelectionForExplicitAIAction("),
+                "\(path) is an authorized explicit-AI path and must use the named entry point."
+            )
+            XCTAssertFalse(
+                text.contains("allowClipboardFallback"),
+                "\(path) must not retain the old ambient Boolean escape hatch."
+            )
+        }
+
+        XCTAssertEqual(
+            try sourceFilesContaining("readSelectionForExplicitAIAction("),
+            [
+                "Sources/ExpanderEngine/AI/SelectionReader.swift",
+                "Sources/DevTypeApp/AITransformFlow.swift",
+                "Sources/DevTypeApp/AppDelegate.swift",
+            ],
+            "No non-AI source path may acquire the synthetic-copy capability."
+        )
+    }
+
+    /// A fallback capture can be a real selection or an editor's copy-current-line behavior.
+    /// The action picker must not represent that ambiguous provenance as AX-verified selection.
+    func testClipboardFallbackPreviewNamesItsAmbiguousProvenance() throws {
+        let flow = try source("Sources/DevTypeApp/AITransformFlow.swift")
+        let panel = try source("Sources/DevTypeApp/AIActionPanel.swift")
+        XCTAssertTrue(
+            flow.contains("source: selection.source"),
+            "The hotkey flow must carry selection provenance into the pre-action preview."
+        )
+        XCTAssertTrue(
+            panel.contains("source: SelectionReader.Source"),
+            "AIActionPanel must accept the provenance needed to label a copy fallback honestly."
+        )
+        XCTAssertTrue(
+            panel.contains("ai.palette.clipboardPreview"),
+            "Clipboard fallback text must be labeled as copied/ambiguous, not as verified selected text."
         )
     }
 
@@ -188,8 +337,8 @@ final class SourceContractTests: XCTestCase {
             text[text.index(text.startIndex, offsetBy: start)..<text.index(text.startIndex, offsetBy: end)]
         )
         XCTAssertTrue(
-            region.contains("SelectionReader.readSelection(allowClipboardFallback: true)"),
-            "presentFromHotkey must use readSelection so the alert can name the real cause, "
+            region.contains("SelectionReader.readSelectionForExplicitAIAction()"),
+            "presentFromHotkey must use the explicit-AI reader so the alert can name the real cause, "
                 + "and it is the one path that opts into the brokered ⌘C fallback — the captured "
                 + "text is shown in the action panel before anything is written back."
         )

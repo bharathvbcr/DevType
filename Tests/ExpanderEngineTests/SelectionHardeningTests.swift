@@ -762,7 +762,8 @@ final class SelectionHardeningTests: XCTestCase {
                 failure: .noSourceSelection,
                 frontmostIsOwnProcess: true,
                 canPostEvents: true,
-                secureInputActive: false
+                secureInputActive: false,
+                sourceAppStillFrontmost: true
             )
         )
         XCTAssertFalse(
@@ -770,7 +771,8 @@ final class SelectionHardeningTests: XCTestCase {
                 failure: .noSourceSelection,
                 frontmostIsOwnProcess: false,
                 canPostEvents: true,
-                secureInputActive: false
+                secureInputActive: false,
+                sourceAppStillFrontmost: true
             ),
             "Only `.noFocusedElement` earns the copy — the fallback exists for apps with no tree, "
                 + "not for a command invoked with nothing behind it."

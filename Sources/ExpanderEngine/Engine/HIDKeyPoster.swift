@@ -92,57 +92,6 @@ public final class HIDKeyPoster {
         }
     }
 
-    // MARK: - Cmd+V
-
-    /// Physical ⌘V: Command down → V → Command up. Flag-only ⌘V fails under many IMEs.
-    /// Used only on the HID clipboard paste path — never on AX range replace.
-    ///
-    /// Synchronous form: kept for callers that need a `Bool` right now, but it blocks the calling
-    /// thread for `2 × cmdVModifierGap`. Prefer `postCmdVKeyEventsAsync` on the main thread.
-    @discardableResult
-    public func postCmdVKeyEvents() -> Bool {
-        // Re-check at post time — CGEvent create-success is not delivery proof if Post was revoked.
-        guard CGPreflightPostEventAccess() else {
-            DevTypeLog.inject.error(
-                "[Inject] Cmd+V refused — CGPreflightPostEventAccess false at post time"
-            )
-            return false
-        }
-
-        let source = makeTaggedEventSource()
-        let command = CGKeyCode(kVK_Command)
-        let vKeyCode = virtualKeyCode(for: "v") ?? CGKeyCode(kVK_ANSI_V)
-
-        var commandIsDown = false
-        if let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: true) {
-            cmdDown.flags = .maskCommand
-            cmdDown.post(tap: .cghidEventTap)
-            commandIsDown = true
-        }
-        usleep(useconds_t(InjectTiming.cmdVModifierGap * 1_000_000))
-
-        guard let vDown = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: true),
-              let vUp = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: false) else {
-            DevTypeLog.inject.error(
-                "[Inject] Cmd+V CGEvent create failed — Post Events may be revoked or CG HID unavailable"
-            )
-            // Command was already pressed; bailing without releasing it leaves the modifier stuck
-            // down system-wide.
-            if commandIsDown {
-                releaseCommand(source: source, command: command)
-            }
-            return false
-        }
-        vDown.flags = .maskCommand
-        vUp.flags = .maskCommand
-        vDown.post(tap: .cghidEventTap)
-        vUp.post(tap: .cghidEventTap)
-        usleep(useconds_t(InjectTiming.cmdVModifierGap * 1_000_000))
-
-        releaseCommand(source: source, command: command)
-        return true
-    }
-
     // MARK: - Cmd+C
 
     /// Physical ⌘C: Command down → C → Command up. The copy half of the clipboard-fallback
@@ -153,10 +102,16 @@ public final class HIDKeyPoster {
     /// it stays stuck down system-wide. Synchronous — the caller is already a bounded,
     /// user-gesture-only path that polls the pasteboard right after.
     @discardableResult
-    public func postCmdCKeyEvents() -> Bool {
+    public func postCmdCKeyEvents(shouldContinue: () -> Bool = { true }) -> Bool {
         guard CGPreflightPostEventAccess() else {
             DevTypeLog.inject.error(
                 "[Inject] Cmd+C refused — CGPreflightPostEventAccess false at post time"
+            )
+            return false
+        }
+        guard shouldContinue() else {
+            DevTypeLog.inject.error(
+                "[Inject] Cmd+C refused — source focus or Secure Input changed before post"
             )
             return false
         }
@@ -172,6 +127,18 @@ public final class HIDKeyPoster {
             commandIsDown = true
         }
         usleep(useconds_t(InjectTiming.cmdVModifierGap * 1_000_000))
+
+        // The modifier gap is deliberately non-zero for IME compatibility. Focus and Secure
+        // Input can change inside it; abort before the C event and always release Command.
+        guard shouldContinue() else {
+            if commandIsDown {
+                releaseCommand(source: source, command: command)
+            }
+            DevTypeLog.inject.error(
+                "[Inject] Cmd+C aborted — source focus or Secure Input changed during chord"
+            )
+            return false
+        }
 
         guard let cDown = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: true),
               let cUp = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: false) else {

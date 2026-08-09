@@ -41,6 +41,24 @@ public enum InjectTiming {
     /// §3.4: …and by this to pick a hold timeout (we would rather wait than report a false miss).
     public static let holdTimeoutSafetyFactor: Double = 2.5
 
+    // MARK: - Payload residency (§8.12)
+
+    /// How long our payload stays on the pasteboard when **nothing ever proved the host read it**.
+    ///
+    /// Deliberately longer than `pasteDeliveryHoldTimeout`. The hold timeout answers "how long do
+    /// we keep *asking* AX whether the text landed"; residency answers "how long must the bytes
+    /// stay readable so ⌘V has something to paste". Those were the same number, which inverted the
+    /// risk: hosts AX cannot read (Electron / Chromium) end the hold soonest and are also the
+    /// slowest to consume the board, so the user's clipboard went back *before* the paste — and
+    /// the host pasted the restored contents instead of the snippet.
+    public static let unverifiedPayloadResidencyFloor: TimeInterval = 0.45
+    /// Hard cap on residency, stall extensions included. Past this the user's clipboard being
+    /// wrong is the bigger harm, and a host this far behind has almost certainly dropped the key.
+    public static let unverifiedPayloadResidencyCeiling: TimeInterval = 2.0
+    /// Re-probe interval while the target app is not answering AX at all (see
+    /// `PasteboardBroker.shouldExtendResidencyForStalledHost`).
+    public static let stalledHostResidencyProbeInterval: TimeInterval = 0.15
+
     // MARK: - Image paste
 
     /// §3.4 bug: the *text* formula (`bytes / 40_000`) saturates instantly on image data — a 1 MB
@@ -193,6 +211,43 @@ public final class InjectTimingStore {
             p90 * InjectTiming.deliverySafetyFactor
         )
         return min(InjectTiming.restoreDelayCeiling, max(learnedFloor, sizeBased))
+    }
+
+    /// §8.12: how long the payload must stay on the pasteboard when the paste ended with **no**
+    /// delivery evidence — `.unavailable` (AX cannot read the host) or `.failed`.
+    ///
+    /// Learned samples may only ever *lengthen* this. `restoreDelay` lets a measured p90 pull the
+    /// delay below the blind floor, which is right when AX confirmed the paste — the confirmation
+    /// is proof the host already read the board. It is exactly wrong here: a p90 recorded while an
+    /// app was AX-confirmable says nothing about the same app today reporting nothing at all, and
+    /// using it shrank Claude Desktop's residency to 0.15 s. Evidence may shorten a wait; the
+    /// *memory* of evidence may not.
+    /// - Parameter atLeast: a floor the caller has already committed to — the 8 s window a secure
+    ///   clipboard paste keeps open for a manual ⌘V. It is applied *after* the ceiling clamp, so
+    ///   this function can only ever lengthen a caller's promise. Making it a parameter rather
+    ///   than leaving callers to `max` the result is deliberate: a forgotten `max` at one call
+    ///   site would silently clamp that 8 s window down to the 2 s ceiling.
+    public func unverifiedPayloadResidency(
+        bundleID: String?,
+        payloadBytes: Int,
+        atLeast: TimeInterval = 0
+    ) -> TimeInterval {
+        Self.unverifiedPayloadResidency(
+            blindDelay: Self.blindRestoreDelay(payloadBytes: payloadBytes),
+            p90: p90DeliveryLatency(bundleID: bundleID),
+            atLeast: atLeast
+        )
+    }
+
+    /// Pure form of `unverifiedPayloadResidency`.
+    public static func unverifiedPayloadResidency(
+        blindDelay: TimeInterval,
+        p90: TimeInterval?,
+        atLeast: TimeInterval = 0
+    ) -> TimeInterval {
+        let learned = max(0, p90 ?? 0) * InjectTiming.deliverySafetyFactor
+        let candidate = max(InjectTiming.unverifiedPayloadResidencyFloor, max(blindDelay, learned))
+        return max(atLeast, min(InjectTiming.unverifiedPayloadResidencyCeiling, candidate))
     }
 
     /// How long the hold loop keeps polling AX before giving up unverified.

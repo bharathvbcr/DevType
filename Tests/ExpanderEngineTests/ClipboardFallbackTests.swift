@@ -19,14 +19,15 @@ final class ClipboardFallbackTests: XCTestCase {
                 failure: .noFocusedElement,
                 frontmostIsOwnProcess: false,
                 canPostEvents: true,
-                secureInputActive: false
+                secureInputActive: false,
+                sourceAppStillFrontmost: true
             )
         )
         // Every other failure keeps its own meaning. `.emptySelection` above all — that is the
         // VS Code copy-a-line-you-never-selected case.
         let never: [SelectionReader.Failure] = [
             .emptySelection, .accessibilityUntrusted, .secureInputActive,
-            .appMuted("com.example"), .selectionTooLarge(1),
+            .appMuted("com.example"), .noSourceSelection, .selectionTooLarge(1),
         ]
         for failure in never {
             XCTAssertFalse(
@@ -34,7 +35,8 @@ final class ClipboardFallbackTests: XCTestCase {
                     failure: failure,
                     frontmostIsOwnProcess: false,
                     canPostEvents: true,
-                    secureInputActive: false
+                    secureInputActive: false,
+                    sourceAppStillFrontmost: true
                 ),
                 "\(failure.diagnosticLabel) must never trigger a synthetic copy"
             )
@@ -48,7 +50,8 @@ final class ClipboardFallbackTests: XCTestCase {
                 failure: .noFocusedElement,
                 frontmostIsOwnProcess: true,
                 canPostEvents: true,
-                secureInputActive: false
+                secureInputActive: false,
+                sourceAppStillFrontmost: true
             )
         )
         // Post Events revoked mid-session: nothing to post with.
@@ -57,7 +60,8 @@ final class ClipboardFallbackTests: XCTestCase {
                 failure: .noFocusedElement,
                 frontmostIsOwnProcess: false,
                 canPostEvents: false,
-                secureInputActive: false
+                secureInputActive: false,
+                sourceAppStillFrontmost: true
             )
         )
         // Secure Input engaged while the AX ladder was failing: the re-check is live, not the
@@ -67,9 +71,157 @@ final class ClipboardFallbackTests: XCTestCase {
                 failure: .noFocusedElement,
                 frontmostIsOwnProcess: false,
                 canPostEvents: true,
-                secureInputActive: true
+                secureInputActive: true,
+                sourceAppStillFrontmost: true
             )
         )
+        // The user moved to another app while AX probing was in flight.
+        XCTAssertFalse(
+            SelectionReader.shouldAttemptClipboardFallback(
+                failure: .noFocusedElement,
+                frontmostIsOwnProcess: false,
+                canPostEvents: true,
+                secureInputActive: false,
+                sourceAppStillFrontmost: false
+            )
+        )
+    }
+
+    func testFallbackPolicyExhaustiveBooleanMatrixHasExactlyOneAuthorizedState() {
+        let failures: [SelectionReader.Failure] = [
+            .accessibilityUntrusted,
+            .secureInputActive,
+            .appMuted("muted.example"),
+            .noFocusedElement,
+            .noSourceSelection,
+            .emptySelection,
+            .selectionTooLarge(SelectionReader.maxSelectionCharacters + 1),
+        ]
+        var authorized: [(SelectionReader.Failure, Bool, Bool, Bool, Bool)] = []
+
+        for failure in failures {
+            for ownProcess in [false, true] {
+                for canPost in [false, true] {
+                    for secureInput in [false, true] {
+                        for sourceMatches in [false, true] {
+                            if SelectionReader.shouldAttemptClipboardFallback(
+                                failure: failure,
+                                frontmostIsOwnProcess: ownProcess,
+                                canPostEvents: canPost,
+                                secureInputActive: secureInput,
+                                sourceAppStillFrontmost: sourceMatches
+                            ) {
+                                authorized.append((
+                                    failure, ownProcess, canPost, secureInput, sourceMatches
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        XCTAssertEqual(authorized.count, 1)
+        guard let only = authorized.first else { return }
+        XCTAssertEqual(only.0, .noFocusedElement)
+        XCTAssertFalse(only.1)
+        XCTAssertTrue(only.2)
+        XCTAssertFalse(only.3)
+        XCTAssertTrue(only.4)
+    }
+
+    // MARK: - Source-focus recovery
+
+    func testFocusRecoveryReadsOnlyTheExactLiveSourceProcess() {
+        XCTAssertEqual(
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: 42,
+                frontmostPID: 42,
+                sourceTerminated: false,
+                remainingPolls: 0
+            ),
+            .read,
+            "An exact match is safe even on the last permitted poll."
+        )
+        XCTAssertEqual(
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: 42,
+                frontmostPID: 7,
+                sourceTerminated: false,
+                remainingPolls: 2
+            ),
+            .wait(remainingPolls: 1)
+        )
+        XCTAssertEqual(
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: 42,
+                frontmostPID: nil,
+                sourceTerminated: false,
+                remainingPolls: 1
+            ),
+            .wait(remainingPolls: 0),
+            "A transient nil from NSWorkspace consumes budget; it never authorizes a read."
+        )
+    }
+
+    func testFocusRecoveryFailsClosedForTerminationInvalidPIDsAndInvalidBudgets() {
+        let failures: [SelectionReader.SourceFocusRetryDecision] = [
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: 42,
+                frontmostPID: 42,
+                sourceTerminated: true,
+                remainingPolls: 1
+            ),
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: 0,
+                frontmostPID: 0,
+                sourceTerminated: false,
+                remainingPolls: 1
+            ),
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: -1,
+                frontmostPID: -1,
+                sourceTerminated: false,
+                remainingPolls: 1
+            ),
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: 42,
+                frontmostPID: 7,
+                sourceTerminated: false,
+                remainingPolls: 0
+            ),
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: 42,
+                frontmostPID: 7,
+                sourceTerminated: false,
+                remainingPolls: -1
+            ),
+            SelectionReader.sourceFocusRetryDecision(
+                sourcePID: 42,
+                frontmostPID: 7,
+                sourceTerminated: false,
+                remainingPolls: SelectionReader.sourceFocusMaxPolls + 1
+            ),
+        ]
+        XCTAssertEqual(failures, Array(repeating: .fail, count: failures.count))
+    }
+
+    func testFocusRecoveryBudgetIsPositiveAndCappedAtHalfASecond() {
+        XCTAssertGreaterThan(SelectionReader.sourceFocusMaxPolls, 0)
+        XCTAssertGreaterThan(SelectionReader.sourceFocusPollInterval, 0)
+        XCTAssertLessThanOrEqual(
+            Double(SelectionReader.sourceFocusMaxPolls)
+                * SelectionReader.sourceFocusPollInterval,
+            0.5
+        )
+    }
+
+    func testFrontmostProcessMatchFailsClosedForUnknownAndInvalidIdentities() {
+        XCTAssertTrue(PasteboardBroker.frontmostProcessMatches(expectedPID: 42, actualPID: 42))
+        XCTAssertFalse(PasteboardBroker.frontmostProcessMatches(expectedPID: 42, actualPID: 7))
+        XCTAssertFalse(PasteboardBroker.frontmostProcessMatches(expectedPID: 42, actualPID: nil))
+        XCTAssertFalse(PasteboardBroker.frontmostProcessMatches(expectedPID: 0, actualPID: 0))
+        XCTAssertFalse(PasteboardBroker.frontmostProcessMatches(expectedPID: -1, actualPID: -1))
     }
 
     // MARK: - Capture → outcome
@@ -122,6 +274,7 @@ final class ClipboardFallbackTests: XCTestCase {
 
         let outcomes: [PasteboardBroker.CopyCaptureOutcome] = [
             .captured("x"), .boardUnchanged, .noStringOnBoard, .postFailed,
+            .sourceAppChanged, .secureInputActive,
         ]
         XCTAssertEqual(Set(outcomes.map(\.diagnosticLabel)).count, outcomes.count)
     }
@@ -153,6 +306,56 @@ final class ClipboardFallbackTests: XCTestCase {
         return pasteboard
     }
 
+    func testFocusTheftStopsBeforePostingOrTouchingTheClipboard() {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("user clipboard", forType: .string)
+        let before = pasteboard.changeCount
+        var postRan = false
+
+        let outcome = PasteboardBroker().captureSelectionViaCopy(
+            pasteboard: pasteboard,
+            expectedFrontmostPID: 42,
+            timeout: 5,
+            pollInterval: 0.005,
+            frontmostPIDProvider: { 7 },
+            secureInputProvider: { false },
+            postCopy: {
+                postRan = true
+                return true
+            }
+        )
+
+        XCTAssertEqual(outcome, .sourceAppChanged)
+        XCTAssertFalse(postRan)
+        XCTAssertEqual(pasteboard.changeCount, before)
+        XCTAssertEqual(pasteboard.string(forType: .string), "user clipboard")
+    }
+
+    func testLateSecureInputStopsBeforePostingOrTouchingTheClipboard() {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("user clipboard", forType: .string)
+        let before = pasteboard.changeCount
+        var postRan = false
+
+        let outcome = PasteboardBroker().captureSelectionViaCopy(
+            pasteboard: pasteboard,
+            expectedFrontmostPID: 42,
+            timeout: 5,
+            pollInterval: 0.005,
+            frontmostPIDProvider: { 42 },
+            secureInputProvider: { true },
+            postCopy: {
+                postRan = true
+                return true
+            }
+        )
+
+        XCTAssertEqual(outcome, .secureInputActive)
+        XCTAssertFalse(postRan)
+        XCTAssertEqual(pasteboard.changeCount, before)
+        XCTAssertEqual(pasteboard.string(forType: .string), "user clipboard")
+    }
+
     func testCaptureReadsTheCopyAndRestoresThePriorClipboard() {
         let pasteboard = makePasteboard()
         pasteboard.setString("user's precious clipboard", forType: .string)
@@ -160,8 +363,11 @@ final class ClipboardFallbackTests: XCTestCase {
         let broker = PasteboardBroker()
         let outcome = broker.captureSelectionViaCopy(
             pasteboard: pasteboard,
+            expectedFrontmostPID: 4_242,
             timeout: 0.2,
             pollInterval: 0.005,
+            frontmostPIDProvider: { 4_242 },
+            secureInputProvider: { false },
             postCopy: {
                 // The "target app" answering ⌘C.
                 pasteboard.clearContents()
@@ -185,8 +391,11 @@ final class ClipboardFallbackTests: XCTestCase {
         let broker = PasteboardBroker()
         let outcome = broker.captureSelectionViaCopy(
             pasteboard: pasteboard,
+            expectedFrontmostPID: 4_242,
             timeout: 0.05,
             pollInterval: 0.005,
+            frontmostPIDProvider: { 4_242 },
+            secureInputProvider: { false },
             postCopy: { true }  // posted, but the app never writes the board
         )
 
@@ -203,8 +412,11 @@ final class ClipboardFallbackTests: XCTestCase {
         let started = Date()
         let outcome = PasteboardBroker().captureSelectionViaCopy(
             pasteboard: pasteboard,
+            expectedFrontmostPID: 4_242,
             timeout: 5.0,  // deliberately huge: a failed post must not wait on it
             pollInterval: 0.005,
+            frontmostPIDProvider: { 4_242 },
+            secureInputProvider: { false },
             postCopy: { false }
         )
         XCTAssertEqual(outcome, .postFailed)
@@ -218,8 +430,11 @@ final class ClipboardFallbackTests: XCTestCase {
         let broker = PasteboardBroker()
         let outcome = broker.captureSelectionViaCopy(
             pasteboard: pasteboard,
+            expectedFrontmostPID: 4_242,
             timeout: 0.2,
             pollInterval: 0.005,
+            frontmostPIDProvider: { 4_242 },
+            secureInputProvider: { false },
             postCopy: {
                 pasteboard.clearContents()
                 pasteboard.setData(Data([0x89, 0x50, 0x4E, 0x47]), forType: .png)
@@ -240,8 +455,11 @@ final class ClipboardFallbackTests: XCTestCase {
         let broker = PasteboardBroker()
         let outcome = broker.captureSelectionViaCopy(
             pasteboard: pasteboard,
+            expectedFrontmostPID: 4_242,
             timeout: 0.2,
             pollInterval: 0.005,
+            frontmostPIDProvider: { 4_242 },
+            secureInputProvider: { false },
             postCopy: {
                 pasteboard.clearContents()
                 pasteboard.setString("transient selection", forType: .string)
@@ -274,7 +492,7 @@ final class ClipboardFallbackTests: XCTestCase {
         )
         XCTAssertFalse(
             captureRan,
-            "allowClipboardFallback defaults to false; only the AI hotkey path opts in."
+            "The ordinary reader is AX-only; only the named explicit-AI entry point may copy."
         )
     }
 }

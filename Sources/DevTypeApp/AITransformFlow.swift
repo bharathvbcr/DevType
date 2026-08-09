@@ -39,7 +39,7 @@ enum AITransformFlow {
         // last resort is right — the captured text is shown in the action panel before anything
         // is written back, so a bad capture is visible and cancellable.
         let selection: SelectionReader.Result
-        switch SelectionReader.readSelection(allowClipboardFallback: true) {
+        switch SelectionReader.readSelectionForExplicitAIAction() {
         case .selection(let resolved):
             selection = resolved
         case .failure(let failure):
@@ -51,7 +51,11 @@ enum AITransformFlow {
             return
         }
 
-        AIActionPanel.present(input: selection.text, loc: loc) { kind, sourceApp in
+        AIActionPanel.present(
+            input: selection.text,
+            source: selection.source,
+            loc: loc
+        ) { kind, sourceApp in
             run(
                 input: selection.text,
                 kind: kind,
