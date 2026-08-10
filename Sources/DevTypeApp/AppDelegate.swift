@@ -1305,7 +1305,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             if case .refuse = plan { return }
 
-            EventTapEngine.shared.suspendMatching()
+            let suspension = EventTapEngine.shared.suspendMatching(reason: "secretPaste")
             TextInjectionPipeline.shared.inject(
                 snippet: snippet,
                 triggerLength: 0,
@@ -1315,7 +1315,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 preResolvedText: text,
                 secureClipboardPaste: true,
                 completion: {
-                    EventTapEngine.shared.resumeMatching()
+                    suspension.release()
                     self.refreshStatusItemUI()
                 }
             )
@@ -1426,7 +1426,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         if case .refuse = plan { return }
 
-        EventTapEngine.shared.suspendMatching()
+        let suspension = EventTapEngine.shared.suspendMatching(reason: "expandFromSearch")
         TextInjectionPipeline.shared.inject(
             snippet: snippet,
             triggerLength: 0,
@@ -1438,7 +1438,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             trailingKeys: resolved.trailingKeys,
             secureClipboardPaste: true,
             completion: {
-                EventTapEngine.shared.resumeMatching()
+                suspension.release()
                 SnippetStore.shared.incrementUsage(for: snippet.id)
                 self.recordRecent(snippet)
                 self.refreshStatusItemUI()

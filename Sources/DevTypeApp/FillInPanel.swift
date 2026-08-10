@@ -23,7 +23,7 @@ enum FillInPanel {
         loc: LocalizationManager = .shared,
         completion: @escaping ([Int: String]?) -> Void
     ) -> NSPanel {
-        EventTapEngine.shared.suspendMatching()
+        let suspension = EventTapEngine.shared.suspendMatching(reason: "FillInPanel")
 
         let panel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 240),
@@ -38,7 +38,7 @@ enum FillInPanel {
         let finish: ([Int: String]?) -> Void = { values in
             guard !finished else { return }
             finished = true
-            EventTapEngine.shared.resumeMatching()
+            suspension.release()
             panel.close()
             completion(values)
         }

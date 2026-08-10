@@ -72,6 +72,8 @@ enum InlineSearchPanel {
 
     private static var panel: NSPanel?
     private static var controller: InlineSearchController?
+    /// This panel's claim on matching being suspended — see `EventTapEngine.MatchingSuspension`.
+    private static var suspension: EventTapEngine.MatchingSuspension?
     private static var dismissMonitors: [Any] = []
     private static var dismissObservers: [NSObjectProtocol] = []
 
@@ -91,7 +93,11 @@ enum InlineSearchPanel {
         panel?.close()
         panel = nil
         controller = nil
-        EventTapEngine.shared.resumeMatching()
+        // `toggle` calls this on the "already open" branch, and dismiss watchers can call it again
+        // afterwards. Releasing our own token makes the second call a no-op instead of stealing
+        // whatever suspension is live by then.
+        suspension?.release()
+        suspension = nil
     }
 
     private static func open(
@@ -109,7 +115,7 @@ enum InlineSearchPanel {
         // The whole `Outcome` is carried, not just the text: the failure reason is what the
         // command handlers need to tell the user why, and it can only be captured here.
         let sourceSelection = SelectionReader.readSelection()
-        EventTapEngine.shared.suspendMatching()
+        suspension = EventTapEngine.shared.suspendMatching(reason: "InlineSearchPanel")
 
         let panel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 460),

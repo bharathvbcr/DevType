@@ -14,6 +14,9 @@ enum AIActionPanel {
 
     private static var panel: NSPanel?
     private static var controller: AIActionController?
+    /// This panel's claim on matching being suspended. Owned, so double-open and double-close are
+    /// both harmless — see `EventTapEngine.MatchingSuspension`.
+    private static var suspension: EventTapEngine.MatchingSuspension?
     private static var dismissMonitors: [Any] = []
     private static var dismissObservers: [NSObjectProtocol] = []
 
@@ -36,7 +39,11 @@ enum AIActionPanel {
         panel = nil
         controller = nil
         if resumeMatching {
-            EventTapEngine.shared.resumeMatching()
+            // Releasing our own token, not decrementing a shared count: a second `close()` (the
+            // dismiss watcher racing `onPick`) finds it already released and does nothing, so it
+            // cannot resume matching out from under a fill-in panel that suspended it next.
+            suspension?.release()
+            suspension = nil
         }
     }
 
@@ -48,7 +55,10 @@ enum AIActionPanel {
         onCancel: (() -> Void)?
     ) {
         let sourceApp = NSWorkspace.shared.frontmostApplication
-        EventTapEngine.shared.suspendMatching()
+        // Assigning over a live token releases the old one (ARC → `deinit` → `release`), so a
+        // second `open()` — reachable because `isOpen` reads `panel?.isVisible`, already false
+        // while the panel animates out — cannot leave a suspension stranded.
+        suspension = EventTapEngine.shared.suspendMatching(reason: "AIActionPanel")
 
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {

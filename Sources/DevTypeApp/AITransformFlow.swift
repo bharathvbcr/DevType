@@ -138,7 +138,10 @@ enum AITransformFlow {
         loc: LocalizationManager,
         onInject: @escaping (String, NSRunningApplication?) -> Void
     ) {
-        EventTapEngine.shared.suspendMatching()
+        // Held for the lifetime of the transform. The completion below is guaranteed to run
+        // exactly once (`AITransformOnceCompletion`, including on discard), and even if that
+        // guarantee were ever broken, dropping the last reference to this token releases it.
+        let suspension = EventTapEngine.shared.suspendMatching(reason: "AITransformFlow")
 
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
@@ -149,7 +152,7 @@ enum AITransformFlow {
                 customInstructions: customInstructions,
                 completionQueue: .main
             ) { result in
-                EventTapEngine.shared.resumeMatching()
+                suspension.release()
                 switch result {
                 case .success(let text):
                     // Never let a blank result erase the selection on the direct path.
@@ -178,7 +181,7 @@ enum AITransformFlow {
         }
         #endif
 
-        EventTapEngine.shared.resumeMatching()
+        suspension.release()
         softAlert(
             title: loc.s("ai.alert.unavailable.title"),
             message: localizedAvailability(.unsupportedOS, loc: loc),
