@@ -208,6 +208,10 @@ public final class EventTapEngine {
     private var _typeAhead = TypeAheadBuffer()
     /// Nested suspend depth (fill-in + inline search / AI panels). Matching is skipped while > 0.
     private var _matchingSuspendCount: Int = 0
+    /// Live suspension owners, newest last, for `matchingSuspensionDiagnostics()`. A leaked
+    /// suspension is invisible in every other counter — the tap still runs, the engine is still
+    /// enabled, permissions are still granted, and not one snippet expands.
+    private var _matchingSuspendOwners: [(id: UUID?, reason: String, since: Date)] = []
     private var _isSecureInputActive: Bool = false
 
     // MARK: - §2.1 cached matcher
@@ -218,6 +222,11 @@ public final class EventTapEngine {
     private let matchStateLock = UnfairLock()
     private var _matchSnapshot: SnippetMatchSnapshot = .empty
     private var _snapshotRevision: UInt64 = 0
+
+    /// The library **before** secrets are filtered out, for diagnostics only — see
+    /// `silentNoExpandDiagnostics()`. Never read by the matcher or the keystroke path.
+    private let libraryLock = UnfairLock()
+    private var _fullLibrary: [SnippetModel] = []
 
     // MARK: - §2.3 cached frontmost context
 
@@ -377,6 +386,18 @@ public final class EventTapEngine {
             // tap callback reads this lock on the keystroke path.
             let snapshot = SnippetMatchSnapshot(snippets: matchable, revision: revision)
 
+            // Kept **unfiltered** for `silentNoExpandDiagnostics()` only. The matcher must never
+            // see it: the whole point of the filter above is that a secret is not reachable from
+            // the keystroke path. This copy carries triggers, and a secret's `replacementText` is
+            // empty by construction (`SnippetModel.init`), so no value is retained here.
+            libraryLock.lock()
+            _fullLibrary = newValue.map { snippet in
+                var stripped = snippet
+                stripped.replacementText = snippet.isSecret ? "" : snippet.replacementText
+                return stripped
+            }
+            libraryLock.unlock()
+
             matchStateLock.lock()
             // Last writer wins; a slower build must never clobber a newer one.
             if snapshot.revision >= _matchSnapshot.revision {
@@ -454,21 +475,294 @@ public final class EventTapEngine {
     }
 
     /// Increment the matching-suspend reference count. Nested callers must pair with `resumeMatching()`.
+    ///
+    /// Prefer `suspendMatching(reason:)`, which returns an owned token. This bare pair is the
+    /// primitive underneath it: balancing it correctly is the caller's problem, and every
+    /// historical way of getting that wrong stops the app expanding anything at all.
     public func suspendMatching() {
+        // Deliberately does **not** go through `suspendMatching(reason:)`: that returns an owned
+        // token, and a discarded token deallocates immediately and releases itself, so the
+        // suspension would end on the same line it began.
+        performSuspend(id: nil, reason: "unattributed")
+    }
+
+    /// Decrement the matching-suspend reference count (clamped at zero). Matching resumes only when count hits 0.
+    ///
+    /// Clamping at zero is a safety net, not a licence: a spurious resume with another owner's
+    /// suspension live *steals* it, and matching restarts under a panel that is still collecting
+    /// keystrokes. `MatchingSuspension` exists so neither mistake is expressible.
+    public func resumeMatching() {
+        releaseSuspension(id: nil)
+    }
+
+    // MARK: - Owned matching suspension
+
+    /// A single owner's claim on "matching is suspended".
+    ///
+    /// The bare `suspendMatching()` / `resumeMatching()` pair is a global reference count with no
+    /// record of *who* holds it, and both ways of unbalancing it are silent catastrophes:
+    ///
+    ///   * **one suspend too many** — a panel opened twice (its `isOpen` check reads
+    ///     `panel?.isVisible`, which is already false while the panel animates out) leaves the
+    ///     count pinned above zero. The tap keeps running, the engine stays enabled, permissions
+    ///     stay granted, and no snippet ever expands again until relaunch. Nothing in the
+    ///     diagnostic report said so.
+    ///   * **one resume too many** — a `close()` that runs without a matching `open()` decrements
+    ///     *someone else's* suspension, so matching restarts while a fill-in panel is still
+    ///     collecting keystrokes and the user's typing starts triggering expansions into it.
+    ///
+    /// Ownership makes both unrepresentable. `release()` is idempotent, so a double close is a
+    /// no-op, and `deinit` releases, so a token dropped on the floor — the double-open case, where
+    /// the second `open()` overwrites the first token — cannot leak either.
+    public final class MatchingSuspension {
+        private let id: UUID
+        private weak var engine: EventTapEngine?
+        private let releaseLock = UnfairLock()
+        private var isReleased = false
+
+        fileprivate init(id: UUID, engine: EventTapEngine) {
+            self.id = id
+            self.engine = engine
+        }
+
+        /// Idempotent: only the first call releases the underlying suspension.
+        public func release() {
+            releaseLock.lock()
+            let alreadyReleased = isReleased
+            isReleased = true
+            releaseLock.unlock()
+            guard !alreadyReleased else { return }
+            engine?.releaseSuspension(id: id)
+        }
+
+        deinit {
+            release()
+        }
+    }
+
+    /// Suspends matching until the returned token is released or deallocated.
+    ///
+    /// `reason` is carried into the diagnostic report so a suspension that outlives its panel can
+    /// be identified by name rather than inferred from the absence of expansions.
+    public func suspendMatching(reason: String) -> MatchingSuspension {
+        let id = UUID()
+        performSuspend(id: id, reason: reason)
+        return MatchingSuspension(id: id, engine: self)
+    }
+
+    private func performSuspend(id: UUID?, reason: String) {
         lock.lock()
         _matchingSuspendCount += 1
+        _matchingSuspendOwners.append((id: id, reason: reason, since: Date()))
+        let depth = _matchingSuspendCount
         lock.unlock()
+        DevTypeLog.eventTap.debug(
+            "[EventTap] matching suspended by \(reason, privacy: .public) depth=\(depth, privacy: .public)"
+        )
         // From this instant keystrokes bypass matching (fill-in panel, inline search), so a live
         // hold can no longer observe the field it would erase — and its debounce timer would
         // fire *into the panel's text view*. Drop it before the first bypassed key.
         heldCoordinator.cancelAll(reason: .unobservedInput)
     }
 
-    /// Decrement the matching-suspend reference count (clamped at zero). Matching resumes only when count hits 0.
-    public func resumeMatching() {
+    /// Releases one suspension.
+    ///
+    /// A token releases **its own** claim: an `id` with no live owner is a no-op rather than a
+    /// decrement, so a second close, or a close racing the token's `deinit`, cannot consume a
+    /// suspension that belongs to a different panel. `id == nil` is the legacy unowned
+    /// `resumeMatching()` path and can only drop the most recent owner.
+    fileprivate func releaseSuspension(id: UUID?) {
         lock.lock()
+        let index: Int?
+        if let id {
+            index = _matchingSuspendOwners.lastIndex { $0.id == id }
+        } else {
+            // Legacy `resumeMatching()` releases the newest *unowned* suspension. Falling back to
+            // "the newest of any kind" would let an unbalanced legacy caller consume a panel's
+            // token, which is the theft this type exists to prevent.
+            index = _matchingSuspendOwners.lastIndex { $0.id == nil }
+        }
+        guard let index else {
+            // Nothing of ours to release. Legacy callers with no owners at all still fall through
+            // to the clamp below so the old contract (resume is always safe) is preserved.
+            let hadOwners = !_matchingSuspendOwners.isEmpty
+            if id == nil, !hadOwners {
+                _matchingSuspendCount = max(0, _matchingSuspendCount - 1)
+            }
+            lock.unlock()
+            return
+        }
+        _matchingSuspendOwners.remove(at: index)
         _matchingSuspendCount = max(0, _matchingSuspendCount - 1)
+        let depth = _matchingSuspendCount
         lock.unlock()
+        DevTypeLog.eventTap.debug(
+            "[EventTap] matching suspension released depth=\(depth, privacy: .public)"
+        )
+    }
+
+    /// Live suspension owners and how long each has held. Empty when matching is running.
+    public func matchingSuspensionOwners() -> [(reason: String, seconds: TimeInterval)] {
+        let now = Date()
+        lock.lock()
+        let owners = _matchingSuspendOwners
+        lock.unlock()
+        return owners.map { (reason: $0.reason, seconds: now.timeIntervalSince($0.since)) }
+    }
+
+    /// Report line. **Matching suspended is a total expansion outage**, so it must never be
+    /// summarized as anything softer, and it must appear whether or not anything else is wrong.
+    public func matchingSuspensionDiagnostics() -> [String] {
+        let owners = matchingSuspensionOwners()
+        guard !owners.isEmpty else { return ["Matching: running (not suspended)"] }
+        var lines = ["Matching: SUSPENDED — typed triggers cannot expand while this is true"]
+        for owner in owners {
+            lines.append("  held by \(owner.reason) for \(Int(owner.seconds))s")
+        }
+        return lines
+    }
+
+    /// Whether DevType itself owns the frontmost app — i.e. one of our panels could legitimately
+    /// be holding a suspension. Reads the cached frontmost context, never AppKit, so it is safe
+    /// from the tap thread's health timer.
+    func isDevTypeFrontmost() -> Bool {
+        cachedFrontmostBundleID == ProcessIdentity.shared.bundleIdentifier
+    }
+
+    /// A suspension older than this with DevType in the background is orphaned, not in use.
+    ///
+    /// Every legitimate owner is a DevType panel that has keyboard focus (fill-in, inline search,
+    /// AI action / preview). If DevType is not frontmost, no such panel is collecting keystrokes,
+    /// so a suspension still standing after this long is a leak — and leaving it in place means
+    /// the user types triggers into other apps forever with nothing happening.
+    public static let orphanedSuspensionTimeout: TimeInterval = 30.0
+
+    /// Force-clears suspensions that cannot belong to a live panel. Returns how many were cleared.
+    ///
+    /// Deliberately conditional on DevType not being frontmost: that is the one check that
+    /// distinguishes "a panel is open and the user is typing into it" (must keep suspending) from
+    /// "a panel closed without releasing" (must recover). Recovering on a timer alone would resume
+    /// matching under a fill-in panel someone is still filling in.
+    @discardableResult
+    public func recoverOrphanedSuspensions(isDevTypeFrontmost: Bool, now: Date = Date()) -> Int {
+        guard !isDevTypeFrontmost else { return 0 }
+        lock.lock()
+        let stale = _matchingSuspendOwners.filter {
+            now.timeIntervalSince($0.since) >= Self.orphanedSuspensionTimeout
+        }
+        guard !stale.isEmpty else {
+            lock.unlock()
+            return 0
+        }
+        _matchingSuspendOwners.removeAll {
+            now.timeIntervalSince($0.since) >= Self.orphanedSuspensionTimeout
+        }
+        _matchingSuspendCount = max(0, _matchingSuspendCount - stale.count)
+        let depth = _matchingSuspendCount
+        lock.unlock()
+        for owner in stale {
+            DevTypeLog.eventTap.error(
+                """
+                [EventTap] orphaned matching suspension recovered — \
+                \(owner.reason, privacy: .public) held matching for \
+                \(Int(now.timeIntervalSince(owner.since)), privacy: .public)s with DevType in the \
+                background. Every typed trigger was silently ignored for that whole period.
+                """
+            )
+        }
+        matchDropLock.lock()
+        _matchDrops.orphanedSuspensionsRecovered += stale.count
+        matchDropLock.unlock()
+        DevTypeLog.eventTap.notice(
+            "[EventTap] matching resumed after orphan recovery depth=\(depth, privacy: .public)"
+        )
+        return stale.count
+    }
+
+    // MARK: - Matched-then-dropped telemetry
+
+    /// Expansions that were **matched and then discarded**, by reason.
+    ///
+    /// This is the counter the field reports were missing. Every other number in the diagnostic
+    /// report describes an expansion that reached the inject pipeline; a trigger that matched and
+    /// was dropped before that point produced nothing at all — no outcome, no refuse provenance,
+    /// no log line — which is indistinguishable, from the user's chair, from a snippet that does
+    /// not exist. "It didn't expand" has to be answerable from the report.
+    public struct MatchDropCounters: Equatable {
+        /// `InjectionPlanner` refused on the cached permission snapshot (AX unavailable).
+        public var plannerRefused = 0
+        /// The live Secure Input check blocked the swallow after the polled flag said otherwise.
+        public var secureInputLive = 0
+        /// A held expansion was already in flight, so this match stood down.
+        public var expansionInFlight = 0
+        /// Suspensions force-cleared by `recoverOrphanedSuspensions`.
+        public var orphanedSuspensionsRecovered = 0
+        public var lastReason: String?
+        public var lastTrigger: String?
+        public var lastBundleID: String?
+        public var lastAt: Date?
+
+        public init() {}
+
+        public var total: Int { plannerRefused + secureInputLive + expansionInFlight }
+
+        public var isEmpty: Bool { total == 0 && orphanedSuspensionsRecovered == 0 }
+    }
+
+    private let matchDropLock = UnfairLock()
+    private var _matchDrops = MatchDropCounters()
+
+    public var matchDropCounters: MatchDropCounters {
+        matchDropLock.withLock { _matchDrops }
+    }
+
+    /// Records a match that will not become an expansion. Never silent: a dropped match gets a
+    /// counter *and* a log line, because the counter alone cannot say when it happened.
+    func recordMatchDrop(reason: String, trigger: String?, bundleID: String?) {
+        matchDropLock.lock()
+        switch reason {
+        case "plannerRefused": _matchDrops.plannerRefused += 1
+        case "secureInputLive": _matchDrops.secureInputLive += 1
+        case "expansionInFlight": _matchDrops.expansionInFlight += 1
+        default: break
+        }
+        _matchDrops.lastReason = reason
+        _matchDrops.lastTrigger = trigger
+        _matchDrops.lastBundleID = bundleID
+        _matchDrops.lastAt = Date()
+        matchDropLock.unlock()
+        DevTypeLog.eventTap.notice(
+            """
+            [EventTap] matched trigger dropped before expanding reason=\(reason, privacy: .public) \
+            app=\(bundleID ?? "(unknown)", privacy: .public)
+            """
+        )
+    }
+
+    /// Report lines for matches that never became expansions.
+    public func matchDropDiagnostics() -> [String] {
+        let drops = matchDropCounters
+        guard !drops.isEmpty else { return ["Matched-then-dropped: none"] }
+        var lines = [
+            "Matched-then-dropped: \(drops.total)"
+                + " (planner-refused=\(drops.plannerRefused)"
+                + " secure-input=\(drops.secureInputLive)"
+                + " already-expanding=\(drops.expansionInFlight))"
+        ]
+        if drops.orphanedSuspensionsRecovered > 0 {
+            lines.append(
+                "  orphaned matching suspensions recovered: \(drops.orphanedSuspensionsRecovered)"
+                    + " — matching was silently off before each recovery"
+            )
+        }
+        if let reason = drops.lastReason, let at = drops.lastAt {
+            lines.append(
+                "  last: \(reason) trigger=\(drops.lastTrigger ?? "?")"
+                    + " app=\(drops.lastBundleID ?? "(unknown)")"
+                    + " at \(ISO8601DateFormatter().string(from: at))"
+            )
+        }
+        return lines
     }
 
     /// Set when macOS Secure Event Input is active; matching is suppressed independently of user pause.
@@ -824,6 +1118,17 @@ public final class EventTapEngine {
         )
         guard EventTapEngine.shouldSwallowTrigger(plan: plan) else {
             // InjectionPlanner refuse — must not swallow (pass key through).
+            //
+            // This exit used to be completely silent: the trigger matched, the plan refused, the
+            // key passed through and nothing anywhere recorded that an expansion had been decided
+            // against. The refuse provenance in the report covers the *deferred* gate, not this
+            // one, so a stale cached snapshot could turn off every expansion in the app while the
+            // report showed all capabilities granted.
+            recordMatchDrop(
+                reason: "plannerRefused",
+                trigger: match.fieldText,
+                bundleID: context.bundleID
+            )
             return Unmanaged.passUnretained(event)
         }
 
@@ -837,6 +1142,11 @@ public final class EventTapEngine {
             DevTypeLog.eventTap.notice(
                 "[EventTap] live Secure Input check blocked a swallow (polled flag was stale)"
             )
+            recordMatchDrop(
+                reason: "secureInputLive",
+                trigger: match.fieldText,
+                bundleID: context.bundleID
+            )
             return Unmanaged.passUnretained(event)
         }
 
@@ -849,6 +1159,11 @@ public final class EventTapEngine {
         guard tryBeginExpansion() else {
             DevTypeLog.debounce.notice(
                 "[Debounce] immediate expansion suppressed — held expansion already in flight"
+            )
+            recordMatchDrop(
+                reason: "expansionInFlight",
+                trigger: match.fieldText,
+                bundleID: context.bundleID
             )
             switch admitTypeAhead(event: event) {
             case .swallow:
@@ -1182,6 +1497,12 @@ public final class EventTapEngine {
     /// If the tap is expected to be live but `tapIsEnabled` is false (or the port is gone),
     /// try `tapEnable` then a full reinstall. Addresses silent disable after timeout/re-sign.
     private func checkTapHealth() {
+        // A live tap with matching suspended is *also* a total expansion outage, and the tap
+        // health check is the only thing already running on a timer that can notice. Checked
+        // before the port checks below so an orphaned suspension is recovered even while the tap
+        // itself is perfectly healthy — which is exactly how it presents.
+        recoverOrphanedSuspensions(isDevTypeFrontmost: isDevTypeFrontmost())
+
         lock.lock()
         let expectRunning = _isTapRunning
         let userEnabled = _isEnabled
@@ -1553,6 +1874,61 @@ public final class EventTapEngine {
         for trigger in triggers.sorted() {
             lines.append("  \(trigger) (\(trigger.count) characters)")
         }
+        return lines
+    }
+
+    /// Every snippet in the library that can **never** respond to typing, and why.
+    ///
+    /// Three distinct causes, one user experience: the snippet sits in the list looking perfectly
+    /// healthy, its trigger is spelled right, and typing it does nothing. Only one of the three
+    /// was reported before, so the other two were indistinguishable from a broken engine.
+    ///
+    /// Takes the full library — including the secrets `snippets` filters out of the matcher — so
+    /// it can name what the matcher deliberately cannot see.
+    public func silentNoExpandDiagnostics(library: [SnippetModel]? = nil) -> [String] {
+        let all = library ?? libraryLock.withLock { _fullLibrary }
+        var lines: [String] = []
+
+        // 1. Secrets. Deliberate (a keychain-backed snippet must never fire from typing), but
+        //    invisible: nothing in the UI or the old report said "this trigger is typing-proof".
+        let secrets = all.filter { $0.enabled && $0.isSecret && !$0.triggerKeyword.isEmpty }
+        if !secrets.isEmpty {
+            lines.append(
+                "\(secrets.count) secret snippet(s) never expand from a typed trigger by design —"
+                    + " use the inline search panel instead:"
+            )
+            for snippet in secrets.map(\.triggerKeyword).sorted() {
+                lines.append("  \(snippet)")
+            }
+        }
+
+        // 2. Overlong. Already reported separately; folded in here so one call answers the whole
+        //    question rather than the caller having to know there are two lists.
+        lines.append(contentsOf: overlongTriggerDiagnostics())
+
+        // 3. Duplicates. `AbbreviationMatcher` keeps the first snippet for a colliding trigger, so
+        //    every later one is unreachable — and nothing said so.
+        var seen: [String: String] = [:]
+        var shadowed: [String] = []
+        for snippet in all where snippet.enabled && !snippet.isSecret && !snippet.triggerKeyword.isEmpty {
+            let key = snippet.isCaseSensitive
+                ? snippet.triggerKeyword
+                : snippet.triggerKeyword.lowercased()
+            if let winner = seen[key] {
+                shadowed.append("\(snippet.displayTitle) (trigger \(snippet.triggerKeyword), shadowed by \(winner))")
+            } else {
+                seen[key] = snippet.displayTitle
+            }
+        }
+        if !shadowed.isEmpty {
+            lines.append(
+                "\(shadowed.count) snippet(s) share a trigger with an earlier one and can never fire:"
+            )
+            for entry in shadowed.sorted() {
+                lines.append("  \(entry)")
+            }
+        }
+
         return lines
     }
 
@@ -1944,7 +2320,7 @@ public final class EventTapEngine {
                     triggerKeyword: "",
                     replacementText: text
                 )
-                EventTapEngine.shared.suspendMatching()
+                let suspension = EventTapEngine.shared.suspendMatching(reason: "aiTransformInject")
                 TextInjectionPipeline.shared.inject(
                     snippet: carrier,
                     triggerLength: 0,
@@ -1954,7 +2330,7 @@ public final class EventTapEngine {
                     preResolvedText: text,
                     secureClipboardPaste: true,
                     completion: {
-                        EventTapEngine.shared.resumeMatching()
+                        suspension.release()
                         completion?()
                     }
                 )

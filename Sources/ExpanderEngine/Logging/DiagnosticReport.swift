@@ -51,6 +51,17 @@ public enum DiagnosticReport {
         public var aiLines: [String]
         /// Secret/Touch ID state. Counts and capabilities only — never a value, never a title.
         public var secretLines: [String]
+        /// Whether abbreviation matching is suspended, and by whom.
+        ///
+        /// A suspension leaked by a panel stops **every** typed expansion while leaving the tap
+        /// running, the engine enabled and all permissions granted — the exact report that
+        /// motivated this field, in which nothing looked wrong and nothing expanded.
+        public var matchingSuspensionLines: [String]
+        /// Triggers that matched and were then discarded before reaching the inject pipeline.
+        /// Invisible in every per-app delivery counter, because no inject was ever attempted.
+        public var matchDropLines: [String]
+        /// Snippets that can never respond to typing at all (secret, overlong, shadowed).
+        public var unreachableSnippetLines: [String]
 
         public init(
             generatedAt: Date = Date(),
@@ -79,7 +90,10 @@ public enum DiagnosticReport {
             overlongTriggerLines: [String] = [],
             aiLines: [String] = [],
             secretLines: [String] = [],
-            prefixDebounceSummary: String? = nil
+            prefixDebounceSummary: String? = nil,
+            matchingSuspensionLines: [String] = [],
+            matchDropLines: [String] = [],
+            unreachableSnippetLines: [String] = []
         ) {
             self.generatedAt = generatedAt
             self.bundleID = bundleID
@@ -108,6 +122,9 @@ public enum DiagnosticReport {
             self.aiLines = aiLines
             self.secretLines = secretLines
             self.prefixDebounceSummary = prefixDebounceSummary
+            self.matchingSuspensionLines = matchingSuspensionLines
+            self.matchDropLines = matchDropLines
+            self.unreachableSnippetLines = unreachableSnippetLines
         }
     }
 
@@ -215,7 +232,14 @@ public enum DiagnosticReport {
                 keychainLocked: { SecretStore.shared.isKeychainLocked() },
                 storageDescription: { SecretStore.shared.storageDescription() }
             ),
-            prefixDebounceSummary: EventTapEngine.shared.prefixDebounceDiagnostics()
+            prefixDebounceSummary: EventTapEngine.shared.prefixDebounceDiagnostics(),
+            // The three that answer "I typed my trigger and nothing happened" — the one question
+            // the report could not previously answer at all. Each covers a distinct way an
+            // expansion dies before it becomes an inject, and therefore before any counter above
+            // this line can see it.
+            matchingSuspensionLines: EventTapEngine.shared.matchingSuspensionDiagnostics(),
+            matchDropLines: EventTapEngine.shared.matchDropDiagnostics(),
+            unreachableSnippetLines: EventTapEngine.shared.silentNoExpandDiagnostics()
         )
     }
 
@@ -406,6 +430,33 @@ public enum DiagnosticReport {
         lines.append("")
         lines.append("-- Prefix debounce --")
         lines.append(context.prefixDebounceSummary ?? "(not captured)")
+
+        // The expansion-outage section. Everything above describes expansions that *happened*;
+        // these three describe the ways one never starts. A report where every counter looks
+        // healthy and the user is still typing triggers into the void is answered here or nowhere.
+        lines.append("")
+        lines.append("-- Matching state --")
+        if context.matchingSuspensionLines.isEmpty {
+            lines.append("(not captured)")
+        } else {
+            lines.append(contentsOf: context.matchingSuspensionLines)
+        }
+
+        lines.append("")
+        lines.append("-- Matched but not expanded --")
+        if context.matchDropLines.isEmpty {
+            lines.append("(not captured)")
+        } else {
+            lines.append(contentsOf: context.matchDropLines)
+        }
+
+        lines.append("")
+        lines.append("-- Snippets that never expand by typing --")
+        if context.unreachableSnippetLines.isEmpty {
+            lines.append("(none)")
+        } else {
+            lines.append(contentsOf: context.unreachableSnippetLines)
+        }
 
         // §3.9: triggers past the 64-character match buffer can never fire and nothing said so.
         lines.append("")

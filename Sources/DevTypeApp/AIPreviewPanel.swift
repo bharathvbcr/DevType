@@ -15,6 +15,8 @@ enum AIPreviewPanel {
 
     private static var panel: NSPanel?
     private static var controller: AIPreviewController?
+    /// This panel's claim on matching being suspended — see `EventTapEngine.MatchingSuspension`.
+    private static var suspension: EventTapEngine.MatchingSuspension?
     private static var dismissMonitors: [Any] = []
     private static var dismissObservers: [NSObjectProtocol] = []
     /// Bumped on close so late partials / completions ignore a dismissed panel.
@@ -57,7 +59,8 @@ enum AIPreviewPanel {
         panel = nil
         controller = nil
         if resumeMatching {
-            EventTapEngine.shared.resumeMatching()
+            suspension?.release()
+            suspension = nil
         }
     }
 
@@ -70,7 +73,7 @@ enum AIPreviewPanel {
         loc: LocalizationManager,
         onReplace: @escaping (String, NSRunningApplication?) -> Void
     ) {
-        EventTapEngine.shared.suspendMatching()
+        suspension = EventTapEngine.shared.suspendMatching(reason: "AIPreviewPanel")
         let token = UUID()
         generationToken = token
         pendingRestoreOnCancel = restoreOnCancel
