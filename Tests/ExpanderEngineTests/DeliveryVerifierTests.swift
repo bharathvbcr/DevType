@@ -24,6 +24,12 @@ final class DeliveryVerifierBoundedContainsTests: XCTestCase {
         XCTAssertEqual(DeliveryVerifier.boundedContains("x", in: "", caretLocation: nil), false)
     }
 
+    func testBoundedContainsHandlesNonBreakingSpace() {
+        XCTAssertEqual(DeliveryVerifier.boundedContains("`slm ", in: "`slm\u{00A0}", caretLocation: nil), true)
+        XCTAssertEqual(DeliveryVerifier.boundedContains("`slm\u{00A0}", in: "`slm ", caretLocation: nil), true)
+    }
+
+
     func testSmallFieldIgnoresCaretLocation() {
         // Below the scan threshold the caret is irrelevant — the whole value is cheap to scan.
         XCTAssertEqual(DeliveryVerifier.boundedContains("needle", in: "needle at the front", caretLocation: 9_999), true)
