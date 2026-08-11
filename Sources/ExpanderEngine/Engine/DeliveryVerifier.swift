@@ -194,21 +194,26 @@ public final class DeliveryVerifier {
         caretLocation: Int?
     ) -> Bool? {
         guard !needle.isEmpty else { return true }
-        let normNeedle = needle.normalizedWhitespace
-        let normValue = value.normalizedWhitespace
-        let total = normValue.utf16.count
+        let total = value.utf16.count
         if total <= maxVerificationScanUTF16 {
-            return normValue.contains(normNeedle)
+            return value.normalizedWhitespace.contains(needle.normalizedWhitespace)
         }
+        // Bound FIRST, fold the window only. Whitespace folding is 1:1 in UTF-16 units (see
+        // WhitespaceFolding.swift), so offsets computed on the raw value are valid on folded
+        // text — folding the whole value here would reintroduce the full-field O(n) copy this
+        // bound exists to prevent, on every 50 ms hold-loop tick.
         guard let caretLocation, caretLocation >= 0, caretLocation <= total else { return nil }
-        let needleUnits = normNeedle.utf16.count
+        let needleUnits = needle.utf16.count
         let lower = max(0, caretLocation - needleUnits - verificationCaretSlackUTF16)
         let upper = min(total, caretLocation + verificationCaretSlackUTF16)
         guard lower < upper else { return nil }
-        let lowerIndex = String.Index(utf16Offset: lower, in: normValue)
-        let upperIndex = String.Index(utf16Offset: upper, in: normValue)
+        // Mid-surrogate offsets round to scalar boundaries when slicing (verified behaviour) —
+        // the slack absorbs the at-most-one-unit shrink at each edge.
+        let lowerIndex = String.Index(utf16Offset: lower, in: value)
+        let upperIndex = String.Index(utf16Offset: upper, in: value)
         guard lowerIndex < upperIndex else { return nil }
-        return normValue[lowerIndex..<upperIndex].contains(normNeedle)
+        return String(value[lowerIndex..<upperIndex]).normalizedWhitespace
+            .contains(needle.normalizedWhitespace)
     }
 }
 
