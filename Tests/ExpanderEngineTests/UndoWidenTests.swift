@@ -151,6 +151,50 @@ final class UndoWidenTests: XCTestCase {
         )
     }
 
+    // MARK: - Whitespace-normalizing hosts (Claude Desktop / ProseMirror NBSP incident)
+
+    /// Electron rich-text editors store typed/pasted spaces as U+00A0. An injected text that
+    /// contains an internal space must still be located — otherwise undo refuses in exactly the
+    /// hosts that need the widening most.
+    func testInjectedTextWithNBSPInsideStillWidens() {
+        let result = widen(
+            injected: "Kind regards",
+            trigger: "`kr",
+            value: "Kind\u{00A0}regardsxy",   // host rewrote our space as NBSP
+            caret: 14
+        )
+        XCTAssertNotNil(result, "NBSP-normalizing host must not defeat the injected-text match.")
+        XCTAssertEqual(result?.plan.utf16Count, 14)
+        XCTAssertEqual(result?.restore, "`krxy")
+    }
+
+    /// The typed tail is preserved byte-for-byte — an NBSP the host manufactured stays an NBSP
+    /// in the restore, because that is what the field actually holds.
+    func testNBSPInTypedTailIsPreservedRaw() {
+        let result = widen(
+            injected: "ScholarLM",
+            trigger: "`slm",
+            value: "ScholarLM\u{00A0}ab",
+            caret: 12
+        )
+        XCTAssertEqual(result?.restore, "`slm\u{00A0}ab")
+        XCTAssertEqual(result?.plan.utf16Count, 12)
+    }
+
+    /// Narrow no-break space (U+202F) and figure space (U+2007) get the same treatment.
+    func testOtherNoBreakVariantsInsideInjectedTextStillWiden() {
+        for variant in ["\u{202F}", "\u{2007}"] {
+            let result = widen(
+                injected: "a b",
+                trigger: "`ab",
+                value: "a\(variant)bz",
+                caret: 4
+            )
+            XCTAssertNotNil(result, "Variant \(variant.unicodeScalars.first!.value) must match a plain space.")
+            XCTAssertEqual(result?.restore, "`abz")
+        }
+    }
+
     // MARK: - Unicode
 
     /// The window arithmetic is in UTF-16 units, so a non-BMP tail must not corrupt the span.

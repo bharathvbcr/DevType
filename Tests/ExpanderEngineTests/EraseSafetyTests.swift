@@ -61,6 +61,58 @@ final class EraseSafetyTests: XCTestCase {
         }
     }
 
+    /// §3.1 undo regression (the "Sch`slm" incident, 2026-08-11): the §8.6 downgrade is only
+    /// sound when the caller can vouch the insertion point sits right after the expected text.
+    /// The undo path cannot — after `` `slm `` → "ScholarLM" the user typed 3 more units, hit
+    /// Backspace, and the downgrade turned the honest mismatch into "proceed best-effort". The
+    /// blind caret-relative erase then ate the typed tail plus "olarLM", and the trigger restore
+    /// landed on the remnant: "Sch`slm". With `insertionPointFollowsExpectedText: false` the
+    /// mismatch must surface so the undo can widen over the tail or refuse.
+    func testUndoModeSurfacesMismatchInsteadOfBestEffortDowngrade() {
+        let value = "ScholarLM ab"   // injected text + terminator space + 2 typed characters
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "ScholarLM"),
+            value: value,
+            caretLocation: value.utf16.count,
+            selectionLength: 0,
+            insertionPointFollowsExpectedText: false
+        )
+        XCTAssertTrue(
+            result.blocksErase,
+            "Undo must never blind-erase at the caret on a readable mismatch, got \(result)"
+        )
+    }
+
+    /// Same field, same plan, expand-path semantics: the §8.6 downgrade must still apply when
+    /// the caller vouches for the insertion point — that behaviour is load-bearing for Electron
+    /// hosts whose caret indexes a different coordinate space than their AXValue.
+    func testExpandModeKeepsBestEffortDowngradeForSameField() {
+        let value = "ScholarLM ab"
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "ScholarLM"),
+            value: value,
+            caretLocation: value.utf16.count,
+            selectionLength: 0
+        )
+        guard case .unavailable = result else {
+            return XCTFail("Expand path must keep the §8.6 best-effort downgrade, got \(result)")
+        }
+    }
+
+    /// In undo mode a genuinely clean field still passes — strictness only changes what a
+    /// mismatch degrades to, never what a match means.
+    func testUndoModeStillPassesWhenInjectedTextIsAtTheCaret() {
+        let value = "ScholarLM"
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "ScholarLM"),
+            value: value,
+            caretLocation: value.utf16.count,
+            selectionLength: 0,
+            insertionPointFollowsExpectedText: false
+        )
+        XCTAssertEqual(result, .ok)
+    }
+
     // MARK: - ErasePlan unit math
 
     func testASCIITriggerCountsAgreeInBothUnits() {

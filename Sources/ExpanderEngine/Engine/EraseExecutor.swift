@@ -86,19 +86,30 @@ public final class EraseExecutor {
     ///     The first read can catch the AX tree mid-transition — notably right after the fill-in
     ///     panel closes and focus returns to the target app — and a transient disagreement must
     ///     degrade to a retry, never to a refused expand.
+    ///   - insertionPointFollowsExpectedText: see `ErasePreconditionChecker.evaluate`. The undo
+    ///     path passes false so a mismatch surfaces instead of degrading to best-effort.
     public func evaluateErasePrecondition(
         plan: ErasePlan,
         element: AXUIElement? = nil,
         retryOnMismatch: Bool = true,
+        insertionPointFollowsExpectedText: Bool = true,
         completion: @escaping (ErasePreconditionResult) -> Void
     ) {
-        let first = evaluateErasePreconditionOnce(plan: plan, element: element)
+        let first = evaluateErasePreconditionOnce(
+            plan: plan,
+            element: element,
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+        )
         guard retryOnMismatch, first.blocksErase else {
             completion(first)
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.erasePreconditionRetryDelay) {
-            completion(self.evaluateErasePreconditionOnce(plan: plan, element: nil))
+            completion(self.evaluateErasePreconditionOnce(
+                plan: plan,
+                element: nil,
+                insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+            ))
         }
     }
 
@@ -111,17 +122,27 @@ public final class EraseExecutor {
     public func evaluateErasePrecondition(
         plan: ErasePlan,
         element: AXUIElement? = nil,
-        retryOnMismatch: Bool = true
+        retryOnMismatch: Bool = true,
+        insertionPointFollowsExpectedText: Bool = true
     ) -> ErasePreconditionResult {
-        let first = evaluateErasePreconditionOnce(plan: plan, element: element)
+        let first = evaluateErasePreconditionOnce(
+            plan: plan,
+            element: element,
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+        )
         guard retryOnMismatch, first.blocksErase, !Thread.isMainThread else { return first }
         Thread.sleep(forTimeInterval: InjectTiming.erasePreconditionRetryDelay)
-        return evaluateErasePreconditionOnce(plan: plan, element: nil)
+        return evaluateErasePreconditionOnce(
+            plan: plan,
+            element: nil,
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+        )
     }
 
     private func evaluateErasePreconditionOnce(
         plan: ErasePlan,
-        element: AXUIElement?
+        element: AXUIElement?,
+        insertionPointFollowsExpectedText: Bool = true
     ) -> ErasePreconditionResult {
         if plan.utf16Count == 0 { return .ok }
         guard ErasePreconditionChecker.isEnabled else {
@@ -154,7 +175,8 @@ public final class EraseExecutor {
             plan: plan,
             value: value,
             caretLocation: caretLocation,
-            selectionLength: selectionLength
+            selectionLength: selectionLength,
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
         )
     }
 
@@ -183,6 +205,7 @@ public final class EraseExecutor {
     public func performGuardedErase(
         plan: ErasePlan,
         afterPossibleWrite: Bool = false,
+        insertionPointFollowsExpectedText: Bool = true,
         onUnverifiableAfterWrite: ((String) -> Void)? = nil,
         completion: @escaping (Bool) -> Void
     ) {
@@ -195,7 +218,11 @@ public final class EraseExecutor {
         // live, so the precondition still sees the post-collapse selection.
         let element = AXContextChecker.shared.focusedElement()
         ax.collapseSelectionToCaret(element: element)
-        evaluateErasePrecondition(plan: plan, element: element) { result in
+        evaluateErasePrecondition(
+            plan: plan,
+            element: element,
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+        ) { result in
             if afterPossibleWrite, case .unavailable = result {
                 // Unverifiable after a write that reached the field is grounds to refuse — but
                 // not on the first read. The AX tree is routinely mid-transition right after an
@@ -207,7 +234,8 @@ public final class EraseExecutor {
                     let second = self.evaluateErasePrecondition(
                         plan: plan,
                         element: nil,
-                        retryOnMismatch: false
+                        retryOnMismatch: false,
+                        insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
                     )
                     self.finishGuardedErase(
                         plan: plan,

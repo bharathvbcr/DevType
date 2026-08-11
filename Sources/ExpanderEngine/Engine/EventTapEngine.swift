@@ -883,6 +883,11 @@ public final class EventTapEngine {
             lock.unlock()
             replayTypeAhead(stranded, reason: "caret moved (click)")
             resetBuffer()
+            // §3.1: same rule as escape/arrows below — the caret moved, so the recorded expansion
+            // no longer describes what sits in front of it. Clicks were the one caret move that
+            // kept the record alive, which let a click + backspace within the undo window fire a
+            // blind erase at the click position in AX-opaque hosts.
+            TextInjectionPipeline.shared.clearLastExpansion()
             return Unmanaged.passUnretained(event)
         }
 
@@ -1005,6 +1010,15 @@ public final class EventTapEngine {
            TextInjectionPipeline.shared.undoLastExpansion() {
             resetBuffer()
             return nil   // swallow: the undo replaces this backspace
+        }
+
+        // §3.1: any real key that mutates the field invalidates the "caret sits right after the
+        // injected text" premise a *blind* (AX-opaque) undo rests on. Counted, not cleared:
+        // readable fields can still widen over the typed tail; only the unverifiable blind path
+        // refuses at a non-zero count. Runs after the undo check so the backspace that *is* the
+        // undo never counts against the record it just consumed. No-op when no record exists.
+        if keyAction == .deleteLast || length > 0 {
+            TextInjectionPipeline.shared.noteInputAfterExpansion()
         }
 
         lock.lock()
@@ -2644,6 +2658,12 @@ public final class EventTapEngine {
             bundleID: cachedFrontmostBundleID,
             characters: text.count
         )
+        // §3.1: replayed characters are user input landing *after* the recorded expansion (the
+        // record is written before the "expansion complete" replay fires), but they are posted
+        // synthetically so the tap's counter hook never sees them. Count them here or a blind
+        // undo would under-count what sits between the injected text and the caret. Replays that
+        // fire before a record exists are a harmless no-op.
+        TextInjectionPipeline.shared.noteInputAfterExpansion(units: text.count)
         // HID only — deliberately *not* `attemptAXDirectInjection`. That call reports success
         // without writing in the whole Chromium/Electron false-success class, which is exactly
         // where this bug occurs, so an AX replay would silently eat the user's keystrokes: the
