@@ -871,8 +871,10 @@ public final class AXContextChecker {
     /// §3.10: `true` when a title / description / identifier names a terminal.
     ///
     /// Pure and public so the heuristic can be tested without a window server. Deliberately
-    /// conservative: a false negative only means a normal paste into a terminal (safe), while a
-    /// false positive injects literal `ESC[200~` into the user's source file (not safe).
+    /// conservative: since the payload is now identical on both sides of this decision, the only
+    /// stake left is the AX direct-set attempt, which a shell-like verdict skips. A false negative
+    /// costs one wasted AX write attempt against a terminal; a false positive costs a document
+    /// edit the slower clipboard path it did not need.
     public static func axTitleLooksLikeTerminal(_ text: String) -> Bool {
         let lowered = text.lowercased()
         guard !lowered.isEmpty else { return false }
@@ -896,8 +898,9 @@ public final class AXContextChecker {
     ///
     /// This used to be a bare substring match for `terminal`/`console`/`shell`/`term`/`pty` over
     /// the *joined* title + description + identifier + role, so a VS Code tab named `terminal.ts`
-    /// or an Xcode file named `Console.swift` was routed through bracketed paste and received
-    /// literal escape sequences. It now requires **both** a terminal-ish AX role and a
+    /// or an Xcode file named `Console.swift` was misread as a shell. That once meant literal
+    /// escape sequences in a source file; since the payload no longer varies by verdict, it now
+    /// only costs the file its AX write path. It requires **both** a terminal-ish AX role and a
     /// terminal-shaped title token.
     public func focusedElementLooksLikeTerminal(element: AXUIElement? = nil) -> Bool {
         let axElement: AXUIElement

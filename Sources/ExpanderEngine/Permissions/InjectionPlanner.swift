@@ -24,11 +24,12 @@ public struct InjectionPlanner: Sendable {
         }
 
         if snapshot.canPostEvents {
-            // Shell-like contexts get bracket-paste on the inject path; multi-line is allowed with Post.
+            // Shell-like contexts take the clipboard path on the inject side (the ⌘V needs Post);
+            // multi-line is allowed with Post.
             return .axPlusHID
         }
 
-        // AX without Post: no HID. Terminal / bracket-paste needs Post.
+        // AX without Post: no HID, so no ⌘V — and a terminal has no other usable write path.
         if isTerminal {
             return .refuse(reason: "Post Events missing — terminal / shell-like paste unsupported")
         }
