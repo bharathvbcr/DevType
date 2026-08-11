@@ -124,11 +124,20 @@ public enum ErasePreconditionChecker {
     ///   - value: full `AXValue` of the focused field, if readable.
     ///   - caretLocation: `AXSelectedTextRange.location` (UTF-16), if readable.
     ///   - selectionLength: `AXSelectedTextRange.length` (UTF-16), if readable.
+    ///   - insertionPointFollowsExpectedText: whether the caller can vouch that the app's real
+    ///     insertion point sits immediately after the expected text. True on the expand path —
+    ///     the tap just observed the trigger keystrokes land at the caret — which licenses the
+    ///     §8.6 mismatch→unavailable downgrade below. The undo path cannot vouch (the user may
+    ///     have typed since the expansion) and passes false, taking the honest `.mismatch` so it
+    ///     can widen over the typed tail or refuse — never blind-erase at the caret. That blind
+    ///     erase is the "Sch`slm" incident: undo ate `injectedText.count` units of the wrong
+    ///     text and then restored the trigger on top of the remnant.
     public static func evaluate(
         plan: ErasePlan,
         value: String?,
         caretLocation: Int?,
-        selectionLength: Int?
+        selectionLength: Int?,
+        insertionPointFollowsExpectedText: Bool = true
     ) -> ErasePreconditionResult {
         if plan.utf16Count == 0 {
             return .ok
@@ -141,6 +150,17 @@ public enum ErasePreconditionChecker {
         }
         guard let caretLocation else {
             return .unavailable("AXSelectedTextRange unreadable")
+        }
+        // A negative caret (CFRange kCFNotFound — "no selection info") or negative selection
+        // length is not AX telling us the field holds the wrong text; it is an answer that could
+        // not be parsed. `.mismatch` is reserved for "AX *could* tell us, and the field
+        // disagrees" — garbage geometry degrades to the same best-effort baseline as an
+        // unreadable range, instead of refusing every expansion in hosts that report it.
+        guard caretLocation >= 0 else {
+            return .unavailable("negative caret \(caretLocation) — no selection info from host")
+        }
+        if let selectionLength, selectionLength < 0 {
+            return .unavailable("negative selection length \(selectionLength) — unparseable range")
         }
 
         // The trigger sits immediately before the selection start. A pre-existing user selection is
@@ -162,9 +182,6 @@ public enum ErasePreconditionChecker {
             return .unavailable(
                 "AXValue (\(units.count) units) cannot hold a \(plan.utf16Count)-unit trigger — virtualised field"
             )
-        }
-        if let selectionLength, selectionLength < 0 {
-            return .mismatch("negative selection length \(selectionLength)")
         }
         // The value is long enough to hold the trigger, yet the caret sits too close to the start.
         // The field is readable and it disagrees with us — erasing here would run off the front.
@@ -197,13 +214,19 @@ public enum ErasePreconditionChecker {
             //
             // A mismatch with the trigger nowhere in the value keeps refusing — that is the
             // genuine "field changed under us" signal this guard exists for.
-            let haystack = plan.caseInsensitive ? value.lowercased() : value
-            let needle = plan.caseInsensitive ? expected.lowercased() : expected
-            if DeliveryVerifier.boundedContains(needle, in: haystack, caretLocation: end) == true {
-                return .unavailable(
-                    "caret slice reads \(debugQuote(rawActual)) but the value does contain the"
-                        + " expected text — caret geometry untrusted, proceeding best-effort"
-                )
+            //
+            // The downgrade's premise — backspaces land right after the expected text — holds
+            // only when the caller vouches for it. The undo path opts out and takes the honest
+            // mismatch instead, because its caret may sit past text typed after the expansion.
+            if insertionPointFollowsExpectedText {
+                let haystack = plan.caseInsensitive ? value.lowercased() : value
+                let needle = plan.caseInsensitive ? expected.lowercased() : expected
+                if DeliveryVerifier.boundedContains(needle, in: haystack, caretLocation: end) == true {
+                    return .unavailable(
+                        "caret slice reads \(debugQuote(rawActual)) but the value does contain the"
+                            + " expected text — caret geometry untrusted, proceeding best-effort"
+                    )
+                }
             }
             return .mismatch("field holds \(debugQuote(rawActual)), expected \(debugQuote(expected))")
         }
@@ -229,18 +252,6 @@ public enum ErasePreconditionChecker {
         }
         guard text.count > limit else { return "\"\(rendered)\"" }
         return "\"\(rendered)…\"(\(text.count))"
-    }
-}
-
-extension String {
-    /// Normalizes non-breaking space variants (\u{00A0}, \u{202F}, \u{2007}) to standard ASCII space (\u{0020}).
-    public var normalizedWhitespace: String {
-        if !self.contains("\u{00A0}") && !self.contains("\u{202F}") && !self.contains("\u{2007}") {
-            return self
-        }
-        return self.replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "\u{202F}", with: " ")
-            .replacingOccurrences(of: "\u{2007}", with: " ")
     }
 }
 
