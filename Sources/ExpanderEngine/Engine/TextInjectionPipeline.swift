@@ -130,7 +130,6 @@ public final class TextInjectionPipeline {
     private let clipboard: PasteboardBroker
     private let eraser: EraseExecutor
     private let timing: InjectTimingStore
-    private let bracketedPaste: BracketedPasteCapabilityStore
 
     /// §2.4: `os_unfair_lock`, taken from both the inject queue and main.
     private let lastExpansionLock = UnfairLock()
@@ -143,7 +142,6 @@ public final class TextInjectionPipeline {
         clipboard = PasteboardBroker.shared
         eraser = EraseExecutor.shared
         timing = InjectTimingStore.shared
-        bracketedPaste = BracketedPasteCapabilityStore.shared
     }
 
     // MARK: - Timing constants (see `InjectTiming` — these are kept as the public surface)
@@ -266,9 +264,20 @@ public final class TextInjectionPipeline {
         )
     }
 
-    /// Bracketed paste sequence for shell-like contexts (prevents metachar execution).
-    public static func bracketPastePayload(_ text: String) -> String {
-        BracketedPasteCapabilityStore.bracketStart + text + BracketedPasteCapabilityStore.bracketEnd
+    /// Whether this inject may touch the field through AX (range replace, then direct set) before
+    /// falling back to the clipboard.
+    ///
+    /// Two exclusions, and they are the same for both AX write sites — which is why this is one
+    /// function rather than a repeated `!a && !b` that can drift apart:
+    ///
+    /// - `shellLike`: a terminal's AX mirror is a rendered screen, not an editable field. A write
+    ///   against it either fails or "succeeds" without reaching the pty.
+    /// - `preferHID`: this `(bundle, role)` has been condemned as a false-success AX host.
+    ///
+    /// Terminals reaching the clipboard path is load-bearing beyond AX: the pasteboard payload is
+    /// the snippet text byte for byte, because the terminal — not DevType — owns bracketed paste.
+    public static func mayWriteViaAX(shellLike: Bool, preferHID: Bool) -> Bool {
+        !shellLike && !preferHID
     }
 
     // MARK: - Entry points
@@ -981,7 +990,7 @@ public final class TextInjectionPipeline {
         // Shell-like + multi-line without Post: refuse (planner should already catch this).
         if shellLike, isMultiLine, !context.snapshot.canPostEvents {
             refuseInject(
-                "Multi-line shell inject requires Post Events (bracket paste)",
+                "Multi-line shell inject requires Post Events (clipboard paste)",
                 path: "shellNoPostEvents",
                 swallowed: swallowed,
                 completion: completion
@@ -1098,7 +1107,7 @@ public final class TextInjectionPipeline {
         // as "may have mutated" refused every expand in AX-opaque hosts — a Chrome PWA cannot
         // verify the field either, so the guard tripped on a write that never happened.
         var attemptedAXWrite = false
-        if !shellLike, !preferHID {
+        if TextInjectionPipeline.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID) {
             let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
                 eraseCount: erasePlan.utf16Count,
@@ -1186,64 +1195,22 @@ public final class TextInjectionPipeline {
                 )
                 return
             }
-            if shellLike {
-                // Bracket paste for terminals / IDE shells — refuse multi-line only handled above.
-                // Verify against the unbracketed text (hosts strip OSC 200/201); hold clipboard until
-                // AX confirms, retries once on confirmed miss, or hold timeout (unverified).
-                //
-                // §3.10: no longer unconditional. A host that has been observed echoing the literal
-                // markers gets a plain paste instead — the escapes are only a defence against a
-                // pasted newline executing, and a host that shows them is not parsing them.
-                let shouldBracket = self.bracketedPaste.shouldBracketPaste(bundleID: context.frontBundleID)
-                let payload = shouldBracket ? TextInjectionPipeline.bracketPastePayload(textToInject) : textToInject
-                let hidPasteBaseline = self.verifier.captureFocusedTextObservation()
-                self.clipboard.pasteViaClipboard(
-                    text: payload,
-                    expectedText: textToInject,
-                    baseline: hidPasteBaseline,
-                    bundleID: context.frontBundleID,
-                    focusedRole: focusedRole,
-                    staleProbe: erasePlan.expectedText,
-                    staleProbeCaseInsensitive: erasePlan.caseInsensitive
-                ) { result in
-                    // #region agent log
-                    TextInjectionPipeline.debugLogInject(
-                        hypothesisId: "M4",
-                        message: "inject path",
-                        data: [
-                            "frontmostBundle": frontBundle,
-                            "path": "shellBracketPaste",
-                            "bracketed": shouldBracket,
-                            "result": TextInjectionPipeline.pasteResultLabel(result)
-                        ]
-                    )
-                    // #endregion
-                    if shouldBracket {
-                        // §3.10: learn from what the field actually shows. AX-opaque terminals
-                        // teach nothing and stay on the safe default.
-                        self.bracketedPaste.learn(
-                            fromObservedValue: self.verifier.captureFocusedTextObservation()?.value,
-                            bundleID: context.frontBundleID
-                        )
-                    }
-                    self.finishPasteDelivery(
-                        result: result,
-                        expectedText: textToInject,
-                        baseline: hidPasteBaseline,
-                        context: context,
-                        focusedRole: focusedRole,
-                        path: "shellBracketPaste",
-                        cursorOffset: cursorOffset,
-                        totalUTF16Length: totalUTF16,
-                        trailingKeys: keysToPress,
-                        completion: completion
-                    )
-                }
-                return
-            }
+            // Terminals and IDE shells take the clipboard path below unchanged — no AX direct set
+            // (a terminal's AX mirror is a rendered screen, not an editable field), and no
+            // synthesised bracketed-paste markers.
+            //
+            // Bracketed paste is a terminal→pty protocol, not clipboard content: when the shell
+            // enables mode 2004 the *terminal emulator* wraps whatever is pasted, at paste time.
+            // Delivery here is a synthetic ⌘V, so markers added to the payload land **inside** that
+            // wrapper and the shell inserts them as literal text — `[200~…[201~` on the command
+            // line, seen in cmux. A host that does not implement bracketed paste shows the same
+            // garbage, and the pasted newline the markers were meant to neutralise executes anyway.
+            // There is no receiver for which wrapping here is correct, so the payload is the
+            // snippet text, byte for byte, everywhere.
 
-            // Weak-AX apps: skip direct AX set (same false-success class as range replace).
-            if !preferHID,
+            // Weak-AX apps and shells: skip direct AX set (same false-success class as range
+            // replace, and the same predicate).
+            if TextInjectionPipeline.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID),
                self.ax.attemptAXDirectInjection(
                    text: textToInject,
                    bundleID: context.frontBundleID

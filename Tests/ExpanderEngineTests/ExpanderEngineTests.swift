@@ -200,13 +200,6 @@ final class ExpanderEngineTests: XCTestCase {
         XCTAssertFalse(checker.isIDEBundleID("com.apple.Safari"))
     }
 
-    func testBracketPastePayloadWrapsText() {
-        let payload = TextInjectionPipeline.bracketPastePayload("echo hi")
-        XCTAssertTrue(payload.hasPrefix("\u{1B}[200~"))
-        XCTAssertTrue(payload.hasSuffix("\u{1B}[201~"))
-        XCTAssertTrue(payload.contains("echo hi"))
-    }
-
     func testVerifyTextDeliverySucceedsWhenValueChangesToContainExpectedText() {
         let before = TextInjectionPipeline.FocusedTextObservation(
             value: "abc",
@@ -903,7 +896,7 @@ final class ExpanderEngineTests: XCTestCase {
             .axOnly
         )
         if case .refuse = planner.plan(snapshot: snap, isTerminal: true, needsCursorHID: false) {
-            // ok — terminal / bracket-paste still needs Post
+            // ok — a terminal is clipboard-only, and the ⌘V still needs Post
         } else {
             XCTFail("terminal without Post should refuse")
         }
