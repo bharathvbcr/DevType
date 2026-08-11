@@ -112,7 +112,7 @@ public final class DeliveryVerifier {
     ) -> TextDeliveryVerification {
         guard !expectedText.isEmpty else { return .delivered }
         guard let after else { return .unavailable }
-        if after.selectedText == expectedText {
+        if after.selectedText?.normalizedWhitespace == expectedText.normalizedWhitespace {
             return .delivered
         }
         guard let value = after.value else {
@@ -194,18 +194,21 @@ public final class DeliveryVerifier {
         caretLocation: Int?
     ) -> Bool? {
         guard !needle.isEmpty else { return true }
-        let total = value.utf16.count
+        let normNeedle = needle.normalizedWhitespace
+        let normValue = value.normalizedWhitespace
+        let total = normValue.utf16.count
         if total <= maxVerificationScanUTF16 {
-            return value.contains(needle)
+            return normValue.contains(normNeedle)
         }
         guard let caretLocation, caretLocation >= 0, caretLocation <= total else { return nil }
-        let needleUnits = needle.utf16.count
+        let needleUnits = normNeedle.utf16.count
         let lower = max(0, caretLocation - needleUnits - verificationCaretSlackUTF16)
         let upper = min(total, caretLocation + verificationCaretSlackUTF16)
         guard lower < upper else { return nil }
-        let lowerIndex = String.Index(utf16Offset: lower, in: value)
-        let upperIndex = String.Index(utf16Offset: upper, in: value)
+        let lowerIndex = String.Index(utf16Offset: lower, in: normValue)
+        let upperIndex = String.Index(utf16Offset: upper, in: normValue)
         guard lowerIndex < upperIndex else { return nil }
-        return value[lowerIndex..<upperIndex].contains(needle)
+        return normValue[lowerIndex..<upperIndex].contains(normNeedle)
     }
 }
+

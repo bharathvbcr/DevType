@@ -243,8 +243,13 @@ public final class AXTextWriter {
                 if let beforeValue {
                     outcome = value == beforeValue ? .falseSuccess : .replaced
                 } else {
-                    // No baseline to compare against — fall back to containment.
-                    outcome = value.contains(text) ? .replaced : .falseSuccess
+                    // No baseline to compare against — fall back to containment. Compare with
+                    // whitespace normalized: rich-text hosts (ProseMirror in Claude Desktop)
+                    // store a trailing typed space as U+00A0, and a raw miss here would record
+                    // `.falseSuccess` for a write that actually landed — condemning the AX path
+                    // and sending the HID fallback at an already-mutated field.
+                    outcome = value.normalizedWhitespace.contains(text.normalizedWhitespace)
+                        ? .replaced : .falseSuccess
                 }
             } else {
                 // AX write claimed success and we cannot read the field back. We must not assume it

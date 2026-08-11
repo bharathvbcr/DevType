@@ -244,6 +244,51 @@ final class EraseSafetyTests: XCTestCase {
         XCTAssertTrue(result.blocksErase)
     }
 
+    /// Electron / Web rich text editors (Claude Desktop incident) report non-breaking space (\u{00A0} / &nbsp;).
+    /// The precondition guard must normalize whitespace variant characters so typed space matches NBSP.
+    func testPreconditionPassesWhenFieldHoldsNonBreakingSpace() {
+        let value = "`slm\u{00A0}"
+        let plan = ErasePlan(text: "`slm ")
+        let result = ErasePreconditionChecker.evaluate(
+            plan: plan,
+            value: value,
+            caretLocation: value.utf16.count,
+            selectionLength: 0
+        )
+        XCTAssertEqual(result, .ok, "Non-breaking space \\u{00A0} in field must match standard space in trigger")
+    }
+
+    /// The other NBSP variants hosts substitute: narrow no-break (option-space on French macOS
+    /// layouts, U+202F) and figure space (U+2007).
+    func testPreconditionPassesForOtherNoBreakSpaceVariants() {
+        for variant in ["\u{202F}", "\u{2007}"] {
+            let value = "`slm" + variant
+            let plan = ErasePlan(text: "`slm ")
+            let result = ErasePreconditionChecker.evaluate(
+                plan: plan,
+                value: value,
+                caretLocation: value.utf16.count,
+                selectionLength: 0
+            )
+            XCTAssertEqual(result, .ok, "whitespace variant U+\(String(format: "%04X", variant.unicodeScalars.first!.value)) must match a typed space")
+        }
+    }
+
+    /// A genuine mismatch must stay refused — normalization must not widen the guard into
+    /// accepting different visible text.
+    func testPreconditionStillRefusesGenuineMismatch() {
+        let value = "hello"
+        let plan = ErasePlan(text: "`slm ")
+        let result = ErasePreconditionChecker.evaluate(
+            plan: plan,
+            value: value,
+            caretLocation: value.utf16.count,
+            selectionLength: 0
+        )
+        XCTAssertTrue(result.blocksErase)
+    }
+
+
     /// AX-opaque hosts must not be blocked — degrade to best-effort, as before.
     func testPreconditionDegradesWhenAXCannotRead() {
         let plan = ErasePlan(text: "addr")

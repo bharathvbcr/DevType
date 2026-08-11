@@ -175,10 +175,12 @@ public enum ErasePreconditionChecker {
         }
 
         let slice = Array(units[start..<end])
-        let actual = String(utf16CodeUnits: slice, count: slice.count)
+        let rawActual = String(utf16CodeUnits: slice, count: slice.count)
+        let actual = rawActual.normalizedWhitespace
+        let normExpected = expected.normalizedWhitespace
         let matches = plan.caseInsensitive
-            ? actual.lowercased() == expected.lowercased()
-            : actual == expected
+            ? actual.lowercased() == normExpected.lowercased()
+            : actual == normExpected
         guard matches else {
             // §8.6: the slice depends on TWO reads agreeing — AXValue for the text and
             // AXSelectedTextRange for where the caret is *within that text*. Electron hosts
@@ -199,19 +201,46 @@ public enum ErasePreconditionChecker {
             let needle = plan.caseInsensitive ? expected.lowercased() : expected
             if DeliveryVerifier.boundedContains(needle, in: haystack, caretLocation: end) == true {
                 return .unavailable(
-                    "caret slice reads \(debugQuote(actual)) but the value does contain the"
+                    "caret slice reads \(debugQuote(rawActual)) but the value does contain the"
                         + " expected text — caret geometry untrusted, proceeding best-effort"
                 )
             }
-            return .mismatch("field holds \(debugQuote(actual)), expected \(debugQuote(expected))")
+            return .mismatch("field holds \(debugQuote(rawActual)), expected \(debugQuote(expected))")
         }
         return .ok
     }
 
-    /// Short, redaction-friendly rendering for logs — length plus a bounded prefix.
+    /// Short, redaction-friendly rendering for logs — length plus a bounded prefix. Exotic
+    /// whitespace is escaped so a mismatch involving an NBSP variant cannot print two
+    /// identical-looking strings ("field holds \"`slm \", expected \"`slm \"" — the field
+    /// actually held U+00A0).
     private static func debugQuote(_ text: String) -> String {
         let limit = 12
-        guard text.count > limit else { return "\"\(text)\"" }
-        return "\"\(text.prefix(limit))…\"(\(text.count))"
+        var rendered = ""
+        for scalar in text.prefix(limit).unicodeScalars {
+            let isExoticWhitespace = scalar.properties.isWhitespace
+                && scalar != " " && scalar != "\n" && scalar != "\t"
+            let isInvisibleFormat = scalar.properties.generalCategory == .format
+            if isExoticWhitespace || isInvisibleFormat {
+                rendered += String(format: "\\u{%X}", scalar.value)
+            } else {
+                rendered.unicodeScalars.append(scalar)
+            }
+        }
+        guard text.count > limit else { return "\"\(rendered)\"" }
+        return "\"\(rendered)…\"(\(text.count))"
     }
 }
+
+extension String {
+    /// Normalizes non-breaking space variants (\u{00A0}, \u{202F}, \u{2007}) to standard ASCII space (\u{0020}).
+    public var normalizedWhitespace: String {
+        if !self.contains("\u{00A0}") && !self.contains("\u{202F}") && !self.contains("\u{2007}") {
+            return self
+        }
+        return self.replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\u{202F}", with: " ")
+            .replacingOccurrences(of: "\u{2007}", with: " ")
+    }
+}
+
