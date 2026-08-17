@@ -1,0 +1,89 @@
+name: 🐛 Bug Report
+description: Report a bug, crash, or unexpected behavior in DevType.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please check [existing issues](https://github.com/bharathvbcr/DevType/issues) and the [Permissions Guide](https://github.com/bharathvbcr/DevType/blob/main/docs/PERMISSIONS_GUIDE.md) before submitting.
+
+  - type: input
+    id: version
+    attributes:
+      label: DevType Version
+      description: The version of DevType you are running (e.g. v1.1.0 or commit hash).
+      placeholder: "e.g. v1.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: macos_version
+    attributes:
+      label: macOS Version & Architecture
+      description: Which macOS version and hardware are you using?
+      options:
+        - "macOS 26+ (Apple Silicon - M1/M2/M3/M4)"
+        - "macOS 15 Sequoia (Apple Silicon)"
+        - "macOS 15 Sequoia (Intel)"
+        - "macOS 14 Sonoma (Apple Silicon)"
+        - "macOS 14 Sonoma (Intel)"
+        - "Other (Specify in description)"
+    validations:
+      required: true
+
+  - type: input
+    id: target_app
+    attributes:
+      label: Target Application(s)
+      description: In which application(s) does the issue occur (e.g. TextEdit, VS Code, Slack, Safari)?
+      placeholder: "e.g. VS Code, Safari"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what went wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Detailed steps to reproduce the issue.
+      placeholder: |
+        1. Open application '...'
+        2. Type snippet trigger '...'
+        3. Observe that text does not expand / behaves unexpectedly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: permissions_checklist
+    attributes:
+      label: Permission Verification
+      description: Please verify that macOS permissions are configured.
+      options:
+        - label: "Input Monitoring permission is enabled for DevType in macOS System Settings"
+          required: true
+        - label: "Accessibility permission is enabled for DevType in macOS System Settings"
+          required: true
+        - label: "DevType is not currently paused and target app is not muted"
+          required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context / Screenshots / Logs
+      description: Add any other context, screenshots, or error messages from Console.app.

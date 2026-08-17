@@ -34,34 +34,50 @@ SOURCE_HASH_STAMP="${APP_BUNDLE}.source-sha256"
 STALE_APP="${ROOT}/build/DevType.app"
 STALE_SUFFIX="${ROOT}/build/DevType.app.stale"
 
-# Prefer the stable local certificate so the designated requirement is cert-pinned
-# (grants persist); create it automatically when missing; fall back to ad-hoc only
-# when cert creation fails.
-SIGN_IDENTITY="${DEVTYPE_SIGN_IDENTITY:-DevType Local Signing}"
-ensure_signing_identity() {
-  if security find-certificate -c "${SIGN_IDENTITY}" \
-       "${HOME}/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
-    return 0
-  fi
-  if [[ "${DEVTYPE_SKIP_AUTO_CERT:-0}" == "1" ]]; then
-    return 1
-  fi
-  echo "==> signing identity '${SIGN_IDENTITY}' missing — running Scripts/make-signing-cert.sh"
-  if ! "${ROOT}/Scripts/make-signing-cert.sh"; then
-    echo "warning: could not create signing identity; falling back to ad-hoc" >&2
-    return 1
-  fi
-  security find-certificate -c "${SIGN_IDENTITY}" \
-    "${HOME}/Library/Keychains/login.keychain-db" >/dev/null 2>&1
+# Signing identity. Scripts/signing-identity.sh is the single owner of the choice
+# (an Apple-issued certificate when one exists, else the stable self-signed one,
+# else ad-hoc) so packaging, release, and the tests cannot drift apart on what
+# "the identity" means. It never creates keychain state; minting the self-signed
+# fallback stays here, where DEVTYPE_SKIP_AUTO_CERT can suppress it.
+SIGN_KIND=""
+SIGN_ARG=""
+resolve_signing_identity() {
+  local line
+  line="$("${ROOT}/Scripts/signing-identity.sh")" || return 1
+  SIGN_KIND="${line%%$'\t'*}"
+  SIGN_ARG="${line#*$'\t'}"
+  [[ -n "${SIGN_KIND}" && -n "${SIGN_ARG}" ]]
 }
 
-if ensure_signing_identity; then
-  SIGN_ARG="${SIGN_IDENTITY}"
-  SIGN_MODE="certificate"
-else
-  SIGN_ARG="-"
-  SIGN_MODE="ad-hoc"
+if ! resolve_signing_identity; then
+  echo "error: could not resolve a signing identity" >&2
+  exit 1
 fi
+
+if [[ "${SIGN_KIND}" == "none" ]]; then
+  if [[ "${DEVTYPE_SKIP_AUTO_CERT:-0}" == "1" ]]; then
+    SIGN_KIND="ad-hoc"
+    SIGN_ARG="-"
+  else
+    echo "==> no usable signing identity — running Scripts/make-signing-cert.sh"
+    if ! "${ROOT}/Scripts/make-signing-cert.sh" \
+       || ! resolve_signing_identity \
+       || [[ "${SIGN_KIND}" == "none" ]]; then
+      echo "warning: could not create signing identity; falling back to ad-hoc" >&2
+      SIGN_KIND="ad-hoc"
+      SIGN_ARG="-"
+    fi
+  fi
+fi
+
+if [[ "${SIGN_KIND}" == "ad-hoc" ]]; then
+  SIGN_MODE="ad-hoc"
+else
+  SIGN_MODE="certificate"
+fi
+# Authority line to match when deciding whether an existing bundle can keep its
+# signature (see bundle_signing_mode_matches).
+SIGN_IDENTITY="${SIGN_ARG}"
 
 sha256_file() {
   shasum -a 256 "$1" | awk '{print $1}'
@@ -348,7 +364,10 @@ else
   CODESIGN_EXTRA=()
   HARDENED="${DEVTYPE_HARDENED_RUNTIME:-auto}"
   if [[ "${HARDENED}" == "auto" ]]; then
-    if [[ "${SIGN_ARG}" == Developer\ ID* ]]; then HARDENED=1; else HARDENED=0; fi
+    # Developer ID only. An Apple Development certificate can carry the Hardened
+    # Runtime too, but its entitlements would then need a provisioning profile to
+    # be honoured, and it can never be notarized — so local dev stays unhardened.
+    if [[ "${SIGN_KIND}" == "developer-id" ]]; then HARDENED=1; else HARDENED=0; fi
   fi
   if [[ "${HARDENED}" == "1" ]]; then
     CODESIGN_EXTRA+=(--options runtime --timestamp)
@@ -422,7 +441,7 @@ echo "==> done: ${APP_BUNDLE}"
 echo "    CFBundleIdentifier: ${BUNDLE_ID}"
 echo "    codesign Identifier: ${SIGNED_ID}"
 echo "    CDHash: ${CDHASH}"
-echo "    Signing: ${SIGN_MODE} (${SIGN_ARG})"
+echo "    Signing: ${SIGN_KIND} (${SIGN_ARG})"
 echo "    Designated requirement: ${DESIGNATED_REQ:-unknown}"
 echo "    Source sha256: ${NEW_SOURCE_HASH}"
 if [[ "${SKIP_RESIGN}" -eq 1 ]]; then
@@ -441,6 +460,11 @@ echo "    Tip: install to Applications / Launchpad: ./Scripts/install-app.sh"
 echo "    Tip: quit all other DevType copies before granting permissions"
 if [[ "${SIGN_MODE}" == "certificate" ]]; then
   echo "    Tip: TCC grants are pinned to the certificate — they survive rebuilds"
+  if [[ "${SIGN_KIND}" == "local" ]]; then
+    echo "    Tip: this is the self-signed fallback. An Apple-issued certificate (free Apple ID,"
+    echo "         Xcode > Settings > Accounts > Manage Certificates) additionally gives keychain"
+    echo "         items a stable teamid: partition instead of a per-build cdhash: one."
+  fi
 else
   echo "    Tip: TCC grants stick across launches; they reset if the binary changes and is re-signed"
 fi
