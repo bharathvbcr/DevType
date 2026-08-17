@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Create a stable local code-signing identity so TCC grants survive rebuilds.
 #
+# This is the FALLBACK identity. Scripts/signing-identity.sh prefers an Apple-issued
+# certificate when the keychain has one — a free Apple ID is enough (Xcode > Settings >
+# Accounts > Manage Certificates > + > Apple Development), and it is strictly better
+# here: an Apple-issued signature also gives keychain items a stable `teamid:`
+# partition, where a self-signed one falls back to a per-build `cdhash:` partition
+# that KeychainPartitionPolicy has to heal after every rebuild (SecretStore.swift §8.10).
+# Run this script when you have no Apple ID to sign with.
+#
 # Ad-hoc signing (codesign --sign -) pins the designated requirement to the CDHash:
 #     designated => cdhash H"..."
 # Every binary change mints a new CDHash, so Accessibility / Input Monitoring / Post
@@ -14,9 +22,24 @@
 # Idempotent: re-running is a no-op once the identity exists.
 set -euo pipefail
 
-CN="${DEVTYPE_SIGN_IDENTITY:-DevType Local Signing}"
+# DEVTYPE_LOCAL_SIGN_IDENTITY, not DEVTYPE_SIGN_IDENTITY: the latter names the identity
+# to *sign with*, which may be an Apple certificate this script must never fabricate.
+CN="${DEVTYPE_LOCAL_SIGN_IDENTITY:-DevType Local Signing}"
 KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
 DAYS="${DEVTYPE_SIGN_DAYS:-3650}"
+
+# A self-signed certificate carrying an Apple-issued common name would collide with
+# the real thing in every by-name lookup (find-identity, find-certificate, the
+# Authority line codesign prints) while chaining to no Apple root — so refuse.
+case "${CN}" in
+  "Apple Development"*|"Apple Distribution"*|"Developer ID"*|"Mac Developer"*|"iPhone Developer"*)
+    echo "error: refusing to create a self-signed certificate named '${CN}'." >&2
+    echo "       That name is reserved for Apple-issued certificates. To sign with a real" >&2
+    echo "       one, leave DEVTYPE_LOCAL_SIGN_IDENTITY unset — Scripts/signing-identity.sh" >&2
+    echo "       finds Apple certificates automatically." >&2
+    exit 1
+    ;;
+esac
 
 # Trial-sign a throwaway Mach-O copy: proves codesign can reach the private key.
 # `security find-identity -p codesigning` reports 0 valid identities for an untrusted

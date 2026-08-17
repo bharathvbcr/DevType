@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # §7.5 — Build, sign, notarize, staple, and package DevType for distribution.
 #
-# This is the ONLY path that produces an artifact other people can run. The local
-# `DevType Local Signing` cert used by package-app.sh is self-signed: Gatekeeper
-# will refuse it on any machine but yours. Distribution requires Developer ID.
+# This is the ONLY path that produces an artifact other people can run. What
+# package-app.sh signs with locally (see Scripts/signing-identity.sh) is good enough
+# for TCC and the keychain but not for anyone else's machine: a self-signed
+# certificate is trusted nowhere, and an Apple Development certificate cannot be
+# notarized. Distribution requires Developer ID.
 #
 # Prerequisites (one time):
-#   1. Apple Developer Program membership.
+#   1. Apple Developer Program membership (the paid one — a free Apple ID yields an
+#      Apple Development certificate, which is fine for local builds but not this).
 #   2. A "Developer ID Application" certificate in your login keychain.
 #      Verify:  security find-identity -p codesigning -v | grep "Developer ID"
 #   3. A notarytool keychain profile holding an app-specific password:

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Community Discussions
+    url: https://github.com/bharathvbcr/DevType/discussions
+    about: Ask questions, share snippet workflows, or discuss ideas.
+  - name: 🔒 Security Vulnerability Reporting
+    url: https://github.com/bharathvbcr/DevType/security/advisories/new
+    about: Report sensitive security vulnerabilities privately.

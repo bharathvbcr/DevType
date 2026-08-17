@@ -9,9 +9,11 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/bharathvbcr/DevType/actions/workflows/ci.yml"><img src="https://github.com/bharathvbcr/DevType/actions/workflows/ci.yml/badge.svg" alt="CI Status"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2014.0%2B-blue" alt="macOS 14+">
   <img src="https://img.shields.io/badge/language-Swift%205.9-orange" alt="Swift 5.9">
   <img src="https://img.shields.io/badge/AI-Apple%20Foundation%20Models-purple" alt="Apple Intelligence">
+  <img src="https://img.shields.io/badge/telemetry-100%25%20Offline-brightgreen" alt="Zero Telemetry">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
 </p>
 
@@ -21,9 +23,25 @@
   <img src="docs/assets/devtype_social_preview.jpg" alt="DevType macOS Text Expander Social Preview Banner" width="100%">
 </p>
 
-**DevType** is a fast, lightweight, native macOS text expander and snippet manager built with Swift & AppKit. Equipped with on-device AI text transformations powered by Apple Foundation Models, DevType offers sub-millisecond keyword expansion and offline writing tools with zero cloud telemetry.
+**DevType** is a fast, lightweight, native macOS text expander and snippet manager built with Swift and AppKit. Equipped with on-device AI text transformations powered by Apple Foundation Models, DevType offers sub-millisecond keyword expansion and offline writing tools with zero cloud telemetry.
 
-Looking for a **privacy-first TextExpander alternative** or an **Espanso GUI for Mac**? DevType combines instant expand-on-match typing automation with local AI proofreading, rewriting, and dynamic mustache/TextExpander macro rendering.
+Looking for a **privacy-first TextExpander alternative** or a **native Espanso GUI for Mac**? DevType combines instant expand-on-match typing automation with local AI proofreading, rewriting, dynamic Mustache/TextExpander macro rendering, and Touch ID encrypted secret snippets.
+
+---
+
+## 📑 Table of Contents
+
+- [⚔️ Comparison: DevType vs. Others](#-comparison-devtype-vs-other-mac-text-expanders)
+- [✨ Key Features](#-key-features)
+- [⌨️ Keyboard Shortcuts](#️-keyboard-shortcuts)
+- [🚀 Quick Start & Installation](#-quick-start--installation)
+- [📚 Documentation Suite](#-documentation-suite)
+- [🤖 On-Device AI Transforms](#-on-device-ai-transforms-macos-26)
+- [🔒 Secret Snippets (Touch ID)](#-secret-snippets-passwords)
+- [🧩 Template & Macro Engine](#-template-engine-reference)
+- [🤝 Open Source & Contributing](#-open-source--contributing)
+- [❓ Frequently Asked Questions (FAQ)](#-frequently-asked-questions-faq)
+- [📄 License & Attribution](#-license--attribution)
 
 ---
 
@@ -35,14 +53,14 @@ Looking for a **privacy-first TextExpander alternative** or an **Espanso GUI for
 | **Native macOS App** | ✅ Swift / AppKit | ❌ Electron / Web | ❌ Rust / Cross-platform | ✅ Native |
 | **On-Device AI Transforms** | ✅ Apple Foundation Models | ❌ None | ❌ None | ❌ Cloud Extensions |
 | **Mustache & TE Syntax** | ✅ Dual Engine | ⚠️ TE Only | ⚠️ Espanso YAML | ⚠️ Alfred Tags |
-| **100% Offline & Private** | ✅ No Cloud Telemetry | ❌ Cloud Sync Mandatory | ✅ Offline | ✅ Offline |
-| ** Espanso / TE Importers** | ✅ Built-in XML & YAML | ❌ Manual | ⚠️ Manual | ❌ Manual |
+| **100% Offline & Private** | ✅ Zero Telemetry | ❌ Cloud Sync Mandatory | ✅ Offline | ✅ Offline |
+| **Espanso / TE Importers** | ✅ Built-in XML & YAML | ❌ Manual | ⚠️ Manual | ❌ Manual |
 | **Command Palette (`⌘/`)** | ✅ Snippets, AI, Math, Dates | ❌ None | ❌ Search Only | ⚠️ Palette |
 | **Encrypted Secret Snippets** | ✅ AES-GCM + Touch ID | ❌ None | ❌ Plaintext YAML | ❌ None |
 
 ---
 
-## ✨ Features
+## ✨ Key Features
 
 - ⚡ **Instant Expand-on-Match**: Low-latency swallowing ring buffer that instantly replaces typed triggers using Accessibility range replacement (with fallback to HID clipboard paste).
 - 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize) using Apple Foundation Models (macOS 26+). 100% private, zero API keys required.
@@ -56,36 +74,59 @@ Looking for a **privacy-first TextExpander alternative** or an **Espanso GUI for
 
 ---
 
-## 🚀 Quick Start & Building
+## ⌨️ Keyboard Shortcuts
 
-### Download Pre-built Release
+| Shortcut | Action | Description |
+|---|---|---|
+| **`⌘/`** | **Command Palette** | Global fuzzy search across all snippets, math evaluation, and date tools |
+| **`⌘⌥A`** | **AI Action Palette** | Highlight text and trigger on-device AI proofreading, rewriting, or custom prompts |
+| **`:trigger`** | **Typed Expansion** | Type any snippet abbreviation to instantly expand the template in place |
+| **`Esc`** | **Dismiss / Cancel** | Close active panels, search palettes, or AI previews |
+
+---
+
+## 🚀 Quick Start & Installation
+
+### Option 1: Download Pre-built Release
 Download the latest macOS disk image (`.dmg`) directly from the [DevType GitHub Releases Page](https://github.com/bharathvbcr/DevType/releases/latest).
 
-### Building from Source
+1. Open the downloaded `.dmg`.
+2. Drag **DevType.app** to your `/Applications` folder.
+3. Open DevType and follow the Permissions Setup Wizard.
+
+### Option 2: Building from Source
 
 ```bash
-# 1. One-time setup: Create a stable local signing certificate so TCC grants survive rebuilds
+# 1. Clone the repository
+git clone https://github.com/bharathvbcr/DevType.git
+cd DevType
+
+# 2. Sign with a stable identity so TCC grants survive rebuilds.
+#    If Xcode has an Apple Development certificate (a free Apple ID is enough),
+#    the build picks it up automatically and this step is unnecessary.
+#    Otherwise, create the self-signed fallback:
 ./Scripts/make-signing-cert.sh
 
-# 2. Build and package the application bundle (.build/DevType.app)
+# 3. Build and package the application bundle (.build/DevType.app)
 ./Scripts/package-app.sh release
 
-# 3. Install to /Applications (Preferred for stable TCC grants & login item management)
+# 4. Install to /Applications
 ./Scripts/install-app.sh
 open /Applications/DevType.app
 ```
 
 ---
 
-## 🔐 Capability Matrix & TCC Permissions
+## 📚 Documentation Suite
 
-DevType separates permission requirements cleanly to uphold macOS privacy boundaries.
+Explore our complete documentation in the [`docs/`](docs/) directory:
 
-| Capability | TCC Service | API Preflight | Required Role |
-|---|---|---|---|
-| **Input Monitoring** | `ListenEvent` | `CGPreflightListenEventAccess` | **Required** to create event tap for swallowing trigger keys |
-| **Accessibility** | `Accessibility` | `AXIsProcessTrustedWithOptions` | **Required** for event tap swallowing & AX range text replacement |
-| **Post Events** | `PostEvent` | `CGPreflightPostEventAccess` | *Optional* for HID backspace, `⌘V` paste, and arrow caret movement |
+- 📖 **[User Guide](docs/USER_GUIDE.md)**: End-user manual for creating snippets, organizing groups, fill-in forms, and preferences.
+- 🏛️ **[Technical Architecture](docs/ARCHITECTURE.md)**: Deep dive into event taps, text injection pipelines, threading models, and exception safety.
+- 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
+- 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
+- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,000+ headless unit tests, debugging, and release automation.
+- 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---
 
@@ -102,25 +143,12 @@ Run Apple Foundation Models text transformations on-device with zero cloud telem
 
 ## 🔒 Secret Snippets (Passwords)
 
-Mark any snippet **Secret** in the editor and its value moves out of the snippet library
-entirely — AES-GCM-sealed in an encrypted archive, with a single master key in the login
-keychain, gated behind **Touch ID**.
+Mark any snippet **Secret** in the editor and its value moves out of the snippet library entirely — AES-GCM-sealed in an encrypted archive, with a single master key in the login keychain, gated behind **Touch ID**.
 
-- **Copy, don't type**: secrets never expand from typed triggers — macOS Secure Event Input
-  withholds keystrokes in password fields, and a typo firing a password into a chat window is
-  the failure a password snippet must never have. Use **menu bar → Copy Secret ▸** or
-  **Search Secrets…**, then paste with your own `⌘V` (which works inside password fields).
-- **Touch ID first**: each copy asks for Touch ID (password fallback available, one 30-second
-  reuse window). Toggle under **Preferences → Snippets → Secrets** or at the bottom of the
-  **Copy Secret** menu.
-- **Auto-clearing clipboard**: copies are marked concealed (clipboard managers ignore them)
-  and cleared after 90 seconds — unless you've already copied something else.
-- **Nothing leaks by construction**: the value is absent from `snippets.json`, every export,
-  the editor after save, and the diagnostic report — enforced in the encoder and asserted by
-  tests, not by call-site discipline.
-
-Full design, threat model, dialog policy, and the measured macOS keychain behaviour behind
-it: **[SECRETS.md](SECRETS.md)**.
+- **Copy, don't type**: secrets never expand from typed triggers — macOS Secure Event Input withholds keystrokes in password fields, and a typo firing a password into a chat window is avoided by design. Use **menu bar → Copy Secret ▸** or **Search Secrets…**, then paste with `⌘V`.
+- **Touch ID first**: each copy asks for Touch ID (password fallback available, one 30-second reuse window).
+- **Auto-clearing clipboard**: copies are marked concealed (clipboard managers ignore them) and cleared after 90 seconds.
+- **Zero leaks by construction**: values are absent from `snippets.json`, every export, the editor after save, and diagnostic reports.
 
 ---
 
@@ -141,11 +169,25 @@ DevType parses Mustache `{{...}}` tags and TextExpander `%...%` tags seamlessly.
 ### TextExpander (`%...%`)
 | Tag | Description |
 |---|---|
-| `%filltext:name=Field%` | Display fill-in dialog before expanding |
+| `%filltext:name=Field%` | Display interactive fill-in dialog before expanding |
 | `%date:FORMAT%` | Format date with `DateFormatter` pattern or preset (`%date:us%`, `%date:full%`) |
 | `%clipboard` | Insert pasteboard text |
 | `%|` | Position caret marker |
 | `%key:enter%` / `%key:tab%` | Post trailing keystroke after injection |
+
+See the full [Macro Reference](docs/MACRO_REFERENCE.md) for more examples.
+
+---
+
+## 🤝 Open Source & Contributing
+
+We welcome contributions from the open source community!
+
+- 💻 **[Contributing Guide](CONTRIBUTING.md)**: How to set up your environment, coding standards, and submit pull requests.
+- 📜 **[Code of Conduct](CODE_OF_CONDUCT.md)**: Community standards and guidelines.
+- 🛡️ **[Security Policy](SECURITY.md)**: Vulnerability reporting and security principles.
+- 💬 **[Support & Help](SUPPORT.md)**: Getting help, asking questions, and reporting bugs.
+- 🐛 **[Issue Tracker](https://github.com/bharathvbcr/DevType/issues)**: Report bugs or request features.
 
 ---
 
@@ -155,19 +197,16 @@ DevType parses Mustache `{{...}}` tags and TextExpander `%...%` tags seamlessly.
 Yes! DevType is completely free and open-source under the MIT License.
 
 ### Does DevType collect or send my keystrokes to the cloud?
-No. DevType operates 100% offline. Keystrokes are processed locally in a memory ring buffer for matching triggers. When AI features are used, text is processed locally on-device via Apple Foundation Models without network requests.
+No. DevType operates 100% offline. Keystrokes are processed locally in a volatile memory ring buffer solely for matching triggers. AI features use on-device Apple Foundation Models without network requests.
 
 ### Can I import my existing snippets from TextExpander or Espanso?
 Yes. DevType includes built-in importers for TextExpander 4/5 XML export files and Espanso YAML config files, preserving your triggers, replacements, and image attachments.
 
 ### How does DevType handle passwords and secure fields?
-Two ways. Typing safety: DevType automatically pauses keyword expansion whenever a secure text field (`NSSecureTextField`) is active or macOS Secure Event Input is locked. Storage: **secret snippets** hold passwords AES-GCM-encrypted behind Touch ID and copy them from the menu bar with an auto-clearing clipboard — see [SECRETS.md](SECRETS.md).
-
-### Where are secret snippet values stored?
-In an encrypted archive (`secrets.enc`, AES-GCM, owner-only permissions) whose 256-bit master key is the only item DevType keeps in the login keychain. Values never appear in the snippet library, exports, the editor after saving, or the diagnostic report. They are device-only: restored to another Mac, the archive cannot be decrypted without the key.
+DevType automatically pauses keyword expansion whenever a secure text field (`NSSecureTextField`) is active or macOS Secure Event Input is locked. Storage: **secret snippets** hold passwords AES-GCM-encrypted behind Touch ID and copy them from the menu bar with an auto-clearing clipboard — see [SECRETS.md](SECRETS.md).
 
 ---
 
 ## 📄 License & Attribution
 
-DevType is licensed under the [MIT License](LICENSE). See [NOTICE](NOTICE) for SnipKey Kit component attributions.
+DevType is licensed under the [MIT License](LICENSE). See [NOTICE](NOTICE) for third-party component attributions.

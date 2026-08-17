@@ -431,8 +431,10 @@ public struct SecretMigrationSummary: Equatable {
 /// TN3137 its access groups "must be authorized by a provisioning profile", and a self-signed
 /// bundle cannot carry one — a probe binary claiming the entitlement is killed outright
 /// (SIGKILL from AMFI). The file-based keychain ACLs the item to this app's code signature,
-/// which is cert-pinned by `Scripts/make-signing-cert.sh`; the per-rebuild partition problem
-/// that signature cannot solve is handled by `KeychainPartitionPolicy` healing.
+/// which `Scripts/signing-identity.sh` keeps cert-pinned; the per-rebuild partition problem
+/// that signature cannot solve is handled by `KeychainPartitionPolicy` healing. That heal is
+/// a no-op when the build is signed by an Apple-issued certificate, whose partition is
+/// `teamid:` and therefore already stable — it only earns its keep on the self-signed path.
 public final class KeychainSecretBackingStore: SecretBackingStore {
     private let lock = UnfairLock()
     private let diagnostics: SecretAccessDiagnostics

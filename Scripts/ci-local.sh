@@ -33,6 +33,9 @@ echo "  - Checking property lists..."
 plutil -lint Resources/Info.plist
 plutil -lint Resources/DevType.entitlements
 
+echo "  - Checking signing identity resolution..."
+"${ROOT}/Scripts/test-signing-identity.sh"
+
 echo "==> 2. Running SwiftPM Unit Tests"
 "${ROOT}/Scripts/test.sh" -v
 
