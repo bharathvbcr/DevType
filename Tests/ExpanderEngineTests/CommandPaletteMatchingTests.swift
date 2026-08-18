@@ -340,4 +340,124 @@ final class CommandPaletteMatchingTests: XCTestCase {
             return false
         })
     }
+
+    // MARK: - Weighted Ranking & Caching
+
+    func testEmptyQueryPrioritizesFrequentlyUsedCommands() {
+        CommandUsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+
+        // Record usage for a specific command
+        for _ in 0..<15 {
+            CommandUsageStatsStore.shared.recordUsage(for: "tool.uuid")
+        }
+
+        let hits = CommandPaletteCatalog.matchCommands(query: "", loc: .shared)
+        XCTAssertEqual(
+            hits.first?.command.id,
+            "tool.uuid",
+            "Frequently used command 'tool.uuid' must float to the top on an empty query."
+        )
+
+        CommandUsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+    }
+
+    func testSearchQueryPrioritizesFrequentlyUsedCommandsOnTies() {
+        CommandUsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+
+        // Boost formal AI command
+        for _ in 0..<20 {
+            CommandUsageStatsStore.shared.recordUsage(for: "ai.formal")
+        }
+
+        let hits = CommandPaletteCatalog.matchCommands(
+            query: "make",
+            loc: .shared,
+            commandUsageBoost: { CommandUsageStatsStore.shared.rankBoost(for: $0) }
+        )
+        XCTAssertFalse(hits.isEmpty)
+        XCTAssertEqual(
+            hits.first?.command.id,
+            "ai.formal",
+            "Frequently used command should rank higher among matching commands."
+        )
+
+        CommandUsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+    }
+
+    func testEmptyQueryPrioritizesFrequentlyUsedSnippets() {
+        UsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+
+        let snipA = SnippetModel(title: "Unused Snippet", triggerKeyword: ":unused", replacementText: "A")
+        let snipB = SnippetModel(title: "Popular Snippet", triggerKeyword: ":popular", replacementText: "B")
+        let group = SnippetGroup(name: "Work", snippets: [snipA, snipB])
+
+        for _ in 0..<25 {
+            UsageStatsStore.shared.recordUsage(for: snipB.id)
+        }
+
+        let rows = CommandPaletteCatalog.buildRows(
+            query: "",
+            groups: [group],
+            loc: .shared,
+            usageBoost: { UsageStatsStore.shared.rankBoost(for: $0) }
+        )
+
+        let snippetHits = rows.compactMap { row -> SearchHit? in
+            if case .snippet(let hit) = row { return hit }
+            return nil
+        }
+
+        XCTAssertEqual(snippetHits.first?.snippet.id, snipB.id, "Most frequently used snippet must appear first on empty palette.")
+
+        UsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+    }
+
+    func testPaletteQueryCachingAndInvalidation() {
+        CommandPaletteCatalog.invalidateCache()
+
+        let group = SnippetGroup(
+            name: "Work",
+            snippets: [
+                SnippetModel(title: "Cached Signature", triggerKeyword: ":cached", replacementText: "Best")
+            ]
+        )
+
+        let rows1 = CommandPaletteCatalog.buildRows(query: "cached", groups: [group], loc: .shared)
+        let rows2 = CommandPaletteCatalog.buildRows(query: "cached", groups: [group], loc: .shared)
+        XCTAssertEqual(rows1, rows2)
+
+        // Invalidate and verify freshness
+        CommandPaletteCatalog.invalidateCache()
+        let rows3 = CommandPaletteCatalog.buildRows(query: "cached", groups: [group], loc: .shared)
+        XCTAssertEqual(rows1, rows3)
+    }
+
+    func testCommandUsageStatsStoreMethodsAndRevisions() {
+        let store = CommandUsageStatsStore(fileURL: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("test-cmd-stats-\(UUID()).json"), flushInterval: 0)
+        XCTAssertEqual(store.totalUsage(), 0)
+        let rev0 = store.revision
+
+        store.recordUsage(for: "cmd.a")
+        store.recordUsage(for: "cmd.a")
+        store.recordUsage(for: "cmd.b")
+        XCTAssertGreaterThan(store.revision, rev0)
+        XCTAssertEqual(store.usageCount(for: "cmd.a"), 2)
+        XCTAssertEqual(store.usageCount(for: "cmd.b"), 1)
+        XCTAssertEqual(store.totalUsage(), 3)
+        XCTAssertEqual(store.topCommandIDs(limit: 5), ["cmd.a", "cmd.b"])
+
+        store.reset(for: "cmd.a")
+        XCTAssertEqual(store.usageCount(for: "cmd.a"), 0)
+        XCTAssertEqual(store.topCommandIDs(limit: 5), ["cmd.b"])
+
+        store.resetAll()
+        XCTAssertEqual(store.totalUsage(), 0)
+        XCTAssertTrue(store.topCommandIDs(limit: 5).isEmpty)
+    }
 }

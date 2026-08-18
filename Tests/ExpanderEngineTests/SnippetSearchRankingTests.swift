@@ -242,4 +242,20 @@ final class SnippetSearchRankingTests: XCTestCase {
             "A stale cached index would still answer with the old library"
         )
     }
+
+    // MARK: - Query-level caching
+
+    func testQueryCacheReturnsCachedHitsForRepeatedQuery() {
+        SnippetSearch.invalidateIndexCache()
+        let group = [SnippetGroup(name: "G", snippets: [signature, resume])]
+
+        let first = SnippetSearch.run(query: "sig", in: group, includeDisabled: true)
+        let second = SnippetSearch.run(query: "sig", in: group, includeDisabled: true)
+        XCTAssertEqual(first, second)
+
+        // Invalidating cache drops cached query results too
+        SnippetSearch.invalidateIndexCache()
+        let third = SnippetSearch.run(query: "sig", in: group, includeDisabled: true)
+        XCTAssertEqual(first, third)
+    }
 }

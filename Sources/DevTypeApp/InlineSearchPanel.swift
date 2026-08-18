@@ -771,7 +771,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             groups: groups,
             loc: loc,
             usageBoost: { [weak store] snippetID in
-                store?.usageCount(forSnippetID: snippetID) ?? 0
+                store?.rankBoost(forSnippetID: snippetID) ?? UsageStatsStore.shared.rankBoost(for: snippetID)
             },
             clipboardPreview: cachedClipboard,
             semanticBoostIDs: semanticBoostIDs,

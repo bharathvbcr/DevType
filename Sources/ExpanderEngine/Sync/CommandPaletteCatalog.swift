@@ -329,6 +329,82 @@ public enum CommandPaletteCatalog {
         return nil
     }
 
+    // MARK: - Query Caching & Command Index
+
+    private static let paletteCacheLock = UnfairLock()
+
+    private struct PaletteQueryCacheKey: Hashable {
+        let query: String
+        let libraryFingerprint: UInt64
+        let commandStatsRevision: UInt64
+        let snippetStatsRevision: UInt64
+        let language: AppLanguage
+        let commandLimit: Int
+        let snippetLimit: Int
+        let hasUndo: Bool
+        let clipboardHash: Int
+        let aiDisabledReason: String?
+        let semanticBoostIDs: [String]
+    }
+
+    private static var rowQueryCache: [PaletteQueryCacheKey: [PaletteListRow]] = [:]
+    private static var rowQueryCacheKeys: [PaletteQueryCacheKey] = []
+    private static let maxRowQueryCacheEntries = 64
+
+    private struct CommandIndexEntry {
+        let command: PaletteCommand
+        let foldedTrigger: String
+        let foldedTitle: String
+        let foldedSubtitle: String
+        let foldedAliases: [String]
+        let foldedAliasBlob: String
+        let searchBlob: String
+    }
+
+    private struct CommandSearchIndex {
+        let language: AppLanguage
+        let entries: [CommandIndexEntry]
+    }
+
+    private static var cachedCommandIndex: CommandSearchIndex?
+
+    private static func commandIndex(loc: LocalizationManager) -> CommandSearchIndex {
+        let lang = loc.language
+        paletteCacheLock.lock()
+        if let cached = cachedCommandIndex, cached.language == lang {
+            paletteCacheLock.unlock()
+            return cached
+        }
+        paletteCacheLock.unlock()
+
+        let entries = commands.map { cmd in
+            CommandIndexEntry(
+                command: cmd,
+                foldedTrigger: cmd.trigger.lowercased(),
+                foldedTitle: loc.s(cmd.titleKey).lowercased(),
+                foldedSubtitle: loc.s(cmd.subtitleKey).lowercased(),
+                foldedAliases: cmd.aliases,
+                foldedAliasBlob: cmd.aliases.joined(separator: "\n"),
+                searchBlob: cmd.searchBlob
+            )
+        }
+        let fresh = CommandSearchIndex(language: lang, entries: entries)
+        paletteCacheLock.lock()
+        cachedCommandIndex = fresh
+        paletteCacheLock.unlock()
+        return fresh
+    }
+
+    /// Drops query-level caches, command indexes, and semantic embedding vectors.
+    public static func invalidateCache() {
+        paletteCacheLock.lock()
+        rowQueryCache.removeAll(keepingCapacity: false)
+        rowQueryCacheKeys.removeAll(keepingCapacity: false)
+        cachedCommandIndex = nil
+        paletteCacheLock.unlock()
+        PaletteSemanticIndex.invalidateCache()
+    }
+
     // MARK: - Search
 
     /// Offline ranking: alias / trigger / localized title token match + fuzzy subsequence.
@@ -360,8 +436,15 @@ public enum CommandPaletteCatalog {
         }
 
         if trimmed.isEmpty {
+            let top = CommandUsageStatsStore.shared.topCommandIDs(limit: 10)
             let recent = CommandUsageStatsStore.shared.recentCommandIDs(limit: 10)
-            var suggestedIDs: [String] = recent
+            var suggestedIDs: [String] = []
+            for id in top where !suggestedIDs.contains(id) {
+                suggestedIDs.append(id)
+            }
+            for id in recent where !suggestedIDs.contains(id) {
+                suggestedIDs.append(id)
+            }
             // Shown when the palette opens with nothing typed. Registering a command is not
             // enough to make it discoverable — anything missing here stays invisible until
             // the user already knows its name.
@@ -381,9 +464,11 @@ public enum CommandPaletteCatalog {
             for (index, id) in suggestedIDs.enumerated() {
                 guard let command = byID[id] else { continue }
                 if case .undoAI = command.action, !AIUndoStore.hasUndo { continue }
-                var score = 20 - index
+                var score = (id == "ai.undo" ? 100 : max(1, 40 - index))
                 if let boost = commandUsageBoost?(command.id) {
                     score += boost
+                } else {
+                    score += CommandUsageStatsStore.shared.rankBoost(for: command.id)
                 }
                 hits.append(makeHit(
                     command,
@@ -396,6 +481,12 @@ public enum CommandPaletteCatalog {
                     aiDisabledReason: aiDisabledReason
                 ))
             }
+            hits.sort { a, b in
+                if a.score != b.score { return a.score > b.score }
+                return a.command.trigger.localizedCaseInsensitiveCompare(b.command.trigger) == .orderedAscending
+            }
+            var seen = Set<String>()
+            hits = hits.filter { seen.insert($0.id).inserted }
             return Array(hits.prefix(limit))
         }
 
@@ -406,9 +497,11 @@ public enum CommandPaletteCatalog {
             uniqueKeysWithValues: semanticBoostIDs.enumerated().map { ($0.element, 80 - $0.offset * 5) }
         )
 
-        for command in commands {
+        let index = commandIndex(loc: loc)
+        for entry in index.entries {
+            let command = entry.command
             if case .undoAI = command.action, !AIUndoStore.hasUndo { continue }
-            guard let score = score(command: command, terms: terms, loc: loc) else { continue }
+            guard let score = score(entry: entry, terms: terms) else { continue }
             var adjusted = score
             if let boost = boostIndex[command.id] {
                 adjusted += max(0, boost)
@@ -456,6 +549,31 @@ public enum CommandPaletteCatalog {
         snippetLimit: Int = 40
     ) -> [PaletteListRow] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let libStamp = SnippetSearch.fingerprint(of: groups, includeDisabled: false)
+        let cmdRev = CommandUsageStatsStore.shared.revision
+        let snipRev = UsageStatsStore.shared.revision
+        let clipHash = clipboardPreview?.hashValue ?? 0
+        let cacheKey = PaletteQueryCacheKey(
+            query: trimmed,
+            libraryFingerprint: libStamp,
+            commandStatsRevision: cmdRev,
+            snippetStatsRevision: snipRev,
+            language: loc.language,
+            commandLimit: commandLimit,
+            snippetLimit: snippetLimit,
+            hasUndo: AIUndoStore.hasUndo,
+            clipboardHash: clipHash,
+            aiDisabledReason: aiDisabledReason,
+            semanticBoostIDs: semanticBoostIDs
+        )
+
+        paletteCacheLock.lock()
+        if let cached = rowQueryCache[cacheKey] {
+            paletteCacheLock.unlock()
+            return cached
+        }
+        paletteCacheLock.unlock()
+
         let commandHits = matchCommands(
             query: trimmed,
             loc: loc,
@@ -473,9 +591,23 @@ public enum CommandPaletteCatalog {
                 .flatMap { group in
                     group.snippets
                         .filter { $0.enabled && !$0.triggerKeyword.isEmpty }
-                        .map { SearchHit(snippet: $0, groupID: group.id, groupName: group.name, score: 0) }
+                        .map { snippet in
+                            let boost = usageBoost?(snippet.id) ?? UsageStatsStore.shared.rankBoost(for: snippet.id)
+                            return SearchHit(
+                                snippet: snippet,
+                                groupID: group.id,
+                                groupName: group.name,
+                                score: boost
+                            )
+                        }
                 }
-                .sorted { $0.snippet.updatedAt > $1.snippet.updatedAt }
+                .sorted { a, b in
+                    if a.score != b.score { return a.score > b.score }
+                    let aLast = UsageStatsStore.shared.lastUsedAt(for: a.snippet.id) ?? a.snippet.updatedAt
+                    let bLast = UsageStatsStore.shared.lastUsedAt(for: b.snippet.id) ?? b.snippet.updatedAt
+                    if aLast != bLast { return aLast > bLast }
+                    return a.snippet.updatedAt > b.snippet.updatedAt
+                }
                 .prefix(snippetLimit)
                 .map { $0 }
         } else {
@@ -505,6 +637,16 @@ public enum CommandPaletteCatalog {
             rows.append(.header(.snippets))
             rows.append(contentsOf: snippetHits.map { .snippet($0) })
         }
+
+        paletteCacheLock.lock()
+        if rowQueryCache.count >= maxRowQueryCacheEntries, !rowQueryCacheKeys.isEmpty {
+            let oldest = rowQueryCacheKeys.removeFirst()
+            rowQueryCache.removeValue(forKey: oldest)
+        }
+        rowQueryCache[cacheKey] = rows
+        rowQueryCacheKeys.append(cacheKey)
+        paletteCacheLock.unlock()
+
         return rows
     }
 
@@ -545,6 +687,27 @@ public enum CommandPaletteCatalog {
     }
 
     // MARK: - Scoring
+
+    private static func score(
+        entry: CommandIndexEntry,
+        terms: [String]
+    ) -> Int? {
+        guard !terms.isEmpty else { return nil }
+        var total = 0
+        for term in terms {
+            guard let best = bestTermScore(
+                term: term,
+                trigger: entry.foldedTrigger,
+                title: entry.foldedTitle,
+                subtitle: entry.foldedSubtitle,
+                aliases: entry.foldedAliases,
+                aliasBlob: entry.foldedAliasBlob,
+                searchBlob: entry.searchBlob
+            ) else { return nil }
+            total += best
+        }
+        return total / terms.count
+    }
 
     /// Token score for one command, or `nil` when no term matches.
     public static func score(
@@ -1092,6 +1255,12 @@ public enum CommandPaletteCatalog {
 enum PaletteSemanticIndex {
     private static let lock = NSLock()
     private static var cachedVectors: [String: [Double]]?
+
+    static func invalidateCache() {
+        lock.lock()
+        cachedVectors = nil
+        lock.unlock()
+    }
 
     static func boostIDs(for query: String, commands: [PaletteCommand], limit: Int) -> [String] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

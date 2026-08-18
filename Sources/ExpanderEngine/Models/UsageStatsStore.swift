@@ -80,6 +80,13 @@ public final class UsageStatsStore {
     /// Monotonic token: only the newest scheduled flush is allowed to run.
     private var flushGeneration: UInt64 = 0
     private var terminateObserver: NSObjectProtocol?
+    private var _revision: UInt64 = 0
+
+    public var revision: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _revision
+    }
 
     /// - Parameters:
     ///   - fileURL: override for tests; defaults to the device-local support directory.
@@ -117,6 +124,7 @@ public final class UsageStatsStore {
         stat.lastUsedAt = date
         stats[snippetID] = stat
         dirty = true
+        _revision &+= 1
         lock.unlock()
         scheduleFlush()
     }
@@ -133,7 +141,10 @@ public final class UsageStatsStore {
                 changed = true
             }
         }
-        if changed { dirty = true }
+        if changed {
+            dirty = true
+            _revision &+= 1
+        }
         lock.unlock()
         if changed { scheduleFlush() }
     }
@@ -145,7 +156,10 @@ public final class UsageStatsStore {
 
     public func reset(for snippetID: UUID) {
         lock.lock()
-        if stats.removeValue(forKey: snippetID) != nil { dirty = true }
+        if stats.removeValue(forKey: snippetID) != nil {
+            dirty = true
+            _revision &+= 1
+        }
         lock.unlock()
         scheduleFlush()
     }
@@ -154,6 +168,7 @@ public final class UsageStatsStore {
         lock.lock()
         stats.removeAll()
         dirty = true
+        _revision &+= 1
         lock.unlock()
         scheduleFlush()
     }
