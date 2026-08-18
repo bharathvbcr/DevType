@@ -53,6 +53,13 @@ public final class CommandUsageStatsStore {
     private var dirty = false
     private var flushGeneration: UInt64 = 0
     private var terminateObserver: NSObjectProtocol?
+    private var _revision: UInt64 = 0
+
+    public var revision: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _revision
+    }
 
     public init(fileURL: URL? = nil, flushInterval: TimeInterval = CommandUsageStatsStore.defaultFlushInterval) {
         if let fileURL {
@@ -86,20 +93,54 @@ public final class CommandUsageStatsStore {
         stat.lastUsedAt = date
         stats[key] = stat
         dirty = true
+        _revision &+= 1
         lock.unlock()
         scheduleFlush()
     }
 
-    public func usageCount(for commandID: String) -> Int {
+    public func stat(for commandID: String) -> Stat? {
         lock.lock()
         defer { lock.unlock() }
-        return stats[commandID]?.usageCount ?? 0
+        return stats[commandID]
+    }
+
+    public func usageCount(for commandID: String) -> Int {
+        stat(for: commandID)?.usageCount ?? 0
     }
 
     public func lastUsedAt(for commandID: String) -> Date? {
+        stat(for: commandID)?.lastUsedAt
+    }
+
+    public func allStats() -> [String: Stat] {
         lock.lock()
         defer { lock.unlock() }
-        return stats[commandID]?.lastUsedAt
+        return stats
+    }
+
+    public func totalUsage() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return stats.values.reduce(0) { $0 + $1.usageCount }
+    }
+
+    public func reset(for commandID: String) {
+        lock.lock()
+        if stats.removeValue(forKey: commandID) != nil {
+            dirty = true
+            _revision &+= 1
+        }
+        lock.unlock()
+        scheduleFlush()
+    }
+
+    public func resetAll() {
+        lock.lock()
+        stats.removeAll()
+        dirty = true
+        _revision &+= 1
+        lock.unlock()
+        scheduleFlush()
     }
 
     public func rankBoost(for commandID: String) -> Int {
@@ -117,6 +158,26 @@ public final class CommandUsageStatsStore {
             boost += 2
         }
         return min(boost, 12)
+    }
+
+    /// Most-used command IDs, highest first. Ties broken by recency.
+    public func topCommandIDs(limit: Int = 10) -> [String] {
+        guard limit > 0 else { return [] }
+        lock.lock()
+        let snapshot = stats
+        lock.unlock()
+        let ordered = snapshot
+            .filter { $0.value.usageCount > 0 }
+            .sorted { lhs, rhs in
+                if lhs.value.usageCount != rhs.value.usageCount {
+                    return lhs.value.usageCount > rhs.value.usageCount
+                }
+                let l = lhs.value.lastUsedAt ?? .distantPast
+                let r = rhs.value.lastUsedAt ?? .distantPast
+                if l != r { return l > r }
+                return lhs.key < rhs.key
+            }
+        return ordered.prefix(limit).map(\.key)
     }
 
     /// Most-recently-used command IDs, newest first.

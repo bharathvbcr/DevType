@@ -174,11 +174,22 @@ public enum SnippetSearch {
     private static let cacheLock = UnfairLock()
     private static var cachedIndex: SnippetSearchIndex?
 
+    private struct QueryCacheKey: Hashable {
+        let query: String
+        let fingerprint: UInt64
+        let limit: Int?
+        let statsRevision: UInt64
+    }
+
+    private static var queryCache: [QueryCacheKey: [SearchHit]] = [:]
+    private static var queryCacheKeys: [QueryCacheKey] = []
+    private static let maxQueryCacheEntries = 128
+
     /// Fingerprint over the fields the index derives from. Deliberately hashes only short
     /// strings plus the body *length* — hashing every body byte would reintroduce the very cost
     /// the index exists to remove, while still catching every realistic edit (`updatedAt` moves
     /// on save, and a body edit changes its length in all but pathological cases).
-    private static func fingerprint(of groups: [SnippetGroup], includeDisabled: Bool) -> UInt64 {
+    public static func fingerprint(of groups: [SnippetGroup], includeDisabled: Bool) -> UInt64 {
         var hasher = Hasher()
         hasher.combine(includeDisabled)
         hasher.combine(groups.count)
@@ -264,6 +275,8 @@ public enum SnippetSearch {
     public static func invalidateIndexCache() {
         cacheLock.lock()
         cachedIndex = nil
+        queryCache.removeAll(keepingCapacity: false)
+        queryCacheKeys.removeAll(keepingCapacity: false)
         cacheLock.unlock()
     }
 
@@ -302,7 +315,25 @@ public enum SnippetSearch {
         limit: Int? = nil,
         boost: ((UUID) -> Int)? = nil
     ) -> [SearchHit] {
-        let terms = tokenize(query)
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let statsRev = UsageStatsStore.shared.revision
+        let cacheKey = QueryCacheKey(
+            query: trimmed,
+            fingerprint: index.fingerprint,
+            limit: limit,
+            statsRevision: boost != nil ? statsRev : 0
+        )
+
+        cacheLock.lock()
+        if let cached = queryCache[cacheKey] {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+
+        let terms = tokenize(trimmed)
         guard !terms.isEmpty else { return [] }
 
         var hits: [SearchHit] = []
@@ -328,10 +359,23 @@ public enum SnippetSearch {
             return a.snippet.triggerKeyword.localizedCaseInsensitiveCompare(b.snippet.triggerKeyword) == .orderedAscending
         }
 
+        let result: [SearchHit]
         if let limit, hits.count > limit {
-            return Array(hits.prefix(limit))
+            result = Array(hits.prefix(limit))
+        } else {
+            result = hits
         }
-        return hits
+
+        cacheLock.lock()
+        if queryCache.count >= maxQueryCacheEntries, !queryCacheKeys.isEmpty {
+            let oldest = queryCacheKeys.removeFirst()
+            queryCache.removeValue(forKey: oldest)
+        }
+        queryCache[cacheKey] = result
+        queryCacheKeys.append(cacheKey)
+        cacheLock.unlock()
+
+        return result
     }
 
     /// Legacy single-snippet scorer, kept as a shim. Returns `nil` when the snippet does not

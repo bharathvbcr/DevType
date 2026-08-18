@@ -847,6 +847,14 @@ public final class SnippetStore {
         usageStatsStore.usageCount(for: snippetID)
     }
 
+    public func rankBoost(for snippet: SnippetModel) -> Int {
+        usageStatsStore.rankBoost(for: snippet.id)
+    }
+
+    public func rankBoost(forSnippetID snippetID: UUID) -> Int {
+        usageStatsStore.rankBoost(for: snippetID)
+    }
+
     /// §4.5: survives relaunch, unlike the in-memory recents list.
     public func lastUsedAt(forSnippetID snippetID: UUID) -> Date? {
         usageStatsStore.lastUsedAt(for: snippetID)
