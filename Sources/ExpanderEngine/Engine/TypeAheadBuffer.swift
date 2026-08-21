@@ -166,3 +166,13 @@ public struct TypeAheadBuffer: Equatable {
         return replay
     }
 }
+
+extension TypeAheadBuffer.Decision {
+    /// Character count a `.flushThenPassThrough` decision will replay; 0 for the others.
+    /// Engine bookkeeping reads this to charge flushed characters to the delivery-input window
+    /// (§3.1d) without unpacking the payload at every call site.
+    var replayCount: Int {
+        if case .flushThenPassThrough(let replay) = self { return replay.count }
+        return 0
+    }
+}

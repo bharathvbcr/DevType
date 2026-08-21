@@ -888,6 +888,11 @@ public final class EventTapEngine {
             // kept the record alive, which let a click + backspace within the undo window fire a
             // blind erase at the click position in AX-opaque hosts.
             TextInjectionPipeline.shared.clearLastExpansion()
+            // §3.1d: a click during an *in-flight* delivery moves the caret around text whose
+            // final geometry the record cannot know. The counter is drained into that record's
+            // input count when delivery completes; outside a delivery it is discarded at the next
+            // `beginDeliveryWindow()`.
+            TextInjectionPipeline.shared.noteDeliveryInput()
             return Unmanaged.passUnretained(event)
         }
 
@@ -915,7 +920,18 @@ public final class EventTapEngine {
             // is what let `a` land in front of `ScholarLM` — the paste was still in flight. Hold
             // it instead and replay after delivery, so ordering matches an instant expansion.
             if expanding, !isSynthetic {
-                switch admitTypeAhead(event: event) {
+                let admission = admitTypeAhead(event: event)
+                // §3.1d: count before acting on the decision. The key itself counts when it is
+                // field-touching; a flush additionally counts its replayed characters, which
+                // land mid-delivery even when the trigger key was inert (F-key flush).
+                let units = TextInjectionPipeline.deliveryInputUnits(
+                    keyContaminates: admission.contaminatesBlindUndo,
+                    flushReplayCount: admission.decision.replayCount
+                )
+                if units > 0 {
+                    TextInjectionPipeline.shared.noteDeliveryInput(units: units)
+                }
+                switch admission.decision {
                 case .swallow:
                     return nil
                 case .flushThenPassThrough(let replay):
@@ -1005,9 +1021,24 @@ public final class EventTapEngine {
         // `undoLastExpansion()` is single-shot and does not block this callback (it hops to main
         // itself), and the erase still runs behind the erase-precondition guard — so if the user
         // typed more text after expanding, it refuses rather than destroying the field.
+        // §3.1e: the backspace travels with the attempt so every refusal exit can hand it back —
+        // a refused undo must never also cost the user the keystroke they pressed.
+        //
+        // Known residual bound (§3.1f): a second backspace landing *while* the undo's async AX
+        // work is still in flight (~10–30 ms) is treated as an ordinary delete and can shift the
+        // caret before a blind (AX-opaque) erase computes its span. Readable hosts are protected
+        // by the guarded erase's re-verification; closing the opaque-host window entirely would
+        // require blocking the user's real keystrokes, which costs more than it saves.
         if keyAction == .deleteLast,
            flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty,
-           TextInjectionPipeline.shared.undoLastExpansion() {
+           TextInjectionPipeline.shared.undoLastExpansion(
+               heldBackspace: SwallowedKey(
+                   didSwallow: true,
+                   unicode: unicodeStr.isEmpty ? "\u{7F}" : unicodeStr,
+                   keyCode: keyCode,
+                   flags: []
+               )
+           ) {
             resetBuffer()
             return nil   // swallow: the undo replaces this backspace
         }
@@ -1179,7 +1210,17 @@ public final class EventTapEngine {
                 trigger: match.fieldText,
                 bundleID: context.bundleID
             )
-            switch admitTypeAhead(event: event) {
+            let admission = admitTypeAhead(event: event)
+            // §3.1d: same delivery-window rule as the callback's expanding gate — the claim
+            // lost, so this key (and any flush it forces) lands inside the other delivery.
+            let units = TextInjectionPipeline.deliveryInputUnits(
+                keyContaminates: admission.contaminatesBlindUndo,
+                flushReplayCount: admission.decision.replayCount
+            )
+            if units > 0 {
+                TextInjectionPipeline.shared.noteDeliveryInput(units: units)
+            }
+            switch admission.decision {
             case .swallow:
                 return nil
             case .flushThenPassThrough(let replay):
@@ -2578,6 +2619,12 @@ public final class EventTapEngine {
         // §8.3: from here until `endExpansion`, keys the user types are held rather than passed
         // through, so they cannot overtake the paste still in flight.
         _typeAhead.beginExpansion(focusPID: focusPID)
+        // §3.1d: open the delivery-input window *before* the expanding flag is visible to the
+        // tap thread. Resetting it after the flag was observable raced: a pass-through key could
+        // increment the counter and then be wiped by the reset, losing exactly the contamination
+        // evidence the window exists to keep. Nesting order is one-directional (engine →
+        // pipeline); no path holds `lastExpansionLock` while taking this engine lock.
+        TextInjectionPipeline.shared.beginDeliveryWindow()
         lock.unlock()
         return true
     }
@@ -2597,7 +2644,7 @@ public final class EventTapEngine {
 
     /// Decides one keystroke against the type-ahead hold. Runs on the tap thread, so it reads the
     /// event directly and never touches AppKit.
-    private func admitTypeAhead(event: CGEvent) -> TypeAheadBuffer.Decision {
+    private func admitTypeAhead(event: CGEvent) -> (decision: TypeAheadBuffer.Decision, contaminatesBlindUndo: Bool) {
         let flags = event.flags
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let resets = Self.shouldResetBuffer(flags: flags, keyCode: keyCode)
@@ -2627,7 +2674,17 @@ public final class EventTapEngine {
             focusPID: focusPID
         )
         lock.unlock()
-        return decision
+
+        // §3.1d: a key that reaches the field *now* — swallowed keys are replayed later and are
+        // already counted by `replayTypeAhead` — edits or moves text around a paste whose final
+        // geometry is unknowable. Poison the blind-undo premise of the record this delivery will
+        // write. Pure predicate on the pipeline keeps this testable without an engine.
+        let contaminates = TextInjectionPipeline.deliveryPassThroughContaminatesBlindUndo(
+            resetsCaret: resets,
+            isDelete: KeyClassifier.action(forKeyCode: Int(keyCode)) == .deleteLast,
+            unicodeCount: length
+        )
+        return (decision, decision != .swallow && contaminates)
     }
 
     /// Re-posts keystrokes held during an expansion, in the order they were typed.

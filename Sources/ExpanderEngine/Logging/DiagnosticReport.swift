@@ -5,7 +5,14 @@ import OSLog
 /// Builds a pasteboard-friendly diagnostic dump for Permission Recovery support.
 public enum DiagnosticReport {
     public static let defaultLogLookback: TimeInterval = 30 * 60
-    public static let defaultLogLineLimit = 200
+    /// Raised from 200: a single busy minute of typing produces more lines than the old cap, so
+    /// the report regularly opened mid-history even before `DevLogMirror` extended retention.
+    /// The mirror is the long-horizon answer; this keeps the direct fetch useful on its own.
+    public static let defaultLogLineLimit = 500
+    /// §9.1: newest mirrored lines included in a report. The ring holds thousands; a report is
+    /// pasted into chat windows and issue trackers, so it carries the recent tail plus a notice
+    /// rather than the whole buffer.
+    public static let defaultMirrorLineLimit = 400
 
     /// Static / live state captured for the dump header (no OSLog I/O).
     public struct Context: Equatable {
@@ -62,6 +69,9 @@ public enum DiagnosticReport {
         public var matchDropLines: [String]
         /// Snippets that can never respond to typing at all (secret, overlong, shadowed).
         public var unreachableSnippetLines: [String]
+        /// §9.1: `DevLogMirror` — engine log lines retained in-process past what OSLog still
+        /// holds. This is the section that answers "it broke yesterday in Slack" at all.
+        public var logMirrorLines: [String]
 
         public init(
             generatedAt: Date = Date(),
@@ -93,7 +103,8 @@ public enum DiagnosticReport {
             prefixDebounceSummary: String? = nil,
             matchingSuspensionLines: [String] = [],
             matchDropLines: [String] = [],
-            unreachableSnippetLines: [String] = []
+            unreachableSnippetLines: [String] = [],
+            logMirrorLines: [String] = []
         ) {
             self.generatedAt = generatedAt
             self.bundleID = bundleID
@@ -125,6 +136,7 @@ public enum DiagnosticReport {
             self.matchingSuspensionLines = matchingSuspensionLines
             self.matchDropLines = matchDropLines
             self.unreachableSnippetLines = unreachableSnippetLines
+            self.logMirrorLines = logMirrorLines
         }
     }
 
@@ -239,8 +251,28 @@ public enum DiagnosticReport {
             // this line can see it.
             matchingSuspensionLines: EventTapEngine.shared.matchingSuspensionDiagnostics(),
             matchDropLines: EventTapEngine.shared.matchDropDiagnostics(),
-            unreachableSnippetLines: EventTapEngine.shared.silentNoExpandDiagnostics()
+            unreachableSnippetLines: EventTapEngine.shared.silentNoExpandDiagnostics(),
+            logMirrorLines: Self.mirrorReportLines()
         )
+    }
+
+    /// Newest mirrored lines for the report, with a truncation notice when the ring holds more
+    /// than the report carries. The count/read pair is not atomic; a line landing between the
+    /// two only skews the notice by one, which is fine for diagnostics.
+    static func mirrorReportLines(
+        limit: Int = defaultMirrorLineLimit,
+        mirror: DevLogMirror = .shared
+    ) -> [String] {
+        let total = mirror.count
+        guard total > 0 else { return [] }
+        var lines = mirror.recentLines(limit: limit)
+        if total > lines.count {
+            lines.insert(
+                "(oldest \(total - lines.count) mirrored line(s) truncated — full ring lives in process memory)",
+                at: 0
+            )
+        }
+        return lines
     }
 
     /// On-device AI state for the report. Keeps every FoundationModels detail behind
@@ -467,6 +499,17 @@ public enum DiagnosticReport {
             lines.append(contentsOf: context.overlongTriggerLines)
         }
 
+        // §9.1: the mirror's own section. OSLog's direct fetch above is bounded by what logd
+        // still holds; these lines were captured into process memory precisely so a report
+        // generated after that window still shows what happened, in which app, at which level.
+        lines.append("")
+        lines.append("-- In-process log mirror (retained beyond OSLog) --")
+        if context.logMirrorLines.isEmpty {
+            lines.append("(mirror empty — not started or nothing logged yet)")
+        } else {
+            lines.append(contentsOf: context.logMirrorLines)
+        }
+
         return lines.joined(separator: "\n")
     }
 
@@ -495,12 +538,28 @@ public enum DiagnosticReport {
     }
 
     /// Fetch recent unified-log lines for this process / DevType subsystem.
+    ///
+    /// The window keeps the *most recent* `limit` lines, not the first `limit` the store happens
+    /// to enumerate: OSLogStore iterates oldest-first, so an early `break` at the limit kept the
+    /// quiet minutes from half an hour ago and cut exactly the seconds around the incident the
+    /// report exists to explain.
+    ///
+    /// Scope: the system-wide store is tried first so persisted entries from *previous*
+    /// launches of the app are included — "it broke this morning" must not be answerable
+    /// only while the process that saw it is still alive. Some hosts refuse that scope;
+    /// the current-process store is the fallback. Entries are filtered to the DevType
+    /// subsystem either way, so nothing from other processes' logs is ever rendered.
     public static func fetchRecentLogLines(
         lookback: TimeInterval = defaultLogLookback,
         limit: Int = defaultLogLineLimit
     ) -> [String] {
+        let store: OSLogStore
         do {
-            let store = try OSLogStore(scope: .currentProcessIdentifier)
+            store = try makeLogStore(preferSystemScope: true)
+        } catch {
+            return ["(OSLogStore error: \(error.localizedDescription))"]
+        }
+        do {
             let startDate = Date().addingTimeInterval(-lookback)
             let position = store.position(date: startDate)
             let predicate = NSPredicate(format: "subsystem == %@", DevTypeLog.subsystem)
@@ -515,13 +574,33 @@ public enum DiagnosticReport {
                 lines.append(
                     "\(formatter.string(from: log.date)) [\(log.category)] \(level) \(log.composedMessage)"
                 )
-                if lines.count >= limit { break }
             }
-            // Prefer newest-last for reading; OSLogStore usually returns oldest-first.
-            return lines
+            return keepingMostRecent(lines, limit: limit)
         } catch {
             return ["(OSLogStore error: \(error.localizedDescription))"]
         }
+    }
+
+    /// Store construction with fallback. Internal so tests can pin the ordering.
+    static func makeLogStore(preferSystemScope: Bool) throws -> OSLogStore {
+        if preferSystemScope {
+            do {
+                return try OSLogStore(scope: .system)
+            } catch {
+                DevTypeLog.app.notice(
+                    "[Diagnostics] system-wide OSLogStore unavailable (\(error.localizedDescription, privacy: .public)) — falling back to current-process scope"
+                )
+            }
+        }
+        return try OSLogStore(scope: .currentProcessIdentifier)
+    }
+
+    /// Newest-last window over an oldest-first enumeration: keep the tail when the session
+    /// produced more than `limit` lines. Pure for tests.
+    public static func keepingMostRecent(_ lines: [String], limit: Int) -> [String] {
+        guard limit > 0 else { return [] }
+        guard lines.count > limit else { return lines }
+        return Array(lines.suffix(limit))
     }
 
     /// Build the full report on a background queue, then deliver on the main queue.

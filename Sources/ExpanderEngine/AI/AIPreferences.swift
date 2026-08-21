@@ -149,6 +149,8 @@ public extension AITransformError {
             return "ai.error.languageDrift"
         case .unexpectedRewrite:
             return "ai.error.unexpectedRewrite"
+        case .promptEcho:
+            return "ai.error.promptEcho"
         case .discarded:
             return "ai.error.discarded"
         case .unknown:

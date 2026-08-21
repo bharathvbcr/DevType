@@ -1128,14 +1128,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         return nil
     }
 
-    private func presentValidationError(_ message: String) {
-        DevTypeAlert.warn(
-            title: loc.s("alert.invalidSnippet.title"),
-            message: message,
-            window: view.window
-        )
-    }
-
     @objc private func deleteSnippet() {
         let selectedRow = tableView.selectedRow
         guard selectedRow >= 0 && selectedRow < snippets.count else { return }

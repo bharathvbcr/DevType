@@ -98,6 +98,27 @@ public enum InjectTiming {
     public static let maxPasteboardRestoreAttempts = 3
     /// §3.1: how long after an expansion `undoLastExpansion()` still reverts it.
     public static let undoExpansionWindow: TimeInterval = 2.0
+
+    /// UserDefaults key for a user-tunable undo window, in seconds. Unset →
+    /// `undoExpansionWindow`. Read per use (only on backspace, never per keystroke).
+    public static let undoWindowDefaultsKey = "DevTypeUndoWindowSeconds"
+
+    /// Clamp bounds for the override. A window this short fires only on an immediate
+    /// regret; past five seconds a stale record is more hazard than help.
+    public static let undoWindowFloor: TimeInterval = 0.5
+    public static let undoWindowCeiling: TimeInterval = 5.0
+
+    /// Pure clamp for `effectiveUndoWindow`. Values outside the bounds snap to them;
+    /// non-positive / non-finite values fall back to the shipped default.
+    public static func clampedUndoWindow(_ raw: Double) -> TimeInterval {
+        guard raw.isFinite, raw > 0 else { return undoExpansionWindow }
+        return min(undoWindowCeiling, max(undoWindowFloor, raw))
+    }
+
+    /// The window actually in force: the user's override when set, else 2.0 s.
+    public static var effectiveUndoWindow: TimeInterval {
+        clampedUndoWindow(UserDefaults.standard.double(forKey: undoWindowDefaultsKey))
+    }
 }
 
 /// §3.4: per-app measured paste-delivery latency, persisted next to `AXWriteCapabilityStore`.

@@ -111,7 +111,7 @@ public final class TextInjectionPipeline {
 
         public func isFresh(
             now: Date = Date(),
-            window: TimeInterval = InjectTiming.undoExpansionWindow
+            window: TimeInterval = InjectTiming.effectiveUndoWindow
         ) -> Bool {
             let age = now.timeIntervalSince(timestamp)
             return age >= 0 && age <= window
@@ -139,6 +139,18 @@ public final class TextInjectionPipeline {
     /// still sits right after `injectedText` — a blind undo is permitted only at zero. Guarded by
     /// `lastExpansionLock`; reset when a record is stored.
     private var _inputEventsSinceExpansion = 0
+    /// §3.1d: real input the tap observed *while an expansion was being delivered* — keys whose
+    /// ordering relative to the paste could not be honoured and therefore passed straight through
+    /// (`TypeAheadBuffer` flushes rather than queues them), and clicks, which bypass key events
+    /// entirely. Such input reaches the field at an unknowable point around the paste, so the
+    /// "caret sits right after `injectedText`" premise the new record would rest on is already
+    /// broken when the record is written. The counter opens with `beginDeliveryWindow()` and is
+    /// drained into `_inputEventsSinceExpansion` by `rememberExpansion`, which used to reset that
+    /// count to zero and silently forgive exactly these keys — the shape behind "backspace after
+    /// an expansion mis-erases in AX-opaque apps": backspace #1 passes through mid-delivery and
+    /// deletes one character of the arriving expansion, backspace #2 then triggers a blind erase
+    /// computed from a caret that sits one unit left of where the record believes it does.
+    private var _deliveryInputUnits = 0
 
     public init() {
         hid = HIDKeyPoster.shared
@@ -494,8 +506,12 @@ public final class TextInjectionPipeline {
     ///
     /// Keystroke detection is deliberately **not** wired here — `EventTapEngine` owns that decision
     /// and this is the API it should call from its backspace handling.
+    ///
+    /// - Parameter heldBackspace: the key event the tap swallowed in order to attempt this undo.
+    ///   Every refusal exit returns it to the field as a synthetic keypress, so a refused undo
+    ///   still performs the ordinary one-character delete instead of eating input (§3.1e).
     @discardableResult
-    public func undoLastExpansion(now: Date = Date()) -> Bool {
+    public func undoLastExpansion(now: Date = Date(), heldBackspace: SwallowedKey? = nil) -> Bool {
         lastExpansionLock.lock()
         guard let record = _lastExpansion, record.isFresh(now: now) else {
             lastExpansionLock.unlock()
@@ -512,14 +528,23 @@ public final class TextInjectionPipeline {
             DevTypeLog.inject.notice(
                 "[Inject] §3.1 undo skipped — expansion happened in \(recorded, privacy: .public), frontmost is now \(current, privacy: .public)"
             )
+            // §3.1e: deliberately NO backspace return on this exit. Focus has moved to another
+            // app; posting the swallowed key there would delete a character of text the key was
+            // never aimed at. The old app's field is unreachable, so the keystroke is simply lost.
+            finishRefusedUndo(
+                "expansion happened in another app",
+                path: "undo",
+                bundleID: recorded,
+                heldBackspace: nil
+            )
             return false
         }
 
         if Thread.isMainThread {
-            performUndo(record, inputEventsSinceExpansion: inputEvents)
+            performUndo(record, inputEventsSinceExpansion: inputEvents, heldBackspace: heldBackspace)
         } else {
             DispatchQueue.main.async {
-                self.performUndo(record, inputEventsSinceExpansion: inputEvents)
+                self.performUndo(record, inputEventsSinceExpansion: inputEvents, heldBackspace: heldBackspace)
             }
         }
         return true
@@ -560,6 +585,78 @@ public final class TextInjectionPipeline {
             _inputEventsSinceExpansion += units
         }
         lastExpansionLock.unlock()
+    }
+
+    // MARK: - §3.1d Delivery input window
+
+    /// Opens the delivery-input window for one expansion. Called when the tap claims the inject
+    /// critical section — before any key can pass through that delivery.
+    ///
+    /// Cheap and unconditional: the counter is only ever *read* by `rememberExpansion`, which
+    /// runs inside the same window, so increments landing outside a delivery (most keystrokes)
+    /// are discarded by the next `beginDeliveryWindow()` without ever affecting a record.
+    public func beginDeliveryWindow() {
+        lastExpansionLock.lock()
+        _deliveryInputUnits = 0
+        lastExpansionLock.unlock()
+    }
+
+    /// One real, field-touching event was observed while an expansion is being delivered.
+    /// See `_deliveryInputUnits` for why this must poison the record's blind-undo premise.
+    public func noteDeliveryInput(units: Int = 1) {
+        guard units > 0 else { return }
+        lastExpansionLock.lock()
+        _deliveryInputUnits += units
+        lastExpansionLock.unlock()
+    }
+
+    /// Internal test reader for the delivery-window counter. Not public API.
+    var deliveryInputUnitsForTesting: Int {
+        lastExpansionLock.withLock { _deliveryInputUnits }
+    }
+
+    /// Whether one pass-through key observed during delivery breaks the blind-undo premise.
+    /// Pure for tests. Anything that types, deletes, or may move the caret contaminates; lone
+    /// F-keys and modifier chords with no character are excluded so an innocent keypress cannot
+    /// cost the user their undo in AX-opaque hosts.
+    public static func deliveryPassThroughContaminatesBlindUndo(
+        resetsCaret: Bool,
+        isDelete: Bool,
+        unicodeCount: Int
+    ) -> Bool {
+        resetsCaret || isDelete || unicodeCount > 0
+    }
+
+    /// §3.1d: contamination units contributed by one admitted event, pure for tests.
+    ///
+    /// The triggering key contributes 1 when it is field-touching on its own. A flush adds its
+    /// replayed character count *even when the trigger is inert*: an F-key keyDown carries no
+    /// unicode and moves no caret, but `TypeAheadBuffer.admit` still flushes the queue on it,
+    /// and those replayed characters land mid-delivery at positions nothing can order against
+    /// the paste. Uncounted, they broke the record's "caret sits right after the injected text"
+    /// premise invisibly — the exact mis-erase shape this window exists to prevent.
+    public static func deliveryInputUnits(keyContaminates: Bool, flushReplayCount: Int) -> Int {
+        (keyContaminates ? 1 : 0) + max(0, flushReplayCount)
+    }
+
+    /// What a finished undo owes the caller's swallowed backspace. Pure for tests.
+    ///
+    /// The tap swallows a real backspace to attempt the undo (`return nil`). When the undo then
+    /// refuses — selection active, unverifiable field, erased text gone — refusing while keeping
+    /// the keystroke turns the user's delete into a dead keypress. The backspace must go back:
+    /// posted synthetically it performs its ordinary one-character delete. A programmatic undo
+    /// (no held key) owes nothing.
+    public enum UndoExit: Equatable {
+        case accepted
+        case refusedWithBackspaceReturned
+        case refusedWithoutHeldKey
+    }
+
+    public static func classifyUndoExit(accepted: Bool, heldBackspace: SwallowedKey?) -> UndoExit {
+        if accepted { return .accepted }
+        return heldBackspace?.didSwallow == true
+            ? .refusedWithBackspaceReturned
+            : .refusedWithoutHeldKey
     }
 
     /// Characters the user may type after an expansion and still have undo work. Bounded so a
@@ -666,7 +763,38 @@ public final class TextInjectionPipeline {
         }
     }
 
-    private func performUndo(_ record: LastExpansion, inputEventsSinceExpansion: Int) {
+    /// §3.1e: the single exit for a refused undo. Records the outcome, and — when this undo was
+    /// attempted on the user's swallowed backspace — posts that key back so it still deletes one
+    /// character. Every refusal path in `performUndo` funnels here; none may return silently.
+    private func finishRefusedUndo(
+        _ reason: String,
+        path: String,
+        bundleID: String?,
+        heldBackspace: SwallowedKey?
+    ) {
+        PermissionCoordinator.shared.recordInjectOutcome(
+            .refused("Undo refused — \(reason)"),
+            refuseContext: nil,
+            path: path
+        )
+        guard Self.classifyUndoExit(accepted: false, heldBackspace: heldBackspace)
+            == .refusedWithBackspaceReturned else { return }
+        let keyCode = heldBackspace?.keyCode ?? Int64(kVK_Delete)
+        DevTypeLog.inject.info(
+            "[Inject] §3.1 returning swallowed backspace after refusal (keycode \(keyCode, privacy: .public))"
+        )
+        _ = hid.postUnicodeKeyEvent(
+            unicode: "\u{7F}",
+            keyCode: CGKeyCode(truncatingIfNeeded: keyCode),
+            flags: []
+        )
+    }
+
+    private func performUndo(
+        _ record: LastExpansion,
+        inputEventsSinceExpansion: Int,
+        heldBackspace: SwallowedKey? = nil
+    ) {
         var undoPlan = ErasePlan(text: record.injectedText)
         var restoreText = record.triggerText
 
@@ -677,15 +805,16 @@ public final class TextInjectionPipeline {
         // A non-empty selection means this backspace was "delete the selection" — a gesture with
         // its own meaning that undo must not hijack. The AX replace below would additionally
         // widen *over* the selection and erase its contents. Refuse; the record is already
-        // consumed, so this costs the user one swallowed backspace, never their selected text.
+        // consumed. With the backspace returned, delete-selection still happens.
         if let selection = field.selection, selection > 0 {
             DevTypeLog.inject.notice(
                 "[Inject] §3.1 undo refused — selection of \(selection, privacy: .public) unit(s) active; backspace means delete-selection"
             )
-            PermissionCoordinator.shared.recordInjectOutcome(
-                .refused("Undo refused — selection active"),
-                refuseContext: nil,
-                path: "undo"
+            finishRefusedUndo(
+                "selection active",
+                path: "undo",
+                bundleID: record.bundleID,
+                heldBackspace: heldBackspace
             )
             return
         }
@@ -733,10 +862,11 @@ public final class TextInjectionPipeline {
                 DevTypeLog.inject.notice(
                     "[Inject] §3.1 undo refused — \(why, privacy: .public)"
                 )
-                PermissionCoordinator.shared.recordInjectOutcome(
-                    .refused("Undo refused — \(why)"),
-                    refuseContext: nil,
-                    path: "undo"
+                self.finishRefusedUndo(
+                    why,
+                    path: "undo",
+                    bundleID: record.bundleID,
+                    heldBackspace: heldBackspace
                 )
                 return
             }
@@ -775,10 +905,11 @@ public final class TextInjectionPipeline {
                     DevTypeLog.inject.notice(
                         "[Inject] §3.1 undo aborted — field no longer holds the injected text"
                     )
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        .refused("Undo aborted — field no longer holds the injected text"),
-                        refuseContext: nil,
-                        path: "undo"
+                    self.finishRefusedUndo(
+                        "field no longer holds the injected text",
+                        path: "undo",
+                        bundleID: record.bundleID,
+                        heldBackspace: heldBackspace
                     )
                     return
                 }
@@ -1662,7 +1793,13 @@ public final class TextInjectionPipeline {
                         path: path
                     )
                 case .unavailable:
-                    break
+                    // Neither provable: AX cannot read this field at all (common for
+                    // Electron/terminal hosts). The outcome stays `postedUnverified` —
+                    // but the ambiguity itself is logged, so a diagnostic report shows
+                    // that this app was never verifiable instead of silently skipping.
+                    DevTypeLog.inject.info(
+                        "[Inject] paste re-verify: field unreadable — delivery stays unverified (app=\(context.frontBundleID ?? "(unknown)", privacy: .public))"
+                    )
                 }
             }
 
@@ -1803,7 +1940,12 @@ public final class TextInjectionPipeline {
         )
         lastExpansionLock.lock()
         _lastExpansion = record
-        _inputEventsSinceExpansion = 0
+        // §3.1d: input that passed through *during this expansion's delivery* already broke the
+        // "caret sits right after the injected text" premise. Seeding it here (instead of the
+        // old unconditional reset to 0) is what keeps a mid-delivery backspace from authorising
+        // a blind mis-erase one keystroke later.
+        _inputEventsSinceExpansion = max(0, _deliveryInputUnits)
+        _deliveryInputUnits = 0
         lastExpansionLock.unlock()
     }
 

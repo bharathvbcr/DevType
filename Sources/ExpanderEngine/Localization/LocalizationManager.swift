@@ -756,7 +756,6 @@ public final class LocalizationManager: ObservableObject {
                 "Could not determine the frontmost application bundle identifier.",
             "alert.appMuted.title": "App Muted",
             "alert.appMuted.message": "Expansions are disabled in:\n%@",
-            "alert.invalidSnippet.title": "Invalid Snippet",
             "alert.reset.title": "Reset to Defaults?",
             "alert.reset.message":
                 "This replaces every snippet in your library with the built-in defaults. Export first if you want a copy — this cannot be undone from disk.",
@@ -996,6 +995,7 @@ public final class LocalizationManager: ObservableObject {
             "ai.error.refusal": "The model declined to transform this text.",
             "ai.error.languageDrift": "The model answered in a different script, so nothing was changed. Try again.",
             "ai.error.unexpectedRewrite": "The model rewrote the text instead of correcting it, so nothing was changed. Try again.",
+            "ai.error.promptEcho": "The model repeated the AI instructions in its output, so nothing was changed. Try again.",
             "ai.error.unsupportedGuide": "The on-device model rejected this guided-generation request.",
             "ai.error.concurrent": "Concurrent AI requests are not supported.",
             "ai.error.discarded": "The result was discarded.",
@@ -1787,7 +1787,6 @@ public final class LocalizationManager: ObservableObject {
             "alert.muteFrontmost.failed.message": "최상위 앱의 번들 식별자를 확인할 수 없습니다.",
             "alert.appMuted.title": "앱 음소거됨",
             "alert.appMuted.message": "다음 앱에서 확장이 비활성화됩니다:\n%@",
-            "alert.invalidSnippet.title": "잘못된 스니펫",
             "alert.reset.title": "기본값으로 재설정할까요?",
             "alert.reset.message":
                 "라이브러리의 모든 스니펫이 기본 제공 항목으로 대체됩니다. 사본이 필요하면 먼저 내보내세요 — 디스크에서는 되돌릴 수 없습니다.",
@@ -2021,6 +2020,7 @@ public final class LocalizationManager: ObservableObject {
             "ai.error.refusal": "모델이 이 텍스트 변환을 거부했습니다.",
             "ai.error.languageDrift": "모델이 다른 문자로 답해 아무것도 변경하지 않았습니다. 다시 시도하세요.",
             "ai.error.unexpectedRewrite": "모델이 교정 대신 다시 작성해 아무것도 변경하지 않았습니다. 다시 시도하세요.",
+            "ai.error.promptEcho": "모델이 출력에 AI 지시문을 그대로 포함했으므로 아무것도 변경하지 않았습니다. 다시 시도하세요.",
             "ai.error.unsupportedGuide": "온디바이스 모델이 이 가이드 생성 요청을 거부했습니다.",
             "ai.error.concurrent": "동시 AI 요청은 지원되지 않습니다.",
             "ai.error.discarded": "결과가 폐기되었습니다.",
@@ -2801,7 +2801,6 @@ public final class LocalizationManager: ObservableObject {
             "alert.muteFrontmost.failed.message": "最前面のアプリのバンドル ID を特定できませんでした。",
             "alert.appMuted.title": "アプリをミュートしました",
             "alert.appMuted.message": "次のアプリで展開が無効になります:\n%@",
-            "alert.invalidSnippet.title": "無効なスニペット",
             "alert.reset.title": "デフォルトに戻しますか？",
             "alert.reset.message":
                 "ライブラリのすべてのスニペットが組み込みのデフォルトに置き換わります。控えが必要な場合は先に書き出してください — ディスク上では元に戻せません。",
@@ -3036,6 +3035,7 @@ public final class LocalizationManager: ObservableObject {
             "ai.error.refusal": "モデルがこのテキストの変換を拒否しました。",
             "ai.error.languageDrift": "モデルが別の文字で応答したため、何も変更しませんでした。もう一度お試しください。",
             "ai.error.unexpectedRewrite": "モデルが修正ではなく書き換えを行ったため、何も変更しませんでした。もう一度お試しください。",
+            "ai.error.promptEcho": "モデルが出力に AI 指示文を含めて返したため、何も変更しませんでした。もう一度お試しください。",
             "ai.error.unsupportedGuide": "オンデバイスモデルがこのガイド付き生成リクエストを拒否しました。",
             "ai.error.concurrent": "同時の AI リクエストには対応していません。",
             "ai.error.discarded": "結果は破棄されました。",

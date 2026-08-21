@@ -43,6 +43,10 @@ public enum AITransformError: Error, Equatable, Sendable {
     /// The model rewrote or answered the text instead of correcting it. Nothing is
     /// injected — a proofread that doubles in length is not a proofread.
     case unexpectedRewrite
+    /// The model copied part of the prompt (the framing line / instructions) into its
+    /// answer. Nothing is injected — "Proofread the text below…" must never appear in
+    /// the user's document.
+    case promptEcho
     /// Caller discarded the result (Cancel). Generation may still finish; do not inject.
     case discarded
     case unknown(String)
@@ -368,6 +372,188 @@ public enum AIScriptFamily: String, Sendable, Hashable {
         }
     }
 }
+
+/// Detects and removes prompt echoes from a model answer.
+///
+/// The on-device model is handed its instructions twice — once as system instructions
+/// and once as the framing line immediately before the selection. Small models
+/// sometimes copy that framing into the reply ("Proofread the text below.
+/// Return it corrected…"), and on the direct path that text lands in the user's
+/// document with no review. Guided generation, the script policy, and the length
+/// policy all let an echo through: it is the right script and roughly the input's
+/// size. This is the check that actually catches it.
+///
+/// Scope note: only the per-request *framing* is matched (it is static per kind and
+/// is what leaks in practice). Custom instructions are user-authored prose; matching
+/// them would risk eating legitimate content whenever they overlap the selection.
+public enum AIPromptEcho: Sendable {
+
+    /// Minimum normalized length of a phrase before stripping/flagging. Below this,
+    /// generic words ("transform", "text") could match innocent output.
+    static let minimumPhraseLength = 12
+
+    /// Characters an echo may carry between itself and the real content
+    /// ("…own language:\n\nHello" → the colon and newlines are the echo's, not ours).
+    ///
+    /// Sentence punctuation is deliberately absent. A period between an echo and the
+    /// content is ambiguous — it may be the echo's sentence end or the content's — so
+    /// it is handled by the explicit terminal-period rule in `stripLeadingPhrase`
+    /// instead of blanket consumption, and content punctuation always survives.
+    private static let boundarySeparators: Set<Character> = [
+        " ", "\t", "\n", "\r", ":", "\"", "'", "\u{201C}", "\u{201D}", "-", "\u{2014}",
+    ]
+
+    /// The prompt phrases a reply might echo, longest first. Derived from the framing
+    /// so every transform kind is covered without per-kind code. Each framing line is
+    /// broken into its sentences/clauses — the model frequently echoes just
+    /// "Proofread the text below." rather than the whole line.
+    public static func phrases(framing: String) -> [String] {
+        var found: Set<String> = []
+        for line in framing.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            // Sentence terminators delimit echoable clauses; they are formatting, so
+            // they never join two words of one phrase.
+            for clause in trimmed.split(whereSeparator: { $0 == "." || $0 == ":" }) {
+                let phrase = normalized(String(clause))
+                guard phrase.count >= minimumPhraseLength else { continue }
+                found.insert(phrase)
+            }
+        }
+        return found.sorted { $0.count > $1.count }
+    }
+
+    /// Comparison form: case-insensitive, whitespace-collapsed, punctuation-skipped.
+    ///
+    /// Punctuation is dropped because echoing models drop it too ("corrected, in" →
+    /// "corrected in"), and a comma-for-comma comparison would miss exactly the sloppiest
+    /// echoes. The strip walk mirrors this form character-by-character on the original
+    /// string, so the cut still lands at the right offset despite the lossy comparison.
+    public static func normalized(_ text: String) -> String {
+        var out = ""
+        var lastWasSpace = false
+        for character in text {
+            if character.isWhitespace {
+                if !lastWasSpace && !out.isEmpty { out.append(" ") }
+                lastWasSpace = true
+                continue
+            }
+            lastWasSpace = false
+            guard character.isLetter || character.isNumber else { continue }
+            out.append(contentsOf: character.lowercased())
+        }
+        while out.hasSuffix(" ") { out.removeLast() }
+        return out
+    }
+
+    /// Removes leading / trailing echoes of the framing from a model answer.
+    ///
+    /// Never strips when the author's own input contains the same phrase — a user who
+    /// selected text that literally begins with "Proofread the text below" keeps it.
+    public static func stripped(_ output: String, input: String, framing: String) -> String {
+        let inputNormalized = normalized(input)
+        var out = output
+        // Framing has at most a handful of clauses; a small fixed bound terminates
+        // even if a pathological answer repeats them.
+        for _ in 0..<8 {
+            var strippedSomething = false
+            for phrase in phrases(framing: framing) where !inputNormalized.contains(phrase) {
+                if let head = stripLeadingPhrase(out, phrase: phrase) {
+                    out = head
+                    strippedSomething = true
+                }
+                if let tail = stripTrailingPhrase(out, phrase: phrase) {
+                    out = tail
+                    strippedSomething = true
+                }
+            }
+            if !strippedSomething { break }
+        }
+        return out
+    }
+
+    /// True when the answer still quotes prompt text after stripping — the signal to
+    /// re-roll rather than inject. Phrases the input itself contains never count,
+    /// so an author writing *about* the framing is never blocked.
+    public static func contaminated(
+        output: String,
+        input: String,
+        framing: String
+    ) -> Bool {
+        let inputNormalized = normalized(input)
+        let outputNormalized = normalized(output)
+        return phrases(framing: framing).contains { phrase in
+            !inputNormalized.contains(phrase) && outputNormalized.contains(phrase)
+        }
+    }
+
+    /// Cuts `phrase` off the start of `text`, or nil when it does not start with it.
+    ///
+    /// Matching walks the original string and builds the same lossy comparison form as
+    /// `normalized` (punctuation skipped, whitespace collapsed), so the cut lands after
+    /// the real characters even when the echo's punctuation differs from the framing's.
+    ///
+    /// After a full match, only true boundary separators are consumed — plus one period
+    /// that reads as terminal (". Content"). A period followed directly by more content
+    /// stays: "below.Fix this" is ambiguous, and ambiguity resolves in favour of the
+    /// author's text.
+    static func stripLeadingPhrase(_ text: String, phrase: String) -> String? {
+        guard !phrase.isEmpty else { return nil }
+        var accumulated = ""
+        var lastAppendedWasSpace = false
+        for (index, character) in zip(text.indices, text) {
+            if character.isWhitespace {
+                if !lastAppendedWasSpace && !accumulated.isEmpty {
+                    accumulated.append(" ")
+                    lastAppendedWasSpace = true
+                }
+            } else if character.isLetter || character.isNumber {
+                accumulated.append(contentsOf: character.lowercased())
+                lastAppendedWasSpace = false
+            } else {
+                // Punctuation: skipped in the comparison, but it still occupies the
+                // original string — the cut below accounts for it via `index`.
+                continue
+            }
+            if accumulated.count >= phrase.count {
+                guard accumulated == phrase else { return nil }
+                var remainder = text[text.index(after: index)...]
+                // The echo's own sentence period: consume only when terminal.
+                if remainder.first == "." {
+                    let next = remainder.index(after: remainder.startIndex)
+                    if next == remainder.endIndex || remainder[next].isWhitespace || remainder[next] == ":" {
+                        remainder.removeFirst()
+                    }
+                }
+                while let first = remainder.first, boundarySeparators.contains(first) {
+                    remainder.removeFirst()
+                }
+                return String(remainder)
+            }
+            guard phrase.hasPrefix(accumulated) else { return nil }
+        }
+        return nil
+    }
+
+    /// Mirror of `stripLeadingPhrase` for an echo at the end of the answer.
+    ///
+    /// In reversed orientation a post-match period would belong to the *content*
+    /// ("Fixed. Proofread…" — the period ends the author's sentence), which is why the
+    /// terminal-period consumption must not run here; only true separators go.
+    static func stripTrailingPhrase(_ text: String, phrase: String) -> String? {
+        guard let cut = stripLeadingPhrase(
+            String(text.reversed()),
+            phrase: String(phrase.reversed())
+        ) else { return nil }
+        var restored = String(cut.reversed())
+        // The whitespace that separated content from echo leaves with the echo.
+        while let last = restored.last, last == " " || last == "\t" || last == "\n" || last == "\r" {
+            restored.removeLast()
+        }
+        return restored
+    }
+}
+
 
 /// Counts consecutive identical requests so a Retry can re-roll sampling.
 public struct AIRepeatTracker: Sendable {
@@ -781,6 +967,23 @@ public actor AITextTransformer {
                 record(violation: "languageDrift", detail: "answered in \(script)", kind: kind, attempt: extraAttempt)
                 continue
             }
+            // The framing echo is stripped in `generateRaw`; anything left means the
+            // model copied the prompt into the body of its answer. Re-roll once, then
+            // fail rather than inject "Proofread the text below…" into a document.
+            if AIPromptEcho.contaminated(
+                output: text,
+                input: input,
+                framing: Self.promptFraming(for: kind)
+            ) {
+                lastFailure = .promptEcho
+                record(
+                    violation: "promptEcho",
+                    detail: "answer still contains prompt framing",
+                    kind: kind,
+                    attempt: extraAttempt
+                )
+                continue
+            }
             if kind.lengthPolicy.exceeded(input: input, output: text) {
                 lastFailure = .unexpectedRewrite
                 record(
@@ -860,7 +1063,10 @@ public actor AITextTransformer {
             raw = response.content.text
         }
 
-        let cleaned = AITransformText.sanitize(raw, input: input)
+        let cleaned = AITransformText.sanitize(
+            AIPromptEcho.stripped(raw, input: input, framing: Self.promptFraming(for: kind)),
+            input: input
+        )
         // An empty response is a failed generation, not a result. Letting it through
         // means the direct path replaces the user's selection with nothing.
         guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

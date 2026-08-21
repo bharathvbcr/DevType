@@ -221,6 +221,8 @@ enum AITransformFlow {
             return loc.s("ai.error.languageDrift")
         case .unexpectedRewrite:
             return loc.s("ai.error.unexpectedRewrite")
+        case .promptEcho:
+            return loc.s("ai.error.promptEcho")
         case .discarded:
             return loc.s("ai.error.discarded")
         case .unknown(let message):

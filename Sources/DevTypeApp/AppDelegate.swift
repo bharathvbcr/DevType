@@ -83,6 +83,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         startSecureInputMonitoring()
         syncSelectionMonitorWithAIPreferences()
         wireTapHealth()
+        // §9.1: start mirroring the unified log into process memory immediately, so the
+        // diagnostic report can answer for incidents older than what logd retains.
+        DevLogMirror.shared.start()
 
         NotificationCenter.default.addObserver(
             forName: .devTypeLanguageChanged,
