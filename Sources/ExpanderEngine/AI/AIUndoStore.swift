@@ -38,6 +38,18 @@ public enum AIUndoStore {
         return value
     }
 
+    /// Non-consuming read of the stashed original, or `nil` when empty.
+    ///
+    /// Exists for `AIPromptLeakGuard.injectionVerdict` at the injection seam: both AI
+    /// flows stash the source selection immediately before handing off the result, so
+    /// the guard can exempt prompt clauses the author's own text contains without
+    /// racing the later Undo flow (`consume()` stays exclusive to it).
+    public static func stashedOriginal() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return originalText
+    }
+
     /// Test / reset hook.
     public static func clear() {
         lock.lock()

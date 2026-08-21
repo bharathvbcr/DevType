@@ -429,6 +429,12 @@ public enum AIPromptEcho: Sendable {
     /// "corrected in"), and a comma-for-comma comparison would miss exactly the sloppiest
     /// echoes. The strip walk mirrors this form character-by-character on the original
     /// string, so the cut still lands at the right offset despite the lossy comparison.
+    ///
+    /// Skipped punctuation must behave identically in both forms: like the strip walk,
+    /// only a *consumed* character clears the run-of-whitespace flag. Clearing it on
+    /// punctuation instead produced "prompt — no" → "prompt  no" here while the strip
+    /// walk built "prompt no" — phrases containing spaced punctuation (em dashes in the
+    /// instruction sentences) were then unfindable and never stripped.
     public static func normalized(_ text: String) -> String {
         var out = ""
         var lastWasSpace = false
@@ -438,8 +444,8 @@ public enum AIPromptEcho: Sendable {
                 lastWasSpace = true
                 continue
             }
-            lastWasSpace = false
             guard character.isLetter || character.isNumber else { continue }
+            lastWasSpace = false
             out.append(contentsOf: character.lowercased())
         }
         while out.hasSuffix(" ") { out.removeLast() }
@@ -451,13 +457,19 @@ public enum AIPromptEcho: Sendable {
     /// Never strips when the author's own input contains the same phrase — a user who
     /// selected text that literally begins with "Proofread the text below" keeps it.
     public static func stripped(_ output: String, input: String, framing: String) -> String {
+        stripped(output, input: input, phrases: phrases(framing: framing))
+    }
+
+    /// Precomputed-phrase variant. Callers that check many outputs against one prompt
+    /// surface (the transformer, `AIPromptLeakGuard`) extract once and reuse.
+    public static func stripped(_ output: String, input: String, phrases: [String]) -> String {
         let inputNormalized = normalized(input)
         var out = output
         // Framing has at most a handful of clauses; a small fixed bound terminates
         // even if a pathological answer repeats them.
         for _ in 0..<8 {
             var strippedSomething = false
-            for phrase in phrases(framing: framing) where !inputNormalized.contains(phrase) {
+            for phrase in phrases where !inputNormalized.contains(phrase) {
                 if let head = stripLeadingPhrase(out, phrase: phrase) {
                     out = head
                     strippedSomething = true
@@ -480,9 +492,18 @@ public enum AIPromptEcho: Sendable {
         input: String,
         framing: String
     ) -> Bool {
+        contaminated(output: output, input: input, phrases: phrases(framing: framing))
+    }
+
+    /// Precomputed-phrase variant — see `stripped(_:input:phrases:)`.
+    public static func contaminated(
+        output: String,
+        input: String,
+        phrases: [String]
+    ) -> Bool {
         let inputNormalized = normalized(input)
         let outputNormalized = normalized(output)
-        return phrases(framing: framing).contains { phrase in
+        return phrases.contains { phrase in
             !inputNormalized.contains(phrase) && outputNormalized.contains(phrase)
         }
     }
@@ -707,21 +728,14 @@ public actor AITextTransformer {
 
     /// Default prompt framing. `runTransform` and `prewarm` resolve it through
     /// `promptFraming(for:)` so the warm prefix matches what the request will send.
-    nonisolated static let promptFramingPrefix = "Transform this text:\n\n"
+    /// The strings themselves live on `AITransformKind` (single canonical owner).
+    nonisolated static let promptFramingPrefix = AITransformKind.genericFraming
 
     /// Per-kind framing. "Transform this text" is an instruction to change the text,
     /// which is the wrong verb for proofreading — the framing line is the last thing
     /// the model reads before the input, so it carries real weight.
     nonisolated static func promptFraming(for kind: AITransformKind) -> String {
-        switch kind {
-        case .proofread:
-            return "Proofread the text below. Return it corrected, in its own language:\n\n"
-        case .translate, .translateTelugu, .translateHindi:
-            return "Translate the text below:\n\n"
-        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .custom:
-            return promptFramingPrefix
-        }
+        kind.framing
     }
 
     /// GCD entry point. Completion fires exactly once on `completionQueue`.
@@ -877,7 +891,7 @@ public actor AITextTransformer {
                 return
             }
         } catch {
-            once.complete(.failure(Self.mapGenerationError(error, kind: kind)))
+            once.complete(.failure(Self.mapGenerationError(error, kind: kind, input: trimmed)))
             return
         }
 
@@ -929,12 +943,29 @@ public actor AITextTransformer {
                     onPartial(progress)
                 }
             }
+            // Each piece was checked against the echo corpus with only its own chunk
+            // visible; re-check the assembly as a whole so no per-chunk miss can slip
+            // through the seams where pieces were rejoined.
+            if AIPromptEcho.contaminated(
+                output: assembled,
+                input: trimmed,
+                phrases: AIPromptLeakGuard.phrases(for: kind)
+            ) {
+                record(
+                    violation: "promptEcho",
+                    detail: "assembled chunks still contain prompt framing",
+                    kind: kind,
+                    attempt: attempt
+                )
+                once.complete(.failure(.promptEcho))
+                return
+            }
             AIDiagnosticsStore.shared.recordSuccess(kind: kind.rawValue)
             once.complete(.success(AITransformText.restoringAffixes(of: input, to: assembled)))
         } catch let error as AITransformError {
             once.complete(.failure(error))
         } catch {
-            once.complete(.failure(Self.mapGenerationError(error, kind: kind)))
+            once.complete(.failure(Self.mapGenerationError(error, kind: kind, input: trimmed)))
         }
     }
 
@@ -970,10 +1001,14 @@ public actor AITextTransformer {
             // The framing echo is stripped in `generateRaw`; anything left means the
             // model copied the prompt into the body of its answer. Re-roll once, then
             // fail rather than inject "Proofread the text below…" into a document.
+            // The corpus covers both the framing line *and* this kind's instruction
+            // sentences ("Return ONLY the enhanced prompt…") — an echoed instruction
+            // has the right script and roughly the right size, so every other policy
+            // waves it through.
             if AIPromptEcho.contaminated(
                 output: text,
                 input: input,
-                framing: Self.promptFraming(for: kind)
+                phrases: AIPromptLeakGuard.phrases(for: kind)
             ) {
                 lastFailure = .promptEcho
                 record(
@@ -1064,7 +1099,11 @@ public actor AITextTransformer {
         }
 
         let cleaned = AITransformText.sanitize(
-            AIPromptEcho.stripped(raw, input: input, framing: Self.promptFraming(for: kind)),
+            AIPromptEcho.stripped(
+                raw,
+                input: input,
+                phrases: AIPromptLeakGuard.phrases(for: kind)
+            ),
             input: input
         )
         // An empty response is a failed generation, not a result. Letting it through
@@ -1200,10 +1239,14 @@ public actor AITextTransformer {
     /// information is gone by the time anyone reads a diagnostic report.
     ///
     /// The transformed text and the user's selection are deliberately never logged. Apple's
-    /// `debugDescription` describes the violation, not the input.
+    /// context prose is documented as describing the violation rather than quoting the
+    /// input — but it is still third-party free-form text entering our logs and the
+    /// diagnostics store, so `AIPromptLeakGuard.redact` scrubs any occurrence of the
+    /// selection or a prompt surface out of it before either sink sees it.
     private static func logGenerationFailure(
         _ generation: LanguageModelSession.GenerationError,
-        kind: AITransformKind
+        kind: AITransformKind,
+        input: String
     ) {
         let detail: String
         switch generation {
@@ -1215,9 +1258,15 @@ public actor AITextTransformer {
              .decodingFailure(let context),
              .concurrentRequests(let context),
              .unsupportedGuide(let context):
-            detail = context.debugDescription
+            detail = AIPromptLeakGuard.redact(
+                context.debugDescription,
+                sources: [input, kind.framing, kind.instructions]
+            )
         case .refusal(_, let context):
-            detail = context.debugDescription
+            detail = AIPromptLeakGuard.redact(
+                context.debugDescription,
+                sources: [input, kind.framing, kind.instructions]
+            )
         @unknown default:
             detail = generation.localizedDescription
         }
@@ -1250,15 +1299,16 @@ public actor AITextTransformer {
 
     private static func mapGenerationError(
         _ error: Error,
-        kind: AITransformKind
+        kind: AITransformKind,
+        input: String
     ) -> AITransformError {
         guard let generation = error as? LanguageModelSession.GenerationError else {
             DevTypeLog.store.error(
-                "[AI] transform failed kind=\(kind.rawValue, privacy: .public) non-GenerationError=\(error.localizedDescription, privacy: .public)"
+                "[AI] transform failed kind=\(kind.rawValue, privacy: .public) non-GenerationError=\(AIPromptLeakGuard.redact(error.localizedDescription, sources: [input, kind.framing, kind.instructions]), privacy: .public)"
             )
             return .unknown(error.localizedDescription)
         }
-        logGenerationFailure(generation, kind: kind)
+        logGenerationFailure(generation, kind: kind, input: input)
         switch generation {
         case .guardrailViolation:
             return .guardrailViolation

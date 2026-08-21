@@ -42,6 +42,28 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         return AITransformKind(rawValue: key)
     }
 
+    /// Framing shared by every rewrite-style kind. Lives beside `instructions` so the
+    /// whole static prompt surface has one owner (`AITransformKind`) that compiles on
+    /// every deployment target — `AIPromptLeakGuard` builds its corpus from this without
+    /// needing FoundationModels availability.
+    public static let genericFraming = "Transform this text:\n\n"
+
+    /// The prompt framing line sent immediately before the selection. It is the last
+    /// thing the model reads before the input, so it carries real weight — and it is
+    /// the text small models most often echo back. Part of the static prompt surface
+    /// owned here so echo defense can cover it without touching the model session.
+    public var framing: String {
+        switch self {
+        case .proofread:
+            return "Proofread the text below. Return it corrected, in its own language:\n\n"
+        case .translate, .translateTelugu, .translateHindi:
+            return "Translate the text below:\n\n"
+        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
+             .bulletize, .promptEnhance, .custom:
+            return Self.genericFraming
+        }
+    }
+
     /// Palette actions (excludes `custom`, which needs caller-supplied instructions).
     public static var builtInPalette: [AITransformKind] {
         allCases.filter { $0 != .custom }

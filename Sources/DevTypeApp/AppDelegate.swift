@@ -1284,7 +1284,38 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Inject AI result after reactivating the source app. Uses `erasePlan: .empty`
     /// so clipboard paste replaces the live selection (hotkey) or inserts at the
     /// caret (typed path, where the trigger was already erased).
+    ///
+    /// This is the single delivery seam for every AI-generated result (hotkey direct,
+    /// palette, preview Replace, typed-path preview Replace), so it carries the last
+    /// line of prompt-leak defense: even if generation-side echo checks ever regress,
+    /// a payload quoting unrecognized prompt text is refused here instead of being
+    /// typed or pasted into a document. The stashed source selection exempts clauses
+    /// the author's own text contains; refusal costs one alert and leaves the field
+    /// untouched — never data loss.
     private func injectAIReplacement(text: String, sourceApp: NSRunningApplication?) {
+        let verdict = AIPromptLeakGuard.injectionVerdict(
+            payload: text,
+            exempting: AIUndoStore.stashedOriginal()
+        )
+        guard verdict.isClean else {
+            DevTypeLog.store.error(
+                "[AI] injection refused at boundary — prompt leak guard matched"
+            )
+            AIDiagnosticsStore.shared.recordFailure(
+                kind: "injection-boundary",
+                error: "promptEcho",
+                detail: "result still contained prompt text after generation checks"
+            )
+            DevTypeAlert.present(
+                title: loc.s("ai.alert.failed.title"),
+                message: AITransformFlow.localizedError(.promptEcho, loc: loc),
+                style: .informational,
+                buttons: [loc.s("common.ok")],
+                handler: nil
+            )
+            sourceApp?.activate()
+            return
+        }
         if let sourceApp {
             sourceApp.activate()
         }

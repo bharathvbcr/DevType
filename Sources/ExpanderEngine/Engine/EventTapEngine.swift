@@ -2339,12 +2339,36 @@ public final class EventTapEngine {
     /// Inject an AI transform result without erasing again (trigger erase already happened, or
     /// hotkey path replaces the live selection via paste). Always passes `erasePlan: .empty`
     /// and `secureClipboardPaste: true` — do not rely on `eraseCountOverride: 0` alone.
+    ///
+    /// `origin` must be declared so the prompt-leak guard knows whether this payload is
+    /// model output (checked against the full static prompt corpus, refused on match) or
+    /// authored text (never blocked). The only current caller restores an erased trigger
+    /// on cancel; a future caller passing model output cannot forget the check.
     public func injectAITransformResult(
         text: String,
         snippet: SnippetModel? = nil,
         sourceApp: NSRunningApplication? = nil,
+        origin: AIPromptLeakGuard.PayloadOrigin,
         completion: (() -> Void)? = nil
     ) {
+        switch origin {
+        case .aiResult(let sourceSelection):
+            let verdict = AIPromptLeakGuard.injectionVerdict(payload: text, exempting: sourceSelection)
+            guard verdict.isClean else {
+                DevTypeLog.store.error(
+                    "[EventTap] AI inject refused at boundary — prompt leak guard matched"
+                )
+                AIDiagnosticsStore.shared.recordFailure(
+                    kind: "injection-boundary",
+                    error: "promptEcho",
+                    detail: "result still contained prompt text after generation checks"
+                )
+                completion?()
+                return
+            }
+        case .authoredText:
+            break
+        }
         let work = { [weak self] in
             if let sourceApp {
                 sourceApp.activate()

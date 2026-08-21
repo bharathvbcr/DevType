@@ -135,9 +135,12 @@ enum AIPreviewPanel {
         pendingRestoreSourceApp = nil
         close(discard: true, resumeMatching: true)
         if let restore, !restore.isEmpty {
+            // Authored text (the erased typed trigger) — exempt from the prompt-leak
+            // guard by declaration, not by accident.
             EventTapEngine.shared.injectAITransformResult(
                 text: restore,
                 sourceApp: app,
+                origin: .authoredText,
                 completion: nil
             )
         } else {
