@@ -917,12 +917,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         expandFromSearch(snippet, sourceApp: nil)
     }
 
-    @objc private func selectLanguage(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let language = AppLanguage(rawValue: raw) else { return }
-        loc.language = language
-    }
-
     private func bindSnippetStore() {
         SnippetStore.shared.addListener { [weak self] snippets in
             EventTapEngine.shared.snippets = snippets
@@ -1914,25 +1908,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             "[App] trigger conflict warnings \(SnippetStore.isConflictDetectionEnabled ? "enabled" : "disabled", privacy: .public) from status menu"
         )
         rebuildMenu()
-    }
-
-    /// Kept as a shim: the Open at Login menu item moved into Preferences (§4.1)
-    /// but external callers / older menus may still reference this selector.
-    @objc private func toggleOpenAtLogin(_ sender: NSMenuItem) {
-        let service = SMAppService.mainApp
-        do {
-            if service.status == .enabled {
-                try service.unregister()
-            } else {
-                try service.register()
-            }
-        } catch {
-            DevTypeAlert.warn(
-                title: loc.s("alert.openAtLogin.title"),
-                message: loc.s("alert.openAtLogin.message", error.localizedDescription)
-            )
-        }
-        refreshOpenAtLoginMenuItem()
     }
 
     @objc private func diagnoseSecureInput(_ sender: NSMenuItem) {

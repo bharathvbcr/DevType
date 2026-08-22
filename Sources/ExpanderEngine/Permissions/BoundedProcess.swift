@@ -61,7 +61,10 @@ public enum BoundedProcess {
 
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = mergeStandardError ? pipe : Pipe()
+        // Unmerged stderr goes to the null device: a fresh undrained `Pipe()` here blocked any
+        // tool writing >64 KB to stderr until it was SIGTERM'd (output lost, full timeout burned)
+        // and leaked its file handles on every call.
+        process.standardError = mergeStandardError ? pipe : FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
 
         // Drain concurrently with the wait — see failure mode 2 above.

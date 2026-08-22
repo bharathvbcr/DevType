@@ -13,7 +13,7 @@ import Foundation
 ///    apart from the user's. An untagged event we post is indistinguishable from typing (§1.2).
 /// 2. A posted arrow / backspace moves or deletes one **grapheme cluster**, never one UTF-16 code
 ///    unit. Anything converting an AX range into a key-press count has to convert units (§1.6).
-public final class HIDKeyPoster {
+public final class HIDKeyPoster: BackspacePosting {
     public static let shared = HIDKeyPoster()
 
     /// §2.7: `resolveVirtualKeyCodeForChar` brute-forces up to 128 `UCKeyTranslate` calls. It used
@@ -289,13 +289,18 @@ public final class HIDKeyPoster {
 
     // MARK: - Backspaces
 
-    public func sendBackspaces(count: Int) {
-        guard count > 0 else { return }
+    /// Posts `count` delete key pairs. Returns the number of **pairs actually posted** — zero
+    /// means nothing reached the field (Post Events revoked or every CGEvent creation failed),
+    /// and anything below `count` is a partial erase. Callers on destructive paths must treat
+    /// "fewer than requested" as a failure, never assume the erase happened.
+    @discardableResult
+    public func sendBackspaces(count: Int) -> Int {
+        guard count > 0 else { return 0 }
         guard CGPreflightPostEventAccess() else {
             DevTypeLog.inject.error(
                 "[Inject] backspace refused — CGPreflightPostEventAccess false at post time count=\(count, privacy: .public)"
             )
-            return
+            return 0
         }
         let source = makeTaggedEventSource()
         var posted = 0
@@ -316,16 +321,22 @@ public final class HIDKeyPoster {
                 "[Inject] backspace CGEvent partial posted=\(posted, privacy: .public)/\(count, privacy: .public)"
             )
         }
+        return posted
     }
 
-    public func sendBackspacesAsync(count: Int, completion: @escaping () -> Void) {
+    /// Async form of `sendBackspaces(count:)` used by destructive gates. `completion(true)` means
+    /// **every** requested backspace was handed to the HID tap; `completion(false)` means none or
+    /// only some were, so the caller must refuse to build on the erased state.
+    public func sendBackspacesAsync(count: Int, completion: @escaping (Bool) -> Void) {
         guard count > 0 else {
-            completion()
+            completion(true)
             return
         }
-        sendBackspaces(count: count)
+        let posted = sendBackspaces(count: count)
         let settle = Double(count) * InjectTiming.backspacePerKeyDelay + InjectTiming.backspaceTrailingDelay
-        DispatchQueue.main.asyncAfter(deadline: .now() + settle, execute: completion)
+        DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
+            completion(posted == count)
+        }
     }
 
     // MARK: - Left arrows

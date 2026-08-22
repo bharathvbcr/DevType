@@ -285,6 +285,44 @@ public enum MacroParser {
 
     // MARK: - Nested snippets
 
+    /// Aggregate work bounds for one nested-snippet resolution pass.
+    ///
+    /// The per-level depth cap (10) bounds recursion *depth*, but not *fan-out*:
+    /// a library where each snippet references ten others costs 10ᴸ leaf
+    /// expansions for L levels, so an ordinary-looking chain could hang the event
+    /// tap (or exhaust memory) when a single trigger is typed. This budget caps
+    /// total resolutions and total produced output per pass; once exhausted,
+    /// remaining references are emitted literally — the same fail-safe behavior as
+    /// an unresolved reference or depth-cap exhaustion.
+    public final class NestedSnippetBudget {
+        /// Total `%snippet:` / `{{snippet:}}` substitutions one pass may perform.
+        public static let defaultMaxResolutions = 10_000
+        /// Hard ceiling on UTF-16 output produced by substitutions in one pass.
+        public static let defaultMaxOutputUTF16Count = 2_000_000
+
+        public let maxResolutions: Int
+        public let maxOutputUTF16Count: Int
+        private(set) var resolutionsPerformed = 0
+        private(set) var outputUTF16Count = 0
+
+        public init(
+            maxResolutions: Int = NestedSnippetBudget.defaultMaxResolutions,
+            maxOutputUTF16Count: Int = NestedSnippetBudget.defaultMaxOutputUTF16Count
+        ) {
+            self.maxResolutions = max(1, maxResolutions)
+            self.maxOutputUTF16Count = max(1, maxOutputUTF16Count)
+        }
+
+        var canResolveMore: Bool {
+            resolutionsPerformed < maxResolutions && outputUTF16Count < maxOutputUTF16Count
+        }
+
+        func recordResolution(producedUTF16Count: Int) {
+            resolutionsPerformed += 1
+            outputUTF16Count += max(0, producedUTF16Count)
+        }
+    }
+
     /// Resolves `%snippet:ABBREV%` references **in place**.
     ///
     /// §3.6: the previous implementation re-parsed the whole string into tokens and rebuilt it
@@ -292,12 +330,17 @@ public enum MacroParser {
     /// `width=` / `height=` clauses and had `%key:Enter%` normalized to `%key:enter%`. Now
     /// everything outside a `%snippet:` macro is copied verbatim and only the reference itself is
     /// substituted, which makes the transform lossless by construction.
+    ///
+    /// Pass `budget` explicitly when this call is part of a larger resolution (e.g. the mustache
+    /// engine resolving one reference of many) so aggregate work stays bounded across the whole
+    /// expansion; the default creates a fresh budget per top-level call.
     public static func resolveNested(
         _ content: String,
         lookup: (String) -> String?,
-        depth: Int = 0
+        depth: Int = 0,
+        budget: NestedSnippetBudget = NestedSnippetBudget()
     ) -> String {
-        guard depth < 10, content.contains("%snippet:") else { return content }
+        guard depth < 10, content.contains("%snippet:"), budget.canResolveMore else { return content }
 
         let marker = "%snippet:"
         var result = ""
@@ -321,10 +364,12 @@ public enum MacroParser {
                 i = content.index(after: i)
                 continue
             }
-            if let nested = lookup(scanned.text) {
-                result += resolveNested(nested, lookup: lookup, depth: depth + 1)
+            if let nested = lookup(scanned.text), budget.canResolveMore {
+                let expanded = resolveNested(nested, lookup: lookup, depth: depth + 1, budget: budget)
+                budget.recordResolution(producedUTF16Count: expanded.utf16.count)
+                result += expanded
             } else {
-                // Unresolved reference: emit the original source text byte-for-byte.
+                // Unresolved or over-budget: emit the original source text byte-for-byte.
                 result += String(rest[rest.startIndex...scanned.terminator])
             }
             i = content.index(i, offsetBy: scanned.consumed)

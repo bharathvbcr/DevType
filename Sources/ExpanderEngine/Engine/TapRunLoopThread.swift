@@ -14,10 +14,14 @@ public final class TapRunLoopThread {
     private var _runLoop: CFRunLoop?
     private var _stopRequested = false
     private var _thread: Thread?
-    private let ready = DispatchSemaphore(value: 0)
 
     /// Bounded wait for the worker's run loop to come up. Callers fall back to the main run loop.
     public static let defaultStartTimeout: TimeInterval = 2.0
+
+    /// Poll step for `waitUntilReady`. The run loop either exists or it does not — there is no
+    /// edge to miss, so a short poll is correct and, unlike a one-shot semaphore, cannot starve
+    /// a second concurrent waiter for the full timeout.
+    private static let readyPollInterval: TimeInterval = 0.01
 
     public init() {}
 
@@ -30,6 +34,17 @@ public final class TapRunLoopThread {
         stateLock.withLock { _runLoop != nil }
     }
 
+    /// Bounded wait until `_runLoop` is set (or `timeout` elapses). Safe for any number of
+    /// concurrent waiters; each returns as soon as the loop exists.
+    private func waitUntilReady(timeout: TimeInterval) -> CFRunLoop? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let loop = runLoop { return loop }
+            Thread.sleep(forTimeInterval: Self.readyPollInterval)
+        }
+        return runLoop
+    }
+
     /// Starts the thread (idempotent) and blocks the caller until its run loop exists.
     /// Returns `nil` if the run loop did not come up within `timeout`.
     @discardableResult
@@ -39,25 +54,23 @@ public final class TapRunLoopThread {
             stateLock.unlock()
             return existing
         }
-        if _thread != nil {
-            // A previous start is still spinning up — just wait for it.
-            stateLock.unlock()
-            _ = ready.wait(timeout: .now() + timeout)
-            return runLoop
+        let alreadyStarting = _thread != nil
+        if !alreadyStarting {
+            _stopRequested = false
+            let thread = Thread { [weak self] in
+                self?.threadMain()
+            }
+            thread.name = "com.devtype.eventtap"
+            thread.qualityOfService = .userInteractive
+            thread.stackSize = 512 * 1024
+            _thread = thread
         }
-        _stopRequested = false
-        let thread = Thread { [weak self] in
-            self?.threadMain()
-        }
-        thread.name = "com.devtype.eventtap"
-        thread.qualityOfService = .userInteractive
-        thread.stackSize = 512 * 1024
-        _thread = thread
         stateLock.unlock()
 
-        thread.start()
-        _ = ready.wait(timeout: .now() + timeout)
-        return runLoop
+        if !alreadyStarting {
+            _thread?.start()
+        }
+        return waitUntilReady(timeout: timeout)
     }
 
     /// Stops the run loop and lets the thread exit. Safe to call from any thread, including
@@ -84,7 +97,6 @@ public final class TapRunLoopThread {
         stateLock.lock()
         _runLoop = current
         stateLock.unlock()
-        ready.signal()
 
         var spinGuard = 0
         while true {

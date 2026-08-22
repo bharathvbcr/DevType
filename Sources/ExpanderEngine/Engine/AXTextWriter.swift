@@ -48,6 +48,39 @@ public final class AXTextWriter {
         self.verifier = verifier
     }
 
+    // MARK: - Hostile range validation
+
+    /// Sanity ceiling for host-reported UTF-16 ranges (~2 GB of text — no real
+    /// field approaches this). NSNotFound-class sentinel answers live near
+    /// `Int.max` and must be rejected before arithmetic, not after.
+    public static let maxPlausibleAXUTF16Units = 1_000_000_000
+
+    /// Whether a host-reported AX selected-text range is safe to do arithmetic on.
+    ///
+    /// Hosts report negative locations (kCFNotFound-class "no selection info") and
+    /// huge lengths; the erase precondition checker already refuses these, but the
+    /// range writer must refuse them too — widening from an unvalidated range
+    /// either targets the start of the document (data destruction) or traps on
+    /// overflow inside the inject path.
+    public static func isUsableAXRange(_ range: CFRange) -> Bool {
+        range.location >= 0 && range.length >= 0
+            && range.location <= maxPlausibleAXUTF16Units
+            && range.length <= maxPlausibleAXUTF16Units
+    }
+
+    /// Widens a validated selection leftwards by `eraseCount` UTF-16 units to
+    /// cover the trigger. Returns nil for any input that would overflow or target
+    /// an unintended region — callers must fall back to HID instead of writing.
+    public static func widenedRange(from reported: CFRange, eraseCount: Int) -> CFRange? {
+        guard isUsableAXRange(reported) else { return nil }
+        let erase = max(0, eraseCount)
+        // Both operands are non-negative and bounded, so this cannot underflow.
+        let erasedFromStart = min(reported.location, erase)
+        let (newLength, overflow) = erasedFromStart.addingReportingOverflow(reported.length)
+        guard !overflow else { return nil }
+        return CFRange(location: reported.location - erasedFromStart, length: newLength)
+    }
+
     // MARK: - Caret
 
     /// Moves selection start left by `utf16OffsetFromEnd` using AX selected-text range.
@@ -69,6 +102,8 @@ public final class AXTextWriter {
         let axRangeValue = unsafeBitCast(rangeValue, to: AXValue.self)
         var range = CFRange(location: 0, length: 0)
         guard AXValueGetValue(axRangeValue, .cfRange, &range) else { return false }
+        // A hostile/sentinel range must not reach the subtraction below.
+        guard Self.isUsableAXRange(range) else { return false }
 
         let newLocation = max(0, range.location - utf16OffsetFromEnd)
         var caret = CFRange(location: newLocation, length: 0)
@@ -110,9 +145,12 @@ public final class AXTextWriter {
         // §3.3: the store is keyed on `(bundleID, role)`. The caller's pre-check only knows the
         // bundle, so this is the first point where a verdict learned for *this* control — a
         // Chromium web view rather than the same app's native NSTextField — can be honoured.
-        // Returning before touching the selection keeps the no-side-effect contract.
-        if let bundleID, !bundleID.isEmpty, !role.isEmpty,
-           AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID, role: role) {
+        // Returning before touching the selection keeps the no-side-effect contract. An
+        // unreadable role still consults the store: it degrades to the bundle-only key, so a
+        // seeded bundle-level condemnation (Chrome, Messages) is honoured without paying the
+        // known-bad first write just because the role could not be read.
+        if let bundleID, !bundleID.isEmpty,
+           AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID, role: role.isEmpty ? nil : role) {
             // #region agent log
             TextInjectionPipeline.debugLogInject(
                 hypothesisId: "M3",
@@ -121,7 +159,7 @@ public final class AXTextWriter {
                 data: ["ok": false, "fail": "learnedFalseSuccessForRole", "role": role]
             )
             // #endregion
-            return .notAttempted("learned false-success for \(bundleID) role \(role)")
+            return .notAttempted("learned false-success for \(bundleID) role \(role.isEmpty ? "(unreadable)" : role)")
         }
 
         var rangeRef: CFTypeRef?
@@ -170,11 +208,19 @@ public final class AXTextWriter {
         func restoreOriginalSelection() {
             var restore = originalRange
             guard let restoreValue = AXValueCreate(.cfRange, &restore) else { return }
-            _ = AXUIElementSetAttributeValue(
+            let status = AXUIElementSetAttributeValue(
                 axElement,
                 kAXSelectedTextRangeAttribute as CFString,
                 restoreValue
             )
+            if status != .success {
+                // A failed restore leaves the widened selection in place; the HID fallback's
+                // first backspace would then eat it. Hosts whose range-set lies twice are a real
+                // observed shape — surface it so field reports can identify them.
+                DevTypeLog.inject.error(
+                    "[Inject] AX selection restore failed after range-replace attempt (\(status.rawValue, privacy: .public)) — widened selection left behind"
+                )
+            }
         }
 
         // Baseline value: the only reliable way to tell "AX reported success but did not mutate"
@@ -186,9 +232,24 @@ public final class AXTextWriter {
             : nil
 
         let erase = max(0, eraseCount)
-        let newLocation = max(0, range.location - erase)
-        let newLength = (range.location - newLocation) + range.length
-        var expanded = CFRange(location: newLocation, length: newLength)
+        // The erase precondition checker refuses negative/overflowing ranges ("we do not know
+        // where the caret is"); the writer must refuse them too. Widening from such a range
+        // previously produced {0, L-1} — the start of the document — or trapped on overflow.
+        guard var expanded = Self.widenedRange(from: range, eraseCount: eraseCount) else {
+            TextInjectionPipeline.debugLogInject(
+                hypothesisId: "M3",
+                message: "axRangeReplace",
+                location: "AXTextWriter",
+                data: [
+                    "ok": false,
+                    "fail": "unusableSelectedTextRange",
+                    "loc": range.location,
+                    "len": range.length,
+                    "erase": erase
+                ]
+            )
+            return .notAttempted("unusable selected-text range (\(range.location), \(range.length))")
+        }
 
         guard let newRangeValue = AXValueCreate(.cfRange, &expanded) else {
             return .notAttempted("AXValueCreate failed for widened range")
@@ -366,6 +427,7 @@ public final class AXTextWriter {
             return false
         }
         guard range.length > 0 else { return true }
+        guard Self.isUsableAXRange(range) else { return false }
 
         DevTypeLog.inject.notice(
             "[Inject] collapsing stray selection before erase length=\(range.length, privacy: .public)"
@@ -374,6 +436,7 @@ public final class AXTextWriter {
         // replace, which widens *backwards* from the caret to cover the trigger — so the trailing
         // edge is where the caret was before we touched it, and `backspaceCount` backspaces from
         // there remove exactly the trigger.
+        // Both fields are bounded by `isUsableAXRange`, so this sum cannot overflow.
         var caret = CFRange(location: range.location + range.length, length: 0)
         guard let caretValue = AXValueCreate(.cfRange, &caret) else { return false }
         return AXUIElementSetAttributeValue(

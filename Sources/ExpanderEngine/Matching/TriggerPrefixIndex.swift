@@ -20,6 +20,9 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
     private let ambiguous: Set<String>
     /// Every folded trigger key, for viable-extension queries.
     private let allKeys: [String]
+    /// `allKeys` fully lowercased once at init (`allKeys` keeps case-sensitive keys verbatim;
+    /// the extension scan must fold those too).
+    private let allKeysLowercased: [String]
     /// Same keys as a set, for exact-completion queries.
     private let completeKeys: Set<String>
     /// Longest trigger, so extension scans can bail early.
@@ -51,6 +54,9 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
 
         self.ambiguous = ambiguous
         self.allKeys = keys
+        // Pre-folded once at init: `hasViableExtension` runs per keystroke while a hold is live,
+        // and `key.lowercased()` allocated a fresh string for every key on every keystroke.
+        self.allKeysLowercased = keys.map { $0.lowercased() }
         self.completeKeys = Set(keys)
         self.maxKeyLength = longest
     }
@@ -71,8 +77,8 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
     public func hasViableExtension(after text: String) -> Bool {
         guard !text.isEmpty, text.count < maxKeyLength else { return false }
         let folded = text.lowercased()
-        for key in allKeys where key.count > text.count {
-            if key.lowercased().hasPrefix(folded) { return true }
+        for key in allKeysLowercased where key.count > folded.count {
+            if key.hasPrefix(folded) { return true }
         }
         return false
     }

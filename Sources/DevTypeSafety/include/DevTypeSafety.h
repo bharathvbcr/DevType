@@ -26,4 +26,26 @@ NS_ASSUME_NONNULL_BEGIN
 /// partially ordered; the caller is expected to log what it caught.
 NSException *_Nullable DTMakeKeyAndOrderFrontCatchingException(NSWindow *window);
 
+/// Key-value-codes `value` onto `object` for `key`, returning whether the write
+/// landed instead of letting the process abort.
+///
+/// Same reason this lives in ObjC as `DTMakeKeyAndOrderFrontCatchingException`
+/// (read that doc comment first): an `NSException` cannot unwind through Swift
+/// frames, so the raising call itself must sit below a frame stack that is ObjC
+/// all the way down to the `@catch`.
+///
+/// **Why KVC into private AppKit views specifically.** `GlassContainerView` drives
+/// the private `NSGlassEffectView` (macOS 26+) through `setValue:forKey:` for keys
+/// like "cornerRadius" / "tintColor" / "contentView". Those keys exist today, but
+/// they are private API with no stability contract — on a future macOS where one
+/// is renamed or removed, KVC raises an `NSUndefinedKeyException`, and raised from
+/// inside a Swift initializer that aborts the process on launch. With this
+/// trampoline the same future change degrades to the existing
+/// `NSVisualEffectView` material fallback instead.
+///
+/// Returns `YES` when the write landed. `NO` means the key was rejected (or the
+/// setter raised for any other reason); the caller must treat `object` as not
+/// configured and take its documented fallback path.
+BOOL DTSetValueForKeyCatching(NSObject *object, id _Nullable value, NSString *key);
+
 NS_ASSUME_NONNULL_END

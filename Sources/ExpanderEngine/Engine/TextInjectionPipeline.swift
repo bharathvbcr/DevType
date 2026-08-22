@@ -1843,7 +1843,10 @@ public final class TextInjectionPipeline {
             if countsAsDuplicateRisk {
                 InjectTelemetryLog.shared.recordTriggerRestore(bundleID: bundleID)
             }
-            if ax.attemptAXDirectInjection(text: text, bundleID: nil) {
+            // Pass the real bundle so the write goes through the capability store like every
+            // other AX site — in a learned false-success app this restore must not claim
+            // success against a field it could not actually mutate.
+            if ax.attemptAXDirectInjection(text: text, bundleID: bundleID) {
                 if swallowed.mustReinjectOnRefuse {
                     _ = reinjectSwallowedKey(swallowed)
                 }

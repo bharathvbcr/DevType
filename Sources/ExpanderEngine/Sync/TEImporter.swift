@@ -84,6 +84,9 @@ public enum TEImporter {
         public var wordBoundaryCount: Int = 0
         /// §3.8: script / AppleScript snippets — imported as their literal source text.
         public var scriptCount: Int = 0
+        /// Items refused at the size boundary (`SnippetImportLimits`): whole group
+        /// files over the byte cap and individual snippets with oversized bodies.
+        public var skippedOversized: Int = 0
     }
 
     public enum ImportError: LocalizedError {
@@ -149,7 +152,14 @@ public enum TEImporter {
         }
 
         var bestByUUID: [String: Candidate] = [:]
+        var skippedOversized = 0
         for url in groupFiles {
+            // Import files are untrusted input: refuse to read absurdly large
+            // sources rather than ballooning memory in the plist parser.
+            if Self.fileSize(at: url) > SnippetImporter.SnippetImportLimits.maxSourceFileBytes {
+                skippedOversized += 1
+                continue
+            }
             guard let data = try? Data(contentsOf: url),
                   let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                   let uuid = plist["uuidString"] as? String
@@ -223,6 +233,13 @@ public enum TEImporter {
                     ?? requireWordBoundary
                 if snippetExpandAfter { wordBoundaryCount += 1 }
 
+                if SnippetImporter.SnippetImportLimits.isOversized(
+                    trigger: abbreviation, replacement: plainText
+                ) {
+                    skippedOversized += 1
+                    continue
+                }
+
                 let title = label.isEmpty ? abbreviation : label
                 snippets.append(SnippetModel(
                     title: title,
@@ -251,8 +268,15 @@ public enum TEImporter {
             sourcePath: folder.path,
             disabledGroupCount: disabledGroupCount,
             wordBoundaryCount: wordBoundaryCount,
-            scriptCount: scriptCount
+            scriptCount: scriptCount,
+            skippedOversized: skippedOversized
         )
+    }
+
+    /// File size in bytes; 0 when the file cannot be stat'ed (the read itself will fail).
+    private static func fileSize(at url: URL) -> Int64 {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? Int64) ?? 0
     }
 
     // MARK: - Plist helpers

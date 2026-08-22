@@ -15,6 +15,13 @@ private final class PanelCloseWatcher: NSObject, NSWindowDelegate {
 /// Floating glass panel that collects fill-in values before an expansion completes.
 enum FillInPanel {
     private static var closeWatcher: PanelCloseWatcher?
+    /// Single-instance state. Two stacked forms would each hold a matching
+    /// suspension and silently disable expansion app-wide until both were dealt
+    /// with — and pixel-identical centered forms make the stack invisible.
+    private static var activePanel: NSPanel?
+    private static var activeFinish: (([Int: String]?) -> Void)?
+    private static var dismissMonitors: [Any] = []
+    private static var dismissObservers: [NSObjectProtocol] = []
 
     @discardableResult
     static func present(
@@ -23,6 +30,10 @@ enum FillInPanel {
         loc: LocalizationManager = .shared,
         completion: @escaping ([Int: String]?) -> Void
     ) -> NSPanel {
+        // A second fill-in request cancels the pending form instead of stacking:
+        // finishing with nil releases its suspension and re-injects the old trigger.
+        activeFinish?(nil)
+
         let suspension = EventTapEngine.shared.suspendMatching(reason: "FillInPanel")
 
         let panel = KeyablePanel(
@@ -38,7 +49,14 @@ enum FillInPanel {
         let finish: ([Int: String]?) -> Void = { values in
             guard !finished else { return }
             finished = true
+            // Clear the retained watcher slot first: `panel.close()` below fires
+            // `windowWillClose` synchronously, re-entering through the watcher, and
+            // leaving the slot set would pin the last form's whole view hierarchy
+            // until the next presentation. Every close path funnels through here —
+            // submit, cancel, outside-dismissal, replacement, and the watcher itself.
+            closeWatcher = nil
             suspension.release()
+            removeDismissWatchers()
             panel.close()
             completion(values)
         }
@@ -62,7 +80,57 @@ enum FillInPanel {
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         controller.focusFirstField()
+
+        activePanel = panel
+        activeFinish = finish
+        installDismissWatchers(for: panel)
         return panel
+    }
+
+    // MARK: - Dismissal on outside interaction
+
+    /// An abandoned form keeps matching suspended invisibly everywhere — the menu
+    /// bar still shows Active and nothing on screen says why. Like the palettes,
+    /// any outside interaction finishes the form as a cancellation.
+    private static func installDismissWatchers(for panel: NSPanel) {
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+
+        let local = NSEvent.addLocalMonitorForEvents(matching: clicks) { event in
+            if event.window !== panel { dismissFromOutsideInteraction() }
+            return event
+        }
+        if let local { dismissMonitors.append(local) }
+
+        let global = NSEvent.addGlobalMonitorForEvents(matching: clicks) { _ in
+            dismissFromOutsideInteraction()
+        }
+        if let global { dismissMonitors.append(global) }
+
+        DispatchQueue.main.async {
+            guard activePanel === panel else { return }
+            dismissObservers.append(
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.didResignKeyNotification,
+                    object: panel,
+                    queue: .main
+                ) { _ in dismissFromOutsideInteraction() }
+            )
+        }
+    }
+
+    private static func removeDismissWatchers() {
+        dismissMonitors.forEach(NSEvent.removeMonitor)
+        dismissMonitors.removeAll()
+        dismissObservers.forEach(NotificationCenter.default.removeObserver)
+        dismissObservers.removeAll()
+    }
+
+    private static func dismissFromOutsideInteraction() {
+        guard activePanel != nil else { return }
+        let finish = activeFinish
+        activePanel = nil
+        activeFinish = nil
+        finish?(nil)
     }
 }
 

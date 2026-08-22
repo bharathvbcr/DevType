@@ -25,12 +25,17 @@ public final class ImageAttachmentStore {
     public enum StoreError: LocalizedError {
         case unreadableImage(String)
         case unsupportedImageType(String)
+        /// §hardening: the payload exceeded `maxImportedImageBytes`. Sources come
+        /// from untrusted imports (Espanso `image_path`), so a multi-GB "image" is
+        /// refused before it is decoded or copied.
+        case oversizedImage(String)
         case saveFailed(String)
 
         public var errorDescription: String? {
             switch self {
             case .unreadableImage(let p): return "Could not read image: \(p)"
             case .unsupportedImageType(let ext): return "Unsupported image type: \(ext)"
+            case .oversizedImage(let p): return "Image exceeds the \(maxImportedImageBytes / 1_000_000) MB attachment limit: \(p)"
             case .saveFailed(let p): return "Could not save image to: \(p)"
             }
         }
@@ -38,6 +43,16 @@ public final class ImageAttachmentStore {
 
     /// Extensions we accept when attaching/importing images.
     public static let supportedExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "tiff", "bmp", "webp", "heic"]
+
+    /// §hardening: hard ceiling on the byte size of an image accepted into the
+    /// store, for both file imports (`importImage(from:)`) and raw payloads
+    /// (`save(data:)`). The source of an import is dictated by untrusted configs,
+    /// so the size is stat'ed *before* any decode/copy work happens.
+    ///
+    /// Deliberately a mutable `internal static var`: production code must treat
+    /// it as a constant; only tests lower it (`@testable`) to exercise the
+    /// refusal path without writing multi-GB fixtures.
+    internal static var maxImportedImageBytes = 25 * 1024 * 1024
 
     /// §3.7: returned by `url(forImagePath:)` when the path fails containment
     /// validation. Deterministic, inside the store, and can never exist — callers
@@ -143,11 +158,20 @@ public final class ImageAttachmentStore {
     }
 
     /// Copies an image file into the store. Returns the stored file name.
+    ///
+    /// §hardening: the source is stat'ed first and refused above
+    /// `maxImportedImageBytes` — before `NSImage` decoding or any copy, so an
+    /// untrusted `image_path` cannot make the importer read a payload bomb.
     @discardableResult
     public func importImage(from sourceURL: URL) throws -> String {
         let ext = sourceURL.pathExtension.lowercased()
         guard Self.supportedExtensions.contains(ext) else {
             throw StoreError.unsupportedImageType(ext.isEmpty ? sourceURL.lastPathComponent : ext)
+        }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        let byteCount = (attributes?[.size] as? Int64) ?? 0
+        guard byteCount <= Self.maxImportedImageBytes else {
+            throw StoreError.oversizedImage(sourceURL.path)
         }
         guard NSImage(contentsOf: sourceURL) != nil else {
             throw StoreError.unreadableImage(sourceURL.path)
@@ -170,6 +194,10 @@ public final class ImageAttachmentStore {
         let ext = preferredExtension.lowercased()
         guard Self.supportedExtensions.contains(ext) else {
             throw StoreError.unsupportedImageType(ext)
+        }
+        // §hardening: same ceiling as `importImage(from:)` — refuse before decode.
+        guard data.count <= Self.maxImportedImageBytes else {
+            throw StoreError.oversizedImage("\(data.count) bytes")
         }
         guard NSImage(data: data) != nil else {
             throw StoreError.unreadableImage("\(data.count) bytes")

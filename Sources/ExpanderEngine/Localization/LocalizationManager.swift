@@ -495,6 +495,7 @@ public final class LocalizationManager: ObservableObject {
             "ax.notApplicable": "not applicable",
             "editor.save": "Save Snippet",
             "editor.error.emptyTrigger": "Enter a trigger to save this snippet.",
+            "editor.error.emptyReplacement": "Enter the text this snippet expands to.",
             "editor.error.conflict": "“%@” conflicts with existing trigger “%@”.",
 
             // §1: new-snippet guide. Teaches the trigger rule live as the user types.
@@ -598,7 +599,7 @@ public final class LocalizationManager: ObservableObject {
                 "When on, a bare-word trigger only fires after a space, punctuation, Return or Tab. Turn it off to expand the moment the last character is typed. Punctuation-leading triggers always fire instantly.",
             "editor.plainText.help": "Strips styling so the snippet is inserted as plain text.",
             "editor.hint.save": "⌘↩ to save",
-            "editor.hint.macros": "⌘/ for macros",
+            "editor.hint.macros": "⌘⇧/ for macros",
 
             // §4: accessibility labels for the editor, palette, group editor and fill-in panel.
             "ax.editor.stage": "Expansion preview",
@@ -738,6 +739,9 @@ public final class LocalizationManager: ObservableObject {
             "alert.import.message":
                 "Choose a TextExpander settings folder, or an Espanso config folder, match directory, package, or .yml file",
             "alert.import.summary": "Added %d · Updated %d · Unchanged %d",
+            "alert.import.inprogress.title": "Import Already Running",
+            "alert.import.inprogress.message":
+                "Another import is already in progress. Please wait for it to finish.",
             "alert.tapFailed.title": "Event Tap Failed",
             "alert.tapFailed.openRecovery": "Open Permission Recovery",
             "alert.textExpander.title": "TextExpander Detected",
@@ -1540,6 +1544,7 @@ public final class LocalizationManager: ObservableObject {
             "ax.notApplicable": "해당 없음",
             "editor.save": "스니펫 저장",
             "editor.error.emptyTrigger": "저장하려면 트리거를 입력하세요.",
+            "editor.error.emptyReplacement": "이 스니펫이 확장될 텍스트를 입력하세요.",
             "editor.error.conflict": "“%@”이(가) 기존 트리거 “%@”와(과) 충돌합니다.",
 
             // §1
@@ -1639,7 +1644,7 @@ public final class LocalizationManager: ObservableObject {
                 "켜면 일반 단어 트리거는 공백, 문장 부호, Return, Tab 뒤에만 실행됩니다. 끄면 마지막 글자를 입력하는 즉시 확장됩니다. 문장 부호로 시작하는 트리거는 항상 즉시 실행됩니다.",
             "editor.plainText.help": "서식을 제거하고 일반 텍스트로 삽입합니다.",
             "editor.hint.save": "⌘↩ 저장",
-            "editor.hint.macros": "⌘/ 매크로",
+            "editor.hint.macros": "⌘⇧/ 매크로",
 
             // §4
             "ax.editor.stage": "확장 미리보기",
@@ -1771,6 +1776,9 @@ public final class LocalizationManager: ObservableObject {
             "alert.import.message":
                 "TextExpander 설정 폴더 또는 Espanso 설정 폴더, match 디렉터리, 패키지, .yml 파일을 선택하세요",
             "alert.import.summary": "추가 %d · 갱신 %d · 변경 없음 %d",
+            "alert.import.inprogress.title": "가져오기 이미 진행 중",
+            "alert.import.inprogress.message":
+                "다른 가져오기가 이미 진행 중입니다. 완료될 때까지 기다려 주세요.",
             "alert.tapFailed.title": "이벤트 탭 실패",
             "alert.tapFailed.openRecovery": "권한 복구 열기",
             "alert.textExpander.title": "TextExpander 감지됨",
@@ -2555,6 +2563,7 @@ public final class LocalizationManager: ObservableObject {
             "ax.notApplicable": "該当なし",
             "editor.save": "スニペットを保存",
             "editor.error.emptyTrigger": "保存するにはトリガーを入力してください。",
+            "editor.error.emptyReplacement": "このスニペットが展開されるテキストを入力してください。",
             "editor.error.conflict": "「%@」は既存のトリガー「%@」と競合しています。",
 
             // §1
@@ -2654,7 +2663,7 @@ public final class LocalizationManager: ObservableObject {
                 "オンにすると、通常の単語トリガーはスペース・記号・Return・Tab の後だけで動作します。オフにすると最後の文字を入力した瞬間に展開されます。記号で始まるトリガーは常に即座に展開されます。",
             "editor.plainText.help": "書式を取り除き、プレーンテキストとして挿入します。",
             "editor.hint.save": "⌘↩ で保存",
-            "editor.hint.macros": "⌘/ でマクロ",
+            "editor.hint.macros": "⌘⇧/ でマクロ",
 
             // §4
             "ax.editor.stage": "展開プレビュー",
@@ -2785,6 +2794,9 @@ public final class LocalizationManager: ObservableObject {
             "alert.import.message":
                 "TextExpander の設定フォルダ、または Espanso の設定フォルダ・match ディレクトリ・パッケージ・.yml ファイルを選択してください",
             "alert.import.summary": "追加 %d · 更新 %d · 変更なし %d",
+            "alert.import.inprogress.title": "インポート実行中",
+            "alert.import.inprogress.message":
+                "別のインポートがすでに実行中です。完了までお待ちください。",
             "alert.tapFailed.title": "イベントタップに失敗しました",
             "alert.tapFailed.openRecovery": "権限の復旧を開く",
             "alert.textExpander.title": "TextExpander を検出",

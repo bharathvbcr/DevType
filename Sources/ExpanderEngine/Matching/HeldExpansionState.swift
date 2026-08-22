@@ -98,9 +98,11 @@ public struct HeldExpansionState: Equatable, Sendable {
         // `hasViableExtension` alone answers only the first — `` `slml `` strictly extends
         // nothing, so on the final `l` it reads as a dead end and the old code fired
         // `` `slm `` + "l".
-        let completedLongerTrigger = passedThroughLongerTrigger || prefixIndex.isCompleteTrigger(full)
+        // Hoisted once: the same query runs twice below (keep-alive check and completion check).
+        let justCompletedLongerTrigger = prefixIndex.isCompleteTrigger(full)
+        let completedLongerTrigger = passedThroughLongerTrigger || justCompletedLongerTrigger
 
-        if prefixIndex.hasViableExtension(after: full) || prefixIndex.isCompleteTrigger(full) {
+        if prefixIndex.hasViableExtension(after: full) || justCompletedLongerTrigger {
             return .keepWaiting(HeldExpansionState(
                 trigger: trigger,
                 typedAfter: combined,

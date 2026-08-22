@@ -70,8 +70,14 @@ public final class UsageStatsStore {
     /// Debounce window for disk writes.
     public static let defaultFlushInterval: TimeInterval = 5.0
 
+    /// Delay before a failed flush is retried. Long enough to ride out a transient
+    /// failure (full disk, iCloud eviction), short enough that counters are not
+    /// stranded for a whole debounce window.
+    public static let defaultFlushRetryDelay: TimeInterval = 5.0
+
     private let fileURL: URL
     private let flushInterval: TimeInterval
+    private let flushRetryDelay: TimeInterval
     private let lock = NSLock()
     private let ioQueue = DispatchQueue(label: "devtype.usagestats", qos: .utility)
 
@@ -82,6 +88,10 @@ public final class UsageStatsStore {
     private var terminateObserver: NSObjectProtocol?
     private var _revision: UInt64 = 0
 
+    /// Test seam: when set, replaces the atomic disk write so failure paths are
+    /// reachable without a full disk. `nil` (the default) means production I/O.
+    var writeInterceptor: ((Data) throws -> Void)?
+
     public var revision: UInt64 {
         lock.lock()
         defer { lock.unlock() }
@@ -91,7 +101,13 @@ public final class UsageStatsStore {
     /// - Parameters:
     ///   - fileURL: override for tests; defaults to the device-local support directory.
     ///   - flushInterval: debounce window; pass `0` in tests for immediate writes.
-    public init(fileURL: URL? = nil, flushInterval: TimeInterval = UsageStatsStore.defaultFlushInterval) {
+    ///   - flushRetryDelay: delay before a failed write is retried; pass a small
+    ///     value in tests.
+    public init(
+        fileURL: URL? = nil,
+        flushInterval: TimeInterval = UsageStatsStore.defaultFlushInterval,
+        flushRetryDelay: TimeInterval = UsageStatsStore.defaultFlushRetryDelay
+    ) {
         if let fileURL {
             self.fileURL = fileURL
         } else if let env = ProcessInfo.processInfo.environment[SnippetStore.storeDirEnvKey], !env.isEmpty {
@@ -102,6 +118,7 @@ public final class UsageStatsStore {
                 .appendingPathComponent(Self.fileName)
         }
         self.flushInterval = max(0, flushInterval)
+        self.flushRetryDelay = max(0, flushRetryDelay)
         stats = Self.loadFromDisk(fileURL: self.fileURL)
         installTerminateHook()
     }
@@ -296,19 +313,44 @@ public final class UsageStatsStore {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(Document(stats: keyed))
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true
-            )
-            try data.write(to: fileURL, options: .atomic)
+            try persist(data)
         } catch {
-            // Re-arm so the next tick retries instead of dropping the counters.
+            // Re-arm and schedule exactly one bounded retry. Re-arming alone used
+            // to be the whole story: with no flush pending, the counters sat
+            // unwritten until some *later* mutation happened to schedule a tick —
+            // an indefinite data-loss window after a transient failure. The
+            // generation guard collapses overlapping retries the same way it
+            // dedupes debounced flushes: any newer mutation or explicit `flush()`
+            // supersedes this retry, because that newer work owns the write.
             lock.lock()
             dirty = true
+            let generation = flushGeneration
             lock.unlock()
             DevTypeLog.store.error(
                 "[Store] Failed to write usage stats: \(error.localizedDescription, privacy: .public)"
             )
+            ioQueue.asyncAfter(deadline: .now() + flushRetryDelay) { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                let isCurrent = generation == self.flushGeneration
+                self.lock.unlock()
+                guard isCurrent else { return }
+                self.writeIfDirty()
+            }
         }
+    }
+
+    /// The atomic disk write, split out so tests can inject failures. Production
+    /// path (`writeInterceptor == nil`) is unchanged.
+    private func persist(_ data: Data) throws {
+        if let writeInterceptor {
+            try writeInterceptor(data)
+            return
+        }
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try data.write(to: fileURL, options: .atomic)
     }
 
     private static func loadFromDisk(fileURL: URL) -> [UUID: Stat] {

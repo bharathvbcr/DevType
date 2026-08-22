@@ -134,12 +134,20 @@ public enum MacroRenderer {
     }
 
     /// Resolves `{{snippet:trigger}}` mustache nested snippets (depth < 10).
+    ///
+    /// The budget bounds total fan-out across this pass *and* every TE resolution
+    /// it performs (a branching reference library previously cost Fᴸ expansions —
+    /// a hang/memory bomb from one typed trigger). Exhaustion leaves references
+    /// literal, matching depth-cap and unresolved-reference behavior.
     public static func resolveMustacheNested(
         _ content: String,
         lookup: (String) -> String?,
-        depth: Int = 0
+        depth: Int = 0,
+        budget: MacroParser.NestedSnippetBudget = MacroParser.NestedSnippetBudget()
     ) -> String {
-        guard depth < 10, content.contains("{{snippet:"), let regex = mustacheSnippetRegex else {
+        guard depth < 10, content.contains("{{snippet:"), let regex = mustacheSnippetRegex,
+              budget.canResolveMore
+        else {
             return content
         }
         let ns = content as NSString
@@ -150,10 +158,13 @@ public enum MacroRenderer {
             guard match.numberOfRanges >= 2 else { continue }
             let trigger = ns.substring(with: match.range(at: 1))
             let replacement: String
-            if let nested = lookup(trigger) {
-                let resolved = MacroParser.resolveNested(nested, lookup: lookup, depth: depth + 1)
-                replacement = resolveMustacheNested(resolved, lookup: lookup, depth: depth + 1)
+            if let nested = lookup(trigger), budget.canResolveMore {
+                let resolved = MacroParser.resolveNested(nested, lookup: lookup, depth: depth + 1, budget: budget)
+                let fullyResolved = resolveMustacheNested(resolved, lookup: lookup, depth: depth + 1, budget: budget)
+                budget.recordResolution(producedUTF16Count: fullyResolved.utf16.count)
+                replacement = fullyResolved
             } else {
+                // Unresolved or over-budget: keep the reference literal.
                 replacement = "{{snippet:\(trigger)}}"
             }
             result = (result as NSString).replacingCharacters(in: match.range, with: replacement)

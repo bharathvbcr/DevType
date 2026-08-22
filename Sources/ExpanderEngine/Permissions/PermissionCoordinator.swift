@@ -174,6 +174,11 @@ public final class PermissionCoordinator {
         }
     }
 
+    /// Threading contract: `onStatusChanged` fires synchronously on **whatever thread** drove the
+    /// refresh — main, `injectQueue`, or `processingQueue` (inject outcomes record status from
+    /// the injection path). Consumers must marshal to main themselves; the app delegate's
+    /// handler funnels through `refreshStatusItemUI`, which already does. Emission is
+    /// synchronous so status reads never lag a state transition they observed.
     public func start(
         onStatusChanged: @escaping (Status) -> Void,
         onTapStartFailed: (() -> Void)? = nil,

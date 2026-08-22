@@ -6,6 +6,24 @@ import Foundation
 /// backed by this type.
 public enum SnippetImporter {
 
+    /// Hard size bounds at the import boundary. Imported libraries are untrusted
+    /// input (shared team exports, downloaded packs); without these a multi-GB
+    /// match file or a half-gigabyte snippet body balloons the parser and then
+    /// lives in the library store forever. Limits are generous far beyond any
+    /// real-world library — they only reject pathological content.
+    public enum SnippetImportLimits {
+        /// Per-source-file read cap before any parsing happens.
+        public static let maxSourceFileBytes = 64 * 1024 * 1024
+        /// Longest accepted trigger abbreviation.
+        public static let maxTriggerCharacters = 512
+        /// Longest accepted replacement body.
+        public static let maxReplacementCharacters = 100_000
+
+        public static func isOversized(trigger: String, replacement: String) -> Bool {
+            trigger.count > maxTriggerCharacters || replacement.count > maxReplacementCharacters
+        }
+    }
+
     public enum SourceKind: String, Equatable {
         case textExpander = "TextExpander"
         case espanso = "Espanso"
@@ -26,6 +44,8 @@ public enum SnippetImporter {
         public let sourcePath: String
         /// Human-readable import notes (rich-text downgrade, skipped matches, …).
         public let notes: [String]
+        /// Items refused at the size boundary (`SnippetImportLimits`).
+        public let skippedOversized: Int
 
         public var groupCount: Int { groups.count }
     }
@@ -127,13 +147,17 @@ public enum SnippetImporter {
             if result.wordBoundaryCount > 0 {
                 notes.append("\(result.wordBoundaryCount) snippet(s) expand only at a word boundary (TextExpander \"expand at delimiter\").")
             }
+            if result.skippedOversized > 0 {
+                notes.append("\(result.skippedOversized) item(s) skipped (exceeds import size limits).")
+            }
             return ImportResult(
                 kind: .textExpander,
                 groups: result.groups,
                 snippetCount: result.snippetCount,
                 imageCount: 0,
                 sourcePath: result.sourcePath,
-                notes: notes
+                notes: notes,
+                skippedOversized: result.skippedOversized
             )
 
         case .espanso:
@@ -160,13 +184,17 @@ public enum SnippetImporter {
             if nonImageSkipped > 0 {
                 notes.append("\(nonImageSkipped) match(es) skipped (variables/forms/html/regex/empty trigger).")
             }
+            if result.skippedOversized > 0 {
+                notes.append("\(result.skippedOversized) item(s) skipped (exceeds import size limits).")
+            }
             return ImportResult(
                 kind: .espanso,
                 groups: result.groups,
                 snippetCount: result.snippetCount,
                 imageCount: result.imageCount,
                 sourcePath: result.sourcePath,
-                notes: notes
+                notes: notes,
+                skippedOversized: result.skippedOversized
             )
         }
     }

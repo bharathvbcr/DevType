@@ -359,6 +359,9 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
     }
 
     private func installKeyMonitor() {
+        // Re-appear without disappear would otherwise stack monitors; every extra
+        // one keeps consuming keys after teardown removed only the last.
+        guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             switch Int(event.keyCode) {

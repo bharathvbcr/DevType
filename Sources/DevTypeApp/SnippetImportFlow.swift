@@ -16,6 +16,12 @@ import ExpanderEngine
 
 enum SnippetImportFlow {
 
+    /// Serializes imports. Two overlapping flows (menu bar + Preferences sheet)
+    /// would race the store's read-modify-write merge and double-alert; the second
+    /// caller is told one is already running instead of queueing silently.
+    private static let stateLock = NSLock()
+    private static var isImporting = false
+
     /// Presents the open panel, imports with `.merge`, and reports the result.
     /// `window` makes both the panel and the result alert sheets.
     static func present(
@@ -57,10 +63,58 @@ enum SnippetImportFlow {
         completion: (() -> Void)?
     ) {
         let loc = LocalizationManager.shared
-        do {
-            // §1.10: `.merge` matches by trigger inside same-named groups and
-            // appends the rest — it never removes a local snippet.
-            let (result, summary) = try store.importSnippets(from: url, mode: .merge)
+        stateLock.lock()
+        if isImporting {
+            stateLock.unlock()
+            DevTypeAlert.info(
+                title: loc.s("alert.import.inprogress.title"),
+                message: loc.s("alert.import.inprogress.message"),
+                window: window
+            )
+            return
+        }
+        isImporting = true
+        stateLock.unlock()
+
+        // Parse + merge + save move off the main thread: a large library used to
+        // beachball the whole app for the duration of the import. Every store
+        // listener already hops to main internally (manager list, palette, health
+        // banner), and the result alert below is marshalled back explicitly —
+        // nothing here touches UI off-main.
+        DispatchQueue.global(qos: .userInitiated).async { [store] in
+            let outcome: Result<
+                (result: SnippetImporter.ImportResult, summary: SnippetStore.ImportSummary),
+                Error
+            >
+            do {
+                // §1.10: `.merge` matches by trigger inside same-named groups and
+                // appends the rest — it never removes a local snippet.
+                outcome = .success(try store.importSnippets(from: url, mode: .merge))
+            } catch {
+                outcome = .failure(error)
+            }
+            DispatchQueue.main.async {
+                stateLock.lock()
+                isImporting = false
+                stateLock.unlock()
+                report(outcome, window: window, loc: loc, completion: completion)
+            }
+        }
+    }
+
+    private typealias ImportOutcome = Result<
+        (result: SnippetImporter.ImportResult, summary: SnippetStore.ImportSummary),
+        Error
+    >
+
+    private static func report(
+        _ outcome: ImportOutcome,
+        window: NSWindow?,
+        loc: LocalizationManager,
+        completion: (() -> Void)?
+    ) {
+        switch outcome {
+        case .success(let (result, summary)):
             completion?()
 
             var body = loc.s(
@@ -93,7 +147,7 @@ enum SnippetImportFlow {
                 message: body,
                 window: window
             )
-        } catch {
+        case .failure(let error):
             DevTypeLog.app.error(
                 "[Import] failed: \(error.localizedDescription, privacy: .public)"
             )

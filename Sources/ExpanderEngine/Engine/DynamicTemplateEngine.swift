@@ -399,6 +399,14 @@ public final class DynamicTemplateEngine {
             let transformed = applyPreservingCursorTag(opener.transform, to: body, locale: locale)
             output.replaceSubrange(opener.range.lowerBound..<close.upperBound, with: transformed)
         }
+        if iterations >= 32, output.contains("{{upper:") || output.contains("{{lower:")
+            || output.contains("{{title:") || output.contains("{{sentence:") {
+            // The cap exists to bound adversarial input; a library that genuinely exceeds it
+            // must not fail silently — the leftover literal tags are the user-visible symptom.
+            DevTypeLog.app.notice(
+                "[Macros] case-transform pass hit its 32-iteration bound — remaining {{…}} tags left literal"
+            )
+        }
         return output
     }
 

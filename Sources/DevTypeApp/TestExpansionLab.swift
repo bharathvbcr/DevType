@@ -95,6 +95,11 @@ private final class LabSession: NSObject {
     private var statusLabel: NSTextField?
     /// Self-retain until Close.
     private var retainSelf: LabSession?
+    /// Fires `close()` for every dismissal of the panel — including the red
+    /// traffic light, which never reaches the Close button. Without it a closed
+    /// lab leaked the retained session *and* its `NSPanel` (`isReleasedWhenClosed`
+    /// is false) for the rest of the launch.
+    private var closeObserver: NSObjectProtocol?
 
     init(
         snippet: SnippetModel,
@@ -240,6 +245,16 @@ private final class LabSession: NSObject {
             NSApp.activate(ignoringOtherApps: true)
         }
 
+        // Mirror the AppDelegate Setup-window pattern: one block-based observer,
+        // replaced (here: removed) on close, so the window closing by any route
+        // funnels into the same teardown as the Close button. Double-close is
+        // idempotent — the observer is removed before `panel.close()` re-enters.
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in self?.close() }
+
         // Focus lab field, then inject with eraseCount=0 (empty field).
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -301,6 +316,12 @@ private final class LabSession: NSObject {
     }
 
     @objc func close() {
+        // Remove first: `panel.close()` below fires willClose synchronously and the
+        // observer would re-enter this method mid-teardown.
+        if let closeObserver {
+            NotificationCenter.default.removeObserver(closeObserver)
+            self.closeObserver = nil
+        }
         if let host = hostWindow, let panel, panel.isSheet {
             host.endSheet(panel)
         }

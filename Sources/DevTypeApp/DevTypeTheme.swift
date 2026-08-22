@@ -1,4 +1,5 @@
 import AppKit
+import DevTypeSafety
 
 // MARK: - Crimson Glass Design System
 //
@@ -664,36 +665,49 @@ final class GlassContainerView: NSView {
 
         if #available(macOS 26.0, *), let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
             let glass = glassClass.init(frame: bounds)
-            glass.setValue(cornerRadius, forKey: "cornerRadius")
-            glass.setValue(tint, forKey: "tintColor")
-            glass.autoresizingMask = [.width, .height]
-            addSubview(glass)
-            contentView.frame = bounds
-            contentView.autoresizingMask = [.width, .height]
-            glass.setValue(contentView, forKey: "contentView")
-        } else {
-            let effect = NSVisualEffectView(frame: bounds)
-            effect.material = material
-            effect.blendingMode = blending
-            effect.state = .active
-            effect.wantsLayer = true
-            effect.autoresizingMask = [.width, .height]
-            addSubview(effect)
-
-            let tintView = NSView(frame: bounds)
-            tintView.wantsLayer = true
-            tintView.layer?.backgroundColor = tint.cgColor
-            tintView.autoresizingMask = [.width, .height]
-            addSubview(tintView)
-
-            contentView.frame = bounds
-            contentView.autoresizingMask = [.width, .height]
-            addSubview(contentView)
-
-            if showsBorder {
-                layer?.borderWidth = 1
-                layer?.borderColor = DevTypeTheme.accent.withAlphaComponent(0.26).cgColor
+            // Each write goes through the exception-catching trampoline: the keys are
+            // private API with no stability contract, and on a future macOS that
+            // renames one, plain KVC raises an undefined-key NSException — which from
+            // a Swift frame aborts the process. A rejected key falls back to the
+            // material path below instead.
+            //
+            // All three writes are attempted before anything touches the view
+            // hierarchy, so a failure can never leave a half-configured glass
+            // surface on screen.
+            let configured =
+                DTSetValueForKeyCatching(glass, cornerRadius, "cornerRadius")
+                && DTSetValueForKeyCatching(glass, tint, "tintColor")
+                && DTSetValueForKeyCatching(glass, contentView, "contentView")
+            if configured {
+                glass.autoresizingMask = [.width, .height]
+                addSubview(glass)
+                contentView.frame = bounds
+                contentView.autoresizingMask = [.width, .height]
+                return
             }
+        }
+
+        let effect = NSVisualEffectView(frame: bounds)
+        effect.material = material
+        effect.blendingMode = blending
+        effect.state = .active
+        effect.wantsLayer = true
+        effect.autoresizingMask = [.width, .height]
+        addSubview(effect)
+
+        let tintView = NSView(frame: bounds)
+        tintView.wantsLayer = true
+        tintView.layer?.backgroundColor = tint.cgColor
+        tintView.autoresizingMask = [.width, .height]
+        addSubview(tintView)
+
+        contentView.frame = bounds
+        contentView.autoresizingMask = [.width, .height]
+        addSubview(contentView)
+
+        if showsBorder {
+            layer?.borderWidth = 1
+            layer?.borderColor = DevTypeTheme.accent.withAlphaComponent(0.26).cgColor
         }
     }
 
@@ -1738,30 +1752,6 @@ final class RoundedSelectionRowView: NSTableRowView {
     }
 }
 
-// MARK: - Status dot
-
-/// 8×8 colored dot used for engine state.
-final class StatusDotView: NSView {
-    var color: NSColor = DevTypeTheme.statusGray {
-        didSet { layer?.backgroundColor = color.cgColor }
-    }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        translatesAutoresizingMaskIntoConstraints = false
-        layer?.cornerRadius = 4
-        layer?.backgroundColor = color.cgColor
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 8),
-            heightAnchor.constraint(equalToConstant: 8)
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-}
-
 // MARK: - Styled text input
 
 /// Rounded, crimson-focus text field matching the glass theme.
@@ -1783,24 +1773,5 @@ final class GlassTextField: NSTextField {
         let result = super.becomeFirstResponder()
         needsDisplay = true
         return result
-    }
-}
-
-// MARK: - NSSwitch convenience
-
-extension NSButton {
-    /// Modern labeled toggle row (NSSwitch + label) used in forms.
-    static func devtypeToggle(
-        title: String,
-        isOn: Bool,
-        target: AnyObject?,
-        action: Selector?
-    ) -> NSSwitch {
-        let toggle = NSSwitch()
-        toggle.state = isOn ? .on : .off
-        toggle.target = target
-        toggle.action = action
-        toggle.translatesAutoresizingMaskIntoConstraints = false
-        return toggle
     }
 }

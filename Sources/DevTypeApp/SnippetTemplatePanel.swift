@@ -16,6 +16,10 @@ enum SnippetTemplatePanel {
         loc: LocalizationManager = .shared,
         onPick: @escaping (SnippetTemplate) -> Void
     ) {
+        // Same single-instance contract as MacroPalettePanel.present: a second
+        // presentation while one is up would overwrite the statics, and finishing
+        // the first would then nil them out from under the second.
+        if activePanel != nil { return }
         let panel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 480),
             styleMask: [.borderless],

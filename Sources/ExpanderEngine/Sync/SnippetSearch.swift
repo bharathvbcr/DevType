@@ -229,9 +229,7 @@ public enum SnippetSearch {
                 let title = snippet.displayTitle
                 let titleFolded = FoldedText.fold(title, locale: locale)
                 let wordStarts = wordStartIndices(in: titleFolded.characters)
-                let body = snippet.replacementText.count > SnippetSearchIndex.maxIndexedBodyCharacters
-                    ? String(snippet.replacementText.prefix(SnippetSearchIndex.maxIndexedBodyCharacters))
-                    : snippet.replacementText
+                let body = indexedBodyText(snippet.replacementText)
 
                 entries.append(SnippetSearchIndex.Entry(
                     snippet: snippet,
@@ -378,6 +376,15 @@ public enum SnippetSearch {
         return result
     }
 
+    /// Body text as searched — capped at `maxIndexedBodyCharacters` exactly like
+    /// `makeIndex`, so the legacy shim and the index path agree on huge snippets:
+    /// same matches, same scores, and no unbounded folding work per call.
+    private static func indexedBodyText(_ body: String) -> String {
+        body.count > SnippetSearchIndex.maxIndexedBodyCharacters
+            ? String(body.prefix(SnippetSearchIndex.maxIndexedBodyCharacters))
+            : body
+    }
+
     /// Legacy single-snippet scorer, kept as a shim. Returns `nil` when the snippet does not
     /// match at all.
     public static func score(snippet: SnippetModel, needle: String) -> Int? {
@@ -395,7 +402,7 @@ public enum SnippetSearch {
             bareTriggerOffset: leadingSigilCount(of: snippet.triggerKeyword),
             title: FoldedText.fold(snippet.displayTitle, locale: Locale.current),
             group: .empty,
-            body: FoldedText.fold(snippet.replacementText, locale: Locale.current),
+            body: FoldedText.fold(indexedBodyText(snippet.replacementText), locale: Locale.current),
             titleWordStarts: [],
             titleInitials: []
         )

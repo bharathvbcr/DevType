@@ -254,6 +254,27 @@ public final class SnippetStore {
     private let digestLock = NSLock()
     private var savedDigest: FileDigest = .absent
 
+    /// Serializes read-modify-write mutations (`importGroups`, `saveSnippets`) and
+    /// the sanitize→write→purge tail of every direct `saveGroups`.
+    /// The per-call `lock` cannot span an RMW — `loadGroups()` and `saveGroups()`
+    /// acquire it internally and unfair locks are not reentrant — so two
+    /// overlapping merges both computed against the same cached baseline and the
+    /// later write silently dropped the earlier one's groups. The on-disk digest
+    /// guard does not catch this either: it defends against *external* writers,
+    /// and every successful in-process write refreshes the digest that the check
+    /// compares against.
+    ///
+    /// `saveGroups` is included because its orphan purge is destructive beyond the
+    /// library file: a direct save computed from a stale snapshot could interleave
+    /// its purge after another writer's commit and delete keychain secrets that
+    /// the just-written library still references.
+    ///
+    /// Held across listener dispatch (they fire from `saveGroupsSerialized`, which
+    /// these methods all reach): a listener that synchronously calls back into
+    /// `importGroups`/`saveSnippets`/`saveGroups` would self-deadlock. Every
+    /// current listener hops to main asynchronously first.
+    private let rmwLock = NSLock()
+
     /// §2.5: reentrancy guard. Set for the duration of an external-state apply so a
     /// watcher event produced by that apply cannot recurse back into `reloadFromDisk`.
     private let externalStateLock = NSLock()
@@ -405,6 +426,12 @@ public final class SnippetStore {
         self.watcher = watcherFactory(fileURL)
         startWatching()
         Self.setActiveLibraryDirectory(fileURL.deletingLastPathComponent())
+
+        // §0.3: an evicted iCloud library materializes in the background; pick it
+        // up and announce it when it lands instead of having blocked init for it.
+        if Self.isPotentiallyMaterializing(fileURL) {
+            scheduleMaterializationReload()
+        }
     }
 
     deinit { watcher?.stop() }
@@ -517,6 +544,9 @@ public final class SnippetStore {
                 saveBlockLock.lock()
                 _saveBlocked = loaded.blocked
                 saveBlockLock.unlock()
+                if Self.isPotentiallyMaterializing(fileURL) {
+                    scheduleMaterializationReload()
+                }
                 return _cachedGroups ?? []
             }
             // First run on a local store. This is the only remaining auto-write
@@ -566,6 +596,9 @@ public final class SnippetStore {
     }
 
     public func saveSnippets(_ snippets: [SnippetModel]) {
+        // Same RMW serialization as `importGroups`: read baseline, merge, save.
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
         lock.lock()
         let existing = _cachedGroups ?? loadGroupsUnlocked()
         lock.unlock()
@@ -602,16 +635,35 @@ public final class SnippetStore {
             }
         }
 
-        saveGroups(updated)
+        // `rmwLock` is already held for this whole read-modify-write; the public
+        // `saveGroups` would try to re-acquire it and deadlock.
+        saveGroupsSerialized(updated)
     }
 
+    /// Commits `groups` as the whole library. The sanitize → write → cache-commit
+    /// → purge sequence runs under `rmwLock`, so it cannot interleave with the
+    /// read-modify-write mutations (`importGroups`, `saveSnippets`): a save whose
+    /// payload was computed from a stale snapshot can still lose to a later
+    /// logical writer, but its write and its orphan purge now land atomically —
+    /// a purge never runs against library bytes other than the ones it computed.
+    @discardableResult
+    public func saveGroups(_ groups: [SnippetGroup]) -> SaveOutcome {
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
+        return saveGroupsSerialized(groups)
+    }
+
+    /// Body of `saveGroups`. The caller must already hold `rmwLock`: either the
+    /// public wrapper above, or one of the RMW mutations that reached here after
+    /// their own merge. (`rmwLock` is a plain `NSLock` — non-reentrant — which is
+    /// why these call sites use this entry point directly.)
+    ///
     /// §1.4: the cache is committed and listeners fire **only** when the bytes
     /// actually reached disk. Previously the cache was updated first and every
     /// listener fired unconditionally, so the UI reported success for writes that
     /// were refused by `blockedReason()` or the digest guard — and every edit was
     /// lost at quit.
-    @discardableResult
-    public func saveGroups(_ groups: [SnippetGroup]) -> SaveOutcome {
+    private func saveGroupsSerialized(_ groups: [SnippetGroup]) -> SaveOutcome {
         let sanitized = Self.sanitizeGroups(groups)
         let outcome = writeGroupsToDisk(sanitized)
 
@@ -673,6 +725,8 @@ public final class SnippetStore {
     /// the default and never drops a local snippet.
     @discardableResult
     public func importGroups(_ imported: [SnippetGroup], mode: ImportMode) -> ImportSummary {
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
         var current = loadGroups()
         var created: [String] = []
         var updatedGroups: [String] = []
@@ -718,7 +772,9 @@ public final class SnippetStore {
             }
         }
 
-        let outcome = saveGroups(current)
+        // `rmwLock` is already held for this whole read-modify-write; the public
+        // `saveGroups` would try to re-acquire it and deadlock.
+        let outcome = saveGroupsSerialized(current)
         return ImportSummary(
             mode: mode,
             groupsCreated: created,
@@ -1195,12 +1251,15 @@ public final class SnippetStore {
 
     /// §0.3: `fileExists(atPath:)` returns false for an evicted iCloud item, which
     /// is how a synced library used to look "missing" and get replaced with demos.
-    /// Ask iCloud to materialize it first, with a bounded wait.
+    /// Ask iCloud to materialize it — but do **not** block the caller waiting for
+    /// the bytes: this used to busy-wait up to `timeout` on the calling thread,
+    /// which `init` reaches synchronously and stalled launches for the full two
+    /// seconds. The bounded wait lives in `scheduleMaterializationReload()`, which
+    /// polls on a utility queue and reloads when the file lands.
+    ///
+    /// - Returns: whether the file exists *right now*.
     @discardableResult
-    static func materializeIfNeeded(
-        _ url: URL,
-        timeout: TimeInterval = SnippetStore.ubiquitousDownloadTimeout
-    ) -> Bool {
+    static func materializeIfNeeded(_ url: URL) -> Bool {
         let fm = FileManager.default
         if fm.fileExists(atPath: url.path) { return true }
 
@@ -1218,15 +1277,64 @@ public final class SnippetStore {
             return false
         }
         DevTypeLog.store.notice(
-            "[Store] Waiting for iCloud to materialize \(url.lastPathComponent, privacy: .public)"
+            "[Store] Requested iCloud download of \(url.lastPathComponent, privacy: .public); reload scheduled when it materializes"
         )
+        return false
+    }
 
-        let deadline = Date().addingTimeInterval(max(0, timeout))
-        while Date() < deadline {
-            if fm.fileExists(atPath: url.path) { return true }
-            Thread.sleep(forTimeInterval: 0.05)
+    /// True when the library file is absent but an iCloud download has plausibly
+    /// been requested for it (evicted-item placeholder present, or the path sits in
+    /// a ubiquity container) — the state where waiting on a background queue can
+    /// still produce a library.
+    static func isPotentiallyMaterializing(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) { return false }
+        let placeholder = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).icloud")
+        return fm.fileExists(atPath: placeholder.path) || isUbiquitousLocation(url)
+    }
+
+    // MARK: Background materialization wait (§0.3)
+
+    /// Serial utility queue for the post-launch iCloud wait. Deliberately separate
+    /// from `coalesceQueue`: a pending download parks here for up to
+    /// `ubiquitousDownloadTimeout` and must not delay external-change coalescing.
+    private let materializeQueue = DispatchQueue(label: "devtype.store.materialize", qos: .utility)
+    private let materializationLock = NSLock()
+    /// Monotonic token so overlapping schedules collapse into one live poll.
+    private var materializationGeneration: UInt64 = 0
+
+    /// Polls for the library file on `materializeQueue` until it appears or
+    /// `ubiquitousDownloadTimeout` elapses, then reloads from disk exactly like an
+    /// external change. Deduped by generation: a newer schedule supersedes the
+    /// polls of every older one, so repeated calls while the file is still absent
+    /// never stack waits.
+    private func scheduleMaterializationReload() {
+        materializationLock.lock()
+        materializationGeneration &+= 1
+        let generation = materializationGeneration
+        materializationLock.unlock()
+
+        let deadline = Date().addingTimeInterval(max(0, Self.ubiquitousDownloadTimeout))
+        let interval = 0.1
+        materializeQueue.async { [weak self] in
+            guard let self else { return }
+            let fm = FileManager.default
+            while Date() < deadline {
+                if fm.fileExists(atPath: self.fileURL.path) {
+                    self.reloadFromDisk()
+                    return
+                }
+                materializationLock.lock()
+                let superseded = generation != self.materializationGeneration
+                materializationLock.unlock()
+                if superseded { return }
+                Thread.sleep(forTimeInterval: interval)
+            }
+            if fm.fileExists(atPath: self.fileURL.path) {
+                self.reloadFromDisk()
+            }
         }
-        return fm.fileExists(atPath: url.path)
     }
 
     /// §1.13: coordinated read so we never observe a half-written or
@@ -1373,10 +1481,24 @@ public final class SnippetStore {
             // are filtered out here and never round-trip through the cache.
             guard onDisk != self.lastKnownDigest() else { return }
 
-            DispatchQueue.main.async { self.reloadFromDisk() }
+            // The full coordinated read + SHA256 + JSON decode runs right here on
+            // the coalesce/io queue — it used to be dispatched to main, stalling
+            // the UI for large libraries. `reloadFromDisk` keeps only the cache
+            // swap and listener notifications on main.
+            self.reloadFromDisk()
         }
     }
 
+    /// Reloads the library from disk and adopts it.
+    ///
+    /// Threading: the heavy work (coordinated read, SHA256, JSON decode) runs on
+    /// the **calling** queue — the external-change path invokes this on
+    /// `coalesceQueue` and the materialization wait on `materializeQueue`, never
+    /// on main. Only listener notifications hop to main: every listener contract
+    /// in this store is main-thread. State latches (`_saveBlocked`,
+    /// `_hardFailure`, pending conflicts, `_lastLoadIssue`) stay synchronous so a
+    /// caller that resolves conflicts and immediately re-checks sees consistent
+    /// answers.
     private func reloadFromDisk() {
         externalStateLock.lock()
         if _isApplyingExternalState {
@@ -1393,7 +1515,11 @@ public final class SnippetStore {
 
         let loaded = Self.loadFrom(Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary))
         setLastKnownDigest(loaded.digest)
-        setPendingConflicts(loaded.conflicts)
+        let conflictsChanged = storePendingConflicts(loaded.conflicts)
+        if conflictsChanged {
+            // §1.13: includes the clearing of a previously reported conflict.
+            DispatchQueue.main.async { [weak self] in self?.notifyConflictListeners() }
+        }
         if let issue = loaded.loadIssue {
             lock.lock()
             _lastLoadIssue = issue
@@ -1409,7 +1535,9 @@ public final class SnippetStore {
             saveBlockLock.lock()
             _saveBlocked = .blockedByRemoteChange
             saveBlockLock.unlock()
-            publishSaveFailure(.blockedByRemoteChange)
+            DispatchQueue.main.async { [weak self] in
+                self?.publishSaveFailure(.blockedByRemoteChange)
+            }
             return
         }
 
@@ -1419,15 +1547,22 @@ public final class SnippetStore {
             _hardFailure = hard
             _saveBlocked = hard
             saveBlockLock.unlock()
-            publishSaveFailure(hard)
+            DispatchQueue.main.async { [weak self] in
+                self?.publishSaveFailure(hard)
+            }
             return
         }
 
         guard loaded.decodeSucceeded else {
-            // File vanished (deleted/evicted mid-flight). Keep the cache.
+            // File vanished (deleted/evicted mid-flight). Keep the cache — and if
+            // this looks like an evicted iCloud item, arm the background wait that
+            // reloads when it materializes again.
             saveBlockLock.lock()
             _saveBlocked = loaded.blocked
             saveBlockLock.unlock()
+            if Self.isPotentiallyMaterializing(fileURL) {
+                scheduleMaterializationReload()
+            }
             return
         }
 
@@ -1443,8 +1578,21 @@ public final class SnippetStore {
         lock.unlock()
 
         let flat = loaded.groups.flatMap(\.snippets)
-        for listener in snippetListeners.values { listener(flat) }
-        for listener in groupListenersCopy.values { listener(loaded.groups) }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            for listener in snippetListeners.values { listener(flat) }
+            for listener in groupListenersCopy.values { listener(loaded.groups) }
+        }
+    }
+
+    /// Fires the conflict listeners with `pendingConflicts()`. Must NOT be called
+    /// while any lock is held (it reads the listener table).
+    private func notifyConflictListeners() {
+        lock.lock()
+        let observers = conflictListeners
+        lock.unlock()
+        let conflicts = pendingConflicts()
+        for observer in observers.values { observer(conflicts) }
     }
 
     // MARK: - Store location switching
@@ -1547,7 +1695,9 @@ public final class SnippetStore {
         let url = localSupportDirectory.appendingPathComponent("devtype-backup-\(tag)-\(formatter.string(from: Date())).json")
         do {
             try FileManager.default.createDirectory(at: localSupportDirectory, withIntermediateDirectories: true)
-            try raw.write(to: url)
+            // Atomic like every other write here: a crash mid-write must not leave
+            // a torn safety backup behind.
+            try raw.write(to: url, options: .atomic)
             return url
         } catch {
             return nil

@@ -9,3 +9,12 @@ NSException *DTMakeKeyAndOrderFrontCatchingException(NSWindow *window) {
     }
     return nil;
 }
+
+BOOL DTSetValueForKeyCatching(NSObject *object, id _Nullable value, NSString *key) {
+    @try {
+        [object setValue:value forKey:key];
+        return YES;
+    } @catch (NSException *exception) {
+        return NO;
+    }
+}

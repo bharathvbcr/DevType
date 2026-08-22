@@ -709,35 +709,6 @@ public enum CommandPaletteCatalog {
         return total / terms.count
     }
 
-    /// Token score for one command, or `nil` when no term matches.
-    public static func score(
-        command: PaletteCommand,
-        terms: [String],
-        loc: LocalizationManager = .shared
-    ) -> Int? {
-        guard !terms.isEmpty else { return nil }
-        let title = loc.s(command.titleKey).lowercased()
-        let subtitle = loc.s(command.subtitleKey).lowercased()
-        let trigger = command.trigger.lowercased()
-        let aliasBlob = command.aliases.joined(separator: "\n")
-        let blob = command.searchBlob
-
-        var total = 0
-        for term in terms {
-            guard let best = bestTermScore(
-                term: term,
-                trigger: trigger,
-                title: title,
-                subtitle: subtitle,
-                aliases: command.aliases,
-                aliasBlob: aliasBlob,
-                searchBlob: blob
-            ) else { return nil }
-            total += best
-        }
-        return total / terms.count
-    }
-
     /// Offline NLEmbedding semantic boost IDs (Stage 1). Returns empty on OOV / failure.
     public static func semanticBoostIDs(
         for query: String,

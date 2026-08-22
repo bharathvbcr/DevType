@@ -2,17 +2,29 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+/// The destructive-posting surface `EraseExecutor` needs from `HIDKeyPoster`. A protocol rather
+/// than the concrete type so tests can simulate Post Events being revoked mid-session — the
+/// exact condition where a silent "erase succeeded" would leave `trigger + replacement` in the
+/// field.
+public protocol BackspacePosting: AnyObject {
+    /// Posts `count` delete key pairs; returns how many pairs were actually posted.
+    @discardableResult
+    func sendBackspaces(count: Int) -> Int
+    /// Async wrapper. `completion(true)` only when **every** requested backspace was posted.
+    func sendBackspacesAsync(count: Int, completion: @escaping (Bool) -> Void)
+}
+
 /// §8.1: the destructive half of expansion — deciding how much to delete, proving it is safe to
 /// delete, and then deleting it. `ErasePlan.swift` owns the pure half (unit counting + the
 /// precondition evaluator); this owns the AX reads and the posted backspaces.
 public final class EraseExecutor {
     public static let shared = EraseExecutor()
 
-    private let hid: HIDKeyPoster
+    private let hid: any BackspacePosting
     private let ax: AXTextWriter
 
     public init(
-        hid: HIDKeyPoster = HIDKeyPoster.shared,
+        hid: any BackspacePosting = HIDKeyPoster.shared,
         ax: AXTextWriter = AXTextWriter.shared
     ) {
         self.hid = hid
@@ -257,7 +269,9 @@ public final class EraseExecutor {
         }
     }
 
-    private func finishGuardedErase(
+    /// Internal (not private) for `BackspaceIntegrityTests`: takes the already-evaluated
+    /// precondition result so the destructive-posting half can be exercised without live AX.
+    func finishGuardedErase(
         plan: ErasePlan,
         afterPossibleWrite: Bool,
         result: ErasePreconditionResult,
@@ -287,6 +301,25 @@ public final class EraseExecutor {
             completion(false)
             return
         }
-        hid.sendBackspacesAsync(count: plan.backspaceCount) { completion(true) }
+        // The precondition passed, but posting can still fail (Post Events revoked mid-session,
+        // CGEvent creation failure). Reporting success here would inject the replacement on top
+        // of an unerased trigger — the exact `trigger + replacement` corruption this executor
+        // exists to prevent — so a short post is a refused expand, same as a mismatch.
+        hid.sendBackspacesAsync(count: plan.backspaceCount) { erased in
+            if erased {
+                completion(true)
+                return
+            }
+            DevTypeLog.inject.error(
+                "[Inject] backspace post incomplete count=\(plan.backspaceCount, privacy: .public) — refusing expand; field may hold a partial trigger"
+            )
+            TextInjectionPipeline.debugLogInject(
+                hypothesisId: "M5",
+                message: "guarded erase aborted — backspaces not fully posted",
+                location: "EraseExecutor",
+                data: ["eraseBackspaces": plan.backspaceCount]
+            )
+            completion(false)
+        }
     }
 }

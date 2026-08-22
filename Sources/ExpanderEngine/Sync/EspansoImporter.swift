@@ -27,10 +27,22 @@ public enum EspansoImporter {
         /// §3.8: matches scoped with `apps:` / `exclude_apps:` mapped onto
         /// `SnippetModel.includeApps` / `excludeApps`.
         public var appScopedCount: Int = 0
+        /// Items refused at the size boundary (`SnippetImporter.SnippetImportLimits`).
+        public var skippedOversized: Int = 0
+        /// §hardening: `imports:` entries refused because they pointed outside the
+        /// importing file's directory (absolute paths, `..` escapes) or lacked a
+        /// `.yml`/`.yaml` extension. Untrusted configs must not read arbitrary files.
+        public var skippedUnsafeImports: Int = 0
+        /// §robustness: files reached via `imports:` whose YAML failed to parse. The
+        /// batch continues with the remaining imports; a broken top-level entry file
+        /// still fails the import outright.
+        public var skippedParseFailed: Int = 0
 
         public var totalSkipped: Int {
             skippedVars + skippedForm + skippedHtml + skippedMarkdown
                 + skippedImage + skippedRegex + skippedEmptyTrigger
+                + skippedOversized
+                + skippedUnsafeImports + skippedParseFailed
         }
     }
 
@@ -193,6 +205,13 @@ public enum EspansoImporter {
         let name = standardized.lastPathComponent
         if !forceInclude, name.hasPrefix("_") { return }
 
+        // Import files are untrusted input: skip absurdly large sources instead of
+        // ballooning memory in the YAML parser. Counted so the user is told.
+        if fileSize(at: standardized) > SnippetImporter.SnippetImportLimits.maxSourceFileBytes {
+            accumulator.skippedOversized += 1
+            return
+        }
+
         let root: [String: Any]
         do {
             root = try loadYAMLDictionary(at: standardized)
@@ -205,16 +224,26 @@ public enum EspansoImporter {
             let baseDir = standardized.deletingLastPathComponent()
             for entry in imports {
                 guard let raw = entry as? String, !raw.isEmpty else { continue }
-                let importedURL: URL
-                if raw.hasPrefix("/") {
-                    importedURL = URL(fileURLWithPath: raw).standardizedFileURL
-                } else {
-                    importedURL = baseDir.appendingPathComponent(raw).standardizedFileURL
+                // §hardening: import files are untrusted input. An `imports:` entry may
+                // only name a YAML file inside this file's directory — absolute targets
+                // and `..` escapes would let an untrusted package read any user-readable
+                // file, so they are refused and counted instead of followed.
+                guard isImportableYAMLName(raw),
+                      let importedURL = containedURL(raw, relativeTo: baseDir) else {
+                    accumulator.skippedUnsafeImports += 1
+                    continue
                 }
                 // Imports may target underscore-prefixed private match sets.
                 guard FileManager.default.fileExists(atPath: importedURL.path) else { continue }
                 let importedGroup = makeGroupName(for: importedURL, packageRoot: nil)
-                try processFile(importedURL, groupName: importedGroup, forceInclude: true, imageStore: imageStore, into: &accumulator)
+                do {
+                    try processFile(importedURL, groupName: importedGroup, forceInclude: true, imageStore: imageStore, into: &accumulator)
+                } catch {
+                    // §robustness: one malformed imported file must not abort the whole
+                    // batch — skip it, count it, keep processing siblings. The top-level
+                    // entry file keeps its throwing contract (see `importFrom`).
+                    accumulator.skippedParseFailed += 1
+                }
             }
         }
 
@@ -325,6 +354,12 @@ public enum EspansoImporter {
                 counters.skippedEmptyTrigger += 1
                 continue
             }
+            if SnippetImporter.SnippetImportLimits.isOversized(
+                trigger: trimmed, replacement: replacement
+            ) {
+                counters.skippedOversized += 1
+                continue
+            }
             let title = label.isEmpty ? trimmed : label
             snippets.append(SnippetModel(
                 title: title,
@@ -400,11 +435,13 @@ public enum EspansoImporter {
         into snippets: inout [SnippetModel],
         counters: inout Accumulator
     ) {
-        let imageURL: URL
-        if rawImagePath.hasPrefix("/") {
-            imageURL = URL(fileURLWithPath: rawImagePath).standardizedFileURL
-        } else {
-            imageURL = baseDir.appendingPathComponent(rawImagePath).standardizedFileURL
+        // §hardening: same confinement as `imports:` — an untrusted config may only
+        // pull images from inside its own tree. Absolute paths and `..` escapes used
+        // to copy arbitrary user-readable files into the store (an exfiltration
+        // primitive); they now count as skipped images like any other failure.
+        guard let imageURL = containedURL(rawImagePath, relativeTo: baseDir) else {
+            counters.skippedImage += 1
+            return
         }
 
         let storedName: String
@@ -460,6 +497,41 @@ public enum EspansoImporter {
 
     // MARK: - Helpers
 
+    /// `imports:` targets must be YAML match files — anything else is refused
+    /// outright rather than parsed opportunistically.
+    private static func isImportableYAMLName(_ raw: String) -> Bool {
+        let ext = (raw as NSString).pathExtension.lowercased()
+        return ext == "yml" || ext == "yaml"
+    }
+
+    /// §hardening: resolves an untrusted relative reference (an `imports:` entry or
+    /// an Espanso `image_path`) against `root` — the importing file's directory —
+    /// and returns `nil` for anything that would read outside it.
+    ///
+    /// Refused: absolute targets (a leading `/`), and any target whose resolved
+    /// standardized location does not sit strictly below `root` (which covers every
+    /// surviving `..` after standardization). Symlinks are resolved on both sides
+    /// first so a symlinked directory inside the config cannot smuggle a path out.
+    /// Plain relative references — including subdirectories — resolve exactly as
+    /// they always did.
+    private static func containedURL(_ raw: String, relativeTo root: URL) -> URL? {
+        guard !raw.isEmpty, !raw.hasPrefix("/"), !raw.hasPrefix("\\") else { return nil }
+
+        let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
+        let candidate = root.appendingPathComponent(raw).standardizedFileURL
+        let candidatePath = candidate.resolvingSymlinksInPath().path
+
+        // Component-wise prefix compare so `/root-evil` can never pass a `/root`
+        // check, and the target must be *inside* the root, not the root itself.
+        let rootParts = (rootPath as NSString).pathComponents
+        let candidateParts = (candidatePath as NSString).pathComponents
+        guard candidateParts.count > rootParts.count,
+              Array(candidateParts.prefix(rootParts.count)) == rootParts else {
+            return nil
+        }
+        return URL(fileURLWithPath: candidatePath)
+    }
+
     private static func collectTriggers(from match: [String: Any]) -> [String] {
         if let triggers = match["triggers"] as? [Any] {
             return triggers.compactMap { $0 as? String }
@@ -482,6 +554,12 @@ public enum EspansoImporter {
     private static func isYAMLFile(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
         return ext == "yml" || ext == "yaml"
+    }
+
+    /// File size in bytes; 0 when the file cannot be stat'ed (the read itself will fail).
+    private static func fileSize(at url: URL) -> Int64 {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? Int64) ?? 0
     }
 
     private static func looksLikePackageDirectory(_ url: URL) -> Bool {
@@ -584,10 +662,16 @@ public enum EspansoImporter {
         var markdownAsPlainCount = 0
         var propagateCaseCount = 0
         var appScopedCount = 0
+        var skippedOversized = 0
+        // §hardening
+        var skippedUnsafeImports = 0
+        var skippedParseFailed = 0
 
         var totalSkipped: Int {
             skippedVars + skippedForm + skippedHtml + skippedMarkdown
                 + skippedImage + skippedRegex + skippedEmptyTrigger
+                + skippedOversized
+                + skippedUnsafeImports + skippedParseFailed
         }
 
         var groups: [SnippetGroup] {
@@ -613,7 +697,10 @@ public enum EspansoImporter {
                 sourcePath: sourcePath,
                 markdownAsPlainCount: markdownAsPlainCount,
                 propagateCaseCount: propagateCaseCount,
-                appScopedCount: appScopedCount
+                appScopedCount: appScopedCount,
+                skippedOversized: skippedOversized,
+                skippedUnsafeImports: skippedUnsafeImports,
+                skippedParseFailed: skippedParseFailed
             )
         }
     }

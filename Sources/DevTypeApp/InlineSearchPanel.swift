@@ -716,6 +716,10 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         super.viewWillDisappear()
         semanticWorkItem?.cancel()
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
+        // Remove here, not just in deinit: every re-appear registered a fresh group
+        // listener while the old one stayed live until deallocation — a panel that
+        // appears N times leaked N registrations.
+        if let listenerToken { store.removeListener(token: listenerToken); self.listenerToken = nil }
     }
 
     func focusSearch() {

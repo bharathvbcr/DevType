@@ -47,7 +47,12 @@ public final class PermissionRequester {
     public func beginSetupActivation() {
         setupHoldsRegular = true
         cancelPendingActivationRestore()
-        let app = NSApp!
+        guard let app = NSApp else {
+            // No NSApplication yet (tests, very early launch) — nothing to promote. Fail closed
+            // rather than trap; Setup presentation itself will re-run this once the app exists.
+            DevTypeLog.permission.notice("[Permission] beginSetupActivation without NSApplication — skipped")
+            return
+        }
         let current = app.activationPolicy()
         if current != .regular {
             app.setActivationPolicy(.regular)
@@ -64,7 +69,10 @@ public final class PermissionRequester {
         setupHoldsRegular = false
         cancelPendingActivationRestore()
         intendedRestorePolicy = .accessory
-        let app = NSApp!
+        guard let app = NSApp else {
+            DevTypeLog.permission.notice("[Permission] endSetupActivation without NSApplication — skipped")
+            return
+        }
         let current = app.activationPolicy()
         if current != .accessory {
             app.setActivationPolicy(.accessory)
@@ -78,7 +86,12 @@ public final class PermissionRequester {
     /// or when the app resigns active (whichever first) — not immediately in `defer`.
     /// While Setup holds `.regular`, restore stays at `.regular` (does not undo Setup).
     public func withPromptActivation<T>(_ body: () -> T) -> T {
-        let app = NSApp!
+        // No NSApplication yet (tests, very early launch): skip the activation dance entirely and
+        // just run the body — the prompt still happens, only the Dock/focus choreography is lost.
+        guard let app = NSApp else {
+            DevTypeLog.permission.notice("[Permission] withPromptActivation without NSApplication — running body without activation")
+            return body()
+        }
         let current = app.activationPolicy()
         cancelPendingActivationRestore()
 

@@ -27,6 +27,11 @@ enum GroupEditorSheet {
         validate: @escaping (_ name: String) -> String?,
         completion: @escaping (GroupDraft?) -> Void
     ) {
+        // Same single-instance contract as MacroPalettePanel.present: a second
+        // presentation while one is up would overwrite the statics, and finishing
+        // the first would then nil them out from under the second — leaving it
+        // unclosable by any path but its own.
+        if activePanel != nil { return }
         let panel = GroupEditorKeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 448),
             styleMask: [.borderless],

@@ -887,12 +887,29 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// writer* (another DevType process, a probe, a future tool) could use to clobber a
     /// load-modify-save in flight — the §8.11 post-mortem shape that cost one secret its
     /// value. Never nested: callers hold it around the whole load→save→verify sequence.
+    ///
+    /// Fail-open, but loud: if `open(2)` cannot produce a descriptor (descriptor
+    /// exhaustion, EISDIR on the lock path, a raced unlink) this used to proceed
+    /// *silently* without cross-process exclusion. Now it notes the failure,
+    /// retries once after a short delay, and if the lock still cannot be taken it
+    /// proceeds anyway with the second note recorded — single-process
+    /// functionality must survive a broken lock file, but the diagnostics trail
+    /// must show that exclusion was unavailable.
     private func withArchiveLock<T>(_ body: () -> T) -> T {
         let directory = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let lockPath = fileURL.appendingPathExtension("lock").path
-        let fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
-        guard fd >= 0 else { return body() }
+
+        var fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        if fd < 0 {
+            diagnostics.note("archive lock unavailable")
+            Thread.sleep(forTimeInterval: 0.05)
+            fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        }
+        guard fd >= 0 else {
+            diagnostics.note("archive lock still unavailable — proceeding without cross-process exclusion")
+            return body()
+        }
         defer { close(fd) }
         _ = flock(fd, LOCK_EX)
         defer { _ = flock(fd, LOCK_UN) }
@@ -1060,17 +1077,33 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         return tier.contains(account: account)
     }
 
+    /// Deletes from both phases and reports honestly about each. The archive phase
+    /// runs first: if its save fails, the sealed copy is still on disk, so this is a
+    /// FAILED delete (`errSecIO`) even though nothing was touched — never the old
+    /// `||` that let a tier success report success while `contains`/`value` kept
+    /// resolving the secret from the archive.
     public func delete(account: String) -> OSStatus {
         lock.lock(); defer { lock.unlock() }
-        let removedFromArchive: Bool = withArchiveLock {
-            guard case .entries(var entries) = loadArchive(), entries[account] != nil else {
+        var archiveHadEntry = false
+        let archivePhaseComplete: Bool = withArchiveLock {
+            switch loadArchive() {
+            case .entries(var entries):
+                guard entries.removeValue(forKey: account) != nil else { return true }
+                archiveHadEntry = true
+                return saveArchive(entries)
+            case .missing:
+                return true
+            case .unreadable:
+                // Bytes this build cannot vouch for may hold the account. Dropping the
+                // tier copy now would strand an unremovable sealed shadow behind a
+                // "gone" answer. Refuse; quarantine/recovery flows own this state.
+                diagnostics.note("delete refused — archive unreadable", account: account)
                 return false
             }
-            entries.removeValue(forKey: account)
-            return saveArchive(entries)
         }
+        guard archivePhaseComplete else { return errSecIO }
         let tierStatus = tier.delete(account: account)
-        if removedFromArchive || tierStatus == errSecSuccess { return errSecSuccess }
+        if archiveHadEntry || tierStatus == errSecSuccess { return errSecSuccess }
         return tierStatus
     }
 

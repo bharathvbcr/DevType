@@ -183,18 +183,24 @@ enum ToastPanel {
         // The user doing anything at all is a better dismiss signal than the clock. Global
         // monitors observe without consuming, so the click that dismisses the toast still lands
         // in whatever app it was aimed at.
-        let events: NSEvent.EventTypeMask = [
-            .leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown, .scrollWheel,
+        //
+        // Keyboard events are never delivered to *global* monitors (AppKit contract:
+        // keyDown goes only to the app processing the event), so `.keyDown` is armed on
+        // the local monitor alone — listing it globally was dead configuration that made
+        // the advertised "keystroke anywhere" dismissal quietly untrue for other apps.
+        let pointerEvents: NSEvent.EventTypeMask = [
+            .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel,
         ]
+        let localEvents: NSEvent.EventTypeMask = pointerEvents.union(.keyDown)
         // Hopped to the next runloop turn rather than run inline: `dismiss()` removes these
         // very monitors, and tearing down an event monitor from inside its own callback is asking
         // the handler block to be released while it is still executing.
-        if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { _ in
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: pointerEvents, handler: { _ in
             DispatchQueue.main.async { dismiss() }
         }) {
             monitors.append(global)
         }
-        if let local = NSEvent.addLocalMonitorForEvents(matching: events, handler: { event in
+        if let local = NSEvent.addLocalMonitorForEvents(matching: localEvents, handler: { event in
             DispatchQueue.main.async { dismiss() }
             return event
         }) {

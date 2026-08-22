@@ -1122,17 +1122,14 @@ public final class PasteboardBroker {
             changeCountAfterCopy: afterCopy
         ) {
             pasteboard.clearContents()
+            let postClearChangeCount = pasteboard.changeCount
             if let snapshot, !snapshot.isEmpty {
-                let restoredItems: [NSPasteboardItem] = snapshot.map { itemDict in
-                    let newItem = NSPasteboardItem()
-                    itemDict.forEach { type, data in newItem.setData(data, forType: type) }
-                    return newItem
-                }
-                if !pasteboard.writeObjects(restoredItems) {
-                    DevTypeLog.inject.error(
-                        "[Inject] copy-capture clipboard restore write failed — the user's clipboard was not restored"
-                    )
-                }
+                writeCopyCaptureRestore(
+                    snapshot,
+                    to: pasteboard,
+                    ownedChangeCount: postClearChangeCount,
+                    attempt: 0
+                )
             }
             // An empty snapshot restores to an empty board: leaving the captured selection up
             // would hand it to every clipboard manager watching the board.
@@ -1193,6 +1190,55 @@ public final class PasteboardBroker {
             || types.contains(transientType)
     }
 
+    /// Rebuilds `NSPasteboardItem`s from a bounded snapshot. Shared by both restore paths so
+    /// representation handling cannot drift between them.
+    private static func makeRestoredItems(_ snapshot: PasteboardSnapshot) -> [NSPasteboardItem] {
+        snapshot.map { itemDict in
+            let newItem = NSPasteboardItem()
+            itemDict.forEach { type, data in newItem.setData(data, forType: type) }
+            return newItem
+        }
+    }
+
+    /// Writes a copy-capture snapshot back onto `pasteboard` with the same bounded retry policy
+    /// as `restore(_:attempt:)`. The board was already cleared for this capture, so every attempt
+    /// first re-checks that we still own it (`changeCount` unchanged since our clear, or our
+    /// markers present) — an owner that claimed the board during the retry window is left alone
+    /// rather than clobbered.
+    private func writeCopyCaptureRestore(
+        _ snapshot: PasteboardSnapshot,
+        to pasteboard: NSPasteboard,
+        ownedChangeCount: Int,
+        attempt: Int
+    ) {
+        guard pasteboard.changeCount == ownedChangeCount || Self.holdsOurPayload(pasteboard) else {
+            DevTypeLog.inject.notice(
+                "[Inject] copy-capture restore retry abandoned — another owner wrote the pasteboard during recovery"
+            )
+            return
+        }
+        if pasteboard.writeObjects(Self.makeRestoredItems(snapshot)) {
+            return
+        }
+        guard attempt + 1 < InjectTiming.maxPasteboardRestoreAttempts else {
+            DevTypeLog.inject.error(
+                "[Inject] copy-capture clipboard restore failed after \(InjectTiming.maxPasteboardRestoreAttempts, privacy: .public) attempts — the user's clipboard was not restored"
+            )
+            return
+        }
+        DevTypeLog.inject.notice(
+            "[Inject] copy-capture clipboard restore write failed — retry \(attempt + 1, privacy: .public)"
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteboardRestoreRetryDelay) { [weak self] in
+            self?.writeCopyCaptureRestore(
+                snapshot,
+                to: pasteboard,
+                ownedChangeCount: ownedChangeCount,
+                attempt: attempt + 1
+            )
+        }
+    }
+
     private func restore(_ ticket: ClipboardTicket, attempt: Int = 0) {
         // Generation gate: a newer expand owns the pasteboard — skip stale restore.
         guard currentRestoreGeneration() == ticket.generation else { return }
@@ -1222,13 +1268,7 @@ public final class PasteboardBroker {
             return
         }
 
-        let restoredItems: [NSPasteboardItem] = oldItems.map { itemDict in
-            let newItem = NSPasteboardItem()
-            itemDict.forEach { type, data in
-                newItem.setData(data, forType: type)
-            }
-            return newItem
-        }
+        let restoredItems: [NSPasteboardItem] = Self.makeRestoredItems(oldItems)
         let wrote = pasteboard.writeObjects(restoredItems)
         if !wrote {
             if attempt + 1 < InjectTiming.maxPasteboardRestoreAttempts {

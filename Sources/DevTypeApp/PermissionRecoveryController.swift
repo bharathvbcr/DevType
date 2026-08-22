@@ -45,6 +45,17 @@ final class PermissionRecoveryController: NSViewController {
     private var lastLoggedAccessibilityReset: Bool?
     private var lastLoggedIdentityChanged: Bool?
 
+    /// How long after a Request before TCC is re-checked. Matches
+    /// `PermissionOnboardingController.requestSettleInterval`.
+    static let requestSettleInterval: TimeInterval = 1.0
+
+    /// Single-flight for the post-Request settle — same contract as Onboarding's
+    /// `performRequest` (see its doc comment): each settle ends in a refresh whose
+    /// tap-failure branch can raise a modal alert, so N stacked settles meant N
+    /// stacked alerts from nothing worse than an impatient double-click.
+    private var pendingRequestSettle: DispatchWorkItem?
+    private var requestInFlight = false
+
     // §6.1: 1,028 lines with zero `loc.s` calls — one of the two screens a
     // Korean or Japanese user hits *before* the app works at all.
     private let loc = LocalizationManager.shared
@@ -893,7 +904,13 @@ final class PermissionRecoveryController: NSViewController {
     }
 
     /// Shared shape for all three Request buttons: show the "not listed?" hint up
-    /// front, fire the real request, then re-check once TCC has had time to settle.
+    /// front, fire the real request, then re-check exactly once once TCC has had
+    /// time to settle.
+    ///
+    /// Single-flight mirrors `PermissionOnboardingController.performRequest`: a
+    /// second click while one settle is pending is ignored instead of stacking
+    /// another settle — each settle refresh can surface the modal Tap Failed
+    /// alert, and overlapping settles stacked one per click.
     private func request(
         kind: PermissionKind,
         logLabel: String,
@@ -901,7 +918,16 @@ final class PermissionRecoveryController: NSViewController {
         stillMissing: @escaping () -> Bool,
         stillMissingHint: String
     ) {
+        guard !requestInFlight else {
+            DevTypeLog.permission.debug(
+                "[Permission] UI Recovery request already in flight — ignoring \(logLabel, privacy: .public)"
+            )
+            return
+        }
         DevTypeLog.permission.info("[Permission] UI Recovery Request \(logLabel, privacy: .public)")
+        requestInFlight = true
+        pendingRequestSettle?.cancel()
+
         let identity = ProcessIdentity.shared
         settingsFallbackLabel.stringValue = PermissionCopy.notListedInSettingsGuidance(
             for: kind,
@@ -912,19 +938,24 @@ final class PermissionRecoveryController: NSViewController {
         )
         settingsFallbackLabel.isHidden = false
 
-        perform()
-        refreshPermissions()
         // Do NOT auto-open Settings. Offer Open if still denied after settle.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            self.pendingRequestSettle = nil
+            self.requestInFlight = false
             if stillMissing() {
                 DevTypeLog.permission.notice(
-                    "[Permission] UI Recovery \(logLabel, privacy: .public) still denied 1s after request"
+                    "[Permission] UI Recovery \(logLabel, privacy: .public) still denied \(Self.requestSettleInterval, privacy: .public)s after request"
                 )
                 self.settingsFallbackLabel.stringValue += "\n" + stillMissingHint
             }
             self.refreshPermissions()
         }
+        pendingRequestSettle = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.requestSettleInterval, execute: work)
+
+        perform()
+        refreshPermissions()
     }
 
     private static var openSettingsThenRelaunchHint: String {

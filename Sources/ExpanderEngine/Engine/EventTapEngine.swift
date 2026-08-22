@@ -2684,8 +2684,8 @@ public final class EventTapEngine {
                 actualStringLength: &length,
                 unicodeString: scratch.baseAddress
             )
-            if length > 0 {
-                unicode = String(utf16CodeUnits: scratch.baseAddress!, count: length)
+            if length > 0, let base = scratch.baseAddress {
+                unicode = String(utf16CodeUnits: base, count: length)
             }
         }
 

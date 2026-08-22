@@ -71,6 +71,12 @@ final class PreferencesWindowController: NSWindowController {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Opens (or raises) Preferences, optionally jumping to a section.
+    ///
+    /// `hotkeyManager` is refreshed on *every* call, not only when the window is
+    /// first created: the controller outlives individual callers, and pinning the
+    /// manager from first show left a window opened via a nil-manager path acting
+    /// on nil forever — macro edits then went to defaults instead of the live
+    /// registration. Nil-safe: callers without a manager keep today's behaviour.
     func show(tab: PreferencesTab? = nil, hotkeyManager: HotkeyManager?) {
         if window == nil {
             let controller = PreferencesViewController(hotkeyManager: hotkeyManager)
@@ -84,6 +90,7 @@ final class PreferencesWindowController: NSWindowController {
             newWindow.isReleasedWhenClosed = false
             self.window = newWindow
         }
+        preferences?.refreshHotkeyManager(hotkeyManager)
         if let tab { preferences?.select(tab) }
         preferences?.reloadAll()
         showWindow(nil)
@@ -286,6 +293,13 @@ final class PreferencesViewController: NSViewController,
     init(hotkeyManager: HotkeyManager?) {
         self.hotkeyManager = hotkeyManager
         super.init(nibName: nil, bundle: nil)
+    }
+
+    /// Re-point at the live manager. Called by `PreferencesWindowController.show`
+    /// on every presentation so a window that is already open never keeps acting
+    /// on the manager (or absence of one) it was created with.
+    func refreshHotkeyManager(_ manager: HotkeyManager?) {
+        hotkeyManager = manager
     }
 
     @available(*, unavailable)
@@ -1045,11 +1059,25 @@ final class PreferencesViewController: NSViewController,
                 argument: argument
             )
         )
-        hotkeyManager?.applyMacros(macros)
+        let failures = hotkeyManager?.applyMacros(macros) ?? []
         if hotkeyManager == nil { HotkeyPreferences.saveMacros(macros) }
+        reportRegistrationFailures(failures)
         macroArgumentField.stringValue = ""
         macroRecorder?.setShortcut(nil)
         reloadHotkeys()
+    }
+
+    /// §4.2 parity for macros: a chord owned by another app must not produce a
+    /// table row that silently does nothing forever. The app delegate suppresses
+    /// its own alert while Preferences is visible, so this is the one channel
+    /// that reaches the user here.
+    private func reportRegistrationFailures(_ failures: [(label: String, status: OSStatus)]) {
+        guard let first = failures.first else { return }
+        DevTypeAlert.warn(
+            title: loc.s("prefs.hotkeys.failed.title"),
+            message: loc.s("prefs.hotkeys.failed.message", first.label, Int(first.status)),
+            window: view.window
+        )
     }
 
     @objc private func removeMacro() {

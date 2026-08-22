@@ -6,8 +6,19 @@ public final class AppMuteStore {
 
     private let fileURL: URL
     private let lock = NSLock()
+    /// Serializes disk persistence so the write order equals the mutation order.
+    /// The mutation happens under `lock` and its write is *enqueued* under the
+    /// same lock (the FIFO queue then makes disk order equal enqueue order), while
+    /// the I/O itself runs off-lock and callers wait only until their own write
+    /// has landed. See `persistSynchronized`.
+    private let persistenceQueue = DispatchQueue(label: "devtype.mutestore.persist", qos: .utility)
     private var mutedBundleIDs: Set<String> = []
     private var listeners: [() -> Void] = []
+
+    /// Test seam: replaces the disk persistence step so ordering properties can be
+    /// observed without depending on real I/O timing. `nil` (the default) means
+    /// production saves.
+    var persistOverride: ((_ ids: Set<String>, _ fileURL: URL) -> Void)?
 
     public init(fileURL: URL? = nil) {
         if let fileURL {
@@ -48,22 +59,50 @@ public final class AppMuteStore {
 
     public func mute(_ bundleID: String) {
         guard !bundleID.isEmpty else { return }
-        lock.lock()
-        mutedBundleIDs.insert(bundleID)
-        let snapshot = mutedBundleIDs
-        let currentListeners = listeners
-        lock.unlock()
-        Self.saveToDisk(snapshot, fileURL: fileURL)
-        currentListeners.forEach { $0() }
+        persistSynchronized { locked in
+            locked.insert(bundleID)
+        }
+        // Listeners fire after the write lands, as they always have.
     }
 
     public func unmute(_ bundleID: String) {
+        persistSynchronized { locked in
+            locked.remove(bundleID)
+        }
+    }
+
+    /// Applies one mutation under `lock`, persists the resulting set on
+    /// `persistenceQueue`, and returns only once that write has landed.
+    ///
+    /// The enqueue happens while `lock` is held, so queue order equals mutation
+    /// order and the FIFO queue makes disk order equal queue order — last write
+    /// wins. Before this, the write ran unlocked on whatever thread called in,
+    /// so two writers could persist out of order and an older snapshot could win
+    /// the file. The caller waits outside the lock for the queued write: the
+    /// historical contract is that `mute`/`unmute` return with the file already
+    /// updated (a fresh instance reads back what was just written), and the
+    /// payloads are tiny, so the wait is the cost the old synchronous write paid
+    /// anyway — just off the lock and correctly ordered.
+    private func persistSynchronized(_ mutate: (inout Set<String>) -> Void) {
+        let written = DispatchSemaphore(value: 0)
         lock.lock()
-        mutedBundleIDs.remove(bundleID)
+        mutate(&mutedBundleIDs)
         let snapshot = mutedBundleIDs
         let currentListeners = listeners
+        // Snapshot both by value: an override swapped in later applies to later
+        // writes only, and `fileURL` never changes after init.
+        let override = persistOverride
+        let url = fileURL
+        persistenceQueue.async {
+            if let override {
+                override(snapshot, url)
+            } else {
+                Self.saveToDisk(snapshot, fileURL: url)
+            }
+            written.signal()
+        }
         lock.unlock()
-        Self.saveToDisk(snapshot, fileURL: fileURL)
+        written.wait()
         currentListeners.forEach { $0() }
     }
 

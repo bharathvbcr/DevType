@@ -911,7 +911,7 @@ public actor AITextTransformer {
                 } catch let e as AITransformError {
                     budgetErr = e
                 } catch {
-                    budgetErr = .unknown(error.localizedDescription)
+                    budgetErr = Self.mapGenerationError(error, kind: kind, input: trimmed)
                 }
                 once.complete(.failure(budgetErr))
                 return
@@ -1303,10 +1303,16 @@ public actor AITextTransformer {
         input: String
     ) -> AITransformError {
         guard let generation = error as? LanguageModelSession.GenerationError else {
-            DevTypeLog.store.error(
-                "[AI] transform failed kind=\(kind.rawValue, privacy: .public) non-GenerationError=\(AIPromptLeakGuard.redact(error.localizedDescription, sources: [input, kind.framing, kind.instructions]), privacy: .public)"
+            // The log line and the returned error must carry the same redaction: third-party
+            // error prose is untrusted, and `.unknown`'s description reaches UI/alert surfaces.
+            let redacted = AIPromptLeakGuard.redact(
+                error.localizedDescription,
+                sources: [input, kind.framing, kind.instructions]
             )
-            return .unknown(error.localizedDescription)
+            DevTypeLog.store.error(
+                "[AI] transform failed kind=\(kind.rawValue, privacy: .public) non-GenerationError=\(redacted, privacy: .public)"
+            )
+            return .unknown(redacted)
         }
         logGenerationFailure(generation, kind: kind, input: input)
         switch generation {

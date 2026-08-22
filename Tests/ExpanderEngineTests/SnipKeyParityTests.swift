@@ -160,8 +160,10 @@ final class MacroParserParityTests: XCTestCase {
             content: "%snippet:a%",
             lookup: { _ in "%snippet:a%" }
         )
-        // Unresolved after depth — should not infinite-loop; may keep literal or empty nesting.
-        XCTAssertTrue(nested.text.contains("%snippet:") || nested.text.isEmpty || !nested.text.isEmpty)
+        // Depth-capped self-reference terminates; the marker survives as literal
+        // text (same contract as unresolved references and budget exhaustion).
+        XCTAssertTrue(nested.text.contains("%snippet:a%"), "got \(nested.text)")
+        XCTAssertFalse(nested.needsFillIn)
     }
 
     func testMustacheSnippetNested() {

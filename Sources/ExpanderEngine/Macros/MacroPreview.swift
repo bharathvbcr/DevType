@@ -31,6 +31,23 @@ public enum MacroPreview {
 
     public static func render(_ content: String, now: Date = Date()) -> String {
         let tokens = MacroParser.parse(content)
+        // Bracket-match every `%fillpart…% … %fillpartend%` pair in one linear
+        // pass. The old code re-scanned the remaining tokens for each skipped
+        // default-off start, so a template of N unterminated starts cost N²/2 —
+        // perceptible lag in the editor preview, which runs on the main thread.
+        var endsByStart: [Int: Int] = [:]
+        var openStarts: [Int] = []
+        for (index, token) in tokens.enumerated() {
+            switch token {
+            case .fillPartStart:
+                openStarts.append(index)
+            case .fillPartEnd:
+                if let start = openStarts.popLast() { endsByStart[start] = index }
+            default:
+                break
+            }
+        }
+
         var out = ""
         var i = 0
         // §3.5: open `%case:…%` blocks as (transform, out.count when the block opened).
@@ -55,11 +72,7 @@ public enum MacroPreview {
                 }
 
             case .fillPartStart(_, let defaultOn):
-                if defaultOn {
-                    i += 1
-                    continue
-                }
-                if let end = matchingEnd(after: i, in: tokens) {
+                if !defaultOn, let end = endsByStart[i] {
                     i = end + 1
                     continue
                 }
@@ -113,24 +126,6 @@ public enum MacroPreview {
             out = head + open.transform.apply(to: body)
         }
         return out
-    }
-
-    private static func matchingEnd(after startIndex: Int, in tokens: [MacroToken]) -> Int? {
-        var depth = 1
-        var j = startIndex + 1
-        while j < tokens.count {
-            switch tokens[j] {
-            case .fillPartStart:
-                depth += 1
-            case .fillPartEnd:
-                depth -= 1
-                if depth == 0 { return j }
-            default:
-                break
-            }
-            j += 1
-        }
-        return nil
     }
 
     private static func formattedDate(_ format: String, now: Date) -> String {

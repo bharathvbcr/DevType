@@ -235,10 +235,28 @@ public enum SnippetExporter {
         fields.map(csvField).joined(separator: ",")
     }
 
+    /// Leading characters that spreadsheet applications interpret as the start of
+    /// a formula. A CSV field beginning with any of these executes as a formula
+    /// when the export is opened in Excel / Numbers / Sheets — classic CSV
+    /// injection, turning an innocent data export into code execution on the
+    /// reader's machine (e.g. a snippet titled `=cmd|' /C calc'!A0`).
+    ///
+    /// The standard mitigation is applied: such fields are prefixed with a single
+    /// apostrophe, which spreadsheets treat as a "literal text" marker and strip
+    /// on display. This happens *before* RFC 4180 quoting so the apostrophe ends
+    /// up inside the quoted field. A leading `-` does occur in ordinary prose;
+    /// that over-triggering is an accepted tradeoff — safety beats cosmetic
+    /// fidelity for an interchange export.
+    private static let csvFormulaLeadingCharacters: Set<Character> = ["=", "+", "-", "@", "\t", "\r"]
+
     private static func csvField(_ raw: String) -> String {
-        let needsQuoting = raw.contains(",") || raw.contains("\"")
-            || raw.contains("\n") || raw.contains("\r")
-        guard needsQuoting else { return raw }
-        return "\"" + raw.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        var field = raw
+        if let first = field.first, csvFormulaLeadingCharacters.contains(first) {
+            field = "'" + field
+        }
+        let needsQuoting = field.contains(",") || field.contains("\"")
+            || field.contains("\n") || field.contains("\r")
+        guard needsQuoting else { return field }
+        return "\"" + field.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 }

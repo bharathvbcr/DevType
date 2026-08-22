@@ -44,6 +44,7 @@ final class HotkeyManager {
     func registerAll() {
         installHandlerIfNeeded()
         unregisterAll()
+        lastMacroRegistrationFailures.removeAll()
         // The kill switch unregisters everything and registers nothing — checked here, at the
         // single choke point, so a toggle mid-session takes effect on the next registerAll()
         // and a rebind while disabled still persists without silently re-enabling.
@@ -81,10 +82,18 @@ final class HotkeyManager {
     }
 
     /// §4.3: replaces the macro list, persists it, and re-registers.
-    func applyMacros(_ updated: [HotkeyMacroAction]) {
+    ///
+    /// Returns one entry per macro whose registration failed (human-readable
+    /// shortcut + status). `onRegistrationFailed` alone was not enough: the app
+    /// delegate suppresses it while Preferences is visible on the assumption that
+    /// Preferences reports inline — but nothing checked macros there, so a chord
+    /// owned by another app produced a table row that silently did nothing forever.
+    @discardableResult
+    func applyMacros(_ updated: [HotkeyMacroAction]) -> [(label: String, status: OSStatus)] {
         HotkeyPreferences.saveMacros(updated)
         macros = updated
         registerAll()
+        return lastMacroRegistrationFailures
     }
 
     /// Status from the most recent inline-search registration attempt.
@@ -92,6 +101,10 @@ final class HotkeyManager {
 
     /// Status from the most recent AI-palette registration attempt.
     private(set) var lastAIPaletteRegistrationStatus: OSStatus = noErr
+
+    /// Failures from the most recent macro re-registration, surfaced by
+    /// Preferences after `applyMacros(_:)`.
+    private(set) var lastMacroRegistrationFailures: [(label: String, status: OSStatus)] = []
 
     static func loadMacros() -> [HotkeyMacroAction] {
         guard let data = UserDefaults.standard.data(forKey: "devtype.hotkeyMacros"),
@@ -191,8 +204,15 @@ final class HotkeyManager {
             eventClass: OSType(kEventClassKeyboard),
             eventKind: UInt32(kEventHotKeyPressed)
         )
+        // Ownership invariant: the refcon is `passUnretained`, which is safe ONLY because
+        // AppDelegate owns this manager for the process lifetime (see AppDelegate) — Carbon
+        // dispatch never retains it. If ownership ever moves, switch to `passRetained` plus a
+        // release in `deinit` or every hotkey press becomes a use-after-free.
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(
+        // A failed handler installation means every registration "succeeds" while
+        // nothing ever fires — the total-death shape §4.2 fixed for registration,
+        // still open for dispatch. Fail loudly at both channels.
+        let installStatus = InstallEventHandler(
             GetEventDispatcherTarget(),
             { _, event, refcon -> OSStatus in
                 guard let event, let refcon else { return noErr }
@@ -215,7 +235,13 @@ final class HotkeyManager {
             refcon,
             nil
         )
-        handlerInstalled = true
+        handlerInstalled = installStatus == noErr
+        if installStatus != noErr {
+            DevTypeLog.app.fault(
+                "[Hotkey] handler installation failed status=\(installStatus, privacy: .public) — hotkeys will not fire"
+            )
+            onRegistrationFailed?("(all shortcuts)", installStatus)
+        }
     }
 
     private func registerMacro(_ macro: HotkeyMacroAction) {
@@ -245,6 +271,7 @@ final class HotkeyManager {
             DevTypeLog.app.error(
                 "[Hotkey] macro registration failed shortcut=\(label, privacy: .public) status=\(status, privacy: .public)"
             )
+            lastMacroRegistrationFailures.append((label, status))
             onRegistrationFailed?(label, status)
         }
     }

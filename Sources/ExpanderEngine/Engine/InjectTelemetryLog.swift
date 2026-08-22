@@ -364,6 +364,7 @@ public final class InjectTelemetryLog {
         lock.lock()
         entries.removeAll(keepingCapacity: true)
         duplicateRisk.removeAll(keepingCapacity: true)
+        clipboardHolds.removeAll(keepingCapacity: true)
         lock.unlock()
     }
 }

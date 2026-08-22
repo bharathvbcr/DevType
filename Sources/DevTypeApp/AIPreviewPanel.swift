@@ -565,6 +565,9 @@ private final class AIPreviewController: NSViewController {
     }
 
     private func installKeyMonitor() {
+        // Same guard as MacroPalettePanel: overwriting a live monitor leaks it —
+        // teardown removes only the last one, and the orphan keeps eating keys.
+        guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             switch Int(event.keyCode) {

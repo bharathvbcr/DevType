@@ -39,6 +39,12 @@ public enum AppRelauncher {
       waited=$((waited + 1))
       if [ "$waited" -ge "$limit" ]; then break; fi
     done
+    if kill -0 "$pid" 2>/dev/null; then
+      # The ceiling expired with the parent still alive — terminate was vetoed (a modal sheet,
+      # say). Opening now would run two instances under one TCC identity, which is exactly what
+      # this helper exists to prevent. Do nothing.
+      exit 0
+    fi
     sleep "$settle"
     exec /usr/bin/open "$app"
     """

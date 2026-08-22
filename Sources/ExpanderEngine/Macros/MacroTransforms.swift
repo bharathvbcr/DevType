@@ -178,13 +178,19 @@ public final class MacroCounterStore: @unchecked Sendable {
     }
 
     /// Advances and returns the new value.
+    ///
+    /// Addition is saturating: a crafted `%counter:x:+9223372036854775807%` spec
+    /// persists `Int.max`, and trapping arithmetic here would crash the app on the
+    /// next expansion — a crash loop that survives relaunch because values are
+    /// persisted to defaults.
     @discardableResult
     public func advance(_ name: String, by step: Int = 1) -> Int {
         let key = Self.normalize(name)
         let snapshot: [String: Int]
         let next: Int
         lock.lock()
-        next = (values[key] ?? 0) + step
+        let (sum, overflow) = (values[key] ?? 0).addingReportingOverflow(step)
+        next = overflow ? (step > 0 ? Int.max : Int.min) : sum
         values[key] = next
         snapshot = values
         lock.unlock()
@@ -364,6 +370,11 @@ public struct MacroEnvironment {
 
 /// §3.5: Parses `name` / `name:+5` out of a counter macro body.
 public enum MacroCounterSpec {
+    /// Bounds one counter step so a crafted spec (`+9223372036854775807`) cannot
+    /// push a persistent counter to the integer edge on its first expansion.
+    /// No legitimate counter needs more than a million increments per use.
+    public static let maxStepMagnitude = 1_000_000
+
     public static func parse(_ body: String) -> (name: String, step: Int) {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let colon = trimmed.lastIndex(of: ":") else {
@@ -374,6 +385,7 @@ public enum MacroCounterSpec {
             return (trimmed, 1)
         }
         let name = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
-        return (name.isEmpty ? "default" : name, step)
+        let clamped = min(max(step, -maxStepMagnitude), maxStepMagnitude)
+        return (name.isEmpty ? "default" : name, clamped)
     }
 }

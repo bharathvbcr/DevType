@@ -78,6 +78,10 @@ enum SnippetEditorSheet {
         validate: @escaping (_ trigger: String, _ caseSensitive: Bool) -> String?,
         completion: @escaping (SnippetModel?, UUID?) -> Void
     ) {
+        // Same single-instance contract as MacroPalettePanel.present: a second
+        // presentation while one is up would overwrite the statics, and finishing
+        // the first would then nil them out from under the second.
+        if activePanel != nil { return }
         let panel = EditorKeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
             styleMask: [.borderless],
@@ -1327,13 +1331,17 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         let macro = ComposerPillButton(
             title: loc.s("editor.macros"),
             symbol: "curlybraces",
-            shortcut: "⌘/",
+            shortcut: "⌘⇧/",
             target: self,
             action: #selector(showMacroMenu(_:))
         )
-        // §3: ⌘/ is the documented "show me the macros" shortcut.
+        // ⌘/ is the global Command Palette chord — a Carbon hotkey consumes it
+        // system-wide before key-equivalent traversal ever reaches this sheet, so
+        // pressing the previously advertised ⌘/ here sprang the search palette
+        // over the editor instead. ⇧⌘/ is unclaimed: the accessory app installs
+        // no Help menu that could bind ⌘?.
         macro.keyEquivalent = "/"
-        macro.keyEquivalentModifierMask = [.command]
+        macro.keyEquivalentModifierMask = [.command, .shift]
         macro.toolTip = loc.s("editor.hint.macros")
         macro.setAccessibilityHelp(loc.s("editor.hint.macros"))
         macroButton = macro
@@ -1838,10 +1846,18 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
         let title = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let replacement = replacementView.string
+        // A cleared body used to resurrect the previous text on save — or plant a
+        // "Hello World" placeholder into a brand-new snippet — silently undoing what
+        // the user just deleted. Refuse the save instead. Secrets and attached images
+        // carry no body by design, so they stay exempt.
+        if !hasImage && !(secretChip?.isOn ?? false), replacement.isEmpty {
+            showError(loc.s("editor.error.emptyReplacement"))
+            return
+        }
         var snippet = existing ?? SnippetModel(
             title: "",
             triggerKeyword: trigger,
-            replacementText: replacement.isEmpty ? "Hello World" : replacement
+            replacementText: replacement
         )
         snippet.title = title.isEmpty ? Self.derivedTitle(from: replacement) : title
         snippet.triggerKeyword = trigger
@@ -1869,7 +1885,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
                 ImageAttachmentStore.shared.deleteImage(path: old)
             }
             snippet.imagePath = ""
-            snippet.replacementText = replacement.isEmpty ? (existing?.replacementText ?? "Hello World") : replacement
+            // Unreachable with an empty body: the guard above refused it (or a secret
+            // is on, and `applySecret` overwrites this below).
+            snippet.replacementText = replacement
         }
 
         snippet.isCaseSensitive = caseSensitive
