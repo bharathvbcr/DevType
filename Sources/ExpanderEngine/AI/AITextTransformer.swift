@@ -96,7 +96,9 @@ fileprivate final class AITransformOnceCompletion: @unchecked Sendable {
 
 /// Pure context-window budgeting (no live model). Used by `AITextTransformer` and unit tests.
 public enum AITokenBudget {
-    /// Tokens reserved for guided-generation schema + prompt framing overhead.
+    /// Budget slack for framing and token-estimate drift (no longer a guided-schema
+    /// reserve; plain-String generation pays no schema cost). Kept so budgets stay
+    /// conservative.
     public static let schemaReserveTokens = 160
     public static let minimumResponseTokens = 32
 
@@ -576,6 +578,166 @@ public enum AIPromptEcho: Sendable {
 }
 
 
+/// Detects the refusal prose plain-String generation returns instead of throwing.
+///
+/// Under `.permissiveContentTransformations`, `String` generation never throws a
+/// guardrail error; when the model declines a request it answers with prose such as
+/// "Sorry, I can't help with that…" (Apple's Foundation Models safety guidance).
+/// Left undetected, that answer would be injected into the user's document exactly
+/// like a correction. Apple offers no structured marker and itself notes the reply
+/// may be indistinguishable from real output, so this check is deliberately narrow
+/// and requires TWO independent keys before failing a transform:
+///
+/// 1. The answer *opens* with a known refusal opener — matched as whole words after
+///    lowercasing, stripping invisible characters, and ignoring wrapper/markdown
+///    punctuation, so "**Sorry**, …" and a BOM-prefixed reply still match while
+///    "Sorryville Gazette…" does not. An apology mid-text is the author's own words.
+/// 2. The opening sentence asserts inability ("can't help", "unable to comply") in
+///    wording largely absent from the selection. A transform of an apologetic
+///    selection keeps nearly all of its words ("sorry i cant come" → "Sorry, I
+///    can't come"); a refusal replaces them. This is what separates the dangerous
+///    mix — a refusal bolted onto the real corrected text — from an author writing
+///    about apologies, and why rewriting kinds (enhance, custom) are judged only by
+///    their opening sentence rather than whole-answer similarity.
+///
+/// Known limits, accepted deliberately: letter-spaced evasion ("s o r r y") destroys
+/// the words themselves and is not modeled; non-English refusal prose is out of scope
+/// (script and preview policies partially backstop constrained kinds); a selection
+/// that literally contains a refusal sentence teaches the containment check to wave
+/// its echo through — self-inflicted, user-owned text either way. A miss degrades to
+/// surfacing odd prose as the result; a hit fails the transform cleanly as `.refusal`.
+public enum AIRefusalProse {
+
+    /// Lowercased refusal openers as token lists over normalized text — apostrophes
+    /// are stripped during normalization, so "i'm"/"im" and "can't"/"cant" unify
+    /// across spellings. Conservative: a form joins only once Apple documents it
+    /// or it is seen.
+    private static let openers: [[String]] = [
+        ["sorry"],
+        ["im", "sorry"],
+        ["i", "am", "sorry"],
+        ["i", "apologize"],
+        ["i", "cannot"],
+        ["i", "cant"],
+        ["unfortunately", "i", "cannot"],
+        ["unfortunately", "i", "cant"],
+        ["as", "an", "ai"],
+    ]
+
+    /// Verbs that turn an apology into a refusal: "can't help", "won't assist",
+    /// "unable to comply". Negation alone is not evidence — "can't overstate" is
+    /// emphasis, not refusal.
+    private static let refusalVerbs: Set<String> = [
+        "help", "assist", "comply", "process", "provide",
+        "fulfil", "fulfill", "perform", "rewrite", "complete",
+    ]
+
+    /// Share of the opening sentence's tokens that may appear in the selection
+    /// before the opening counts as model-authored rather than the author's own.
+    /// Corrections fix spelling, so an author's own opening still shares most words;
+    /// the bar sits low enough to absorb that drift and nothing else.
+    private static let maximumHeadContainment = 0.5
+
+    /// Smallest opening sentence considered meaningful. Below this there is not
+    /// enough evidence to call either way, and ambiguity resolves in favour of the
+    /// author's text.
+    private static let minimumHeadTokens = 3
+
+    /// `true` when `output` reads as a refusal message rather than a transform of `input`.
+    public static func detected(output: String, input: String) -> Bool {
+        let answer = normalize(output)
+        let answerTokens = tokens(in: answer)
+        guard opensWithRefusal(answerTokens) else { return false }
+
+        let inputWords = Set(tokens(in: normalize(input)))
+        let head = tokens(in: String(headSentence(of: answer)))
+        guard head.count >= minimumHeadTokens else { return false }
+
+        let containment = Double(Set(head).intersection(inputWords).count) / Double(head.count)
+        guard containment < maximumHeadContainment else { return false }
+
+        return expressesInability(head)
+    }
+
+    // MARK: - Pieces
+
+    private static func opensWithRefusal(_ answerTokens: [String]) -> Bool {
+        openers.contains { opener in
+            opener.count <= answerTokens.count &&
+                zip(opener, answerTokens).allSatisfy(==)
+        }
+    }
+
+    /// Whether the opening sentence denies capability: a negated modal ("can't",
+    /// "won't", "unable") aimed at a refusal verb, tolerating "to" ("unable to
+    /// help") and "be able to" ("won't be able to assist").
+    private static func expressesInability(_ head: [String]) -> Bool {
+        for (index, word) in head.enumerated()
+        where word == "cant" || word == "cannot" || word == "wont" || word == "unable" {
+            let rest = head[(index + 1)...]
+            if let next = rest.first {
+                if refusalVerbs.contains(next) { return true }
+                if next == "to", rest.dropFirst().first.map(refusalVerbs.contains) == true {
+                    return true
+                }
+                if next == "be", rest.dropFirst().first == "able",
+                   rest.dropFirst(2).first.map(refusalVerbs.contains) == true {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// Everything before the first sentence terminator or line break, after
+    /// skipping any leading whitespace — an answer opening with blank lines must
+    /// not have its opening sentence amputated into nothing.
+    private static func headSentence(of text: String) -> Substring {
+        let body = text.drop(while: { $0.isWhitespace })
+        if let end = body.firstIndex(where: { $0 == "." || $0 == "!" || $0 == "?" || $0 == "\n" }) {
+            return body[..<end]
+        }
+        return body[...]
+    }
+
+    /// Lowercased, with characters removed that must never influence matching:
+    /// default-ignorable code points (BOM, soft hyphen, zero-width spaces/joiners)
+    /// so invisible characters cannot hide a refusal, and apostrophes (straight and
+    /// curly) so contraction spelling drift cannot skew it — "can't"/"cant" and
+    /// "i'm"/"im" tokenize identically on both sides of the comparison.
+    private static func normalize(_ text: String) -> String {
+        let lowered = text.lowercased()
+        var out = ""
+        out.reserveCapacity(lowered.count)
+        for scalar in lowered.unicodeScalars
+        where !scalar.properties.isDefaultIgnorableCodePoint
+            && scalar != "\u{0027}" && scalar != "\u{2019}" {
+            out.unicodeScalars.append(scalar)
+        }
+        return out
+    }
+
+    /// Word tokens over normalized text: letters and digits only. Everything else —
+    /// markdown, quotes, punctuation — is a boundary.
+    private static func tokens(in text: String) -> [String] {
+        var current = ""
+        var found: [String] = []
+        func flush() {
+            if !current.isEmpty { found.append(current) }
+            current = ""
+        }
+        for character in text {
+            if character.isLetter || character.isNumber {
+                current.append(character)
+            } else {
+                flush()
+            }
+        }
+        flush()
+        return found
+    }
+}
+
 /// Counts consecutive identical requests so a Retry can re-roll sampling.
 public struct AIRepeatTracker: Sendable {
     private var lastSignature: String?
@@ -615,14 +777,6 @@ public enum AILocaleSupport {
 // MARK: - Transformer
 
 #if canImport(FoundationModels)
-
-/// Guided-generation payload. Forces clean text (no JSON wrapper / commentary).
-@available(macOS 26.0, *)
-@Generable
-public struct TransformedText {
-    @Guide(description: "The transformed text only. No commentary, quotes, or labels.")
-    public var text: String
-}
 
 /// Serial on-device text transformer.
 ///
@@ -1073,29 +1227,23 @@ public actor AITextTransformer {
             attempt: attempt
         )
 
+        // Plain-String overloads on purpose: `.permissiveContentTransformations` only
+        // relaxes guardrails for String generation — guided generation runs default
+        // guardrails and refuses the sensitive selections this feature exists to
+        // transform. The trade is that a refusal may arrive as prose, which
+        // AIRefusalProse screens out below instead of surfacing as a result.
         let raw: String
         if streamPartials {
-            let stream = session.streamResponse(
-                to: prompt,
-                generating: TransformedText.self,
-                options: options
-            )
+            let stream = session.streamResponse(to: Prompt(prompt), options: options)
             var lastText = ""
             for try await snapshot in stream {
-                let partial = snapshot.content.text
-                onPartial(partial)
-                if let partial {
-                    lastText = partial
-                }
+                lastText = snapshot.content
+                onPartial(lastText)
             }
             raw = lastText
         } else {
-            let response = try await session.respond(
-                to: prompt,
-                generating: TransformedText.self,
-                options: options
-            )
-            raw = response.content.text
+            let response = try await session.respond(to: Prompt(prompt), options: options)
+            raw = response.content
         }
 
         let cleaned = AITransformText.sanitize(
@@ -1118,6 +1266,19 @@ public actor AITextTransformer {
                 detail: "model returned no text"
             )
             throw AITransformError.decodingFailure
+        }
+        // Permissive String generation signals a decline with refusal prose instead of
+        // throwing — fail cleanly rather than inject "Sorry, I can't help with that…".
+        if AIRefusalProse.detected(output: cleaned, input: input) {
+            DevTypeLog.store.error(
+                "[AI] refusal prose kind=\(kind.rawValue, privacy: .public)"
+            )
+            AIDiagnosticsStore.shared.recordFailure(
+                kind: kind.rawValue,
+                error: "refusalProse",
+                detail: "string generation returned a refusal message"
+            )
+            throw AITransformError.refusal
         }
         return cleaned
     }

@@ -139,6 +139,35 @@ final class AILiveModelTests: XCTestCase {
         }
     }
 
+    /// P1 regression: `.permissiveContentTransformations` only applies to plain-String
+    /// generation, so both paths must use the String overloads — guided generation ran
+    /// default guardrails and refused selections like this mental-health note outright.
+    ///
+    /// Success asserts the corrected text stays Latin-script. An explicit `.refusal`
+    /// skips (Apple documents permissive mode as best-effort); any other failure fails.
+    func testSensitiveSelectionIsTransformedUnderPermissiveGuardrails() async throws {
+        try requireLiveModel()
+        guard #available(macOS 26.0, *) else { return }
+
+        let input = """
+            The doctor started me on sertraline yesterday for my depresion and told me \
+            to journal daily about my mood swings, insomia, and the panick attacks that \
+            got worse after the divorce
+            """
+        switch await proofread(input) {
+        case .success(let text):
+            XCTAssertEqual(
+                AIScriptFamily.families(in: text).subtracting([.latin]),
+                [],
+                "sensitive English proofread answered in another script: \(text)"
+            )
+        case .failure(.refusal):
+            throw XCTSkip("model refused the synthetic sample — permissive mode is best-effort")
+        case .failure(let error):
+            XCTFail("sensitive proofread failed: \(error)")
+        }
+    }
+
     /// Both outbound directions answer in English letters — native script is unusable
     /// in the field the text lands in.
     func testOutboundTranslationsAreRomanized() async throws {
