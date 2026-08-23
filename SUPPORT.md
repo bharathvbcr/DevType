@@ -19,7 +19,7 @@ Before submitting an issue, please check our documentation resources:
 ## ❓ Frequently Asked Questions (FAQ)
 
 ### 1. Snippets are not expanding when I type. What should I do?
-1. Open **DevType Preferences → Permissions** to check your Accessibility and Input Monitoring status.
+1. Press **`⌘⇧P`** (or choose **Permission Recovery** from the menu bar) to see the live status of Accessibility and Input Monitoring with one-click fixes.
 2. Verify that DevType is not paused (look for the pause indicator in the menu bar).
 3. Ensure the active application is not in your **Muted Apps** list.
 4. Try typing in standard macOS applications like TextEdit or Notes to verify system-level expansion.
@@ -29,7 +29,7 @@ Before submitting an issue, please check our documentation resources:
 Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A). You can also type assigned trigger abbreviations (e.g. `:fix`, `:rw`) when configured in **Preferences → AI**. Note that on-device AI requires macOS 26+ with Apple Foundation Models.
 
 ### 3. How do I migrate my snippets from TextExpander or Espanso?
-Go to **DevType → Preferences → Importers** or use the menu bar option **File → Import Snippets…** and select your TextExpander XML group file or Espanso match YAML file.
+Open the DevType menu bar icon and choose **Import Snippets…**, then select your TextExpander settings bundle (`.textexpandersettings` / `.textexpanderbackup`) or an Espanso config folder / match YAML file. Your library can be exported again as DevType JSON, Espanso YAML, or CSV via **Export…**.
 
 ---
 

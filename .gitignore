@@ -10,6 +10,7 @@ DerivedData/
 
 # Packaged / legacy build outputs (regenerate via Scripts/package-app.sh)
 build/
+dist/
 Public/
 *.app
 *.app.source-sha256

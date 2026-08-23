@@ -14,11 +14,13 @@ This guide explains why each permission is needed, how to grant and maintain the
 | **Accessibility** | `kTCCServiceAccessibility` | `AXIsProcessTrustedWithOptions()` | **Required** to perform atomic text range replacement directly inside focused text fields via macOS Accessibility APIs (`AXUIElement`). |
 | **Post Events** | `kTCCServicePostEvent` | `CGPreflightPostEventAccess()` | *Optional / Fallback* to synthesize backspaces (`kVK_Delete`), `⌘V` paste events, and arrow navigation when Accessibility APIs are blocked. |
 
+The capabilities are deliberately split: the swallowing event tap requires **Input Monitoring + Accessibility** together, while Post Events only powers the synthetic-injection fallback. Losing Post Event access degrades injection (AX-only) without tearing down the tap, and an `InjectionPlanner` decides per expansion whether to refuse, degrade to AX-only, or inject fully. Permission probes use CG + AX preflight only — DevType never flips toggles for you and never opens System Settings without you asking it to.
+
 ---
 
 ## 🛠️ Step-by-Step Setup in macOS
 
-When you first launch DevType, the **Permission Onboarding Wizard** will open automatically. You can also manually configure permissions at any time:
+When you first launch DevType, the **Permission Onboarding Wizard** will open automatically (Welcome → Input Monitoring → Accessibility + Post Events → Verify → Done). You can also manually configure permissions at any time:
 
 ### 1. Enable Accessibility
 1. Open **System Settings** (`` → **System Settings…**).
@@ -81,6 +83,9 @@ Changing identity changes the DR, so existing Settings toggles authorize the old
 ---
 
 ## 🔧 Troubleshooting Permission Issues
+
+### 0. Start with the Permission Recovery window
+DevType has a built-in triage surface: open it with **⌘⇧P** or **menu bar → Permission Recovery**. The **Status** tab shows each capability's live state with one-click fixes (request, deep-link into the right System Settings pane, relaunch); the **Diagnostics** tab carries the evidence (bundle identity, executable path, TCC expectations). If something is wrong, this window tells you *what* before you touch System Settings.
 
 ### 1. Permissions Toggle Shows "ON", but Expansions Do Not Trigger
 Occasionally, after updating macOS or rebuilding an app bundle, the macOS TCC daemon (`tccd`) may hold a stale cache entry.

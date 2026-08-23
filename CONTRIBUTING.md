@@ -83,7 +83,7 @@ DevType/
 │   │   ├── AI/                            # Apple Foundation Models, selection gates
 │   │   ├── Models/                        # Snippet models, SecretStore, usage stats
 │   │   ├── Permissions/                   # TCC checks, AX verification, recovery
-│   │   └── Sync/                          # Import/export (TextExpander XML, Espanso YAML)
+│   │   └── Sync/                          # Import/export (TextExpander bundles, Espanso YAML), search, palette catalog
 │   │
 │   └── DevTypeSafety/       # Objective-C Runtime Exception Trampoline
 │       └── include/DevTypeSafety.h        # @try/@catch wrappers for unsafe AppKit/AX calls

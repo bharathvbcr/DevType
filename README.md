@@ -54,8 +54,8 @@ Looking for a **privacy-first TextExpander alternative** or a **native Espanso G
 | **On-Device AI Transforms** | ✅ Apple Foundation Models | ❌ None | ❌ None | ❌ Cloud Extensions |
 | **Mustache & TE Syntax** | ✅ Dual Engine | ⚠️ TE Only | ⚠️ Espanso YAML | ⚠️ Alfred Tags |
 | **100% Offline & Private** | ✅ Zero Telemetry | ❌ Cloud Sync Mandatory | ✅ Offline | ✅ Offline |
-| **Espanso / TE Importers** | ✅ Built-in XML & YAML | ❌ Manual | ⚠️ Manual | ❌ Manual |
-| **Command Palette (`⌘/`)** | ✅ Snippets, AI, Math, Dates | ❌ None | ❌ Search Only | ⚠️ Palette |
+| **Espanso / TE Importers** | ✅ Built-in Bundles & YAML | ❌ Manual | ⚠️ Manual | ❌ Manual |
+| **Command Palette (`⌘/`)** | ✅ Snippets, AI, Math, Dates, Text Tools | ❌ None | ❌ Search Only | ⚠️ Palette |
 | **Encrypted Secret Snippets** | ✅ AES-GCM + Touch ID | ❌ None | ❌ Plaintext YAML | ❌ None |
 
 ---
@@ -63,11 +63,11 @@ Looking for a **privacy-first TextExpander alternative** or a **native Espanso G
 ## ✨ Key Features
 
 - ⚡ **Instant Expand-on-Match**: Low-latency swallowing ring buffer that instantly replaces typed triggers using Accessibility range replacement (with fallback to HID clipboard paste).
-- 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize) using Apple Foundation Models (macOS 26+). 100% private, zero API keys required.
-- 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy search for snippets, AI tools, date/time offsets, clipboard history, and quick app navigation.
-- 🧩 **Dual Macro Engine**: Full support for both Mustache (`{{date:iso}}`, `{{clipboard}}`, `{{calc: 1+2}}`, `{{cursor}}`) and TextExpander (`%filltext:name=X%`, `%date:us%`, `%|`, `%key:enter%`) template syntaxes.
+- 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize, prompt enhance, translate) using Apple Foundation Models (macOS 26+). 100% private, zero API keys required.
+- 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy search for snippets and AI tools, inline math (`= 45 * 12.5`), custom one-shot AI prompts (`> …`), date offsets (`tomorrow`, `+3w`, `next friday`), instant text operations (case, sort, dedupe, Base64/URL/JSON, SHA-256/MD5), generators (UUID, lorem, password), and quick app navigation — ranked by your own usage.
+- 🧩 **Dual Macro Engine**: Full support for both Mustache (`{{date:iso:+1d}}`, `{{clipboard}}`, `{{calc: 1+2}}`, `{{uuid}}`, `{{cursor}}`) and TextExpander (`%filltext:name=X%`, `%@+1D%`, `%snippet:x%`, `%|`, `%key:enter%`) template syntaxes.
 - 🖼️ **Rich Image Snippets**: Paste images directly from snippet triggers with full Espanso `image_path` import support.
-- 📦 **One-Click Importers**: Seamlessly import existing snippet libraries from TextExpander 4/5 XML groups and Espanso YAML match configs.
+- 📦 **One-Click Importers**: Seamlessly import existing snippet libraries from TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML match configs — with one-click export to Espanso YAML, CSV, or DevType JSON.
 - 🛡️ **Privacy & Fail-Closed Security**: Automatic expansion pause during password entry (`NSSecureTextField`), Secure Event Input locks, IME composition, or in muted apps.
 - 🔒 **Secret Snippets**: Store passwords AES-GCM-encrypted, gated behind Touch ID, copied from the menu bar with an auto-clearing concealed clipboard — never in the library file, exports, or diagnostics. See [SECRETS.md](SECRETS.md).
 - 🔑 **Stable Identity TCC**: Packaged `.app` bundle with dedicated code identity (`com.devtype.app`) so macOS Accessibility & Input Monitoring permissions persist cleanly across updates.
@@ -79,8 +79,9 @@ Looking for a **privacy-first TextExpander alternative** or a **native Espanso G
 | Shortcut | Action | Description |
 |---|---|---|
 | **`⌘/`** | **Command Palette** | Global fuzzy search across all snippets, math evaluation, and date tools |
-| **`⌘⌥A`** | **AI Action Palette** | Highlight text and trigger on-device AI proofreading, rewriting, or custom prompts |
+| **`⌘⌥A`** | **AI Action Palette** | Highlight text and trigger on-device AI proofreading, rewriting, translation, or custom prompts |
 | **`:trigger`** | **Typed Expansion** | Type any snippet abbreviation to instantly expand the template in place |
+| **`⌘⇧P`** | **Permission Recovery** | Open the status/diagnostics window to fix Accessibility & Input Monitoring grants |
 | **`Esc`** | **Dismiss / Cancel** | Close active panels, search palettes, or AI previews |
 
 ---
@@ -125,7 +126,7 @@ Explore our complete documentation in the [`docs/`](docs/) directory:
 - 🏛️ **[Technical Architecture](docs/ARCHITECTURE.md)**: Deep dive into event taps, text injection pipelines, threading models, and exception safety.
 - 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
-- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,000+ headless unit tests, debugging, and release automation.
+- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,200+ headless unit tests, debugging, and release automation.
 - 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---
@@ -137,7 +138,8 @@ Run Apple Foundation Models text transformations on-device with zero cloud telem
 - **Enable**: Go to **Preferences → AI** and turn on `Enable on-device AI transforms`.
 - **Action Palette** (`⌘⌥A`): Highlight text in any application and press `⌘⌥A` to bring up the AI action menu.
 - **Typed Triggers**: Assign AI actions directly to triggers (e.g. typing `:fix` or `:rw` over selected text automatically replaces or previews the transformed text).
-- **Available Actions**: Proofread (Direct replace), Rewrite, Paraphrase, Expand, Condense, Tone Shift (Formal/Friendly), Bulletize, Prompt Enhance, and Freeform Prompting (`> custom prompt`).
+- **Available Actions**: Proofread (direct replace), Rewrite, Paraphrase, Expand, Condense, Tone Shift (Formal/Friendly), Bulletize, Prompt Enhance, Translate (→ English, or → romanized Telugu/Hindi), and Freeform Prompting (`> custom prompt` from the Command Palette).
+- **Preview or Direct**: Proofread replaces in place by default; every other action streams into a diff preview (Replace / Copy / Retry / Cancel). Per-action delivery is switchable in **Preferences → AI**, and **Undo last AI** in the palette reverts a transform.
 
 ---
 
@@ -159,21 +161,32 @@ DevType parses Mustache `{{...}}` tags and TextExpander `%...%` tags seamlessly.
 ### Mustache (`{{...}}`)
 | Tag | Description |
 |---|---|
-| `{{date}}` / `{{date:yyyy-MM-dd}}` | Insert current date (supports standard patterns or named presets like `us`, `iso`, `eu`) |
+| `{{date}}` / `{{date:yyyy-MM-dd}}` | Insert current date (standard patterns or named presets like `us`, `iso`, `eu`) |
+| `{{date:iso:+1d}}` / `{{date:+1w}}` | Date arithmetic — offset a preset or pattern by `y/M/w/d/h/m/s` units |
 | `{{time}}` | Insert current time |
 | `{{clipboard}}` | Insert current pasteboard text (read on-demand only) |
-| `{{calc: 12 * 4}}` | Perform safe inline arithmetic evaluation |
+| `{{calc: 1+2}}` | Perform safe inline arithmetic evaluation |
 | `{{cursor}}` | Position the caret after snippet expansion |
 | `{{snippet:trigger_name}}` | Nest another snippet recursively (max depth 10) |
+| `{{uuid}}` | Generate an upper-case UUID (lower-case via `{{uuid:lower}}`) |
+| `{{random:1-100}}` | Random value — integer range, `a\|b\|c` choices, or `hex:`/`alnum:`/`digits:`/`letters:` specs |
+| `{{counter:name}}` | Persistent named counter (optional step, e.g. `{{counter:ticket:+5}}`) |
+| `{{upper:text}}` … `{{sentence:text}}` | Case transforms — also work around nested tags and fill-ins |
 
 ### TextExpander (`%...%`)
 | Tag | Description |
 |---|---|
-| `%filltext:name=Field%` | Display interactive fill-in dialog before expanding |
+| `%filltext:name=Field%` | Display interactive fill-in dialog before expanding (also `%fillarea%`, `%fillpopup%`, optional `%fillpart%…%fillpartend%` sections) |
 | `%date:FORMAT%` | Format date with `DateFormatter` pattern or preset (`%date:us%`, `%date:full%`) |
+| `%@+1D%` | TextExpander-style date math (`y M w d h m s` units) |
 | `%clipboard` | Insert pasteboard text |
 | `%|` | Position caret marker |
-| `%key:enter%` / `%key:tab%` | Post trailing keystroke after injection |
+| `%snippet:abbrev%` | Nest another snippet |
+| `%key:enter%` / `%key:tab%` | Post trailing keystroke after injection (also `return`, `esc`, `space`) |
+| `%uuid%`, `%random:1-100%`, `%counter:name%` | Generated values |
+| `%case:upper% … %caseend%` | Case-transform the enclosed block |
+
+Inside a macro body, `%%` is an escaped literal `%`. Unknown `%…%` sequences (like URL-encoded text) are left untouched.
 
 See the full [Macro Reference](docs/MACRO_REFERENCE.md) for more examples.
 
@@ -200,7 +213,7 @@ Yes! DevType is completely free and open-source under the MIT License.
 No. DevType operates 100% offline. Keystrokes are processed locally in a volatile memory ring buffer solely for matching triggers. AI features use on-device Apple Foundation Models without network requests.
 
 ### Can I import my existing snippets from TextExpander or Espanso?
-Yes. DevType includes built-in importers for TextExpander 4/5 XML export files and Espanso YAML config files, preserving your triggers, replacements, and image attachments.
+Yes. DevType includes built-in importers for TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML config folders or match files, preserving your triggers, replacements, and image attachments. Libraries can be exported back out as DevType JSON, Espanso YAML, or CSV.
 
 ### How does DevType handle passwords and secure fields?
 DevType automatically pauses keyword expansion whenever a secure text field (`NSSecureTextField`) is active or macOS Secure Event Input is locked. Storage: **secret snippets** hold passwords AES-GCM-encrypted behind Touch ID and copy them from the menu bar with an auto-clearing clipboard — see [SECRETS.md](SECRETS.md).
