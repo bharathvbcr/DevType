@@ -36,6 +36,9 @@ plutil -lint Resources/DevType.entitlements
 echo "  - Checking signing identity resolution..."
 "${ROOT}/Scripts/test-signing-identity.sh"
 
+echo "  - Checking release DMG selection..."
+"${ROOT}/Scripts/test-release-dmg-select.sh"
+
 echo "==> 2. Running SwiftPM Unit Tests"
 "${ROOT}/Scripts/test.sh" -v
 

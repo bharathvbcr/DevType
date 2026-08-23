@@ -16,11 +16,24 @@ permissions:
 jobs:
   release:
     name: Build & Publish Release
+    # Every step below assumes a tag ref (release name, notes file, version
+    # assertion); a manual dispatch from a branch must skip instead of
+    # publishing a garbage-named release.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Check release notes exist
+        # Fail before the multi-minute build, not at publish time.
+        run: |
+          NOTES="docs/releases/${GITHUB_REF_NAME}.md"
+          if [[ ! -s "${NOTES}" ]]; then
+            echo "::error::missing or empty ${NOTES} — every tagged release ships curated notes"
+            exit 1
+          fi
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -37,19 +50,15 @@ jobs:
 
       - name: Locate DMG
         id: dmg
-        run: |
-          DMG_PATH=$(find dist -name "DevType-*.dmg" | head -n 1)
-          if [ -z "$DMG_PATH" ]; then
-            echo "error: no DMG found under dist/"
-            exit 1
-          fi
-          echo "dmg_path=$DMG_PATH" >> $GITHUB_OUTPUT
-          echo "dmg_name=$(basename $DMG_PATH)" >> $GITHUB_OUTPUT
+        # Fails on zero, multiple, or version-mismatched candidates — never
+        # uploads an arbitrary or mislabeled artifact.
+        run: Scripts/select-release-dmg.sh dist "${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.dmg.outputs.dmg_path }}
+          body_path: docs/releases/${{ github.ref_name }}.md
           name: DevType ${{ github.ref_name }}
           draft: false
           prerelease: false
