@@ -25,7 +25,7 @@ final class HardeningStressTests: XCTestCase {
             let result = MacroRenderer.expand(content: table["a"]!, lookup: { table[$0] })
             XCTAssertLessThanOrEqual(result.text.utf16.count, MacroParser.NestedSnippetBudget.defaultMaxOutputUTF16Count)
         }
-        XCTAssertLessThan(elapsed, 2.0)
+        XCTAssertLessThan(elapsed, StressWallClock.terminationGuard)
     }
 
     /// Diamond: a → {b, c}, b → d ×N, c → d ×N — shared subtree resolved many
@@ -41,7 +41,7 @@ final class HardeningStressTests: XCTestCase {
             let result = MacroRenderer.expand(content: table["a"]!, lookup: { table[$0] })
             XCTAssertLessThanOrEqual(result.text.utf16.count, MacroParser.NestedSnippetBudget.defaultMaxOutputUTF16Count)
         }
-        XCTAssertLessThan(elapsed, 2.0)
+        XCTAssertLessThan(elapsed, StressWallClock.terminationGuard)
     }
 
     /// Mixed TE + mustache syntax referencing each other across engines.
@@ -54,7 +54,7 @@ final class HardeningStressTests: XCTestCase {
             let result = MacroRenderer.expand(content: table["te"]!, lookup: { table[$0] })
             XCTAssertLessThanOrEqual(result.text.utf16.count, MacroParser.NestedSnippetBudget.defaultMaxOutputUTF16Count)
         }
-        XCTAssertLessThan(elapsed, 2.0)
+        XCTAssertLessThan(elapsed, StressWallClock.terminationGuard)
     }
 
     /// Seeded random reference graphs: every expansion terminates quickly and
@@ -81,7 +81,7 @@ final class HardeningStressTests: XCTestCase {
                     "seed \(seed): output exceeded the ceiling"
                 )
             }
-            XCTAssertLessThan(elapsed, 2.0, "seed \(seed) took \(elapsed)s")
+            XCTAssertLessThan(elapsed, StressWallClock.terminationGuard, "seed \(seed) took \(elapsed)s")
         }
     }
 

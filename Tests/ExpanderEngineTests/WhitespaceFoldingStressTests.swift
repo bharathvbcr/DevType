@@ -283,7 +283,7 @@ final class WhitespaceFoldingStressTests: XCTestCase {
         }
         let elapsed = Date().timeIntervalSince(start)
         XCTAssertLessThan(
-            elapsed, 2.0,
+            elapsed, StressWallClock.quadraticCanary,
             "caret-window scan is folding the full value again — §2.6 regression"
         )
     }

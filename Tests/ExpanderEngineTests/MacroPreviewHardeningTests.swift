@@ -49,6 +49,6 @@ final class MacroPreviewHardeningTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(started)
 
         XCTAssertEqual(preview, String(repeating: " ", count: 19_999) + " VISIBLE")
-        XCTAssertLessThan(elapsed, 2.0, "render took \(elapsed)s — quadratic behavior is back")
+        XCTAssertLessThan(elapsed, StressWallClock.quadraticCanary, "render took \(elapsed)s — quadratic behavior is back")
     }
 }
