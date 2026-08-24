@@ -76,7 +76,7 @@ codesign --verify --strict --deep --verbose=2 "${APP_BUNDLE}" \
   || die "codesign verification failed"
 
 mkdir -p "${DIST}"
-rm -f "${DIST}"/DevType-*.dmg
+rm -f "${DIST}"/DevType-*.dmg "${DIST}"/DevType-*.zip
 STAGE="${DIST}/DevType-${VERSION}"
 rm -rf "${STAGE}" && mkdir -p "${STAGE}"
 cp -R "${APP_BUNDLE}" "${STAGE}/DevType.app"
