@@ -20,6 +20,30 @@ echo "==> Toolchain check"
 swift --version
 xcodebuild -version
 
+echo "==> 0. Stale module-cache preflight"
+# A checkout moved between directories poisons SwiftPM's clang module cache:
+# every PCM embeds the absolute ModuleCache path it was built with, so after a
+# move clang aborts C/ObjC compiles with "was compiled with module cache path
+# ... but the path is currently ..." buried under a _DarwinFoundation* cascade.
+# Purge any cache containing a PCM whose embedded path is not under ROOT.
+stale_pcm_found=0
+while IFS= read -r pcm; do
+  [[ -f "${pcm}" ]] || continue
+  # Bound the scan: sampling the first 200 PCMs is enough to catch a wholesale
+  # stale cache, and keeps this preflight O(few hundred MB of grep) worst case.
+  if ! grep -aq -- "${ROOT}" "${pcm}" && grep -aq "/.build/" "${pcm}"; then
+    echo "  stale PCM (built elsewhere): ${pcm}"
+    stale_pcm_found=1
+    break
+  fi
+done < <(find .build -type f -name '*.pcm' 2>/dev/null | head -n 200)
+if [[ "${stale_pcm_found}" -eq 1 ]]; then
+  find .build -type d -name ModuleCache -prune -exec rm -rf {} +
+  echo "  purged ModuleCache dirs; they will be rebuilt during this run"
+else
+  echo "  ok: no stale module caches"
+fi
+
 echo "==> 1. Linting & Repo Hygiene"
 echo "  - Checking shell scripts syntax..."
 for f in Scripts/*.sh; do
