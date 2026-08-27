@@ -291,14 +291,22 @@ public final class VoiceAudioRecorder: @unchecked Sendable {
     // MARK: - Level Metering & Utilities
 
     private static func calculateRMS(buffer: AVAudioPCMBuffer) -> Float {
-        guard let channelData = buffer.floatChannelData?[0] else { return 0.0 }
         let frames = buffer.frameLength
         guard frames > 0 else { return 0.0 }
 
         var sum: Float = 0.0
-        for i in 0..<Int(frames) {
-            let sample = channelData[i]
-            sum += sample * sample
+        if let channelData = buffer.floatChannelData?[0] {
+            for i in 0..<Int(frames) {
+                let sample = channelData[i]
+                sum += sample * sample
+            }
+        } else if let int16Data = buffer.int16ChannelData?[0] {
+            for i in 0..<Int(frames) {
+                let sample = Float(int16Data[i]) / 32768.0
+                sum += sample * sample
+            }
+        } else {
+            return 0.0
         }
 
         let rms = sqrt(sum / Float(frames))

@@ -1,6 +1,6 @@
 # Voice Smart Dictation in DevType
 
-DevType integrates local, on-device Smart Speech-to-Text and Dictation powered by **Mistral Voxtral Realtime (Mini 4B)** and **Fun-ASR-Nano**, paired with Google Gemini **Jot**-inspired thought revision and disfluency resolution, rendered in an authentic **Apple Liquid Glass** interface.
+DevType integrates local, on-device Smart Speech-to-Text and Dictation powered by **Mistral Voxtral Realtime (Mini 4B)** and **Fun-ASR-Nano**, paired with Google Gemini **Jot**-inspired thought revision and disfluency resolution, rendered in a floating dictation HUD that adopts Apple **Liquid Glass** on macOS 26+ (`NSGlassEffectView`) with a material fallback below.
 
 ---
 
@@ -36,12 +36,13 @@ Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-tr
 * **Millisecond-1 Audio Journaling**: 16kHz mono 16-bit PCM streaming audio capture with continuous disk journaling (`active_session_*.pcm`) in `~/Library/Application Support/DevType/VoiceCache/`.
 * **Single-Shot Watchdog Transcription**: Guaranteed non-blocking transcription execution with a 12-second watchdog guard preventing system stalls.
 
-### 4. Apple Liquid Glass HUD Panel (`VoiceHUDPanel`)
-* Floating non-activating AppKit HUD rendered with Apple Liquid Glass styling:
-  - **Specular Fresnel Glass Border**: Multi-stop refractive edge highlights.
-  - **Liquid Caustic Aura**: Ambient ruby glow pulsing during speech capture and transcription.
-  - **Fluid Harmonic Waveforms (`FluidWaveVisualizerView`)**: 3-phase sinusoidal bezier spline oscillating dynamically with live RMS power and transcribing shimmer.
-  - **Apple Spring Physics**: Fluid entrance and dismissal animations.
+### 4. Voice Dictation HUD (`VoiceHUDPanel`)
+* Floating non-activating AppKit HUD that never steals key focus from the target field:
+  - **Liquid Glass on macOS 26+**: runtime `NSGlassEffectView` (clear + crimson tint) via the same discovery trampoline as the rest of DevType; `NSVisualEffectView` material fallback on older macOS.
+  - **Inset organic blob silhouette**: DevType-owned Bezier geometry (`LiquidBlobGeometry`) that stays inside the panel bounds and deforms with live mic RMS.
+  - **Transcript-driven expansion**: panel springs wider/taller as live STT tokens arrive (coalesced, not one animation per token).
+  - **Fluid harmonic metering**: original multi-phase waveform (Apple does not ship Siri orb / Liquid Glass shader assets for porting).
+  - **Accessibility**: Reduce Transparency → solid fill; Reduce Motion → frozen silhouette and no blink; localized status strings.
 
 ---
 

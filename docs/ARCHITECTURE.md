@@ -245,5 +245,5 @@ The Voice Dictation subsystem provides real-time local speech-to-text with seman
 - **Mistral Voxtral Realtime (Mini 4B)** & **Fun-ASR-Nano**: Local GGUF models managed by `VoiceModelManager` with on-demand download, progress streaming, and SHA-256 verification.
 - **Audio Capture & Crash Journaling (`VoiceAudioRecorder`)**: 16kHz mono 16-bit PCM audio capture with continuous disk journaling (`active_session_*.pcm`) to protect against app crashes during recording.
 - **Thought-Revision & Smart Polish (`SmartDictationEngine`)**: Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS), resolves spoken self-corrections mid-sentence, strips filler words/hesitations, replaces custom vocabulary jargon, and adapts tone (natural, email, chat, code, verbatim).
-- **Crimson Liquid Glass HUD (`VoiceHUDPanel`)**: Floating non-activating AppKit HUD with animated RMS waveform metering and live transcription feedback.
+- **Voice Dictation HUD (`VoiceHUDPanel`)**: Floating non-activating AppKit HUD. On macOS 26+ uses runtime `NSGlassEffectView` Liquid Glass with an inset organic blob mask; older systems fall back to `NSVisualEffectView`. Expands with live STT transcript and meters mic RMS. Blob geometry is DevType-owned (`LiquidBlobGeometry`) — Apple does not provide Liquid Glass shader/orb assets for third-party porting.
 
