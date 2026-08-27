@@ -49,6 +49,8 @@ public enum DevTypeLog {
         case .accessibility: return "Accessibility"
         case .inputMonitoring: return "InputMonitoring"
         case .postEvent: return "PostEvents"
+        case .microphone: return "Microphone"
+        case .speechRecognition: return "SpeechRecognition"
         }
     }
 

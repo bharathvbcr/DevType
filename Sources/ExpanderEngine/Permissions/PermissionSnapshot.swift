@@ -70,9 +70,11 @@ public struct PermissionSnapshot: Equatable {
     }
 }
 
-/// TCC permission kinds DevType requests via CG / AX APIs.
+/// TCC permission kinds DevType requests via CG / AX / AVFoundation / Speech APIs.
 public enum PermissionKind: Equatable, CaseIterable {
     case accessibility
     case inputMonitoring
     case postEvent
+    case microphone
+    case speechRecognition
 }

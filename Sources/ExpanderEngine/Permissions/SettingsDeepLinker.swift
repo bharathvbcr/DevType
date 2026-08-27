@@ -47,6 +47,10 @@ public final class SettingsDeepLinker {
             return "Privacy_Accessibility"
         case .inputMonitoring:
             return "Privacy_ListenEvent"
+        case .microphone:
+            return "Privacy_Microphone"
+        case .speechRecognition:
+            return "Privacy_SpeechRecognition"
         case .none:
             return nil
         }

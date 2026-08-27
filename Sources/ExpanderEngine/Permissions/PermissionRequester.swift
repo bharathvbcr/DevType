@@ -292,6 +292,38 @@ public final class PermissionRequester {
         }
     }
 
+    @discardableResult
+    public func request(kind: PermissionKind) -> RequestResult {
+        switch kind {
+        case .accessibility:
+            return requestAccessibility()
+        case .inputMonitoring:
+            return requestInputMonitoring()
+        case .postEvent:
+            return requestPostEvent()
+        case .microphone:
+            final class GrantBox: @unchecked Sendable { var granted = false }
+            let box = GrantBox()
+            let sem = DispatchSemaphore(value: 0)
+            VoiceAudioRecorder.requestMicrophonePermission { result in
+                box.granted = result
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 2.0)
+            return RequestResult(
+                kind: .microphone,
+                apiReturnedTrue: box.granted,
+                preflightGranted: VoiceAudioRecorder.checkMicrophonePermission()
+            )
+        case .speechRecognition:
+            return RequestResult(
+                kind: .speechRecognition,
+                apiReturnedTrue: true,
+                preflightGranted: true
+            )
+        }
+    }
+
     /// Short-lived `.listenOnly` tap so TCC can list this process under ListenEvent.
     /// Not the production `.defaultTap` / `.cghidEventTap` engine path.
     @discardableResult

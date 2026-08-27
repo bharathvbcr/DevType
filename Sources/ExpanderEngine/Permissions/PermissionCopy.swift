@@ -19,6 +19,10 @@ public enum PermissionCopy {
             return "Required for the keyboard event tap — without it, DevType cannot read keystrokes."
         case .postEvent:
             return "Synthetic backspace, paste, and arrow cursor moves. Separate TCC service (may appear under Accessibility). No dedicated Privacy_PostEvent pane."
+        case .microphone:
+            return "Required for Smart Speech-to-Text and Dictation. Audio stays strictly local on your Mac."
+        case .speechRecognition:
+            return "Required for on-device fallback speech recognition using Apple Speech framework."
         }
     }
 
@@ -28,6 +32,10 @@ public enum PermissionCopy {
             return "Accessibility"
         case .inputMonitoring:
             return "Input Monitoring"
+        case .microphone:
+            return "Microphone"
+        case .speechRecognition:
+            return "Speech Recognition"
         }
     }
 
@@ -37,6 +45,10 @@ public enum PermissionCopy {
             return "Open Settings"
         case .postEvent:
             return "Open Accessibility"
+        case .microphone:
+            return "Open Microphone Settings"
+        case .speechRecognition:
+            return "Open Speech Settings"
         }
     }
 
@@ -52,6 +64,10 @@ public enum PermissionCopy {
             return "Open Settings only deep-links — it does not register DevType under Input Monitoring. Click Request first, wait for the macOS prompt, then look for \"DevType\" (scroll or use + if needed)."
         case .accessibility:
             return "Open Settings only deep-links — it does not register the app. If \(toggle) does not list \(bundleID) yet, click Request first, then enable that exact entry."
+        case .microphone:
+            return "Open Settings only deep-links. Click Request Access or trigger Smart Dictation (⌘⌥V) to prompt macOS for Microphone permission."
+        case .speechRecognition:
+            return "Open Settings only deep-links. Enable \(bundleID) under Speech Recognition if listed."
         }
     }
 
@@ -79,6 +95,14 @@ public enum PermissionCopy {
         case .accessibility:
             lines.append(
                 "If \(toggle) is empty or missing DevType: click Request first (registers this process), look for \(bundleID), enable it, then return here. Newly granted Accessibility may require Relaunch."
+            )
+        case .microphone:
+            lines.append(
+                "If Microphone is empty or missing DevType: click Request Access or use ⌘⌥V to register this process with macOS TCC."
+            )
+        case .speechRecognition:
+            lines.append(
+                "If Speech Recognition is empty: trigger smart dictation once to register this process."
             )
         }
 
@@ -108,6 +132,10 @@ public enum PermissionCopy {
             pane = "Input Monitoring"
         case .postEvent:
             pane = "Accessibility (Post Events has no dedicated pane)"
+        case .microphone:
+            pane = "Microphone"
+        case .speechRecognition:
+            pane = "Speech Recognition"
         case .none:
             pane = "Privacy & Security"
         }

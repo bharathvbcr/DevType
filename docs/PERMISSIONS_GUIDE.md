@@ -1,6 +1,6 @@
 # macOS Permissions & TCC Setup Guide
 
-To provide seamless, low-latency text expansion and swallow trigger keystrokes across macOS, **DevType** requires specific system permissions governed by Apple's Transparency, Consent, and Control (TCC) subsystem.
+To provide seamless, low-latency text expansion, trigger-swallowing, and Smart Voice Dictation across macOS, **DevType** requires specific system permissions governed by Apple's Transparency, Consent, and Control (TCC) subsystem.
 
 This guide explains why each permission is needed, how to grant and maintain them, and how to troubleshoot permission issues.
 
@@ -13,8 +13,13 @@ This guide explains why each permission is needed, how to grant and maintain the
 | **Input Monitoring** | `kTCCServiceListenEvent` | `CGPreflightListenEventAccess()` | **Required** to intercept typed keystrokes and swallow trigger abbreviations before they render on screen. |
 | **Accessibility** | `kTCCServiceAccessibility` | `AXIsProcessTrustedWithOptions()` | **Required** to perform atomic text range replacement directly inside focused text fields via macOS Accessibility APIs (`AXUIElement`). |
 | **Post Events** | `kTCCServicePostEvent` | `CGPreflightPostEventAccess()` | *Optional / Fallback* to synthesize backspaces (`kVK_Delete`), `⌘V` paste events, and arrow navigation when Accessibility APIs are blocked. |
+| **Microphone** | `kTCCServiceMicrophone` | `AVCaptureDevice.authorizationStatus(for: .audio)` | **Required for Voice Dictation** to capture audio via 16kHz PCM streaming for on-device transcription models (Voxtral / Fun-ASR). Zero audio leaves your Mac. |
+| **Speech Recognition** | `kTCCServiceSpeechRecognition` | `SFSpeechRecognizer.authorizationStatus()` | *Optional Fallback* for on-device speech transcription via Apple Speech Framework. |
 
-The capabilities are deliberately split: the swallowing event tap requires **Input Monitoring + Accessibility** together, while Post Events only powers the synthetic-injection fallback. Losing Post Event access degrades injection (AX-only) without tearing down the tap, and an `InjectionPlanner` decides per expansion whether to refuse, degrade to AX-only, or inject fully. Permission probes use CG + AX preflight only — DevType never flips toggles for you and never opens System Settings without you asking it to.
+The capabilities are deliberately partitioned:
+- Core text expansion requires **Input Monitoring + Accessibility** together.
+- Post Events powers the synthetic-injection fallback without tearing down the tap.
+- Voice Dictation requires **Microphone** permission on-demand when push-to-talk (`⌘⌥V`) is activated, with prompt dialogs governed by `NSMicrophoneUsageDescription` in `Info.plist`.
 
 ---
 
@@ -32,6 +37,11 @@ When you first launch DevType, the **Permission Onboarding Wizard** will open au
 1. In **System Settings**, navigate to **Privacy & Security** → **Input Monitoring**.
 2. Locate **DevType** and toggle the switch to **ON**.
 3. If prompted to "Quit & Reopen", allow macOS to restart DevType so the event tap activates immediately.
+
+### 3. Enable Microphone (for Smart Dictation)
+1. Trigger Smart Dictation with `⌘⌥V` or open **Preferences** (`⌘,`) → **Voice** → **Request Access**.
+2. When the macOS system modal appears (*"DevType would like to access the microphone"*), click **Allow**.
+3. You can also view or change this in **System Settings** → **Privacy & Security** → **Microphone**.
 
 ---
 
@@ -62,60 +72,22 @@ In Xcode, go to **Settings → Accounts**, add your Apple ID, then **Manage Cert
 security find-identity -v -p codesigning
 ```
 
-This is better than the self-signed fallback for a reason beyond TCC: keychain items created by an Apple-issued signature get a stable `teamid:` partition, whereas a self-signed signature falls back to a per-build `cdhash:` partition that DevType has to heal after every rebuild.
+### Self-signed fallback: `DevType Local Signing`
 
-Apple Development certificates expire (unlike the 10-year self-signed one). The build warns 30 days ahead; renew in the same Xcode pane. A renewed certificate keeps its common name, so the DR — and your grants — survive the renewal.
-
-### Fallback: a self-signed certificate
-
-With no Apple ID, run this once instead:
+If you do not have Xcode or an Apple ID configured, create a stable local self-signed certificate:
 
 ```bash
 ./Scripts/make-signing-cert.sh
 ```
 
-It creates a self-signed certificate named `DevType Local Signing` in your login keychain.
-
-### Switching identities
-
-Changing identity changes the DR, so existing Settings toggles authorize the old one and permissions silently stop working. `./Scripts/install-app.sh` detects this, prints both requirements, and runs `./Scripts/reset-tcc.sh` for you — re-grant Accessibility and Input Monitoring once afterwards.
-
 ---
 
-## 🔧 Troubleshooting Permission Issues
+## 🔍 Permission Diagnostics & Recovery
 
-### 0. Start with the Permission Recovery window
-DevType has a built-in triage surface: open it with **⌘⇧P** or **menu bar → Permission Recovery**. The **Status** tab shows each capability's live state with one-click fixes (request, deep-link into the right System Settings pane, relaunch); the **Diagnostics** tab carries the evidence (bundle identity, executable path, TCC expectations). If something is wrong, this window tells you *what* before you touch System Settings.
-
-### 1. Permissions Toggle Shows "ON", but Expansions Do Not Trigger
-Occasionally, after updating macOS or rebuilding an app bundle, the macOS TCC daemon (`tccd`) may hold a stale cache entry.
-
-**Fix**:
-1. Quit DevType.
-2. Open **System Settings** → **Privacy & Security** → **Accessibility**.
-3. Select **DevType** and click the **`-`** (minus) button to remove it completely.
-4. Do the same under **Input Monitoring**.
-5. Relaunch DevType and allow the setup wizard to re-request access.
-
-### 2. Resetting TCC Permissions via Terminal
-You can quickly reset permission states for DevType using the `tccutil` CLI or DevType's reset helper:
-
-```bash
-# Reset using DevType helper script
-./Scripts/reset-tcc.sh
-
-# Or reset individual services manually via tccutil
-tccutil reset Accessibility com.devtype.app
-tccutil reset ListenEvent com.devtype.app
-```
-
----
-
-## 🛡️ Security & Privacy Guarantees
-
-Because DevType requires Input Monitoring and Accessibility permissions, we enforce strict, verifiable privacy invariants:
-
-1. **Zero Cloud Telemetry**: DevType is 100% offline. No network libraries or telemetry frameworks exist in the binary.
-2. **Volatile Buffer Only**: Keystrokes are held in a short memory ring buffer strictly to match trigger abbreviations. Keystrokes are never logged to disk or persisted.
-3. **Fail-Closed Password Protection**: The event tap automatically pauses whenever a secure text field (`NSSecureTextField`) or macOS Secure Event Input lock is detected.
-4. **Open Source Auditability**: All source code for the event tap (`EventTapEngine.swift`), text injection (`TextInjectionPipeline.swift`), and permissions management (`PermissionAuditTests.swift`) is open source and open to public inspection.
+If text expansion or microphone capture stops responding:
+1. Open **Preferences** (`⌘,`) → Check the status pill.
+2. Click **Status Menu** → **Permission Diagnostics** for detailed CDHash, designated requirement, and TCC service states.
+3. Reset permissions for a clean slate if needed:
+   ```bash
+   ./Scripts/reset-tcc.sh
+   ```

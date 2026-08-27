@@ -315,6 +315,7 @@ final class PreferencesViewController: NSViewController,
     private var voiceModelActionButtons: [VoiceModelType: CapsuleButton] = [:]
     private var voiceModelDeleteButtons: [VoiceModelType: CapsuleButton] = [:]
     private var voiceModelListenerToken: UUID?
+    private var voiceMicPermissionPill: PillBadgeView?
 
     init(hotkeyManager: HotkeyManager?) {
         self.hotkeyManager = hotkeyManager
@@ -1135,6 +1136,43 @@ final class PreferencesViewController: NSViewController,
     // MARK: Voice & Smart Dictation
 
     private func buildVoice(into stack: NSStackView) {
+        // 0. Permission Card
+        let permCard = makeCard(title: loc.s("prefs.voice.permission.card"), symbol: "mic.badge.shield")
+        let permHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.permission.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        permHint.translatesAutoresizingMaskIntoConstraints = false
+
+        let micPill = PillBadgeView(text: "Checking...", tint: DevTypeTheme.statusGray, showsDot: true)
+        voiceMicPermissionPill = micPill
+
+        let permActionsRow = NSStackView(views: [
+            micPill,
+            CapsuleButton(
+                title: loc.s("prefs.voice.requestMic"),
+                symbol: "mic.fill",
+                style: .primary,
+                target: self,
+                action: #selector(requestMicrophoneAccessClicked)
+            ),
+            CapsuleButton(
+                title: loc.s("prefs.voice.openSettings"),
+                symbol: "gearshape",
+                style: .secondary,
+                target: self,
+                action: #selector(openMicrophoneSettingsClicked)
+            )
+        ])
+        permActionsRow.orientation = .horizontal
+        permActionsRow.spacing = 10
+        permActionsRow.alignment = .centerY
+        permActionsRow.translatesAutoresizingMaskIntoConstraints = false
+
+        stackInCard(permCard, views: [permHint, permActionsRow])
+
         // 1. Models Card
         let modelsCard = makeCard(title: loc.s("prefs.voice.models.card"), symbol: "waveform.and.mic")
         let modelsHint = DevTypeTheme.makeLabel(
@@ -1388,14 +1426,20 @@ final class PreferencesViewController: NSViewController,
 
         stackInCard(dictCard, views: [dictHint, dictScroll, voiceDictionaryEmptyLabel, dictButtons])
 
-        for card in [modelsCard, optionsCard, hotkeyCard, dictCard] {
+        for card in [permCard, modelsCard, optionsCard, hotkeyCard, dictCard] {
             stack.addArrangedSubview(card)
         }
-        pinWidth(of: [modelsCard, optionsCard, hotkeyCard, dictCard], to: stack)
+        pinWidth(of: [permCard, modelsCard, optionsCard, hotkeyCard, dictCard], to: stack)
     }
 
     private func reloadVoice() {
         guard panes[.voice] != nil else { return }
+
+        let micGranted = VoiceAudioRecorder.checkMicrophonePermission()
+        voiceMicPermissionPill?.update(
+            text: micGranted ? loc.s("status.active") : loc.s("status.needsPermissions"),
+            tint: micGranted ? DevTypeTheme.statusGreen : DevTypeTheme.accent
+        )
 
         let currentModel = VoicePreferences.selectedModel
         if let index = VoiceModelType.allCases.firstIndex(of: currentModel) {
@@ -1424,6 +1468,18 @@ final class PreferencesViewController: NSViewController,
         voiceDictionaryTable.reloadData()
         voiceDictionaryEmptyLabel.stringValue = voiceDictEntries.isEmpty ? loc.s("prefs.voice.dict.empty") : ""
         voiceDictionaryEmptyLabel.isHidden = !voiceDictEntries.isEmpty
+    }
+
+    @objc private func requestMicrophoneAccessClicked() {
+        VoiceAudioRecorder.requestMicrophonePermission { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.reloadVoice()
+            }
+        }
+    }
+
+    @objc private func openMicrophoneSettingsClicked() {
+        SettingsDeepLinker.shared.open(for: .microphone)
     }
 
     private func updateVoiceModelUI(type: VoiceModelType, status: VoiceModelStatus) {

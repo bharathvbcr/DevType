@@ -647,6 +647,14 @@ final class ExpanderEngineTests: XCTestCase {
             "Privacy_Accessibility",
             "Post Event has no dedicated pane; deep-link Accessibility"
         )
+        XCTAssertEqual(
+            SettingsDeepLinker.privacyRevealKey(for: .microphone),
+            "Privacy_Microphone"
+        )
+        XCTAssertEqual(
+            SettingsDeepLinker.privacyRevealKey(for: .speechRecognition),
+            "Privacy_SpeechRecognition"
+        )
         XCTAssertNil(SettingsDeepLinker.privacyRevealKey(for: nil))
         XCTAssertEqual(
             SettingsDeepLinker.privacyRevealKey(for: .postEvent),
