@@ -23,58 +23,46 @@ public final class VoiceHUDPanel: NSPanel {
 
     private let blobContainer: LiquidGlassBlobHUDView
     private let fluidWaveView = FluidWaveVisualizerView()
-    private let statusPill: PillBadgeView
     private let micImageView: NSImageView
-    private let titleLabel: NSTextField
+    private let stateLabel: NSTextField
     private let transcriptLabel: NSTextField
-    private let cursorDot: NSTextField
     private var dismissWorkItem: DispatchWorkItem?
     private var currentModelName: String = "Voxtral"
     private var pendingTargetSize: CGSize?
     private var isResizeScheduled = false
     private var usesRealGlass = false
 
-    private static let baseWidth: CGFloat = 340
-    private static let baseHeight: CGFloat = 76
-    private static let maxWidth: CGFloat = 520
-    private static let maxHeight: CGFloat = 220
+    private static let baseWidth: CGFloat = 304
+    private static let baseHeight: CGFloat = 68
+    private static let maxWidth: CGFloat = 500
+    private static let maxHeight: CGFloat = 188
 
     public init() {
         let loc = LocalizationManager.shared
-        self.statusPill = PillBadgeView(text: loc.s("voice.hud.status.listening"), tint: DevTypeTheme.accent, showsDot: true)
-        self.statusPill.setContentHuggingPriority(.required, for: .horizontal)
-        self.statusPill.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        self.titleLabel = DevTypeTheme.makeLabel(
-            loc.s("voice.hud.title"),
-            font: DevTypeTheme.font(12, .bold),
-            color: DevTypeTheme.textPrimary
+        self.stateLabel = DevTypeTheme.makeLabel(
+            loc.s("voice.hud.status.listening"),
+            font: DevTypeTheme.font(11, .medium),
+            color: DevTypeTheme.textSecondary
         )
-        self.titleLabel.maximumNumberOfLines = 1
-        self.titleLabel.cell?.lineBreakMode = .byTruncatingTail
+        self.stateLabel.maximumNumberOfLines = 1
+        self.stateLabel.cell?.lineBreakMode = .byTruncatingTail
 
         self.transcriptLabel = DevTypeTheme.makeLabel(
             loc.s("voice.hud.placeholder"),
-            font: DevTypeTheme.font(13.5, .medium),
+            font: DevTypeTheme.font(14.5, .regular),
             color: DevTypeTheme.textSecondary,
             wrapping: true
         )
-        self.transcriptLabel.maximumNumberOfLines = 6
+        self.transcriptLabel.maximumNumberOfLines = 5
         self.transcriptLabel.cell?.wraps = true
         self.transcriptLabel.cell?.lineBreakMode = .byWordWrapping
-
-        self.cursorDot = DevTypeTheme.makeLabel(
-            "●",
-            font: DevTypeTheme.font(10, .bold),
-            color: DevTypeTheme.accentBright
-        )
         self.blobContainer = LiquidGlassBlobHUDView()
 
         let micIcon = DevTypeTheme.tintedSymbol(
-            "waveform.and.mic",
-            size: 14,
-            weight: .semibold,
-            color: DevTypeTheme.accentBright
+            "mic.fill",
+            size: 11,
+            weight: .medium,
+            color: DevTypeTheme.textSecondary
         )
         self.micImageView = NSImageView(image: micIcon ?? NSImage())
         self.micImageView.translatesAutoresizingMaskIntoConstraints = false
@@ -109,14 +97,14 @@ public final class VoiceHUDPanel: NSPanel {
         let rootStack = NSStackView()
         rootStack.orientation = .vertical
         rootStack.alignment = .leading
-        rootStack.spacing = 6
+        rootStack.spacing = 5
         rootStack.translatesAutoresizingMaskIntoConstraints = false
         blobContainer.contentHost.addSubview(rootStack)
 
         let headerStack = NSStackView()
         headerStack.orientation = .horizontal
         headerStack.alignment = .centerY
-        headerStack.spacing = 6
+        headerStack.spacing = 5
         headerStack.translatesAutoresizingMaskIntoConstraints = false
 
         let spacer = NSView()
@@ -124,75 +112,28 @@ public final class VoiceHUDPanel: NSPanel {
         spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
         headerStack.addArrangedSubview(micImageView)
-        headerStack.addArrangedSubview(titleLabel)
+        headerStack.addArrangedSubview(stateLabel)
         headerStack.addArrangedSubview(spacer)
-        headerStack.addArrangedSubview(statusPill)
-
-        let textContainer = NSStackView()
-        textContainer.orientation = .horizontal
-        textContainer.alignment = .firstBaseline
-        textContainer.spacing = 4
-        textContainer.translatesAutoresizingMaskIntoConstraints = false
+        headerStack.addArrangedSubview(fluidWaveView)
 
         transcriptLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         transcriptLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        cursorDot.setContentHuggingPriority(.required, for: .horizontal)
-
-        textContainer.addArrangedSubview(transcriptLabel)
-        textContainer.addArrangedSubview(cursorDot)
 
         fluidWaveView.translatesAutoresizingMaskIntoConstraints = false
-        fluidWaveView.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        fluidWaveView.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        fluidWaveView.heightAnchor.constraint(equalToConstant: 14).isActive = true
 
         rootStack.addArrangedSubview(headerStack)
-        rootStack.addArrangedSubview(textContainer)
-        rootStack.addArrangedSubview(fluidWaveView)
+        rootStack.addArrangedSubview(transcriptLabel)
 
         NSLayoutConstraint.activate([
-            rootStack.topAnchor.constraint(equalTo: blobContainer.contentHost.topAnchor, constant: 14),
-            rootStack.leadingAnchor.constraint(equalTo: blobContainer.contentHost.leadingAnchor, constant: 22),
-            rootStack.trailingAnchor.constraint(equalTo: blobContainer.contentHost.trailingAnchor, constant: -22),
-            rootStack.bottomAnchor.constraint(equalTo: blobContainer.contentHost.bottomAnchor, constant: -12),
+            rootStack.topAnchor.constraint(equalTo: blobContainer.contentHost.topAnchor, constant: 11),
+            rootStack.leadingAnchor.constraint(equalTo: blobContainer.contentHost.leadingAnchor, constant: 18),
+            rootStack.trailingAnchor.constraint(equalTo: blobContainer.contentHost.trailingAnchor, constant: -18),
+            rootStack.bottomAnchor.constraint(equalTo: blobContainer.contentHost.bottomAnchor, constant: -10),
             headerStack.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
-            textContainer.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
-            fluidWaveView.widthAnchor.constraint(equalTo: rootStack.widthAnchor)
+            transcriptLabel.widthAnchor.constraint(equalTo: rootStack.widthAnchor)
         ])
-
-        refreshCursorBlink()
-    }
-
-    private func refreshCursorBlink() {
-        cursorDot.wantsLayer = true
-        cursorDot.layer?.removeAnimation(forKey: "cursorBlink")
-        guard !DevTypeAccessibility.reduceMotion else {
-            cursorDot.alphaValue = 1
-            return
-        }
-        let anim = CABasicAnimation(keyPath: "opacity")
-        anim.fromValue = 1.0
-        anim.toValue = 0.2
-        anim.duration = 0.6
-        anim.autoreverses = true
-        anim.repeatCount = .infinity
-        cursorDot.layer?.add(anim, forKey: "cursorBlink")
-    }
-
-    private func displayTitle(for modelName: String) -> String {
-        let loc = LocalizationManager.shared
-        if modelName.isEmpty {
-            return loc.s("voice.hud.title")
-        }
-        let shortName: String
-        if modelName.contains("Voxtral") {
-            shortName = "Voxtral"
-        } else if modelName.contains("Fun-ASR") {
-            shortName = "Fun-ASR"
-        } else if modelName.contains("Apple") {
-            shortName = "Apple Speech"
-        } else {
-            shortName = modelName
-        }
-        return loc.s("voice.hud.title.model", shortName)
     }
 
     // MARK: - Public State Controls
@@ -205,63 +146,73 @@ public final class VoiceHUDPanel: NSPanel {
         switch state {
         case .listening(let modelName):
             currentModelName = modelName
-            statusPill.update(text: loc.s("voice.hud.status.listening"), tint: DevTypeTheme.accent)
-            titleLabel.stringValue = displayTitle(for: modelName)
+            updateStatus(loc.s("voice.hud.status.listening"), color: DevTypeTheme.accent)
             transcriptLabel.stringValue = loc.s("voice.hud.placeholder")
             transcriptLabel.textColor = DevTypeTheme.textSecondary
-            cursorDot.isHidden = false
             fluidWaveView.isTranscribing = false
             blobContainer.setActive(true)
             scheduleSize(forText: "")
+            updateAccessibility(status: stateLabel.stringValue, transcript: transcriptLabel.stringValue)
             showOnScreen()
 
         case .streaming(let transcript, let modelName):
             currentModelName = modelName
-            statusPill.update(text: loc.s("voice.hud.status.live"), tint: DevTypeTheme.accentBright)
-            titleLabel.stringValue = displayTitle(for: modelName)
+            updateStatus(loc.s("voice.hud.status.live"), color: DevTypeTheme.accent)
             let prompt = loc.s("voice.hud.listening")
             transcriptLabel.stringValue = transcript.isEmpty ? prompt : transcript
             transcriptLabel.textColor = DevTypeTheme.textPrimary
-            cursorDot.isHidden = false
             fluidWaveView.isTranscribing = false
             blobContainer.setActive(true)
             scheduleSize(forText: transcript)
+            updateAccessibility(status: stateLabel.stringValue, transcript: transcriptLabel.stringValue)
             showOnScreen()
 
         case .transcribing(let modelName):
-            statusPill.update(text: loc.s("voice.hud.status.polishing"), tint: DevTypeTheme.accentBright)
-            titleLabel.stringValue = displayTitle(for: modelName)
-            cursorDot.isHidden = true
+            currentModelName = modelName
+            updateStatus(loc.s("voice.hud.status.polishing"), color: DevTypeTheme.accent)
             fluidWaveView.isTranscribing = true
             updateAudioLevel(0)
             blobContainer.setActive(true)
+            updateAccessibility(status: stateLabel.stringValue, transcript: transcriptLabel.stringValue)
             showOnScreen()
 
         case .success(let text):
-            statusPill.update(text: loc.s("voice.hud.status.inserted"), tint: DevTypeTheme.statusGreen)
-            cursorDot.isHidden = true
-            let preview = text.count > 60 ? String(text.prefix(57)) + "…" : text
-            transcriptLabel.stringValue = "\"\(preview)\""
-            transcriptLabel.textColor = DevTypeTheme.statusGreen
+            updateStatus(loc.s("voice.hud.status.inserted"), color: DevTypeTheme.statusGreen)
+            let preview = text.count > 100 ? String(text.prefix(97)) + "…" : text
+            transcriptLabel.stringValue = preview
+            transcriptLabel.textColor = DevTypeTheme.textPrimary
             fluidWaveView.isTranscribing = false
             updateAudioLevel(0)
             blobContainer.setActive(false)
             scheduleSize(forText: preview)
+            updateAccessibility(status: stateLabel.stringValue, transcript: preview)
             showOnScreen()
-            scheduleAutoDismiss(after: 1.2)
+            scheduleAutoDismiss(after: VoiceHUDPresentationTiming.successHoldDuration)
 
         case .error(let message):
-            statusPill.update(text: loc.s("voice.hud.status.failed"), tint: DevTypeTheme.statusOrange)
-            cursorDot.isHidden = true
+            updateStatus(loc.s("voice.hud.status.failed"), color: DevTypeTheme.statusOrange)
             transcriptLabel.stringValue = message
-            transcriptLabel.textColor = DevTypeTheme.statusOrange
+            transcriptLabel.textColor = DevTypeTheme.textPrimary
             fluidWaveView.isTranscribing = false
             updateAudioLevel(0)
             blobContainer.setActive(false)
             scheduleSize(forText: message)
+            updateAccessibility(status: stateLabel.stringValue, transcript: message)
             showOnScreen()
-            scheduleAutoDismiss(after: 3.0)
+            scheduleAutoDismiss(after: VoiceHUDPresentationTiming.errorHoldDuration)
         }
+    }
+
+    private func updateStatus(_ text: String, color: NSColor) {
+        stateLabel.stringValue = text
+        stateLabel.textColor = color
+        micImageView.contentTintColor = color
+        fluidWaveView.tintColor = color
+    }
+
+    private func updateAccessibility(status: String, transcript: String) {
+        setAccessibilityLabel(status)
+        setAccessibilityValue(transcript)
     }
 
     /// Updates the streaming transcript in real time, expanding the liquid blob elastically.
@@ -278,7 +229,7 @@ public final class VoiceHUDPanel: NSPanel {
     // MARK: - Dynamic Liquid Blob Expansion
 
     private func scheduleSize(forText text: String) {
-        let font = DevTypeTheme.font(13.5, .medium)
+        let font = DevTypeTheme.font(14.5, .regular)
         let size = LiquidBlobGeometry.hudSize(
             forText: text,
             font: font,
@@ -330,9 +281,9 @@ public final class VoiceHUDPanel: NSPanel {
         }
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.32
+            context.duration = 0.26
             context.allowsImplicitAnimation = true
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.20, 0.82, 0.20, 1.0)
             self.animator().setFrame(newFrame, display: true)
         }
     }
@@ -348,7 +299,6 @@ public final class VoiceHUDPanel: NSPanel {
     private func showOnScreen() {
         blobContainer.setAnimationEnabled(true)
         fluidWaveView.setAnimationEnabled(true)
-        refreshCursorBlink()
 
         if !isVisible {
             let size = pendingTargetSize
@@ -360,7 +310,7 @@ public final class VoiceHUDPanel: NSPanel {
                 alphaValue = 1
             } else {
                 NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.20
+                    context.duration = VoiceHUDPresentationTiming.fadeInDuration
                     context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                     self.animator().alphaValue = 1.0
                 }
@@ -387,7 +337,7 @@ public final class VoiceHUDPanel: NSPanel {
             return
         }
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.25
+            context.duration = VoiceHUDPresentationTiming.fadeOutDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             self.animator().alphaValue = 0.0
         }, completionHandler: { [weak self] in
@@ -404,7 +354,6 @@ public final class VoiceHUDPanel: NSPanel {
         updateAudioLevel(0)
         blobContainer.setAnimationEnabled(false)
         fluidWaveView.setAnimationEnabled(false)
-        cursorDot.layer?.removeAnimation(forKey: "cursorBlink")
     }
 
     public func hide() {
@@ -433,7 +382,7 @@ final class LiquidGlassBlobHUDView: NSView {
     private var smoothedAudioLevel: Float = 0.06
     private var animationEnabled = false
     private var glowActive = true
-    private var lastMaskSize: CGSize = .zero
+    private var lastGlassCornerRadius: CGFloat = -1
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -477,11 +426,12 @@ final class LiquidGlassBlobHUDView: NSView {
             return false
         }
         let glass = glassClass.init(frame: bounds)
-        // Attempt clear style (NSGlassEffectView.Style.clear ≈ 1). Rejected keys
-        // are ignored; tint + contentView are required for a usable surface.
-        _ = DTSetValueForKeyCatching(glass, NSNumber(value: 1), "style")
-        _ = DTSetValueForKeyCatching(glass, NSNumber(value: true), "effectIsInteractive")
-        let tint = DevTypeTheme.accent.withAlphaComponent(0.12)
+        // NSGlassEffectView.Style.regular is raw value 0. This HUD carries live
+        // text over arbitrary desktop content, where regular glass preserves
+        // legibility better than the clear media-overlay variant. Runtime KVC
+        // keeps the target buildable with pre-macOS-26 SDKs used by CI.
+        _ = DTSetValueForKeyCatching(glass, NSNumber(value: 0), "style")
+        let tint = DevTypeTheme.accent.withAlphaComponent(0.09)
         let configured =
             DTSetValueForKeyCatching(glass, tint, "tintColor")
             && DTSetValueForKeyCatching(glass, contentHost, "contentView")
@@ -513,8 +463,10 @@ final class LiquidGlassBlobHUDView: NSView {
 
     private func installRim(on view: NSView) {
         rimLayer.fillColor = nil
-        rimLayer.lineWidth = 1.2
-        rimLayer.strokeColor = DevTypeTheme.accentBright.withAlphaComponent(0.45).cgColor
+        rimLayer.lineWidth = DevTypeAccessibility.increaseContrast ? 1.2 : 0.7
+        rimLayer.strokeColor = DevTypeTheme.accent.withAlphaComponent(
+            DevTypeAccessibility.increaseContrast ? 0.48 : 0.30
+        ).cgColor
         view.wantsLayer = true
         view.layer?.addSublayer(rimLayer)
     }
@@ -543,7 +495,7 @@ final class LiquidGlassBlobHUDView: NSView {
     func setActive(_ active: Bool) {
         glowActive = active
         if isUsingLiquidGlass {
-            let tintAlpha: CGFloat = active ? 0.14 : 0.06
+            let tintAlpha: CGFloat = active ? 0.10 : 0.04
             if let glass = glassSurface {
                 _ = DTSetValueForKeyCatching(
                     glass,
@@ -552,7 +504,7 @@ final class LiquidGlassBlobHUDView: NSView {
                 )
             }
         } else {
-            rimLayer.opacity = active ? 1 : 0.35
+            rimLayer.opacity = active ? 1.0 : 0.55
         }
     }
 
@@ -594,14 +546,25 @@ final class LiquidGlassBlobHUDView: NSView {
         if contentHost.superview == glassSurface {
             contentHost.frame = bounds
         }
+        updateGlassCornerRadius()
         updateBlobPath()
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        rimLayer.strokeColor = DevTypeTheme.accentBright.withAlphaComponent(0.45).cgColor
+        rimLayer.strokeColor = DevTypeTheme.accent.withAlphaComponent(
+            DevTypeAccessibility.increaseContrast ? 0.48 : 0.30
+        ).cgColor
         solidBackground?.layer?.backgroundColor = DevTypeTheme.cardBackgroundSolid.cgColor
         updateBlobPath()
+    }
+
+    private func updateGlassCornerRadius() {
+        guard let glass = glassSurface else { return }
+        let radius = bounds.height / 2
+        guard abs(radius - lastGlassCornerRadius) > 0.5 else { return }
+        _ = DTSetValueForKeyCatching(glass, NSNumber(value: radius), "cornerRadius")
+        lastGlassCornerRadius = radius
     }
 
     private func updateBlobPath() {
@@ -622,7 +585,6 @@ final class LiquidGlassBlobHUDView: NSView {
         if let effect = visualEffectView {
             // maskImage shapes the vibrancy sample; layer mask above clips subviews.
             effect.maskImage = LiquidBlobGeometry.maskImage(path: path, size: bounds.size)
-            lastMaskSize = bounds.size
         }
 
         if rimLayer.superlayer != nil {
@@ -634,13 +596,17 @@ final class LiquidGlassBlobHUDView: NSView {
 
 // MARK: - Fluid Harmonic Wave Visualizer View
 
-/// Multi-harmonic sine metering. Original drawing — Apple does not ship Siri waveform assets.
+/// Compact harmonic metering. Original drawing — Apple does not ship Siri waveform assets.
 final class FluidWaveVisualizerView: NSView {
     private var currentAudioLevel: Float = 0.0
-    private var smoothedLevel: Float = 0.08
+    private var smoothedLevel: Float = 0.04
     private var phase: Double = 0.0
     private var displayLink: CADisplayLink?
     private var animationEnabled = false
+
+    var tintColor: NSColor = DevTypeTheme.textSecondary {
+        didSet { needsDisplay = true }
+    }
 
     var isTranscribing = false {
         didSet { needsDisplay = true }
@@ -664,7 +630,7 @@ final class FluidWaveVisualizerView: NSView {
             startDisplayLinkIfNeeded()
         } else {
             stopDisplayLink()
-            smoothedLevel = 0.08
+            smoothedLevel = 0.04
             currentAudioLevel = 0
             needsDisplay = true
         }
@@ -696,8 +662,8 @@ final class FluidWaveVisualizerView: NSView {
 
     @objc private func displayLinkFired(_ link: CADisplayLink) {
         guard animationEnabled, !DevTypeAccessibility.reduceMotion else { return }
-        smoothedLevel = smoothedLevel * 0.80 + max(0.04, currentAudioLevel) * 0.20
-        phase += isTranscribing ? 0.12 : 0.06
+        smoothedLevel = smoothedLevel * 0.84 + max(0.03, currentAudioLevel) * 0.16
+        phase += isTranscribing ? 0.075 : 0.045
         needsDisplay = true
     }
 
@@ -708,27 +674,22 @@ final class FluidWaveVisualizerView: NSView {
         let midY = height / 2.0
         guard width > 0, height > 0 else { return }
 
-        let primary = DevTypeTheme.accent.withAlphaComponent(0.35)
-        let bright = DevTypeTheme.accentBright.withAlphaComponent(0.60)
-        let peak = DevTypeTheme.textPrimary.withAlphaComponent(0.90)
-
         let level = DevTypeAccessibility.reduceMotion
-            ? max(0.08, CGFloat(currentAudioLevel))
+            ? max(0.04, CGFloat(currentAudioLevel))
             : CGFloat(smoothedLevel)
 
         context.saveGState()
         let waveConfigs: [(frequency: Double, amplitudeMultiplier: CGFloat, phaseOffset: Double, color: NSColor, lineWidth: CGFloat)] = [
-            (1.5, 0.50, 0.0, primary, 1.5),
-            (2.2, 0.75, 2.094, bright, 2.0),
-            (3.0, 1.00, 4.188, peak, 2.2)
+            (1.35, 0.62, 0.0, tintColor.withAlphaComponent(0.42), 1.25),
+            (2.10, 1.00, 2.20, tintColor.withAlphaComponent(0.82), 1.55)
         ]
-        let amplitudeBase = level * (height * 0.42)
+        let amplitudeBase = level * (height * 0.38)
 
         for config in waveConfigs {
             let path = CGMutablePath()
             let amp = amplitudeBase * config.amplitudeMultiplier
             var isFirst = true
-            let step: CGFloat = 3.0
+            let step: CGFloat = 2.0
             for x in stride(from: 0.0, through: width, by: step) {
                 let normalizedX = x / width
                 let envelope = sin(normalizedX * .pi)

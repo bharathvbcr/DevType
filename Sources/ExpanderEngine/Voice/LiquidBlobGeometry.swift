@@ -10,17 +10,17 @@ import Foundation
 public enum LiquidBlobGeometry {
 
     /// Maximum harmonic ripple perturbation ratio relative to radius.
-    public static let maxDeformationRatio: CGFloat = 0.12
+    public static let maxDeformationRatio: CGFloat = 0.075
 
     /// Control points around the blob silhouette.
-    public static let pointCount: Int = 24
+    public static let pointCount: Int = 32
 
-    /// Vertical chrome outside the transcript line: top pad + header + stack
-    /// spacings + waveform + bottom pad.
-    public static let defaultChromeHeight: CGFloat = 68
+    /// Vertical chrome outside the transcript: top pad + compact status row +
+    /// stack spacing + bottom pad.
+    public static let defaultChromeHeight: CGFloat = 46
 
     /// Horizontal padding around the transcript (leading/trailing insets).
-    public static let horizontalTextPadding: CGFloat = 40
+    public static let horizontalTextPadding: CGFloat = 36
 
     /// Closed organic spline inscribed in `rect`. Bounding box ⊆ `rect` for any
     /// `audioLevel` in 0…1 and any `phase`.
@@ -41,12 +41,24 @@ public enum LiquidBlobGeometry {
 
         let level = Swift.min(Swift.max(audioLevel, 0), 1)
         let r = height / 2.0
-        let maxDeform = Swift.min(4.5, r * maxDeformationRatio) * level
+        let maxDeform = Swift.min(3.0, r * maxDeformationRatio) * level
 
         // Inset base capsule by maxDeform + margin so ripples NEVER exceed rect
         let insetX = maxDeform + 1.0
         let insetY = maxDeform + 1.0
         let inner = rect.insetBy(dx: insetX, dy: insetY)
+
+        // The voice HUD is intentionally horizontal. Keep the public geometry
+        // contract safe for a narrow or transient zero-layout rect anyway: the
+        // horizontal-cap construction below assumes width >= height and would
+        // otherwise project both caps beyond the supplied bounds.
+        guard inner.width >= inner.height else {
+            let radius = Swift.min(inner.width, inner.height) / 2
+            let fallback = CGMutablePath()
+            fallback.addRoundedRect(in: inner, cornerWidth: radius, cornerHeight: radius)
+            fallback.closeSubpath()
+            return fallback
+        }
 
         let capR = inner.height / 2.0
         let leftCenterX = inner.minX + capR
@@ -56,13 +68,16 @@ public enum LiquidBlobGeometry {
         var points: [CGPoint] = []
         points.reserveCapacity(pointCount)
 
-        let pointsPerSegment = 6
+        let pointsPerSegment = pointCount / 4
 
         // 1. Top flat edge (left to right)
         for i in 0..<pointsPerSegment {
             let t = Double(i) / Double(pointsPerSegment)
             let x = leftCenterX + CGFloat(t) * straightWidth
-            let wave = sin(t * 2.0 * .pi * 2.0 + phase) * Double(maxDeform) * 0.7
+            let wave = (
+                sin(t * 2.0 * .pi + phase) * 0.58
+                + sin(t * .pi + phase * 0.37) * 0.18
+            ) * Double(maxDeform)
             let y = inner.maxY + CGFloat(wave)
             points.append(CGPoint(x: x, y: y))
         }
@@ -71,7 +86,10 @@ public enum LiquidBlobGeometry {
         for i in 0..<pointsPerSegment {
             let t = Double(i) / Double(pointsPerSegment)
             let angle = (.pi / 2.0) - t * .pi
-            let wave = cos(angle * 3.0 - phase * 0.8) * Double(maxDeform) * 0.8
+            let wave = (
+                cos(angle * 2.0 - phase * 0.72) * 0.52
+                + sin(angle + phase * 0.31) * 0.16
+            ) * Double(maxDeform)
             let radius = capR + CGFloat(wave)
             let x = rightCenterX + CGFloat(cos(angle)) * radius
             let y = inner.midY + CGFloat(sin(angle)) * radius
@@ -82,7 +100,10 @@ public enum LiquidBlobGeometry {
         for i in 0..<pointsPerSegment {
             let t = Double(i) / Double(pointsPerSegment)
             let x = rightCenterX - CGFloat(t) * straightWidth
-            let wave = -sin(t * 2.0 * .pi * 2.0 + phase + 1.2) * Double(maxDeform) * 0.7
+            let wave = -(
+                sin(t * 2.0 * .pi + phase + 1.15) * 0.56
+                + sin(t * .pi - phase * 0.29) * 0.16
+            ) * Double(maxDeform)
             let y = inner.minY + CGFloat(wave)
             points.append(CGPoint(x: x, y: y))
         }
@@ -91,7 +112,10 @@ public enum LiquidBlobGeometry {
         for i in 0..<pointsPerSegment {
             let t = Double(i) / Double(pointsPerSegment)
             let angle = (3.0 * .pi / 2.0) - t * .pi
-            let wave = cos(angle * 3.0 + phase * 0.7) * Double(maxDeform) * 0.8
+            let wave = (
+                cos(angle * 2.0 + phase * 0.68) * 0.50
+                + sin(angle - phase * 0.27) * 0.16
+            ) * Double(maxDeform)
             let radius = capR + CGFloat(wave)
             let x = leftCenterX + CGFloat(cos(angle)) * radius
             let y = inner.midY + CGFloat(sin(angle)) * radius
@@ -178,8 +202,8 @@ public enum LiquidBlobGeometry {
         forText text: String,
         font: NSFont,
         chromeHeight: CGFloat = defaultChromeHeight,
-        base: CGSize = CGSize(width: 320, height: 72),
-        maximum: CGSize = CGSize(width: 520, height: 220)
+        base: CGSize = CGSize(width: 304, height: 68),
+        maximum: CGSize = CGSize(width: 500, height: 188)
     ) -> CGSize {
         if isPlaceholderText(text) {
             return base

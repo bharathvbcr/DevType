@@ -50,6 +50,17 @@ enum PreferencesTab: Int, CaseIterable {
         }
     }
 
+    var subtitle: String {
+        switch self {
+        case .general: return LocalizationManager.shared.s("prefs.tab.general.subtitle")
+        case .snippets: return LocalizationManager.shared.s("prefs.tab.snippets.subtitle")
+        case .hotkeys: return LocalizationManager.shared.s("prefs.tab.hotkeys.subtitle")
+        case .voice: return LocalizationManager.shared.s("prefs.tab.voice.subtitle")
+        case .ai: return LocalizationManager.shared.s("prefs.tab.ai.subtitle")
+        case .advanced: return LocalizationManager.shared.s("prefs.tab.advanced.subtitle")
+        }
+    }
+
     /// AI requires macOS 26+; hide the tab on older systems.
     static var visibleCases: [PreferencesTab] {
         if #available(macOS 26.0, *) {
@@ -86,8 +97,8 @@ final class PreferencesWindowController: NSWindowController {
             preferences = controller
             let newWindow = NSWindow(contentViewController: controller)
             newWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            newWindow.setContentSize(NSSize(width: 740, height: 620))
-            newWindow.minSize = NSSize(width: 680, height: 520)
+            newWindow.setContentSize(NSSize(width: 800, height: 680))
+            newWindow.minSize = NSSize(width: 720, height: 560)
             DevTypeTheme.styleWindow(newWindow, title: LocalizationManager.shared.s("window.preferences"))
             newWindow.center()
             newWindow.isReleasedWhenClosed = false
@@ -116,6 +127,11 @@ final class PreferencesWindowController: NSWindowController {
 private final class PrefsFlippedView: NSView {
     override var isFlipped: Bool { true }
 }
+
+/// Marker views let the shared card stack stretch rows and table areas while
+/// preserving intrinsic widths for individual controls and buttons.
+private final class PreferenceRowView: NSView {}
+private final class PreferenceTableAreaView: NSView {}
 
 // MARK: - Sidebar nav row
 
@@ -215,6 +231,10 @@ final class PreferencesViewController: NSViewController,
     private var selectedTab: PreferencesTab = .general
     private var panes: [PreferencesTab: NSView] = [:]
     private var paneTitleLabel: NSTextField?
+    private var paneSubtitleLabel: NSTextField?
+    private var paneIconBadge: IconBadgeView?
+    private var tabsShownAtLeastOnce: Set<PreferencesTab> = [.general]
+    private var removalButtons: [ObjectIdentifier: CapsuleButton] = [:]
     /// Glanceable engine state pinned to the bottom of the sidebar.
     private var engineStatusPill: PillBadgeView?
 
@@ -253,6 +273,11 @@ final class PreferencesViewController: NSViewController,
         wrapping: true
     )
     private let macroTable = NSTableView()
+    private let macroEmptyLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(11.5),
+        color: DevTypeTheme.textTertiary
+    )
     private var macros: [HotkeyMacroAction] = []
     private var macroRecorder: ShortcutRecorderView?
     private let macroKindPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -424,17 +449,45 @@ final class PreferencesViewController: NSViewController,
         let content = NSView()
         content.translatesAutoresizingMaskIntoConstraints = false
 
+        let paneIcon = IconBadgeView(
+            symbol: selectedTab.symbol,
+            tint: DevTypeTheme.accent,
+            size: 34,
+            pointSize: 15
+        )
+        paneIconBadge = paneIcon
+
         let paneTitle = DevTypeTheme.makeLabel(
             selectedTab.title,
-            font: DevTypeTheme.font(20, .bold),
+            font: DevTypeTheme.font(21, .bold),
             color: DevTypeTheme.textPrimary
         )
-        paneTitle.translatesAutoresizingMaskIntoConstraints = false
         paneTitleLabel = paneTitle
+
+        let paneSubtitle = DevTypeTheme.makeLabel(
+            selectedTab.subtitle,
+            font: DevTypeTheme.font(11.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        paneSubtitleLabel = paneSubtitle
+
+        let paneHeadingText = NSStackView(views: [paneTitle, paneSubtitle])
+        paneHeadingText.orientation = .vertical
+        paneHeadingText.alignment = .leading
+        paneHeadingText.spacing = 2
+        paneHeadingText.translatesAutoresizingMaskIntoConstraints = false
+
+        let paneHeader = NSStackView(views: [paneIcon, paneHeadingText])
+        paneHeader.orientation = .horizontal
+        paneHeader.alignment = .centerY
+        paneHeader.spacing = 11
+        paneHeader.translatesAutoresizingMaskIntoConstraints = false
+        paneHeadingText.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let paneHost = NSView()
         paneHost.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(paneTitle)
+        content.addSubview(paneHeader)
         content.addSubview(paneHost)
 
         for tab in PreferencesTab.visibleCases {
@@ -487,11 +540,11 @@ final class PreferencesViewController: NSViewController,
             content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
 
-            paneTitle.topAnchor.constraint(equalTo: content.topAnchor, constant: 46),
-            paneTitle.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            paneTitle.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24),
+            paneHeader.topAnchor.constraint(equalTo: content.topAnchor, constant: 42),
+            paneHeader.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            paneHeader.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24),
 
-            paneHost.topAnchor.constraint(equalTo: paneTitle.bottomAnchor, constant: 10),
+            paneHost.topAnchor.constraint(equalTo: paneHeader.bottomAnchor, constant: 16),
             paneHost.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             paneHost.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             paneHost.bottomAnchor.constraint(equalTo: content.bottomAnchor)
@@ -520,6 +573,7 @@ final class PreferencesViewController: NSViewController,
     }
 
     private func applyTabSelection(_ tab: PreferencesTab, animated: Bool) {
+        let isFirstPresentation = tabsShownAtLeastOnce.insert(tab).inserted
         selectedTab = tab
         for row in navRows {
             let selected = row.tab == tab
@@ -527,6 +581,8 @@ final class PreferencesViewController: NSViewController,
             row.setAccessibilityValue(selected)
         }
         paneTitleLabel?.stringValue = tab.title
+        paneSubtitleLabel?.stringValue = tab.subtitle
+        paneIconBadge?.setSymbol(tab.symbol, tint: DevTypeTheme.accent)
         for (candidate, pane) in panes {
             pane.isHidden = candidate != tab
         }
@@ -543,6 +599,29 @@ final class PreferencesViewController: NSViewController,
         if tab == .snippets { stats.refresh() }
         if tab == .advanced { reloadAdvanced() }
         if tab == .ai { reloadAI() }
+        // Reloading controls (especially popups) can make AppKit reveal their
+        // row. Reset after all pane work so first presentation still starts at
+        // the page header rather than at the last selected action.
+        if isFirstPresentation {
+            resetScrollPosition(for: tab)
+        }
+    }
+
+    /// Auto Layout sizes hidden scroll documents lazily. Their clip view can
+    /// therefore inherit a non-zero origin before first display, which made long
+    /// panes open in the middle. Reset once, after revealing and laying out; later
+    /// visits preserve the user's own scroll position.
+    private func resetScrollPosition(for tab: PreferencesTab) {
+        guard let scroll = panes[tab] as? NSScrollView else { return }
+        let scrollToTop = { [weak scroll] in
+            guard let scroll else { return }
+            scroll.documentView?.layoutSubtreeIfNeeded()
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+        view.layoutSubtreeIfNeeded()
+        scrollToTop()
+        DispatchQueue.main.async(execute: scrollToTop)
     }
 
     /// Sidebar footer: one glance answers "is it on?" without opening the menu.
@@ -677,48 +756,35 @@ final class PreferencesViewController: NSViewController,
         )
         mutedHint.translatesAutoresizingMaskIntoConstraints = false
 
-        mutedTable.headerView = nil
-        mutedTable.rowHeight = 22
-        mutedTable.backgroundColor = .clear
-        mutedTable.gridStyleMask = []
-        mutedTable.usesAlternatingRowBackgroundColors = false
-        mutedTable.allowsMultipleSelection = true
-        mutedTable.dataSource = self
-        mutedTable.delegate = self
-        mutedTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("muted")))
-        mutedTable.setAccessibilityLabel(loc.s("prefs.general.mutedApps"))
+        let mutedArea = makeTableArea(
+            table: mutedTable,
+            accessibilityLabel: loc.s("prefs.general.mutedApps"),
+            columnIdentifier: "muted",
+            emptyLabel: mutedEmptyLabel,
+            allowsMultipleSelection: true
+        )
 
-        let mutedScroll = NSScrollView()
-        mutedScroll.translatesAutoresizingMaskIntoConstraints = false
-        mutedScroll.hasVerticalScroller = true
-        mutedScroll.borderType = .noBorder
-        mutedScroll.drawsBackground = false
-        mutedScroll.documentView = mutedTable
-        mutedScroll.heightAnchor.constraint(equalToConstant: 110).isActive = true
-
-        mutedEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        let mutedButtons = NSStackView(views: [
-            CapsuleButton(
-                title: loc.s("prefs.general.muteFrontmost"),
-                symbol: "speaker.slash",
-                style: .secondary,
-                target: self,
-                action: #selector(muteFrontmost)
-            ),
-            CapsuleButton(
-                title: loc.s("common.remove"),
-                symbol: "trash",
-                style: .destructive,
-                target: self,
-                action: #selector(unmuteSelected)
-            )
-        ])
+        let muteFrontmostButton = CapsuleButton(
+            title: loc.s("prefs.general.muteFrontmost"),
+            symbol: "speaker.slash",
+            style: .secondary,
+            target: self,
+            action: #selector(muteFrontmost)
+        )
+        let unmuteButton = CapsuleButton(
+            title: loc.s("common.remove"),
+            symbol: "trash",
+            style: .destructive,
+            target: self,
+            action: #selector(unmuteSelected)
+        )
+        bindRemovalButton(unmuteButton, to: mutedTable)
+        let mutedButtons = NSStackView(views: [muteFrontmostButton, unmuteButton])
         mutedButtons.orientation = .horizontal
         mutedButtons.spacing = 8
         mutedButtons.translatesAutoresizingMaskIntoConstraints = false
 
-        stackInCard(mutedCard, views: [mutedHint, mutedScroll, mutedEmptyLabel, mutedButtons])
+        stackInCard(mutedCard, views: [mutedHint, mutedArea, mutedButtons])
 
         stack.addArrangedSubview(startupCard)
         stack.addArrangedSubview(languageCard)
@@ -737,6 +803,7 @@ final class PreferencesViewController: NSViewController,
         mutedTable.reloadData()
         mutedEmptyLabel.stringValue = mutedApps.isEmpty ? loc.s("prefs.general.mutedApps.empty") : ""
         mutedEmptyLabel.isHidden = !mutedApps.isEmpty
+        refreshRemovalButton(for: mutedTable)
     }
 
     @objc private func openAtLoginChanged() {
@@ -982,23 +1049,13 @@ final class PreferencesViewController: NSViewController,
         )
         macroHint.translatesAutoresizingMaskIntoConstraints = false
 
-        macroTable.headerView = nil
-        macroTable.rowHeight = 24
-        macroTable.backgroundColor = .clear
-        macroTable.gridStyleMask = []
-        macroTable.usesAlternatingRowBackgroundColors = false
-        macroTable.dataSource = self
-        macroTable.delegate = self
-        macroTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("macro")))
-        macroTable.setAccessibilityLabel(loc.s("prefs.hotkeys.macros"))
-
-        let macroScroll = NSScrollView()
-        macroScroll.translatesAutoresizingMaskIntoConstraints = false
-        macroScroll.hasVerticalScroller = true
-        macroScroll.borderType = .noBorder
-        macroScroll.drawsBackground = false
-        macroScroll.documentView = macroTable
-        macroScroll.heightAnchor.constraint(equalToConstant: 110).isActive = true
+        let macroArea = makeTableArea(
+            table: macroTable,
+            accessibilityLabel: loc.s("prefs.hotkeys.macros"),
+            columnIdentifier: "macro",
+            emptyLabel: macroEmptyLabel,
+            rowHeight: 24
+        )
 
         let newRecorder = ShortcutRecorderView(shortcut: nil)
         macroRecorder = newRecorder
@@ -1022,27 +1079,27 @@ final class PreferencesViewController: NSViewController,
         editorRow.spacing = 8
         editorRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let macroButtons = NSStackView(views: [
-            CapsuleButton(
-                title: loc.s("prefs.hotkeys.macros.add"),
-                symbol: "plus",
-                style: .primary,
-                target: self,
-                action: #selector(addMacro)
-            ),
-            CapsuleButton(
-                title: loc.s("common.remove"),
-                symbol: "trash",
-                style: .destructive,
-                target: self,
-                action: #selector(removeMacro)
-            )
-        ])
+        let addMacroButton = CapsuleButton(
+            title: loc.s("prefs.hotkeys.macros.add"),
+            symbol: "plus",
+            style: .primary,
+            target: self,
+            action: #selector(addMacro)
+        )
+        let removeMacroButton = CapsuleButton(
+            title: loc.s("common.remove"),
+            symbol: "trash",
+            style: .destructive,
+            target: self,
+            action: #selector(removeMacro)
+        )
+        bindRemovalButton(removeMacroButton, to: macroTable)
+        let macroButtons = NSStackView(views: [addMacroButton, removeMacroButton])
         macroButtons.orientation = .horizontal
         macroButtons.spacing = 8
         macroButtons.translatesAutoresizingMaskIntoConstraints = false
 
-        stackInCard(macroCard, views: [macroHint, macroScroll, editorRow, macroButtons])
+        stackInCard(macroCard, views: [macroHint, macroArea, editorRow, macroButtons])
 
         stack.addArrangedSubview(searchCard)
         stack.addArrangedSubview(macroCard)
@@ -1058,6 +1115,9 @@ final class PreferencesViewController: NSViewController,
         hotkeyWarningLabel.isHidden = !shortcut.isDefaultInlineSearch
         macros = hotkeyManager?.macros ?? HotkeyManager.loadMacros()
         macroTable.reloadData()
+        macroEmptyLabel.stringValue = macros.isEmpty ? loc.s("prefs.hotkeys.macros.empty") : ""
+        macroEmptyLabel.isHidden = !macros.isEmpty
+        refreshRemovalButton(for: macroTable)
     }
 
     private func applyInlineShortcut(_ shortcut: DevTypeShortcut?) {
@@ -1204,17 +1264,11 @@ final class PreferencesViewController: NSViewController,
         voiceModelPopup.action = #selector(voiceModelPopupChanged(_:))
         voiceModelPopup.setAccessibilityLabel(loc.s("prefs.voice.activeModel"))
 
-        let activeModelLabel = DevTypeTheme.makeLabel(
-            loc.s("prefs.voice.activeModel"),
-            font: DevTypeTheme.font(12, .semibold),
-            color: DevTypeTheme.textPrimary
+        let activeModelRow = makeLabeledControlRow(
+            title: loc.s("prefs.voice.activeModel"),
+            control: voiceModelPopup,
+            font: DevTypeTheme.font(12, .semibold)
         )
-        activeModelLabel.translatesAutoresizingMaskIntoConstraints = false
-        let activeModelRow = NSStackView(views: [activeModelLabel, voiceModelPopup])
-        activeModelRow.orientation = .horizontal
-        activeModelRow.spacing = 10
-        activeModelRow.alignment = .centerY
-        activeModelRow.translatesAutoresizingMaskIntoConstraints = false
 
         var modelCards: [NSView] = [modelsHint, activeModelRow, DevTypeTheme.makeHairline()]
 
@@ -1310,12 +1364,11 @@ final class PreferencesViewController: NSViewController,
         voiceTonePopup.action = #selector(voiceTonePopupChanged(_:))
         voiceTonePopup.setAccessibilityLabel(loc.s("prefs.voice.tone"))
 
-        let toneLabel = DevTypeTheme.makeLabel(loc.s("prefs.voice.tone"), font: DevTypeTheme.font(12, .semibold), color: DevTypeTheme.textPrimary)
-        let toneRow = NSStackView(views: [toneLabel, voiceTonePopup])
-        toneRow.orientation = .horizontal
-        toneRow.spacing = 10
-        toneRow.alignment = .centerY
-        toneRow.translatesAutoresizingMaskIntoConstraints = false
+        let toneRow = makeLabeledControlRow(
+            title: loc.s("prefs.voice.tone"),
+            control: voiceTonePopup,
+            font: DevTypeTheme.font(12, .semibold)
+        )
 
         let realTimeTypingRow = makeToggleRow(
             title: loc.s("prefs.voice.realTimeTyping"),
@@ -1385,27 +1438,12 @@ final class PreferencesViewController: NSViewController,
         )
         dictHint.translatesAutoresizingMaskIntoConstraints = false
 
-        voiceDictionaryTable.headerView = nil
-        voiceDictionaryTable.rowHeight = 22
-        voiceDictionaryTable.backgroundColor = .clear
-        voiceDictionaryTable.gridStyleMask = []
-        voiceDictionaryTable.usesAlternatingRowBackgroundColors = false
-        voiceDictionaryTable.dataSource = self
-        voiceDictionaryTable.delegate = self
-        if voiceDictionaryTable.tableColumns.isEmpty {
-            voiceDictionaryTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("voiceDict")))
-        }
-        voiceDictionaryTable.setAccessibilityLabel(loc.s("prefs.voice.dict.card"))
-
-        let dictScroll = NSScrollView()
-        dictScroll.translatesAutoresizingMaskIntoConstraints = false
-        dictScroll.hasVerticalScroller = true
-        dictScroll.borderType = .noBorder
-        dictScroll.drawsBackground = false
-        dictScroll.documentView = voiceDictionaryTable
-        dictScroll.heightAnchor.constraint(equalToConstant: 110).isActive = true
-
-        voiceDictionaryEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        let dictionaryArea = makeTableArea(
+            table: voiceDictionaryTable,
+            accessibilityLabel: loc.s("prefs.voice.dict.card"),
+            columnIdentifier: "voiceDict",
+            emptyLabel: voiceDictionaryEmptyLabel
+        )
 
         voiceDictSpokenField.translatesAutoresizingMaskIntoConstraints = false
         voiceDictSpokenField.placeholderString = loc.s("prefs.voice.dict.spokenPlaceholder")
@@ -1417,29 +1455,32 @@ final class PreferencesViewController: NSViewController,
         voiceDictReplacementField.font = DevTypeTheme.font(12)
         voiceDictReplacementField.widthAnchor.constraint(greaterThanOrEqualToConstant: 130).isActive = true
 
+        let addDictionaryButton = CapsuleButton(
+            title: loc.s("common.add"),
+            symbol: "plus",
+            style: .primary,
+            target: self,
+            action: #selector(voiceDictAddEntry)
+        )
+        let removeDictionaryButton = CapsuleButton(
+            title: loc.s("common.remove"),
+            symbol: "trash",
+            style: .destructive,
+            target: self,
+            action: #selector(voiceDictRemoveEntry)
+        )
+        bindRemovalButton(removeDictionaryButton, to: voiceDictionaryTable)
         let dictButtons = NSStackView(views: [
             voiceDictSpokenField,
             voiceDictReplacementField,
-            CapsuleButton(
-                title: loc.s("common.add"),
-                symbol: "plus",
-                style: .primary,
-                target: self,
-                action: #selector(voiceDictAddEntry)
-            ),
-            CapsuleButton(
-                title: loc.s("common.remove"),
-                symbol: "trash",
-                style: .destructive,
-                target: self,
-                action: #selector(voiceDictRemoveEntry)
-            )
+            addDictionaryButton,
+            removeDictionaryButton
         ])
         dictButtons.orientation = .horizontal
         dictButtons.spacing = 8
         dictButtons.translatesAutoresizingMaskIntoConstraints = false
 
-        stackInCard(dictCard, views: [dictHint, dictScroll, voiceDictionaryEmptyLabel, dictButtons])
+        stackInCard(dictCard, views: [dictHint, dictionaryArea, dictButtons])
 
         // 5. AI Voice Triggers & Rewrites Card
         let triggersCard = makeCard(title: loc.s("prefs.voice.triggers.card"), symbol: "wand.and.stars")
@@ -1469,27 +1510,13 @@ final class PreferencesViewController: NSViewController,
         )
         triggersHint.translatesAutoresizingMaskIntoConstraints = false
 
-        voiceTriggersTable.headerView = nil
-        voiceTriggersTable.rowHeight = 22
-        voiceTriggersTable.backgroundColor = .clear
-        voiceTriggersTable.gridStyleMask = []
-        voiceTriggersTable.usesAlternatingRowBackgroundColors = false
-        voiceTriggersTable.dataSource = self
-        voiceTriggersTable.delegate = self
-        if voiceTriggersTable.tableColumns.isEmpty {
-            voiceTriggersTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("voiceTriggers")))
-        }
-        voiceTriggersTable.setAccessibilityLabel(loc.s("prefs.voice.triggers.card"))
-
-        let triggersScroll = NSScrollView()
-        triggersScroll.translatesAutoresizingMaskIntoConstraints = false
-        triggersScroll.hasVerticalScroller = true
-        triggersScroll.borderType = .noBorder
-        triggersScroll.drawsBackground = false
-        triggersScroll.documentView = voiceTriggersTable
-        triggersScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
-
-        voiceTriggersEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        let triggersArea = makeTableArea(
+            table: voiceTriggersTable,
+            accessibilityLabel: loc.s("prefs.voice.triggers.card"),
+            columnIdentifier: "voiceTriggers",
+            emptyLabel: voiceTriggersEmptyLabel,
+            height: 120
+        )
 
         voiceTriggerPhraseField.translatesAutoresizingMaskIntoConstraints = false
         voiceTriggerPhraseField.placeholderString = loc.s("prefs.voice.triggers.phrasePlaceholder")
@@ -1503,29 +1530,32 @@ final class PreferencesViewController: NSViewController,
             voiceTriggerActionPopup.lastItem?.representedObject = kind.rawValue
         }
 
+        let addTriggerButton = CapsuleButton(
+            title: loc.s("common.add"),
+            symbol: "plus",
+            style: .primary,
+            target: self,
+            action: #selector(voiceTriggerAddEntry)
+        )
+        let removeTriggerButton = CapsuleButton(
+            title: loc.s("common.remove"),
+            symbol: "trash",
+            style: .destructive,
+            target: self,
+            action: #selector(voiceTriggerRemoveEntry)
+        )
+        bindRemovalButton(removeTriggerButton, to: voiceTriggersTable)
         let triggerControls = NSStackView(views: [
             voiceTriggerPhraseField,
             voiceTriggerActionPopup,
-            CapsuleButton(
-                title: loc.s("common.add"),
-                symbol: "plus",
-                style: .primary,
-                target: self,
-                action: #selector(voiceTriggerAddEntry)
-            ),
-            CapsuleButton(
-                title: loc.s("common.remove"),
-                symbol: "trash",
-                style: .destructive,
-                target: self,
-                action: #selector(voiceTriggerRemoveEntry)
-            )
+            addTriggerButton,
+            removeTriggerButton
         ])
         triggerControls.orientation = .horizontal
         triggerControls.spacing = 8
         triggerControls.translatesAutoresizingMaskIntoConstraints = false
 
-        stackInCard(triggersCard, views: [disclaimerBox, triggersHint, triggersScroll, voiceTriggersEmptyLabel, triggerControls])
+        stackInCard(triggersCard, views: [disclaimerBox, triggersHint, triggersArea, triggerControls])
 
         for card in [permCard, modelsCard, optionsCard, hotkeyCard, dictCard, triggersCard] {
             stack.addArrangedSubview(card)
@@ -1570,12 +1600,14 @@ final class PreferencesViewController: NSViewController,
         voiceDictionaryTable.reloadData()
         voiceDictionaryEmptyLabel.stringValue = voiceDictEntries.isEmpty ? loc.s("prefs.voice.dict.empty") : ""
         voiceDictionaryEmptyLabel.isHidden = !voiceDictEntries.isEmpty
+        refreshRemovalButton(for: voiceDictionaryTable)
 
         let triggers = VoicePreferences.customVoiceTriggers
         voiceTriggerEntries = triggers.map { (phrase: $0.key, action: $0.value) }.sorted { $0.phrase < $1.phrase }
         voiceTriggersTable.reloadData()
         voiceTriggersEmptyLabel.stringValue = voiceTriggerEntries.isEmpty ? loc.s("prefs.voice.triggers.empty") : ""
         voiceTriggersEmptyLabel.isHidden = !voiceTriggerEntries.isEmpty
+        refreshRemovalButton(for: voiceTriggersTable)
     }
 
     @objc private func voiceRealTimeTypingChanged() {
@@ -1836,19 +1868,10 @@ final class PreferencesViewController: NSViewController,
             popup.widthAnchor.constraint(greaterThanOrEqualToConstant: 110).isActive = true
             aiOutputModePopups[kind] = popup
 
-            let label = DevTypeTheme.makeLabel(
-                loc.s(kind.localizationKey),
-                font: DevTypeTheme.font(12.5, .medium),
-                color: DevTypeTheme.textPrimary
+            let row = makeLabeledControlRow(
+                title: loc.s(kind.localizationKey),
+                control: popup
             )
-            label.translatesAutoresizingMaskIntoConstraints = false
-            let row = NSStackView(views: [label, popup])
-            row.orientation = .horizontal
-            row.spacing = 10
-            row.alignment = .centerY
-            row.translatesAutoresizingMaskIntoConstraints = false
-            label.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            popup.setContentHuggingPriority(.required, for: .horizontal)
             modeRows.append(row)
         }
         stackInCard(modesCard, views: modeRows)
@@ -1863,28 +1886,13 @@ final class PreferencesViewController: NSViewController,
         )
         allowHint.translatesAutoresizingMaskIntoConstraints = false
 
-        aiAllowlistTable.headerView = nil
-        aiAllowlistTable.rowHeight = 22
-        aiAllowlistTable.backgroundColor = .clear
-        aiAllowlistTable.gridStyleMask = []
-        aiAllowlistTable.usesAlternatingRowBackgroundColors = false
-        aiAllowlistTable.allowsMultipleSelection = true
-        aiAllowlistTable.dataSource = self
-        aiAllowlistTable.delegate = self
-        if aiAllowlistTable.tableColumns.isEmpty {
-            aiAllowlistTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("aiAllow")))
-        }
-        aiAllowlistTable.setAccessibilityLabel(loc.s("prefs.ai.allowlist"))
-
-        let allowScroll = NSScrollView()
-        allowScroll.translatesAutoresizingMaskIntoConstraints = false
-        allowScroll.hasVerticalScroller = true
-        allowScroll.borderType = .noBorder
-        allowScroll.drawsBackground = false
-        allowScroll.documentView = aiAllowlistTable
-        allowScroll.heightAnchor.constraint(equalToConstant: 110).isActive = true
-
-        aiAllowlistEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        let allowlistArea = makeTableArea(
+            table: aiAllowlistTable,
+            accessibilityLabel: loc.s("prefs.ai.allowlist"),
+            columnIdentifier: "aiAllow",
+            emptyLabel: aiAllowlistEmptyLabel,
+            allowsMultipleSelection: true
+        )
 
         aiAllowlistField.translatesAutoresizingMaskIntoConstraints = false
         aiAllowlistField.placeholderString = loc.s("prefs.ai.allowlist.bundleID")
@@ -1892,28 +1900,32 @@ final class PreferencesViewController: NSViewController,
         aiAllowlistField.setAccessibilityLabel(loc.s("prefs.ai.allowlist.bundleID"))
         aiAllowlistField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
 
+        let addFrontmostButton = CapsuleButton(
+            title: loc.s("prefs.ai.allowlist.addFrontmost"),
+            symbol: "plus.app",
+            style: .secondary,
+            target: self,
+            action: #selector(aiAllowlistAddFrontmost)
+        )
+        let addAllowlistButton = CapsuleButton(
+            title: loc.s("common.add"),
+            symbol: "plus",
+            style: .primary,
+            target: self,
+            action: #selector(aiAllowlistAddTyped)
+        )
+        let removeAllowlistButton = CapsuleButton(
+            title: loc.s("common.remove"),
+            symbol: "trash",
+            style: .destructive,
+            target: self,
+            action: #selector(aiAllowlistRemove)
+        )
+        bindRemovalButton(removeAllowlistButton, to: aiAllowlistTable)
         let allowButtons = NSStackView(views: [
-            CapsuleButton(
-                title: loc.s("prefs.ai.allowlist.addFrontmost"),
-                symbol: "plus.app",
-                style: .secondary,
-                target: self,
-                action: #selector(aiAllowlistAddFrontmost)
-            ),
-            CapsuleButton(
-                title: loc.s("common.add"),
-                symbol: "plus",
-                style: .primary,
-                target: self,
-                action: #selector(aiAllowlistAddTyped)
-            ),
-            CapsuleButton(
-                title: loc.s("common.remove"),
-                symbol: "trash",
-                style: .destructive,
-                target: self,
-                action: #selector(aiAllowlistRemove)
-            )
+            addFrontmostButton,
+            addAllowlistButton,
+            removeAllowlistButton
         ])
         allowButtons.orientation = .horizontal
         allowButtons.spacing = 8
@@ -1923,7 +1935,7 @@ final class PreferencesViewController: NSViewController,
         editorRow.orientation = .horizontal
         editorRow.translatesAutoresizingMaskIntoConstraints = false
 
-        stackInCard(allowCard, views: [allowHint, allowScroll, aiAllowlistEmptyLabel, editorRow, allowButtons])
+        stackInCard(allowCard, views: [allowHint, allowlistArea, editorRow, allowButtons])
 
         for card in [enableCard, hotkeyCard, modesCard, allowCard] {
             stack.addArrangedSubview(card)
@@ -1956,6 +1968,7 @@ final class PreferencesViewController: NSViewController,
             ? loc.s("prefs.ai.allowlist.empty")
             : ""
         aiAllowlistEmptyLabel.isHidden = !aiAllowlist.isEmpty
+        refreshRemovalButton(for: aiAllowlistTable)
     }
 
     @objc private func aiEnabledChanged() {
@@ -2193,7 +2206,83 @@ final class PreferencesViewController: NSViewController,
         return rowView
     }
 
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let tableView = notification.object as? NSTableView else { return }
+        refreshRemovalButton(for: tableView)
+    }
+
     // MARK: Small layout helpers
+
+    /// One canonical list surface for every table-shaped preference. Empty
+    /// messages sit inside the list bounds, so zero rows read as an intentional
+    /// state rather than an unexplained blank card.
+    private func makeTableArea(
+        table: NSTableView,
+        accessibilityLabel: String,
+        columnIdentifier: String,
+        emptyLabel: NSTextField,
+        rowHeight: CGFloat = 22,
+        height: CGFloat = 110,
+        allowsMultipleSelection: Bool = false
+    ) -> NSView {
+        table.headerView = nil
+        table.rowHeight = rowHeight
+        table.backgroundColor = .clear
+        table.gridStyleMask = []
+        table.usesAlternatingRowBackgroundColors = false
+        table.allowsMultipleSelection = allowsMultipleSelection
+        table.dataSource = self
+        table.delegate = self
+        if table.tableColumns.isEmpty {
+            table.addTableColumn(NSTableColumn(
+                identifier: NSUserInterfaceItemIdentifier(columnIdentifier)
+            ))
+        }
+        table.setAccessibilityLabel(accessibilityLabel)
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.documentView = table
+
+        let area = PreferenceTableAreaView()
+        area.translatesAutoresizingMaskIntoConstraints = false
+        area.wantsLayer = true
+        area.layer?.cornerRadius = DevTypeTheme.Radius.control
+        area.layer?.backgroundColor = DevTypeTheme.contrastOverlay(0.035).cgColor
+        area.layer?.borderWidth = 1
+        area.layer?.borderColor = DevTypeTheme.hairline.cgColor
+
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.alignment = .center
+        emptyLabel.maximumNumberOfLines = 2
+        area.addSubview(scroll)
+        area.addSubview(emptyLabel)
+        NSLayoutConstraint.activate([
+            area.heightAnchor.constraint(equalToConstant: height),
+            scroll.topAnchor.constraint(equalTo: area.topAnchor, constant: 4),
+            scroll.leadingAnchor.constraint(equalTo: area.leadingAnchor, constant: 6),
+            scroll.trailingAnchor.constraint(equalTo: area.trailingAnchor, constant: -6),
+            scroll.bottomAnchor.constraint(equalTo: area.bottomAnchor, constant: -4),
+            emptyLabel.centerYAnchor.constraint(equalTo: area.centerYAnchor),
+            emptyLabel.leadingAnchor.constraint(greaterThanOrEqualTo: area.leadingAnchor, constant: 16),
+            emptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: area.trailingAnchor, constant: -16),
+            emptyLabel.centerXAnchor.constraint(equalTo: area.centerXAnchor)
+        ])
+        return area
+    }
+
+    private func bindRemovalButton(_ button: CapsuleButton, to tableView: NSTableView) {
+        removalButtons[ObjectIdentifier(tableView)] = button
+        refreshRemovalButton(for: tableView)
+    }
+
+    private func refreshRemovalButton(for tableView: NSTableView) {
+        removalButtons[ObjectIdentifier(tableView)]?.isEnabled = !tableView.selectedRowIndexes.isEmpty
+    }
 
     private func makeCard(title: String, symbol: String) -> GlassCardView {
         let card = GlassCardView(tint: DevTypeTheme.accent.withAlphaComponent(0.05))
@@ -2235,7 +2324,11 @@ final class PreferencesViewController: NSViewController,
         // controls (buttons, popups, recorders) keep their intrinsic size so the
         // leading-aligned stack does not stretch them across the card.
         for subview in views {
-            if subview is NSTextField || subview is NSScrollView {
+            if subview is NSTextField
+                || subview is NSScrollView
+                || subview is PreferenceRowView
+                || subview is PreferenceTableAreaView
+                || (subview as? NSStackView)?.orientation == .horizontal {
                 subview.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             } else {
                 subview.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor).isActive = true
@@ -2244,7 +2337,7 @@ final class PreferencesViewController: NSViewController,
     }
 
     private func makeToggleRow(title: String, toggle: NSSwitch, action: Selector) -> NSView {
-        let row = NSView()
+        let row = PreferenceRowView()
         row.translatesAutoresizingMaskIntoConstraints = false
         toggle.translatesAutoresizingMaskIntoConstraints = false
         toggle.controlSize = .small
@@ -2263,12 +2356,38 @@ final class PreferencesViewController: NSViewController,
         row.addSubview(toggle)
         row.addSubview(label)
         NSLayoutConstraint.activate([
-            toggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -12),
+            toggle.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             toggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: toggle.trailingAnchor, constant: 10),
-            label.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             label.topAnchor.constraint(equalTo: row.topAnchor, constant: 2),
             label.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -2)
+        ])
+        return row
+    }
+
+    private func makeLabeledControlRow(
+        title: String,
+        control: NSView,
+        font: NSFont = DevTypeTheme.font(12.5, .medium)
+    ) -> NSView {
+        let row = PreferenceRowView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        control.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = DevTypeTheme.makeLabel(title, font: font, color: DevTypeTheme.textPrimary)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        row.addSubview(label)
+        row.addSubview(control)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: control.leadingAnchor, constant: -12),
+            control.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            control.topAnchor.constraint(greaterThanOrEqualTo: row.topAnchor),
+            control.bottomAnchor.constraint(lessThanOrEqualTo: row.bottomAnchor),
+            row.heightAnchor.constraint(greaterThanOrEqualToConstant: 26)
         ])
         return row
     }

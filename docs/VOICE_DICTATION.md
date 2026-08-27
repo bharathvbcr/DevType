@@ -38,11 +38,13 @@ Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-tr
 
 ### 4. Voice Dictation HUD (`VoiceHUDPanel`)
 * Floating non-activating AppKit HUD that never steals key focus from the target field:
-  - **Liquid Glass on macOS 26+**: runtime `NSGlassEffectView` (clear + crimson tint) via the same discovery trampoline as the rest of DevType; `NSVisualEffectView` material fallback on older macOS.
-  - **Inset organic blob silhouette**: DevType-owned Bezier geometry (`LiquidBlobGeometry`) that stays inside the panel bounds and deforms with live mic RMS.
-  - **Transcript-driven expansion**: panel springs wider/taller as live STT tokens arrive (coalesced, not one animation per token).
-  - **Fluid harmonic metering**: original multi-phase waveform (Apple does not ship Siri orb / Liquid Glass shader assets for porting).
-  - **Accessibility**: Reduce Transparency → solid fill; Reduce Motion → frozen silhouette and no blink; localized status strings.
+  - **Legible Liquid Glass on macOS 26+**: runtime `NSGlassEffectView` regular style with a restrained crimson tint; `NSVisualEffectView` material fallback with a crimson hairline on older macOS.
+  - **Minimal content hierarchy**: one small SF Symbol/status line and the live transcript — no duplicate title, badge, cursor, or decorative waveform row.
+  - **Inset organic silhouette**: DevType-owned Bezier geometry (`LiquidBlobGeometry`) that stays inside the panel bounds and breathes subtly with live mic RMS.
+  - **Transcript-driven expansion**: the transparent surface eases wider and then taller as live STT tokens arrive (coalesced, not one animation per token), capped at 500×188 points.
+  - **Compact fluid metering**: an original two-harmonic meter shares the status line (Apple does not ship Siri orb / Liquid Glass shader assets for application embedding).
+  - **Fast transient motion**: 140 ms entrance/exit fades; successful insertions hold for 750 ms while errors retain a longer 2 s reading window.
+  - **Accessibility**: Reduce Transparency → solid fill; Reduce Motion → frozen silhouette; localized status strings and live accessibility values.
 
 ---
 

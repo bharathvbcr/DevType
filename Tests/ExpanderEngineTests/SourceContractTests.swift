@@ -676,4 +676,64 @@ final class SourceContractTests: XCTestCase {
         )
     }
 
+    // MARK: - Preferences must behave like one coherent surface
+
+    /// Hidden scroll views can acquire a non-zero clip origin while Auto Layout sizes their
+    /// documents. Without a first-presentation reset, long panes (notably Voice and AI) open in
+    /// the middle and hide their primary enablement/status controls above the viewport.
+    func testPreferencesTabsStartAtTheTopOnFirstPresentation() throws {
+        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+
+        XCTAssertTrue(
+            preferences.contains("tabsShownAtLeastOnce.insert(tab).inserted"),
+            "Each Preferences tab must distinguish its first presentation from later returns."
+        )
+        XCTAssertTrue(
+            preferences.contains("scroll.contentView.scroll(to: .zero)"),
+            "A newly revealed Preferences pane must explicitly reset its flipped document to y=0."
+        )
+        XCTAssertTrue(
+            preferences.contains("scroll.reflectScrolledClipView(scroll.contentView)"),
+            "The scroller must be synchronized after resetting the clip view."
+        )
+    }
+
+    /// Every list-shaped preference needs the same in-context empty state. A label below a fixed
+    /// 110-point table leaves a large blank box that looks broken, and the macro table previously
+    /// had no empty message at all.
+    func testPreferencesListsUseTheSharedEmptyStateContainer() throws {
+        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+        let uses = preferences.components(separatedBy: "makeTableArea(").count - 1
+
+        XCTAssertEqual(
+            uses,
+            6,
+            "Five list cards plus the helper declaration must flow through makeTableArea."
+        )
+        XCTAssertTrue(
+            preferences.contains("macroEmptyLabel"),
+            "Hotkey Macros must explain its empty state just like the other preference lists."
+        )
+    }
+
+    /// macOS settings rows read left-to-right as label then control. Keeping the switch on the
+    /// leading edge while popups sit on the trailing edge made adjacent cards feel unrelated and
+    /// made long Voice labels harder to scan.
+    func testPreferencesToggleRowsAlignLabelsLeadingAndSwitchesTrailing() throws {
+        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+        guard let start = preferences.range(of: "private func makeToggleRow("),
+              let end = preferences.range(of: "\n    private func", range: start.upperBound..<preferences.endIndex)
+        else {
+            return XCTFail("makeToggleRow no longer has the shape this contract describes.")
+        }
+        let body = String(preferences[start.upperBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("label.leadingAnchor.constraint(equalTo: row.leadingAnchor)"))
+        XCTAssertTrue(body.contains("toggle.trailingAnchor.constraint(equalTo: row.trailingAnchor)"))
+        XCTAssertFalse(
+            body.contains("toggle.leadingAnchor.constraint(equalTo: row.leadingAnchor)"),
+            "Switches belong at the trailing edge of a full-width settings row."
+        )
+    }
+
 }

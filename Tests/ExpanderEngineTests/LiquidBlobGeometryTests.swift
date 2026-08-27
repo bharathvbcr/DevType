@@ -31,6 +31,7 @@ final class LiquidBlobGeometryTests: XCTestCase {
         let testRects = [
             standardRect,
             expandedRect,
+            CGRect(x: 0, y: 0, width: 44, height: 120),
             CGRect(x: 100, y: 200, width: 320, height: 90),
             CGRect(x: 0, y: 0, width: 520, height: 200)
         ]
@@ -115,6 +116,67 @@ final class LiquidBlobGeometryTests: XCTestCase {
         XCTAssertEqual(spacesSize, baseSize)
         XCTAssertEqual(placeholder1, baseSize)
         XCTAssertEqual(placeholder2, baseSize)
+    }
+
+    func testDefaultHUDFootprintIsCompactAndDeformationIsRestrained() {
+        let font = NSFont.systemFont(ofSize: 14.5, weight: .regular)
+        let restingSize = LiquidBlobGeometry.hudSize(forText: "", font: font)
+
+        XCTAssertEqual(restingSize, CGSize(width: 304, height: 68))
+        XCTAssertLessThanOrEqual(
+            LiquidBlobGeometry.maxDeformationRatio,
+            0.08,
+            "The voice surface should breathe subtly instead of visibly wobbling around its text"
+        )
+    }
+
+    func testVoiceHUDPresentationTimingIsFastAndOrdered() {
+        XCTAssertEqual(VoiceHUDPresentationTiming.fadeInDuration, 0.14)
+        XCTAssertEqual(VoiceHUDPresentationTiming.fadeOutDuration, 0.14)
+        XCTAssertEqual(VoiceHUDPresentationTiming.successHoldDuration, 0.75)
+        XCTAssertEqual(VoiceHUDPresentationTiming.errorHoldDuration, 2.0)
+        XCTAssertLessThanOrEqual(
+            VoiceHUDPresentationTiming.fadeOutDuration,
+            VoiceHUDPresentationTiming.fadeInDuration,
+            "The HUD should leave at least as quickly as it arrives"
+        )
+        XCTAssertLessThan(
+            VoiceHUDPresentationTiming.successHoldDuration,
+            VoiceHUDPresentationTiming.errorHoldDuration,
+            "Errors need more reading time than successful insertions"
+        )
+    }
+
+    func testHUDSizeStaysBoundedForOversizedAndUnbrokenTranscripts() {
+        let font = NSFont.systemFont(ofSize: 14.5, weight: .regular)
+        let maximum = CGSize(width: 500, height: 188)
+        let transcripts = [
+            String(repeating: "spoken ", count: 2_000),
+            String(repeating: "x", count: 12_000),
+            String(repeating: "🧑🏽‍💻", count: 2_000)
+        ]
+
+        for transcript in transcripts {
+            let size = LiquidBlobGeometry.hudSize(
+                forText: transcript,
+                font: font,
+                maximum: maximum
+            )
+            XCTAssertLessThanOrEqual(size.width, maximum.width)
+            XCTAssertLessThanOrEqual(size.height, maximum.height)
+            XCTAssertGreaterThanOrEqual(size.width, 304)
+            XCTAssertGreaterThanOrEqual(size.height, 68)
+        }
+    }
+
+    func testAudioLevelClampsAtBothBoundaries() {
+        let belowZero = LiquidBlobGeometry.path(in: standardRect, phase: 1.7, audioLevel: -10)
+        let atZero = LiquidBlobGeometry.path(in: standardRect, phase: 1.7, audioLevel: 0)
+        let atOne = LiquidBlobGeometry.path(in: standardRect, phase: 1.7, audioLevel: 1)
+        let aboveOne = LiquidBlobGeometry.path(in: standardRect, phase: 1.7, audioLevel: 10)
+
+        XCTAssertEqual(belowZero.boundingBoxOfPath, atZero.boundingBoxOfPath)
+        XCTAssertEqual(aboveOne.boundingBoxOfPath, atOne.boundingBoxOfPath)
     }
 
     // MARK: - Mask image generation
