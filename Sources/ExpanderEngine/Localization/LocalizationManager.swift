@@ -1287,7 +1287,24 @@ public final class LocalizationManager: ObservableObject {
             "prefs.voice.status.downloading": "Downloading (%@)…",
             "prefs.voice.status.ready": "Ready (On-Device)",
             "prefs.voice.status.installed": "Installed",
-            "prefs.voice.status.error": "Download Failed: %@"
+            "prefs.voice.status.error": "Download Failed: %@",
+            "voice.hud.title": "Smart Dictation",
+            "voice.hud.title.model": "Smart Dictation (%@)",
+            "voice.hud.prompt": "Speak naturally…",
+            "voice.hud.placeholder": "Speak naturally…",
+            "voice.hud.listening": "Listening",
+            "voice.hud.status.listening": "Listening",
+            "voice.hud.listeningEllipsis": "Listening…",
+            "voice.hud.live": "Live",
+            "voice.hud.status.live": "Live",
+            "voice.hud.polishing": "Polishing",
+            "voice.hud.status.polishing": "Polishing",
+            "voice.hud.inserted": "Inserted",
+            "voice.hud.status.inserted": "Inserted",
+            "voice.hud.failed": "Failed",
+            "voice.hud.status.failed": "Failed",
+            "voice.hud.ax": "Smart Dictation status",
+            "voice.hud.ax.title": "Voice Dictation"
         ]
     }
 
@@ -2353,7 +2370,24 @@ public final class LocalizationManager: ObservableObject {
             "prefs.voice.status.downloading": "다운로드 중 (%@)…",
             "prefs.voice.status.ready": "준비됨 (온디바이스)",
             "prefs.voice.status.installed": "설치됨",
-            "prefs.voice.status.error": "다운로드 실패: %@"
+            "prefs.voice.status.error": "다운로드 실패: %@",
+            "voice.hud.title": "스마트 받아쓰기",
+            "voice.hud.title.model": "스마트 받아쓰기 (%@)",
+            "voice.hud.prompt": "자연스럽게 말씀하세요…",
+            "voice.hud.placeholder": "자연스럽게 말씀하세요…",
+            "voice.hud.listening": "듣는 중",
+            "voice.hud.status.listening": "듣는 중",
+            "voice.hud.listeningEllipsis": "듣는 중…",
+            "voice.hud.live": "실시간",
+            "voice.hud.status.live": "실시간",
+            "voice.hud.polishing": "다듬는 중",
+            "voice.hud.status.polishing": "다듬는 중",
+            "voice.hud.inserted": "삽입됨",
+            "voice.hud.status.inserted": "삽입됨",
+            "voice.hud.failed": "실패",
+            "voice.hud.status.failed": "실패",
+            "voice.hud.ax": "스마트 받아쓰기 상태",
+            "voice.hud.ax.title": "음성 받아쓰기"
         ]
     }
 
@@ -3430,7 +3464,24 @@ public final class LocalizationManager: ObservableObject {
             "prefs.voice.status.downloading": "ダウンロード中 (%@)…",
             "prefs.voice.status.ready": "準備完了 (オンデバイス)",
             "prefs.voice.status.installed": "インストール済み",
-            "prefs.voice.status.error": "ダウンロード失敗: %@"
+            "prefs.voice.status.error": "ダウンロード失敗: %@",
+            "voice.hud.title": "スマート音声入力",
+            "voice.hud.title.model": "スマート音声入力 (%@)",
+            "voice.hud.prompt": "自然に話してください…",
+            "voice.hud.placeholder": "自然に話してください…",
+            "voice.hud.listening": "聞き取り中",
+            "voice.hud.status.listening": "聞き取り中",
+            "voice.hud.listeningEllipsis": "聞き取り中…",
+            "voice.hud.live": "ライブ",
+            "voice.hud.status.live": "ライブ",
+            "voice.hud.polishing": "整形中",
+            "voice.hud.status.polishing": "整形中",
+            "voice.hud.inserted": "挿入完了",
+            "voice.hud.status.inserted": "挿入完了",
+            "voice.hud.failed": "失敗",
+            "voice.hud.status.failed": "失敗",
+            "voice.hud.ax": "スマート音声入力の状態",
+            "voice.hud.ax.title": "音声入力"
         ]
     }
 }

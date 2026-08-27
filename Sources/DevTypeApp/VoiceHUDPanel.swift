@@ -34,25 +34,35 @@ public final class VoiceHUDPanel: NSPanel {
     private var isResizeScheduled = false
     private var usesRealGlass = false
 
-    private static let baseWidth: CGFloat = 280
-    private static let baseHeight: CGFloat = 72
+    private static let baseWidth: CGFloat = 340
+    private static let baseHeight: CGFloat = 76
     private static let maxWidth: CGFloat = 520
-    private static let maxHeight: CGFloat = 200
+    private static let maxHeight: CGFloat = 220
 
     public init() {
         let loc = LocalizationManager.shared
         self.statusPill = PillBadgeView(text: loc.s("voice.hud.status.listening"), tint: DevTypeTheme.accent, showsDot: true)
+        self.statusPill.setContentHuggingPriority(.required, for: .horizontal)
+        self.statusPill.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         self.titleLabel = DevTypeTheme.makeLabel(
-            loc.s("palette.voice.dictation"),
+            loc.s("voice.hud.title"),
             font: DevTypeTheme.font(12, .bold),
             color: DevTypeTheme.textPrimary
         )
+        self.titleLabel.maximumNumberOfLines = 1
+        self.titleLabel.cell?.lineBreakMode = .byTruncatingTail
+
         self.transcriptLabel = DevTypeTheme.makeLabel(
             loc.s("voice.hud.placeholder"),
             font: DevTypeTheme.font(13.5, .medium),
             color: DevTypeTheme.textSecondary,
             wrapping: true
         )
+        self.transcriptLabel.maximumNumberOfLines = 6
+        self.transcriptLabel.cell?.wraps = true
+        self.transcriptLabel.cell?.lineBreakMode = .byWordWrapping
+
         self.cursorDot = DevTypeTheme.makeLabel(
             "●",
             font: DevTypeTheme.font(10, .bold),
@@ -139,10 +149,10 @@ public final class VoiceHUDPanel: NSPanel {
         rootStack.addArrangedSubview(fluidWaveView)
 
         NSLayoutConstraint.activate([
-            rootStack.topAnchor.constraint(equalTo: blobContainer.contentHost.topAnchor, constant: 12),
-            rootStack.leadingAnchor.constraint(equalTo: blobContainer.contentHost.leadingAnchor, constant: 18),
-            rootStack.trailingAnchor.constraint(equalTo: blobContainer.contentHost.trailingAnchor, constant: -18),
-            rootStack.bottomAnchor.constraint(equalTo: blobContainer.contentHost.bottomAnchor, constant: -10),
+            rootStack.topAnchor.constraint(equalTo: blobContainer.contentHost.topAnchor, constant: 14),
+            rootStack.leadingAnchor.constraint(equalTo: blobContainer.contentHost.leadingAnchor, constant: 22),
+            rootStack.trailingAnchor.constraint(equalTo: blobContainer.contentHost.trailingAnchor, constant: -22),
+            rootStack.bottomAnchor.constraint(equalTo: blobContainer.contentHost.bottomAnchor, constant: -12),
             headerStack.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
             textContainer.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
             fluidWaveView.widthAnchor.constraint(equalTo: rootStack.widthAnchor)
@@ -167,6 +177,24 @@ public final class VoiceHUDPanel: NSPanel {
         cursorDot.layer?.add(anim, forKey: "cursorBlink")
     }
 
+    private func displayTitle(for modelName: String) -> String {
+        let loc = LocalizationManager.shared
+        if modelName.isEmpty {
+            return loc.s("voice.hud.title")
+        }
+        let shortName: String
+        if modelName.contains("Voxtral") {
+            shortName = "Voxtral"
+        } else if modelName.contains("Fun-ASR") {
+            shortName = "Fun-ASR"
+        } else if modelName.contains("Apple") {
+            shortName = "Apple Speech"
+        } else {
+            shortName = modelName
+        }
+        return loc.s("voice.hud.title.model", shortName)
+    }
+
     // MARK: - Public State Controls
 
     /// Updates the HUD state and positions it on screen.
@@ -178,7 +206,7 @@ public final class VoiceHUDPanel: NSPanel {
         case .listening(let modelName):
             currentModelName = modelName
             statusPill.update(text: loc.s("voice.hud.status.listening"), tint: DevTypeTheme.accent)
-            titleLabel.stringValue = loc.s("voice.hud.title", modelName)
+            titleLabel.stringValue = displayTitle(for: modelName)
             transcriptLabel.stringValue = loc.s("voice.hud.placeholder")
             transcriptLabel.textColor = DevTypeTheme.textSecondary
             cursorDot.isHidden = false
@@ -190,7 +218,7 @@ public final class VoiceHUDPanel: NSPanel {
         case .streaming(let transcript, let modelName):
             currentModelName = modelName
             statusPill.update(text: loc.s("voice.hud.status.live"), tint: DevTypeTheme.accentBright)
-            titleLabel.stringValue = loc.s("voice.hud.title", modelName)
+            titleLabel.stringValue = displayTitle(for: modelName)
             let prompt = loc.s("voice.hud.listening")
             transcriptLabel.stringValue = transcript.isEmpty ? prompt : transcript
             transcriptLabel.textColor = DevTypeTheme.textPrimary
@@ -202,7 +230,7 @@ public final class VoiceHUDPanel: NSPanel {
 
         case .transcribing(let modelName):
             statusPill.update(text: loc.s("voice.hud.status.polishing"), tint: DevTypeTheme.accentBright)
-            titleLabel.stringValue = loc.s("voice.hud.title", modelName)
+            titleLabel.stringValue = displayTitle(for: modelName)
             cursorDot.isHidden = true
             fluidWaveView.isTranscribing = true
             updateAudioLevel(0)

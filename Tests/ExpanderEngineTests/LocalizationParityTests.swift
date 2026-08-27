@@ -154,6 +154,41 @@ final class LocalizationParityTests: XCTestCase {
         }
     }
 
+    // MARK: - Voice HUD Keys
+
+    func testVoiceHUDKeysResolveNonEmptyInAllLanguages() {
+        let expectedVoiceKeys = [
+            "voice.hud.title",
+            "voice.hud.title.model",
+            "voice.hud.prompt",
+            "voice.hud.placeholder",
+            "voice.hud.listening",
+            "voice.hud.status.listening",
+            "voice.hud.listeningEllipsis",
+            "voice.hud.live",
+            "voice.hud.status.live",
+            "voice.hud.polishing",
+            "voice.hud.status.polishing",
+            "voice.hud.inserted",
+            "voice.hud.status.inserted",
+            "voice.hud.failed",
+            "voice.hud.status.failed",
+            "voice.hud.ax",
+            "voice.hud.ax.title"
+        ]
+
+        for (language, table) in concrete {
+            for key in expectedVoiceKeys {
+                guard let value = table[key] else {
+                    XCTFail("\(language.rawValue) missing voice HUD key: \(key)")
+                    continue
+                }
+                XCTAssertFalse(value.isEmpty, "\(language.rawValue) has empty value for \(key)")
+                XCTAssertNotEqual(value, key, "\(language.rawValue) key \(key) must not resolve to the key name itself")
+            }
+        }
+    }
+
     // MARK: - Lookup behaviour
 
     func testUnknownKeyFallsBackToTheKeyItself() {

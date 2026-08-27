@@ -4,24 +4,23 @@ import Foundation
 
 /// Pure geometry for the voice dictation liquid blob HUD.
 ///
-/// The silhouette must stay inside `rect` at every audio level so the panel does
-/// not clip organic lobes into a stadium. Expansion sizing accounts for real
-/// chrome (header, waveform, padding), not just transcript height.
+/// Base shape is an inset horizontal stadium / capsule with straight top and bottom
+/// spans so that content in the top-left and top-right is NEVER pinched or clipped.
+/// Harmonics deform the perimeter organically in response to live speech.
 public enum LiquidBlobGeometry {
 
-    /// Maximum radial scale above the inset base ellipse (audio + harmonics).
-    /// Chosen so the path stays inside `rect` after the inset is applied.
-    public static let maxRadiusScale: CGFloat = 1.22
+    /// Maximum harmonic ripple perturbation ratio relative to radius.
+    public static let maxDeformationRatio: CGFloat = 0.12
 
     /// Control points around the blob silhouette.
-    public static let pointCount: Int = 14
+    public static let pointCount: Int = 24
 
     /// Vertical chrome outside the transcript line: top pad + header + stack
     /// spacings + waveform + bottom pad.
-    public static let defaultChromeHeight: CGFloat = 70
+    public static let defaultChromeHeight: CGFloat = 68
 
     /// Horizontal padding around the transcript (leading/trailing insets).
-    public static let horizontalTextPadding: CGFloat = 48
+    public static let horizontalTextPadding: CGFloat = 40
 
     /// Closed organic spline inscribed in `rect`. Bounding box ⊆ `rect` for any
     /// `audioLevel` in 0…1 and any `phase`.
@@ -41,43 +40,72 @@ public enum LiquidBlobGeometry {
         }
 
         let level = Swift.min(Swift.max(audioLevel, 0), 1)
-        // Inset so maxRadiusScale * base radius never leaves the rect.
-        let insetX = (width / 2) * (1 - 1 / maxRadiusScale)
-        let insetY = (height / 2) * (1 - 1 / maxRadiusScale)
+        let r = height / 2.0
+        let maxDeform = Swift.min(4.5, r * maxDeformationRatio) * level
+
+        // Inset base capsule by maxDeform + margin so ripples NEVER exceed rect
+        let insetX = maxDeform + 1.0
+        let insetY = maxDeform + 1.0
         let inner = rect.insetBy(dx: insetX, dy: insetY)
 
-        let cx = inner.midX
-        let cy = inner.midY
-        let rx = Double(inner.width / 2)
-        let ry = Double(inner.height / 2)
+        let capR = inner.height / 2.0
+        let leftCenterX = inner.minX + capR
+        let rightCenterX = Swift.max(leftCenterX, inner.maxX - capR)
+        let straightWidth = rightCenterX - leftCenterX
 
-        // Speech grows deformation inside the inset, not past the window.
-        let audioPerturbation = Double(level) * 8.0
         var points: [CGPoint] = []
         points.reserveCapacity(pointCount)
 
-        for i in 0..<pointCount {
-            let angle = (Double(i) / Double(pointCount)) * 2.0 * .pi
-            let harmonic1 = sin(angle * 2.0 + phase) * 3.0
-            let harmonic2 = cos(angle * 3.0 - phase * 0.7) * (2.0 + audioPerturbation)
-            let harmonic3 = sin(angle * 5.0 + phase * 1.3) * Double(level) * 2.5
-            let radiusScale = 1.0 + ((harmonic1 + harmonic2 + harmonic3) / 100.0)
-            // Clamp so floating-point drift cannot push past maxRadiusScale.
-            let clampedScale = Swift.min(Swift.max(radiusScale, 0.82), Double(maxRadiusScale))
+        let pointsPerSegment = 6
 
-            let px = cx + CGFloat(cos(angle) * rx * clampedScale)
-            let py = cy + CGFloat(sin(angle) * ry * clampedScale)
-            points.append(CGPoint(x: px, y: py))
+        // 1. Top flat edge (left to right)
+        for i in 0..<pointsPerSegment {
+            let t = Double(i) / Double(pointsPerSegment)
+            let x = leftCenterX + CGFloat(t) * straightWidth
+            let wave = sin(t * 2.0 * .pi * 2.0 + phase) * Double(maxDeform) * 0.7
+            let y = inner.maxY + CGFloat(wave)
+            points.append(CGPoint(x: x, y: y))
+        }
+
+        // 2. Right semicircular cap (angle +pi/2 -> -pi/2)
+        for i in 0..<pointsPerSegment {
+            let t = Double(i) / Double(pointsPerSegment)
+            let angle = (.pi / 2.0) - t * .pi
+            let wave = cos(angle * 3.0 - phase * 0.8) * Double(maxDeform) * 0.8
+            let radius = capR + CGFloat(wave)
+            let x = rightCenterX + CGFloat(cos(angle)) * radius
+            let y = inner.midY + CGFloat(sin(angle)) * radius
+            points.append(CGPoint(x: x, y: y))
+        }
+
+        // 3. Bottom flat edge (right to left)
+        for i in 0..<pointsPerSegment {
+            let t = Double(i) / Double(pointsPerSegment)
+            let x = rightCenterX - CGFloat(t) * straightWidth
+            let wave = -sin(t * 2.0 * .pi * 2.0 + phase + 1.2) * Double(maxDeform) * 0.7
+            let y = inner.minY + CGFloat(wave)
+            points.append(CGPoint(x: x, y: y))
+        }
+
+        // 4. Left semicircular cap (angle 3pi/2 -> pi/2)
+        for i in 0..<pointsPerSegment {
+            let t = Double(i) / Double(pointsPerSegment)
+            let angle = (3.0 * .pi / 2.0) - t * .pi
+            let wave = cos(angle * 3.0 + phase * 0.7) * Double(maxDeform) * 0.8
+            let radius = capR + CGFloat(wave)
+            let x = leftCenterX + CGFloat(cos(angle)) * radius
+            let y = inner.midY + CGFloat(sin(angle)) * radius
+            points.append(CGPoint(x: x, y: y))
+        }
+
+        guard points.count >= 3 else {
+            let fallback = CGMutablePath()
+            fallback.addRoundedRect(in: inner, cornerWidth: capR, cornerHeight: capR)
+            fallback.closeSubpath()
+            return fallback
         }
 
         let path = CGMutablePath()
-        guard points.count >= 3 else {
-            let r = Swift.min(inner.width, inner.height) / 2
-            path.addRoundedRect(in: inner, cornerWidth: r, cornerHeight: r)
-            path.closeSubpath()
-            return path
-        }
-
         path.move(to: midpoint(points[points.count - 1], points[0]))
         for i in 0..<points.count {
             let p1 = points[i]
@@ -98,9 +126,10 @@ public enum LiquidBlobGeometry {
         let cx = rect.midX
         let cy = rect.midY
         var radii: [CGFloat] = []
-        radii.reserveCapacity(pointCount)
-        for i in 0..<pointCount {
-            let angle = (Double(i) / Double(pointCount)) * 2.0 * .pi
+        let probeCount = 16
+        radii.reserveCapacity(probeCount)
+        for i in 0..<probeCount {
+            let angle = (Double(i) / Double(probeCount)) * 2.0 * .pi
             var lo: CGFloat = 0
             var hi: CGFloat = Swift.max(rect.width, rect.height)
             for _ in 0..<16 {
@@ -120,24 +149,28 @@ public enum LiquidBlobGeometry {
         return radii
     }
 
-    /// Radial variance of the silhouette (higher when speech deforms the blob).
+    /// Radial deformation variance of the silhouette relative to resting state (0 at idle, > 0 during speech).
     public static func radialVariance(
         in rect: CGRect,
         phase: Double,
         audioLevel: CGFloat
     ) -> CGFloat {
-        let radii = sampleRadii(in: rect, phase: phase, audioLevel: audioLevel)
-        guard !radii.isEmpty else { return 0 }
-        let mean = radii.reduce(0, +) / CGFloat(radii.count)
-        let sumSq = radii.reduce(CGFloat(0)) { $0 + ($1 - mean) * ($1 - mean) }
-        return sumSq / CGFloat(radii.count)
+        let baseRadii = sampleRadii(in: rect, phase: 0.0, audioLevel: 0.0)
+        let activeRadii = sampleRadii(in: rect, phase: phase, audioLevel: audioLevel)
+        guard baseRadii.count == activeRadii.count, !baseRadii.isEmpty else { return 0 }
+        var sumDiffSq: CGFloat = 0
+        for i in 0..<baseRadii.count {
+            let diff = activeRadii[i] - baseRadii[i]
+            sumDiffSq += diff * diff
+        }
+        return sumDiffSq / CGFloat(baseRadii.count)
     }
 
     /// Whether `text` should keep the HUD at its compact base size.
     public static func isPlaceholderText(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return true }
-        return text == "Speak naturally…" || text == "Listening…"
+        return text == "Speak naturally…" || text == "Listening…" || text == "Listening" || text == "자연스럽게 말씀하세요…" || text == "自然に話してください…"
     }
 
     /// Target HUD size for a transcript string. Empty / placeholder copy stays at `base`.
@@ -145,8 +178,8 @@ public enum LiquidBlobGeometry {
         forText text: String,
         font: NSFont,
         chromeHeight: CGFloat = defaultChromeHeight,
-        base: CGSize = CGSize(width: 280, height: 72),
-        maximum: CGSize = CGSize(width: 520, height: 200)
+        base: CGSize = CGSize(width: 320, height: 72),
+        maximum: CGSize = CGSize(width: 520, height: 220)
     ) -> CGSize {
         if isPlaceholderText(text) {
             return base
