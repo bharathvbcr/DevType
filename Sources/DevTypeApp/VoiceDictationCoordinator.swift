@@ -155,16 +155,91 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
                         return
                     }
 
-                    VoiceHUDPanel.shared.updateState(.success(text: polishedText))
-                    let previousInjectedCount = self.liveInjectedText.count
-                    self.liveInjectedText = ""
-                    self.injectText(polishedText, eraseCount: previousInjectedCount, sourceApp: appToRestore)
+                    if let aiCommand = VoiceAITriggerParser.parse(transcript: polishedText) {
+                        self.handleVoiceAICommand(aiCommand, sourceApp: appToRestore)
+                    } else {
+                        VoiceHUDPanel.shared.updateState(.success(text: polishedText))
+                        let previousInjectedCount = self.liveInjectedText.count
+                        self.liveInjectedText = ""
+                        self.injectText(polishedText, eraseCount: previousInjectedCount, sourceApp: appToRestore)
+                    }
 
                 case .failure(let error):
                     VoiceHUDPanel.shared.updateState(.error(message: error.localizedDescription))
                 }
             }
         }
+    }
+
+    @MainActor
+    private func handleVoiceAICommand(_ command: VoiceAICommand, sourceApp: NSRunningApplication?) {
+        let previousInjectedCount = self.liveInjectedText.count
+        self.liveInjectedText = ""
+
+        // Disclaimer and compatibility check for macOS 27
+        guard AITextTransformSupport.isRunningOnCompatibleOS else {
+            VoiceHUDPanel.shared.updateState(.error(message: "AI tools require macOS 27 (tested on macOS 26: unsupported)"))
+            if previousInjectedCount > 0 {
+                replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
+            }
+            return
+        }
+
+        var textToTransform = command.payloadText
+        if command.requiresSelectionFallback || textToTransform.isEmpty {
+            switch SelectionReader.readSelectionForExplicitAIAction() {
+            case .selection(let resolved):
+                textToTransform = resolved.text
+            case .failure(let failure):
+                VoiceHUDPanel.shared.updateState(.error(message: failure.message(loc: .shared)))
+                if previousInjectedCount > 0 {
+                    replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
+                }
+                return
+            }
+        }
+
+        guard !textToTransform.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            VoiceHUDPanel.shared.updateState(.error(message: "No text provided for \(command.triggerPhrase)"))
+            if previousInjectedCount > 0 {
+                replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
+            }
+            return
+        }
+
+        VoiceHUDPanel.shared.updateState(.transcribing(modelName: "AI (\(command.kind.rawValue))"))
+
+        #if canImport(FoundationModels)
+        if #available(macOS 27.0, *) {
+            _ = AITextTransformer.shared.transform(
+                kind: command.kind,
+                input: textToTransform,
+                completionQueue: .main
+            ) { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    switch result {
+                    case .success(let output):
+                        guard !output.isEmpty else {
+                            VoiceHUDPanel.shared.updateState(.error(message: "AI produced empty output"))
+                            return
+                        }
+                        VoiceHUDPanel.shared.updateState(.success(text: output))
+                        self.injectText(output, eraseCount: previousInjectedCount, sourceApp: sourceApp)
+
+                    case .failure(let error):
+                        VoiceHUDPanel.shared.updateState(.error(message: "AI failed: \(error.localizedDescription)"))
+                        if previousInjectedCount > 0 {
+                            self.replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
+                        }
+                    }
+                }
+            }
+            return
+        }
+        #endif
+
+        VoiceHUDPanel.shared.updateState(.error(message: "AI Foundation Models require macOS 27"))
     }
 
     /// Cancels recording and dismisses the HUD without injecting text.

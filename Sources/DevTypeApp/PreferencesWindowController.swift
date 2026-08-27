@@ -311,6 +311,15 @@ final class PreferencesViewController: NSViewController,
     private let voiceDictSpokenField = NSTextField()
     private let voiceDictReplacementField = NSTextField()
     private var voiceDictEntries: [(spoken: String, replacement: String)] = []
+    private let voiceTriggersTable = NSTableView()
+    private let voiceTriggersEmptyLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(11.5),
+        color: DevTypeTheme.textTertiary
+    )
+    private let voiceTriggerPhraseField = NSTextField()
+    private let voiceTriggerActionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var voiceTriggerEntries: [(phrase: String, action: String)] = []
     private var voiceModelDownloadProgressBars: [VoiceModelType: NSProgressIndicator] = [:]
     private var voiceModelStatusLabels: [VoiceModelType: NSTextField] = [:]
     private var voiceModelActionButtons: [VoiceModelType: CapsuleButton] = [:]
@@ -1432,10 +1441,96 @@ final class PreferencesViewController: NSViewController,
 
         stackInCard(dictCard, views: [dictHint, dictScroll, voiceDictionaryEmptyLabel, dictButtons])
 
-        for card in [permCard, modelsCard, optionsCard, hotkeyCard, dictCard] {
+        // 5. AI Voice Triggers & Rewrites Card
+        let triggersCard = makeCard(title: loc.s("prefs.voice.triggers.card"), symbol: "wand.and.stars")
+
+        let disclaimerPill = PillBadgeView(text: "macOS 27 Required", tint: DevTypeTheme.statusOrange, showsDot: true)
+        disclaimerPill.translatesAutoresizingMaskIntoConstraints = false
+
+        let disclaimerText = DevTypeTheme.makeLabel(
+            "Disclaimer: AI rewrite and developer-type tools require macOS 27 to function properly (tested on macOS 26 where AI features are not operational).",
+            font: DevTypeTheme.font(10.5, .medium),
+            color: DevTypeTheme.accentBright,
+            wrapping: true
+        )
+        disclaimerText.translatesAutoresizingMaskIntoConstraints = false
+
+        let disclaimerBox = NSStackView(views: [disclaimerPill, disclaimerText])
+        disclaimerBox.orientation = .vertical
+        disclaimerBox.alignment = .leading
+        disclaimerBox.spacing = 3
+        disclaimerBox.translatesAutoresizingMaskIntoConstraints = false
+
+        let triggersHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.triggers.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        triggersHint.translatesAutoresizingMaskIntoConstraints = false
+
+        voiceTriggersTable.headerView = nil
+        voiceTriggersTable.rowHeight = 22
+        voiceTriggersTable.backgroundColor = .clear
+        voiceTriggersTable.gridStyleMask = []
+        voiceTriggersTable.usesAlternatingRowBackgroundColors = false
+        voiceTriggersTable.dataSource = self
+        voiceTriggersTable.delegate = self
+        if voiceTriggersTable.tableColumns.isEmpty {
+            voiceTriggersTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("voiceTriggers")))
+        }
+        voiceTriggersTable.setAccessibilityLabel(loc.s("prefs.voice.triggers.card"))
+
+        let triggersScroll = NSScrollView()
+        triggersScroll.translatesAutoresizingMaskIntoConstraints = false
+        triggersScroll.hasVerticalScroller = true
+        triggersScroll.borderType = .noBorder
+        triggersScroll.drawsBackground = false
+        triggersScroll.documentView = voiceTriggersTable
+        triggersScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
+
+        voiceTriggersEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        voiceTriggerPhraseField.translatesAutoresizingMaskIntoConstraints = false
+        voiceTriggerPhraseField.placeholderString = loc.s("prefs.voice.triggers.phrasePlaceholder")
+        voiceTriggerPhraseField.font = DevTypeTheme.font(12)
+        voiceTriggerPhraseField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+
+        voiceTriggerActionPopup.translatesAutoresizingMaskIntoConstraints = false
+        voiceTriggerActionPopup.removeAllItems()
+        for kind in AITransformKind.builtInPalette {
+            voiceTriggerActionPopup.addItem(withTitle: loc.s(kind.localizationKey))
+            voiceTriggerActionPopup.lastItem?.representedObject = kind.rawValue
+        }
+
+        let triggerControls = NSStackView(views: [
+            voiceTriggerPhraseField,
+            voiceTriggerActionPopup,
+            CapsuleButton(
+                title: loc.s("common.add"),
+                symbol: "plus",
+                style: .primary,
+                target: self,
+                action: #selector(voiceTriggerAddEntry)
+            ),
+            CapsuleButton(
+                title: loc.s("common.remove"),
+                symbol: "trash",
+                style: .destructive,
+                target: self,
+                action: #selector(voiceTriggerRemoveEntry)
+            )
+        ])
+        triggerControls.orientation = .horizontal
+        triggerControls.spacing = 8
+        triggerControls.translatesAutoresizingMaskIntoConstraints = false
+
+        stackInCard(triggersCard, views: [disclaimerBox, triggersHint, triggersScroll, voiceTriggersEmptyLabel, triggerControls])
+
+        for card in [permCard, modelsCard, optionsCard, hotkeyCard, dictCard, triggersCard] {
             stack.addArrangedSubview(card)
         }
-        pinWidth(of: [permCard, modelsCard, optionsCard, hotkeyCard, dictCard], to: stack)
+        pinWidth(of: [permCard, modelsCard, optionsCard, hotkeyCard, dictCard, triggersCard], to: stack)
     }
 
     private func reloadVoice() {
@@ -1475,10 +1570,34 @@ final class PreferencesViewController: NSViewController,
         voiceDictionaryTable.reloadData()
         voiceDictionaryEmptyLabel.stringValue = voiceDictEntries.isEmpty ? loc.s("prefs.voice.dict.empty") : ""
         voiceDictionaryEmptyLabel.isHidden = !voiceDictEntries.isEmpty
+
+        let triggers = VoicePreferences.customVoiceTriggers
+        voiceTriggerEntries = triggers.map { (phrase: $0.key, action: $0.value) }.sorted { $0.phrase < $1.phrase }
+        voiceTriggersTable.reloadData()
+        voiceTriggersEmptyLabel.stringValue = voiceTriggerEntries.isEmpty ? loc.s("prefs.voice.triggers.empty") : ""
+        voiceTriggersEmptyLabel.isHidden = !voiceTriggerEntries.isEmpty
     }
 
     @objc private func voiceRealTimeTypingChanged() {
         VoicePreferences.isRealTimeTypingEnabled = voiceRealTimeTypingSwitch.state == .on
+    }
+
+    @objc private func voiceTriggerAddEntry() {
+        let phrase = voiceTriggerPhraseField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !phrase.isEmpty,
+              let rawAction = voiceTriggerActionPopup.selectedItem?.representedObject as? String else { return }
+
+        VoicePreferences.addVoiceTrigger(phrase: phrase, action: rawAction)
+        voiceTriggerPhraseField.stringValue = ""
+        reloadVoice()
+    }
+
+    @objc private func voiceTriggerRemoveEntry() {
+        let row = voiceTriggersTable.selectedRow
+        guard voiceTriggerEntries.indices.contains(row) else { return }
+        let entry = voiceTriggerEntries[row]
+        VoicePreferences.removeVoiceTrigger(phrase: entry.phrase)
+        reloadVoice()
     }
 
     @objc private func requestMicrophoneAccessClicked() {
@@ -1575,6 +1694,7 @@ final class PreferencesViewController: NSViewController,
         case .ready:
             break
         }
+        reloadVoice()
     }
 
     @objc private func voiceModelDeleteButtonClicked(_ sender: CapsuleButton) {
@@ -1624,23 +1744,21 @@ final class PreferencesViewController: NSViewController,
     // MARK: AI
 
     private func buildAI(into stack: NSStackView) {
-        let featureAvailable: Bool
-        if #available(macOS 26.0, *) {
-            featureAvailable = true
-        } else {
-            featureAvailable = false
-        }
+        let featureAvailable = AITextTransformSupport.isRunningOnCompatibleOS
 
         if !featureAvailable {
             let unsupportedCard = makeCard(title: loc.s("prefs.tab.ai"), symbol: "sparkles")
+            let disclaimerPill = PillBadgeView(text: "macOS 27 Required", tint: DevTypeTheme.statusOrange, showsDot: true)
+            disclaimerPill.translatesAutoresizingMaskIntoConstraints = false
+
             let note = DevTypeTheme.makeLabel(
-                loc.s("prefs.ai.unsupported.hint"),
+                "Disclaimer: On-device Apple Intelligence and Foundation Models require macOS 27 to function properly (tested on macOS 26 where AI features are not operational).",
                 font: DevTypeTheme.font(11.5),
                 color: DevTypeTheme.textSecondary,
                 wrapping: true
             )
             note.translatesAutoresizingMaskIntoConstraints = false
-            stackInCard(unsupportedCard, views: [note])
+            stackInCard(unsupportedCard, views: [disclaimerPill, note])
             stack.addArrangedSubview(unsupportedCard)
             pinWidth(of: [unsupportedCard], to: stack)
             return
@@ -1648,6 +1766,9 @@ final class PreferencesViewController: NSViewController,
 
         // Enable + availability
         let enableCard = makeCard(title: loc.s("prefs.ai.enable.card"), symbol: "sparkles")
+        let disclaimerPill = PillBadgeView(text: "macOS 27 Intelligence", tint: DevTypeTheme.accent, showsDot: true)
+        disclaimerPill.translatesAutoresizingMaskIntoConstraints = false
+
         let enableRow = makeToggleRow(
             title: loc.s("prefs.ai.enable"),
             toggle: aiEnabledSwitch,
@@ -1661,7 +1782,7 @@ final class PreferencesViewController: NSViewController,
         )
         privacyNote.translatesAutoresizingMaskIntoConstraints = false
         aiAvailabilityLabel.translatesAutoresizingMaskIntoConstraints = false
-        stackInCard(enableCard, views: [enableRow, privacyNote, aiAvailabilityLabel])
+        stackInCard(enableCard, views: [disclaimerPill, enableRow, privacyNote, aiAvailabilityLabel])
 
         // Palette hotkey
         let hotkeyCard = makeCard(title: loc.s("prefs.ai.hotkey"), symbol: "keyboard")
@@ -2015,6 +2136,7 @@ final class PreferencesViewController: NSViewController,
         if tableView === macroTable { return macros.count }
         if tableView === aiAllowlistTable { return aiAllowlist.count }
         if tableView === voiceDictionaryTable { return voiceDictEntries.count }
+        if tableView === voiceTriggersTable { return voiceTriggerEntries.count }
         return 0
     }
 
@@ -2038,6 +2160,11 @@ final class PreferencesViewController: NSViewController,
             guard voiceDictEntries.indices.contains(row) else { return nil }
             let entry = voiceDictEntries[row]
             text = "\(entry.spoken)  →  \(entry.replacement)"
+        } else if tableView === voiceTriggersTable {
+            guard voiceTriggerEntries.indices.contains(row) else { return nil }
+            let entry = voiceTriggerEntries[row]
+            let actionName = loc.s("ai.kind.\(entry.action)")
+            text = "“\(entry.phrase)”  →  \(actionName)"
         } else {
             return nil
         }

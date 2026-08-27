@@ -819,11 +819,15 @@ public actor AITextTransformer {
     }
 
     public var availability: AIModelAvailability {
-        Self.mapAvailability(model.availability)
+        guard AITextTransformSupport.isRunningOnCompatibleOS else {
+            return .unavailable(.unsupportedOS)
+        }
+        return Self.mapAvailability(model.availability)
     }
 
     public var isAvailable: Bool {
-        model.isAvailable
+        guard AITextTransformSupport.isRunningOnCompatibleOS else { return false }
+        return model.isAvailable
     }
 
     public var contextSize: Int {
@@ -837,6 +841,9 @@ public actor AITextTransformer {
 
     /// Sync readiness check that does not hop through the actor.
     public nonisolated static func probeAvailability() -> AIModelAvailability {
+        guard AITextTransformSupport.isRunningOnCompatibleOS else {
+            return .unavailable(.unsupportedOS)
+        }
         let probe = SystemLanguageModel(
             useCase: .general,
             guardrails: .permissiveContentTransformations
@@ -1514,9 +1521,20 @@ public enum AITextTransformerUnavailable {
 
 /// Process-wide availability that compiles on every deployment target.
 public enum AITextTransformSupport {
+    /// Platform disclaimer: On-device Apple Intelligence & Foundation Models
+    /// require macOS 27 to function properly. On macOS 26 and earlier, on-device AI
+    /// features are inoperable or not supported.
+    public static let macOSRequirementDisclaimer = "On-device AI tools and Foundation Models require macOS 27 to function properly (tested on macOS 26 where AI features are not operational)."
+
+    /// Returns whether the host OS is macOS 27 or higher.
+    public static var isRunningOnCompatibleOS: Bool {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return version.majorVersion >= 27
+    }
+
     public static var availability: AIModelAvailability {
         #if canImport(FoundationModels)
-        if #available(macOS 26.0, *) {
+        if #available(macOS 27.0, *) {
             return AITextTransformer.probeAvailability()
         }
         return .unavailable(.unsupportedOS)

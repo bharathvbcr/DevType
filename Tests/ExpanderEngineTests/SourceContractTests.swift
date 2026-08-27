@@ -262,6 +262,7 @@ final class SourceContractTests: XCTestCase {
         for path in [
             "Sources/DevTypeApp/AITransformFlow.swift",
             "Sources/DevTypeApp/AppDelegate.swift",
+            "Sources/DevTypeApp/VoiceDictationCoordinator.swift",
         ] {
             let text = try source(path)
             XCTAssertTrue(
@@ -279,6 +280,7 @@ final class SourceContractTests: XCTestCase {
             [
                 "Sources/ExpanderEngine/AI/SelectionReader.swift",
                 "Sources/DevTypeApp/AITransformFlow.swift",
+                "Sources/DevTypeApp/VoiceDictationCoordinator.swift",
                 "Sources/DevTypeApp/AppDelegate.swift",
             ],
             "No non-AI source path may acquire the synthetic-copy capability."

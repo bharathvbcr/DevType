@@ -1219,6 +1219,46 @@ public enum CommandPaletteCatalog {
                 "prompt enhance", "enhance prompt", "improve prompt", "better prompt",
                 "promptenhance", "prompt"
             ]
+        case .explainCode:
+            return [
+                "explain code", "code explanation", "what does this code do", "understand code",
+                "code walkthrough", "explain function"
+            ]
+        case .generateDocstring:
+            return [
+                "docstring", "generate docstring", "document code", "documentation",
+                "add comments", "swift doc", "jsdoc", "doc comments"
+            ]
+        case .fixCode:
+            return [
+                "fix code", "fix bugs", "debug", "debug code", "find bug", "correct code",
+                "fix syntax error", "refactor code"
+            ]
+        case .toJson:
+            return [
+                "to json", "convert to json", "parse json", "make json", "format json",
+                "json object", "json string"
+            ]
+        case .generateUnitTests:
+            return [
+                "unit tests", "write unit tests", "generate tests", "test cases", "create tests",
+                "xctest", "jest", "pytest"
+            ]
+        case .gitCommitMessage:
+            return [
+                "git commit", "commit message", "generate commit", "git message", "commit note",
+                "conventional commit"
+            ]
+        case .explainRegex:
+            return [
+                "explain regex", "regular expression", "regex explanation", "what does this regex do",
+                "regex breakdown", "pattern explanation"
+            ]
+        case .sqlQuery:
+            return [
+                "sql query", "generate sql", "write sql", "database query", "select query",
+                "postgres", "mysql", "sql schema"
+            ]
         case .translate:
             return [
                 "translate", "translation", "translate to english", "to english",

@@ -52,4 +52,17 @@ final class VoicePreferencesTests: XCTestCase {
         VoicePreferences.isRealTimeTypingEnabled = true
         XCTAssertTrue(VoicePreferences.isRealTimeTypingEnabled)
     }
+
+    func testCustomVoiceTriggersPersistence() {
+        let defaultTriggers = VoicePreferences.customVoiceTriggers
+        XCTAssertEqual(defaultTriggers["rephrase"], "paraphrase")
+        XCTAssertEqual(defaultTriggers["explain code"], "explaincode")
+        XCTAssertEqual(defaultTriggers["to json"], "tojson")
+
+        VoicePreferences.addVoiceTrigger(phrase: "refactor", action: "fixcode")
+        XCTAssertEqual(VoicePreferences.customVoiceTriggers["refactor"], "fixcode")
+
+        VoicePreferences.removeVoiceTrigger(phrase: "refactor")
+        XCTAssertNil(VoicePreferences.customVoiceTriggers["refactor"])
+    }
 }

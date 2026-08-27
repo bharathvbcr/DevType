@@ -139,6 +139,63 @@ public enum VoicePreferences {
         customDictionary = dict
     }
 
+    public static let customVoiceTriggersKey = "devtype.voice.customTriggers"
+
+    // MARK: - Custom Voice AI Triggers
+
+    public static var customVoiceTriggers: [String: String] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: customVoiceTriggersKey),
+                  let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
+                return defaultVoiceTriggers
+            }
+            return dict
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: customVoiceTriggersKey)
+            }
+        }
+    }
+
+    public static let defaultVoiceTriggers: [String: String] = [
+        "rephrase": "paraphrase",
+        "rewrite": "rewrite",
+        "expand": "expand",
+        "condense": "condense",
+        "prompt enhance": "promptenhance",
+        "enhance prompt": "promptenhance",
+        "proofread": "proofread",
+        "fix grammar": "proofread",
+        "explain code": "explaincode",
+        "docstring": "docstring",
+        "document code": "docstring",
+        "fix bug": "fixcode",
+        "fix code": "fixcode",
+        "to json": "tojson",
+        "unit tests": "unittests",
+        "git commit": "gitcommit",
+        "explain regex": "explainregex",
+        "sql query": "sqlquery"
+    ]
+
+    public static func addVoiceTrigger(phrase: String, action: String) {
+        let cleanPhrase = phrase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanAction = action.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !cleanPhrase.isEmpty, !cleanAction.isEmpty else { return }
+
+        var triggers = customVoiceTriggers
+        triggers[cleanPhrase] = cleanAction
+        customVoiceTriggers = triggers
+    }
+
+    public static func removeVoiceTrigger(phrase: String) {
+        let cleanPhrase = phrase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var triggers = customVoiceTriggers
+        triggers.removeValue(forKey: cleanPhrase)
+        customVoiceTriggers = triggers
+    }
+
     public static func resetAllForTesting() {
         UserDefaults.standard.removeObject(forKey: selectedModelKey)
         UserDefaults.standard.removeObject(forKey: toneKey)
@@ -148,5 +205,6 @@ public enum VoicePreferences {
         UserDefaults.standard.removeObject(forKey: realTimeTypingKey)
         UserDefaults.standard.removeObject(forKey: handsFreeKey)
         UserDefaults.standard.removeObject(forKey: customDictionaryKey)
+        UserDefaults.standard.removeObject(forKey: customVoiceTriggersKey)
     }
 }

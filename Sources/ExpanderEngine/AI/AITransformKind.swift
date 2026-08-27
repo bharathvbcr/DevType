@@ -28,6 +28,14 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     case friendly
     case bulletize
     case promptEnhance = "promptenhance"
+    case explainCode = "explaincode"
+    case generateDocstring = "docstring"
+    case fixCode = "fixcode"
+    case toJson = "tojson"
+    case generateUnitTests = "unittests"
+    case gitCommitMessage = "gitcommit"
+    case explainRegex = "explainregex"
+    case sqlQuery = "sqlquery"
     /// Anything (usually Telugu / Hindi typed in English letters) → English.
     case translate
     /// English → Telugu, written in English letters.
@@ -58,6 +66,20 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             return "Proofread the text below. Return it corrected, in its own language:\n\n"
         case .translate, .translateTelugu, .translateHindi:
             return "Translate the text below:\n\n"
+        case .explainCode, .explainRegex:
+            return "Explain the following:\n\n"
+        case .generateDocstring:
+            return "Generate documentation for the following code:\n\n"
+        case .fixCode:
+            return "Fix bugs and issues in the following code:\n\n"
+        case .toJson:
+            return "Convert the following into valid formatted JSON:\n\n"
+        case .generateUnitTests:
+            return "Write comprehensive unit tests for the following code:\n\n"
+        case .gitCommitMessage:
+            return "Generate a conventional git commit message for:\n\n"
+        case .sqlQuery:
+            return "Generate an optimized SQL query for:\n\n"
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
              .bulletize, .promptEnhance, .custom:
             return Self.genericFraming
@@ -124,6 +146,55 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             Improve structure, specificity, constraints, and output format while
             preserving the author's intent. Return ONLY the enhanced prompt — no
             commentary, labels, or preamble.
+            """
+        case .explainCode:
+            return """
+            You explain the provided code clearly and concisely for software engineers.
+            Highlight the purpose, key logic flow, parameter meanings, algorithmic complexity,
+            and any edge cases. Do not include excessive fluff or long preambles.
+            """
+        case .generateDocstring:
+            return """
+            You generate idiomatic, clean documentation comments / docstrings for the provided code.
+            Match the syntax style of the target language (e.g. Swift Doc, JSDoc, PyDoc, RustDoc).
+            Document parameters, return values, thrown errors, and brief usage examples where helpful.
+            Return the documented code or the docstrings cleanly without commentary.
+            """
+        case .fixCode:
+            return """
+            You inspect the provided code for bugs, syntax mistakes, logical flaws, memory leaks,
+            and concurrency issues. Return the corrected, idiomatic code with the minimum necessary diff.
+            Do not include conversational filler.
+            """
+        case .toJson:
+            return """
+            You parse the provided input text, list, table, or structured data and convert it into
+            valid, well-formatted JSON. Ensure proper quoting, escaped characters, and valid syntax.
+            Return ONLY the raw JSON output.
+            """
+        case .generateUnitTests:
+            return """
+            You write comprehensive, idiomatic unit tests for the provided code.
+            Cover standard execution paths, edge cases (empty, boundary, nil, large input),
+            and error conditions. Match the standard testing framework for the language (e.g. XCTest/SwiftTesting, Jest, PyTest).
+            Return ONLY the code for the unit tests.
+            """
+        case .gitCommitMessage:
+            return """
+            You generate a concise, high-quality conventional git commit message (e.g. feat:, fix:, refactor:, chore:)
+            summarizing the provided diff or description. Include a short subject line (<= 72 chars) and optional bulleted summary.
+            Return ONLY the commit message.
+            """
+        case .explainRegex:
+            return """
+            You explain the provided regular expression pattern step-by-step in clear, plain English.
+            Detail what each token, quantifier, anchor, lookaround, and capture group matches.
+            """
+        case .sqlQuery:
+            return """
+            You generate an optimized, clean SQL query that satisfies the user's plain-English request.
+            Use standard SQL syntax with proper joins, filters, grouping, and indexing considerations.
+            Return ONLY the SQL query.
             """
         case .translate:
             return """
@@ -212,18 +283,16 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
 
     public var temperature: Double {
         switch self {
-        case .proofread: return 0.2
-        case .rewrite: return 0.5
-        case .paraphrase: return 0.6
-        case .expand: return 0.7
-        case .condense: return 0.3
-        case .formal: return 0.4
-        case .friendly: return 0.5
-        case .bulletize: return 0.3
-        case .promptEnhance: return 0.35
-        // Translation should be reproducible, not creative.
-        case .translate, .translateTelugu, .translateHindi: return 0.2
-        case .custom: return 0.5
+        case .proofread, .translate, .translateTelugu, .translateHindi, .toJson, .sqlQuery, .fixCode:
+            return 0.2
+        case .promptEnhance:
+            return 0.35
+        case .rewrite, .paraphrase, .condense, .formal, .friendly, .bulletize, .explainCode, .generateDocstring, .explainRegex, .gitCommitMessage:
+            return 0.4
+        case .expand, .generateUnitTests:
+            return 0.6
+        case .custom:
+            return 0.5
         }
     }
 
@@ -232,10 +301,11 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     /// `AITextTransformer.generationOptions`) or the Retry button would be a no-op.
     public var isDeterministic: Bool {
         switch self {
-        case .proofread, .translate, .translateTelugu, .translateHindi:
+        case .proofread, .translate, .translateTelugu, .translateHindi, .toJson, .sqlQuery, .fixCode, .explainRegex:
             return true
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .custom:
+             .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+             .generateUnitTests, .gitCommitMessage, .custom:
             return false
         }
     }
@@ -251,7 +321,9 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .translate, .translateTelugu, .translateHindi:
             return .latinOnly
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .custom:
+             .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+             .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
+             .explainRegex, .sqlQuery, .custom:
             return .unconstrained
         }
     }
@@ -263,7 +335,9 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread:
             return .correction
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .translate, .translateTelugu,
+             .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+             .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
+             .explainRegex, .sqlQuery, .translate, .translateTelugu,
              .translateHindi, .custom:
             return .unconstrained
         }
@@ -277,7 +351,9 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread, .translate, .translateTelugu, .translateHindi:
             return true
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .custom:
+             .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+             .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
+             .explainRegex, .sqlQuery, .custom:
             return false
         }
     }
@@ -287,10 +363,9 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread:
             return .direct
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly, .bulletize,
-             .promptEnhance, .translate, .translateTelugu, .translateHindi, .custom:
-            // Translation replaces the text wholesale, and for romanized input the
-            // source language is a guess — always worth a look before it lands.
-            // Preferences → AI can switch any of these to direct.
+             .promptEnhance, .explainCode, .generateDocstring, .fixCode, .toJson,
+             .generateUnitTests, .gitCommitMessage, .explainRegex, .sqlQuery,
+             .translate, .translateTelugu, .translateHindi, .custom:
             return .preview
         }
     }
@@ -308,10 +383,15 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .friendly: return 1.2
         case .bulletize: return 1.1
         case .promptEnhance: return 1.4
-        // Romanized Telugu / Hindi is token-hostile (it splits into many sub-word
-        // pieces), so the output can be longer in tokens than the input even when
-        // it is shorter in characters. That cuts both ways, so both directions
-        // budget generously.
+        case .explainCode: return 2.0
+        case .generateDocstring: return 1.5
+        case .fixCode: return 1.3
+        case .toJson: return 1.5
+        case .generateUnitTests: return 2.5
+        case .gitCommitMessage: return 1.0
+        case .explainRegex: return 2.0
+        case .sqlQuery: return 1.2
+        // Romanized Telugu / Hindi is token-hostile
         case .translate: return 1.6
         case .translateTelugu, .translateHindi: return 2.0
         case .custom: return 1.5
@@ -327,7 +407,10 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread, .formal, .friendly, .bulletize,
              .translate, .translateTelugu, .translateHindi:
             return true
-        case .rewrite, .paraphrase, .expand, .condense, .promptEnhance, .custom:
+        case .rewrite, .paraphrase, .expand, .condense, .promptEnhance,
+             .explainCode, .generateDocstring, .fixCode, .toJson,
+             .generateUnitTests, .gitCommitMessage, .explainRegex,
+             .sqlQuery, .custom:
             return false
         }
     }

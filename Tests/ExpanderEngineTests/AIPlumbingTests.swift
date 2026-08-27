@@ -345,6 +345,36 @@ final class AIPlumbingTests: XCTestCase {
         XCTAssertEqual(kind.localizationKey, "ai.kind.promptenhance")
     }
 
+    func testDeveloperAIToolsCatalogDefaults() {
+        let devKinds: [AITransformKind] = [
+            .explainCode,
+            .generateDocstring,
+            .fixCode,
+            .toJson,
+            .generateUnitTests,
+            .gitCommitMessage,
+            .explainRegex,
+            .sqlQuery
+        ]
+
+        for kind in devKinds {
+            XCTAssertTrue(AITransformKind.builtInPalette.contains(kind))
+            XCTAssertEqual(AITransformKind.named(kind.rawValue), kind)
+            XCTAssertFalse(kind.instructions.isEmpty)
+            XCTAssertFalse(kind.framing.isEmpty)
+            XCTAssertFalse(kind.localizationKey.isEmpty)
+        }
+
+        XCTAssertEqual(AITransformKind.explainCode.defaultOutputMode, .preview)
+        XCTAssertEqual(AITransformKind.generateDocstring.defaultOutputMode, .preview)
+        XCTAssertEqual(AITransformKind.fixCode.defaultOutputMode, .preview)
+        XCTAssertEqual(AITransformKind.toJson.defaultOutputMode, .preview)
+        XCTAssertEqual(AITransformKind.generateUnitTests.defaultOutputMode, .preview)
+        XCTAssertEqual(AITransformKind.gitCommitMessage.defaultOutputMode, .preview)
+        XCTAssertEqual(AITransformKind.explainRegex.defaultOutputMode, .preview)
+        XCTAssertEqual(AITransformKind.sqlQuery.defaultOutputMode, .preview)
+    }
+
     // MARK: - Selection TTL / staleness
 
     func testCachedSelectionFreshnessTTL() {
