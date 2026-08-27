@@ -48,5 +48,9 @@
     <string>DevType requires Accessibility access to replace trigger keywords with expanded text in active applications.</string>
     <key>NSInputMonitoringUsageDescription</key>
     <string>DevType requires Input Monitoring access to detect trigger keywords as you type.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>DevType requires Microphone access for on-device Smart Speech-to-Text and Dictation.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>DevType requires Speech Recognition access for local on-device voice transcription.</string>
 </dict>
 </plist>

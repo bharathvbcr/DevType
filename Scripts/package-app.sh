@@ -234,7 +234,7 @@ if [[ "${LSUI_VALUE}" != *"<true/>"* ]]; then
   exit 1
 fi
 # Keep TCC usage descriptions in the packaged plist (required for prompts).
-for USAGE_KEY in NSAccessibilityUsageDescription NSInputMonitoringUsageDescription; do
+for USAGE_KEY in NSAccessibilityUsageDescription NSInputMonitoringUsageDescription NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
   if ! grep -q "<key>${USAGE_KEY}</key>" "${PLIST_SRC}"; then
     echo "error: ${PLIST_SRC} missing ${USAGE_KEY}" >&2
     exit 1
@@ -393,7 +393,7 @@ if [[ "${SIGNED_ID}" != "${BUNDLE_ID}" ]]; then
 fi
 
 # Verify usage descriptions survived packaging (required for TCC prompts / Settings listing).
-for USAGE_KEY in NSAccessibilityUsageDescription NSInputMonitoringUsageDescription; do
+for USAGE_KEY in NSAccessibilityUsageDescription NSInputMonitoringUsageDescription NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
   if ! /usr/libexec/PlistBuddy -c "Print :${USAGE_KEY}" "${CONTENTS}/Info.plist" >/dev/null 2>&1; then
     echo "error: packaged Info.plist missing ${USAGE_KEY}" >&2
     exit 1
