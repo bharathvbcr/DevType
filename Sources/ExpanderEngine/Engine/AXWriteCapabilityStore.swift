@@ -135,6 +135,7 @@ public final class AXWriteCapabilityStore {
     /// know canonicalization exists.
     public static func seedVerdict(bundleID rawBundleID: String) -> Verdict {
         let bundleID = canonicalBundleID(rawBundleID)
+        let lower = bundleID.lowercased()
         switch bundleID {
         case "com.apple.MobileSMS", "com.apple.iChat",
              "com.google.Chrome", "com.google.Chrome.canary", "com.google.Chrome.beta",
@@ -147,6 +148,10 @@ public final class AXWriteCapabilityStore {
              "net.whatsapp.WhatsApp", "net.whatsapp.WhatsApp.beta",
              "com.microsoft.teams2", "com.microsoft.teams", "com.apple.Safari",
              "com.github.githubapp", "com.github.GitHubClient",
+             // Microsoft Office suite (Word, Excel, PowerPoint, Outlook, OneNote, Remote Desktop, To-Do, etc.).
+             // Custom document rendering & AX bridge report success on setSelectedText without mutating.
+             "com.microsoft.Word", "com.microsoft.Excel", "com.microsoft.Powerpoint", "com.microsoft.PowerPoint",
+             "com.microsoft.Outlook", "com.microsoft.onenote.mac",
              // Google Antigravity (Electron IDE). Field incident 2026-08-07: AX write
              // false-succeeded, and its AXValue mirror also never showed a landed paste inside
              // the hold window — the stale `.failed` reads drove a re-paste plus a trigger
@@ -155,13 +160,51 @@ public final class AXWriteCapabilityStore {
             return .falseSuccess
         default:
             // Electron / Chromium shells (Cursor, VS Code, Slack variants, Notion, Linear, …).
-            if bundleID.hasPrefix("com.todesktop.") { return .falseSuccess }
-            if bundleID.hasPrefix("com.microsoft.VSCode") { return .falseSuccess }
-            if bundleID.hasPrefix("com.visualstudio.code") { return .falseSuccess }
-            if bundleID.hasPrefix("com.electron.") { return .falseSuccess }
+            if lower.hasPrefix("com.todesktop.") { return .falseSuccess }
+            if lower.hasPrefix("com.microsoft.vscode") { return .falseSuccess }
+            if lower.hasPrefix("com.visualstudio.code") { return .falseSuccess }
+            if lower.hasPrefix("com.electron.") { return .falseSuccess }
+            // Microsoft ecosystem (all Office, productivity, remote desktop, and developer tools).
+            if lower.hasPrefix("com.microsoft.") { return .falseSuccess }
+            // Mozilla / Gecko ecosystem (Firefox, Nightly, Developer Edition, Tor Browser, Thunderbird).
+            if lower.hasPrefix("org.mozilla.") || lower.hasPrefix("org.torproject.") { return .falseSuccess }
+            // JetBrains & Java IDEs (IntelliJ IDEA, PyCharm, WebStorm, CLion, GoLand, Rider, Android Studio, Fleet, etc.).
+            if lower.hasPrefix("com.jetbrains.") || lower == "com.google.android.studio" { return .falseSuccess }
+            // Non-native document suites (LibreOffice, OpenOffice, WPS Office).
+            if lower.hasPrefix("org.libreoffice.") || lower.hasPrefix("org.openoffice.") || lower.hasPrefix("com.kingsoft.wpsoffice.") {
+                return .falseSuccess
+            }
+            // Productivity, Notes & Task Management (Notion, Obsidian, Logseq, Linear, Evernote, ClickUp, Asana).
+            if lower.hasPrefix("notion.") || lower.hasPrefix("com.notion.") || lower == "md.obsidian" || lower.hasPrefix("com.logseq.") {
+                return .falseSuccess
+            }
+            if lower.hasPrefix("com.linear") || lower.hasPrefix("com.evernote.") || lower.hasPrefix("com.clickup.") || lower.hasPrefix("com.asana.") {
+                return .falseSuccess
+            }
+            // Design, Developer & Creative tools (Figma, Canva, Adobe CC, Postman, Insomnia, GitKraken, Zed, Sublime).
+            if lower.hasPrefix("com.figma.") || lower.hasPrefix("com.canva.") || lower.hasPrefix("com.adobe.") {
+                return .falseSuccess
+            }
+            if lower.hasPrefix("com.postmanlabs.") || lower.hasPrefix("com.insomnia.") || lower.hasPrefix("com.axosoft.gitkraken") || lower.hasPrefix("com.gitkraken.") {
+                return .falseSuccess
+            }
+            if lower.hasPrefix("dev.zed.zed") || lower.hasPrefix("com.sublimetext.") || lower == "com.sublimemerge" {
+                return .falseSuccess
+            }
+            // Communication & Chat (Signal, Telegram, Zoom, Discord variants).
+            if lower.hasPrefix("org.whispersystems.signal") || lower.contains("telegram") || lower.hasPrefix("us.zoom.") {
+                return .falseSuccess
+            }
+            if lower.hasPrefix("com.discord") || lower == "com.hammerandchisel.discord" {
+                return .falseSuccess
+            }
+            // AI Clients & WebKit/Blink Browsers (ChatGPT, Orion, DuckDuckGo).
+            if lower.hasPrefix("com.openai.") || lower == "com.kagi.orion" || lower.hasPrefix("com.duckduckgo.") {
+                return .falseSuccess
+            }
             // Electron, but not under any of the prefixes above. Its AXValue is readable and
             // never contains pasted text, so delivery verification cannot judge it.
-            if bundleID == "com.anthropic.claudefordesktop" { return .falseSuccess }
+            if lower == "com.anthropic.claudefordesktop" { return .falseSuccess }
             // Installed web apps (Chromium PWAs, Safari "Add to Dock") never reach this branch
             // under their wrapper IDs — `canonicalBundleID` collapsed them to the host browser
             // above, which the exact-match list already covers.

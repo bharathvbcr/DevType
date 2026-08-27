@@ -462,6 +462,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             key: hotkeyMenuKeyEquivalent(),
             modifiers: hotkeyMenuModifiers()
         ))
+        menu.addItem(item(
+            loc.s("menu.smartDictation"),
+            "waveform.and.mic",
+            #selector(startSmartDictation(_:)),
+            key: "v",
+            modifiers: [.command, .option]
+        ))
         // The two secure-field routes. Neither needs a keystroke DevType has to observe: the menu
         // is driven by the mouse, the clipboard write is an API call, and the ⌘V is the user's own
         // key going to their own app. That is the whole reason these exist — inside a password
@@ -960,6 +967,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.onAIPalette = { [weak self] in
             self?.presentAIPalette()
         }
+        hotkeyManager.onVoiceDictation = {
+            VoiceDictationCoordinator.shared.toggleDictation()
+        }
         hotkeyManager.onInsertText = { text in
             TextInjectionPipeline.shared.inject(
                 snippet: SnippetModel(title: "Hotkey", triggerKeyword: "", replacementText: text),
@@ -994,6 +1004,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         hotkeyManager.registerAll()
+    }
+
+    @objc private func startSmartDictation(_ sender: Any?) {
+        VoiceDictationCoordinator.shared.toggleDictation()
     }
 
     /// Records the reason for an otherwise-silent `SIGABRT`.
@@ -1108,6 +1122,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             injectPaletteText(original, sourceApp: sourceApp)
 
+        case .voiceDictation:
+            VoiceDictationCoordinator.shared.toggleDictation(sourceApp: sourceApp)
+
         case .navigate(let target):
             switch target {
             case .preferences:
@@ -1116,6 +1133,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 openSnippetManager(nil)
             case .permissionRecovery:
                 openPermissionRecovery(nil)
+            case .voicePreferences:
+                openPreferences(nil, tab: .voice)
             }
         }
     }

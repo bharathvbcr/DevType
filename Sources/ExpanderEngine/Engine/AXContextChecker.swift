@@ -70,7 +70,14 @@ public final class AXContextChecker {
         "com.microsoft.VSCode",
         "com.microsoft.VSCodeInsiders",
         "com.visualstudio.code",
-        "com.apple.dt.Xcode"
+        "com.apple.dt.Xcode",
+        "com.jetbrains.",
+        "com.google.android.studio",
+        "dev.zed.Zed",
+        "com.sublimetext.",
+        "com.panic.Nova",
+        "org.rstudio.",
+        "com.rstudio."
     ]
 
     public init() {}

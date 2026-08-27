@@ -235,3 +235,15 @@ The Command Palette and snippet search are offline-first:
 - `UsageStatsStore` (snippets, UUID-keyed) and `CommandUsageStatsStore` (palette commands, string-keyed) compute a saturating frequency boost (~log₂ of use count) plus a recency kicker within 7 days, capped at 12 points — deliberately bounded so a hot item cannot outrank an exact trigger match.
 - Optional Stage-1 semantic boost uses offline `NLEmbedding` word vectors to reorder results; it never blocks rendering. A model-backed Stage-2 router (`PaletteToolRouter`) exists behind a preference flag and ships off by default.
 - Query-level result caches are keyed by library fingerprint, usage-stats revision, UI language, and clipboard state, then invalidated wholesale on changes.
+
+---
+
+## 🎙️ Smart Dictation & Audio Journaling (Jot Architecture)
+
+The Voice Dictation subsystem provides real-time local speech-to-text with semantic formatting:
+
+- **Mistral Voxtral Realtime (Mini 4B)** & **Fun-ASR-Nano**: Local GGUF models managed by `VoiceModelManager` with on-demand download, progress streaming, and SHA-256 verification.
+- **Audio Capture & Crash Journaling (`VoiceAudioRecorder`)**: 16kHz mono 16-bit PCM audio capture with continuous disk journaling (`active_session_*.pcm`) to protect against app crashes during recording.
+- **Thought-Revision & Smart Polish (`SmartDictationEngine`)**: Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS), resolves spoken self-corrections mid-sentence, strips filler words/hesitations, replaces custom vocabulary jargon, and adapts tone (natural, email, chat, code, verbatim).
+- **Crimson Liquid Glass HUD (`VoiceHUDPanel`)**: Floating non-activating AppKit HUD with animated RMS waveform metering and live transcription feedback.
+

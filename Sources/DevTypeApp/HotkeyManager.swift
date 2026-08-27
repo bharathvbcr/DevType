@@ -20,10 +20,12 @@ final class HotkeyManager {
     private var handlerInstalled = false
     private var inlineSearchHotkeyID: UInt32?
     private var aiPaletteHotkeyID: UInt32?
+    private var voiceDictationHotkeyID: UInt32?
     private var macroByID: [UInt32: HotkeyMacroAction] = [:]
 
     var onInlineSearch: (() -> Void)?
     var onAIPalette: (() -> Void)?
+    var onVoiceDictation: (() -> Void)?
     var onInsertText: ((String) -> Void)?
     var onOpenURL: ((String) -> Void)?
     /// §4.2: `RegisterEventHotKey` failure used to be logged and dropped, so a
@@ -41,6 +43,9 @@ final class HotkeyManager {
     /// Persisted in `devtype.hotkey.aiPalette`. Defaults to ⌘⌥A.
     var aiPaletteShortcut: DevTypeShortcut = HotkeyPreferences.aiPaletteShortcut
 
+    /// Persisted in `devtype.voice.hotkey`. Defaults to ⌘⌥V.
+    var voiceShortcut: DevTypeShortcut = HotkeyPreferences.voiceShortcut
+
     func registerAll() {
         installHandlerIfNeeded()
         unregisterAll()
@@ -54,6 +59,7 @@ final class HotkeyManager {
         }
         registerInlineSearch()
         registerAIPalette()
+        registerVoiceDictation()
         for macro in macros where macro.keyCode != 0 {
             registerMacro(macro)
         }
@@ -81,6 +87,16 @@ final class HotkeyManager {
         return lastAIPaletteRegistrationStatus
     }
 
+    /// Rebinds the Voice Dictation shortcut, persists it, and re-registers.
+    @discardableResult
+    func applyVoiceShortcut(_ shortcut: DevTypeShortcut) -> OSStatus {
+        HotkeyPreferences.voiceShortcut = shortcut
+        voiceShortcut = shortcut
+        lastVoiceRegistrationStatus = noErr
+        registerAll()
+        return lastVoiceRegistrationStatus
+    }
+
     /// §4.3: replaces the macro list, persists it, and re-registers.
     ///
     /// Returns one entry per macro whose registration failed (human-readable
@@ -101,6 +117,9 @@ final class HotkeyManager {
 
     /// Status from the most recent AI-palette registration attempt.
     private(set) var lastAIPaletteRegistrationStatus: OSStatus = noErr
+
+    /// Status from the most recent Voice Dictation registration attempt.
+    private(set) var lastVoiceRegistrationStatus: OSStatus = noErr
 
     /// Failures from the most recent macro re-registration, surfaced by
     /// Preferences after `applyMacros(_:)`.
@@ -188,11 +207,40 @@ final class HotkeyManager {
         }
     }
 
+    private func registerVoiceDictation() {
+        let shortcut = voiceShortcut
+        let id = nextID
+        nextID += 1
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4454_5059), id: id)
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            shortcut.keyCode,
+            shortcut.carbonModifiers,
+            hotKeyID,
+            GetEventDispatcherTarget(),
+            0,
+            &ref
+        )
+        lastVoiceRegistrationStatus = status
+        let label = shortcut.displayString
+        if status == noErr, let ref {
+            refs[id] = ref
+            voiceDictationHotkeyID = id
+            DevTypeLog.app.info("[Hotkey] Voice dictation registered (\(label, privacy: .public))")
+        } else {
+            DevTypeLog.app.error(
+                "[Hotkey] Voice dictation registration failed shortcut=\(label, privacy: .public) status=\(status, privacy: .public)"
+            )
+            onRegistrationFailed?(label, status)
+        }
+    }
+
     private func unregisterAll() {
         for (_, ref) in refs { UnregisterEventHotKey(ref) }
         refs.removeAll()
         inlineSearchHotkeyID = nil
         aiPaletteHotkeyID = nil
+        voiceDictationHotkeyID = nil
         // §4.3: re-registering after an edit reuses fresh IDs; stale entries here
         // would keep firing removed macros.
         macroByID.removeAll()
@@ -286,6 +334,12 @@ final class HotkeyManager {
         if id == aiPaletteHotkeyID {
             DispatchQueue.main.async { [weak self] in
                 self?.onAIPalette?()
+            }
+            return
+        }
+        if id == voiceDictationHotkeyID {
+            DispatchQueue.main.async { [weak self] in
+                self?.onVoiceDictation?()
             }
             return
         }

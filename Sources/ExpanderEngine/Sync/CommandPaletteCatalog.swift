@@ -23,6 +23,7 @@ public enum PaletteNavigateAction: String, Sendable, Equatable {
     case preferences
     case manageSnippets
     case permissionRecovery
+    case voicePreferences
 }
 
 /// Date/time insert tools resolved through `DateFormatLibrary`.
@@ -55,6 +56,8 @@ public enum PaletteCommandAction: Equatable, Sendable {
     /// Preview-only character/word/line count of selection/clipboard.
     case count
     case undoAI
+    /// Trigger Smart Dictation recording.
+    case voiceDictation
 }
 
 /// One built-in command/tool row (not a user snippet).
@@ -232,6 +235,24 @@ public enum CommandPaletteCatalog {
                     "fix recovery", "tcc"
                 ],
                 action: .navigate(.permissionRecovery)
+            ),
+            PaletteCommand(
+                id: "voice.dictation",
+                section: .commands,
+                trigger: "voice",
+                titleKey: "palette.voice.dictation",
+                subtitleKey: "palette.voice.dictation.detail",
+                aliases: ["voice", "dictate", "smart dictation", "transcribe", "speech", "speech to text", "voxtral", "fun asr"],
+                action: .voiceDictation
+            ),
+            PaletteCommand(
+                id: "nav.voice",
+                section: .commands,
+                trigger: "voiceprefs",
+                titleKey: "palette.nav.voice",
+                subtitleKey: "palette.nav.voice.detail",
+                aliases: ["voice preferences", "dictation preferences", "voice settings", "dictation settings", "model download"],
+                action: .navigate(.voicePreferences)
             )
         ])
 
@@ -854,7 +875,7 @@ public enum CommandPaletteCatalog {
                 preview: loc.s(command.subtitleKey),
                 disabledReason: aiDisabledReason
             )
-        case .textOp, .navigate:
+        case .textOp, .navigate, .voiceDictation:
             return PaletteCommandHit(
                 command: command,
                 score: score,

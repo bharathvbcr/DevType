@@ -29,6 +29,12 @@ struct DevTypeShortcut: Equatable, Codable {
         carbonModifiers: UInt32(cmdKey | optionKey)
     )
 
+    /// Default Voice Dictation: ⌘⌥V
+    static let voiceDefault = DevTypeShortcut(
+        keyCode: UInt32(kVK_ANSI_V),
+        carbonModifiers: UInt32(cmdKey | optionKey)
+    )
+
     /// A shortcut with no modifier would swallow a plain key system-wide.
     var hasModifier: Bool { carbonModifiers != 0 }
 
@@ -108,6 +114,7 @@ struct DevTypeShortcut: Equatable, Codable {
 enum HotkeyPreferences {
     static let inlineSearchKey = "devtype.hotkey.inlineSearch"
     static let aiPaletteKey = "devtype.hotkey.aiPalette"
+    static let voiceKey = "devtype.voice.hotkey"
     static let macrosKey = "devtype.hotkeyMacros"
     static let shortcutsDisabledKey = "devtype.hotkeys.disabled"
 
@@ -156,6 +163,25 @@ enum HotkeyPreferences {
 
     static func resetAIPaletteShortcut() {
         UserDefaults.standard.removeObject(forKey: aiPaletteKey)
+    }
+
+    static var voiceShortcut: DevTypeShortcut {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: voiceKey),
+                  let decoded = try? JSONDecoder().decode(DevTypeShortcut.self, from: data),
+                  decoded.hasModifier else {
+                return .voiceDefault
+            }
+            return decoded
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            UserDefaults.standard.set(data, forKey: voiceKey)
+        }
+    }
+
+    static func resetVoiceShortcut() {
+        UserDefaults.standard.removeObject(forKey: voiceKey)
     }
 
     /// §4.3: the macro list was readable only by hand-crafting JSON into

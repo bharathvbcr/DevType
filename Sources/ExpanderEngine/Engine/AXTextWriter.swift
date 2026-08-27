@@ -313,10 +313,27 @@ public final class AXTextWriter {
                         ? .replaced : .falseSuccess
                 }
             } else {
-                // AX write claimed success and we cannot read the field back. We must not assume it
-                // was a no-op (that would double-apply); treat it as applied but unverified, and
-                // learn nothing about the app from it.
-                outcome = .replaced
+                // AXValue is unreadable (e.g. complex document views like Word or unseeded custom editors).
+                // Check if kAXSelectedTextAttribute is readable: if the write succeeded, the selection
+                // should have collapsed (empty) or become the replacement text. If it is still non-empty
+                // and does NOT contain the replacement text (e.g. still holds the widened trigger),
+                // the write provably failed to mutate.
+                var selectedTextRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
+                   let afterSelected = selectedTextRef as? String,
+                   !afterSelected.isEmpty {
+                    if !afterSelected.normalizedWhitespace.contains(text.normalizedWhitespace) {
+                        outcome = .falseSuccess
+                        verdictIsEvidence = true
+                    } else {
+                        outcome = .replaced
+                    }
+                } else {
+                    // AX write claimed success and we cannot read the field back. We must not assume it
+                    // was a no-op (that would double-apply); treat it as applied but unverified, and
+                    // learn nothing about the app from it.
+                    outcome = .replaced
+                }
             }
         }
 

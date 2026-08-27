@@ -24,6 +24,7 @@ enum PreferencesTab: Int, CaseIterable {
     case general
     case snippets
     case hotkeys
+    case voice
     case ai
     case advanced
 
@@ -32,6 +33,7 @@ enum PreferencesTab: Int, CaseIterable {
         case .general: return LocalizationManager.shared.s("prefs.tab.general")
         case .snippets: return LocalizationManager.shared.s("prefs.tab.snippets")
         case .hotkeys: return LocalizationManager.shared.s("prefs.tab.hotkeys")
+        case .voice: return LocalizationManager.shared.s("prefs.tab.voice")
         case .ai: return LocalizationManager.shared.s("prefs.tab.ai")
         case .advanced: return LocalizationManager.shared.s("prefs.tab.advanced")
         }
@@ -42,6 +44,7 @@ enum PreferencesTab: Int, CaseIterable {
         case .general: return "gearshape"
         case .snippets: return "square.stack.3d.up"
         case .hotkeys: return "keyboard"
+        case .voice: return "waveform.and.mic"
         case .ai: return "sparkles"
         case .advanced: return "wrench.and.screwdriver"
         }
@@ -290,9 +293,47 @@ final class PreferencesViewController: NSViewController,
     private let aiAllowlistField = NSTextField()
     private var aiAllowlist: [String] = []
 
+    // Voice & Smart Dictation
+    private let voiceModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let voiceTonePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let voiceAutoPunctuateSwitch = NSSwitch()
+    private let voiceDisfluenciesSwitch = NSSwitch()
+    private let voiceSoundFeedbackSwitch = NSSwitch()
+    private let voiceHandsFreeSwitch = NSSwitch()
+    private var voiceShortcutRecorder: ShortcutRecorderView?
+    private let voiceDictionaryTable = NSTableView()
+    private let voiceDictionaryEmptyLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(11.5),
+        color: DevTypeTheme.textTertiary
+    )
+    private let voiceDictSpokenField = NSTextField()
+    private let voiceDictReplacementField = NSTextField()
+    private var voiceDictEntries: [(spoken: String, replacement: String)] = []
+    private var voiceModelDownloadProgressBars: [VoiceModelType: NSProgressIndicator] = [:]
+    private var voiceModelStatusLabels: [VoiceModelType: NSTextField] = [:]
+    private var voiceModelActionButtons: [VoiceModelType: CapsuleButton] = [:]
+    private var voiceModelDeleteButtons: [VoiceModelType: CapsuleButton] = [:]
+    private var voiceModelListenerToken: UUID?
+
     init(hotkeyManager: HotkeyManager?) {
         self.hotkeyManager = hotkeyManager
         super.init(nibName: nil, bundle: nil)
+        setupVoiceModelListener()
+    }
+
+    deinit {
+        if let token = voiceModelListenerToken {
+            VoiceModelManager.shared.removeStatusListener(token)
+        }
+    }
+
+    private func setupVoiceModelListener() {
+        voiceModelListenerToken = VoiceModelManager.shared.addStatusListener { [weak self] type, status in
+            DispatchQueue.main.async {
+                self?.updateVoiceModelUI(type: type, status: status)
+            }
+        }
     }
 
     /// Re-point at the live manager. Called by `PreferencesWindowController.show`
@@ -530,6 +571,7 @@ final class PreferencesViewController: NSViewController,
         reloadGeneral()
         reloadSnippets()
         reloadHotkeys()
+        reloadVoice()
         reloadAI()
         reloadAdvanced()
         refreshEngineStatus()
@@ -560,6 +602,7 @@ final class PreferencesViewController: NSViewController,
         case .general: buildGeneral(into: stack)
         case .snippets: buildSnippets(into: stack)
         case .hotkeys: buildHotkeys(into: stack)
+        case .voice: buildVoice(into: stack)
         case .ai: buildAI(into: stack)
         case .advanced: buildAdvanced(into: stack)
         }
@@ -1089,6 +1132,428 @@ final class PreferencesViewController: NSViewController,
         reloadHotkeys()
     }
 
+    // MARK: Voice & Smart Dictation
+
+    private func buildVoice(into stack: NSStackView) {
+        // 1. Models Card
+        let modelsCard = makeCard(title: loc.s("prefs.voice.models.card"), symbol: "waveform.and.mic")
+        let modelsHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.models.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        modelsHint.translatesAutoresizingMaskIntoConstraints = false
+
+        // Active model selector row
+        voiceModelPopup.translatesAutoresizingMaskIntoConstraints = false
+        voiceModelPopup.removeAllItems()
+        for model in VoiceModelType.allCases {
+            voiceModelPopup.addItem(withTitle: model.descriptor.name)
+            voiceModelPopup.lastItem?.representedObject = model.rawValue
+        }
+        voiceModelPopup.target = self
+        voiceModelPopup.action = #selector(voiceModelPopupChanged(_:))
+        voiceModelPopup.setAccessibilityLabel(loc.s("prefs.voice.activeModel"))
+
+        let activeModelLabel = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.activeModel"),
+            font: DevTypeTheme.font(12, .semibold),
+            color: DevTypeTheme.textPrimary
+        )
+        activeModelLabel.translatesAutoresizingMaskIntoConstraints = false
+        let activeModelRow = NSStackView(views: [activeModelLabel, voiceModelPopup])
+        activeModelRow.orientation = .horizontal
+        activeModelRow.spacing = 10
+        activeModelRow.alignment = .centerY
+        activeModelRow.translatesAutoresizingMaskIntoConstraints = false
+
+        var modelCards: [NSView] = [modelsHint, activeModelRow, DevTypeTheme.makeHairline()]
+
+        for type in [VoiceModelType.voxtralMini4B, VoiceModelType.funASRNano] {
+            let desc = type.descriptor
+            let container = NSStackView()
+            container.orientation = .vertical
+            container.alignment = .leading
+            container.spacing = 4
+            container.translatesAutoresizingMaskIntoConstraints = false
+
+            let headerRow = NSStackView()
+            headerRow.orientation = .horizontal
+            headerRow.alignment = .centerY
+            headerRow.spacing = 8
+            headerRow.translatesAutoresizingMaskIntoConstraints = false
+
+            let nameLabel = DevTypeTheme.makeLabel(desc.name, font: DevTypeTheme.font(12.5, .bold), color: DevTypeTheme.textPrimary)
+            let badge = PillBadgeView(text: desc.modelSizeFormatted, tint: desc.isRecommended ? DevTypeTheme.accent : DevTypeTheme.statusGray, showsDot: false)
+            let paramLabel = DevTypeTheme.makeLabel(desc.parameterCount, font: DevTypeTheme.font(10.5), color: DevTypeTheme.textTertiary)
+
+            headerRow.addArrangedSubview(nameLabel)
+            headerRow.addArrangedSubview(badge)
+            headerRow.addArrangedSubview(paramLabel)
+
+            let descLabel = DevTypeTheme.makeLabel(desc.description, font: DevTypeTheme.font(10.5), color: DevTypeTheme.textSecondary, wrapping: true)
+            descLabel.translatesAutoresizingMaskIntoConstraints = false
+
+            let progressBar = NSProgressIndicator()
+            progressBar.translatesAutoresizingMaskIntoConstraints = false
+            progressBar.isIndeterminate = false
+            progressBar.minValue = 0.0
+            progressBar.maxValue = 1.0
+            progressBar.doubleValue = 0.0
+            progressBar.style = .bar
+            progressBar.isHidden = true
+            progressBar.controlSize = .small
+            voiceModelDownloadProgressBars[type] = progressBar
+
+            let statusLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10.5, .medium), color: DevTypeTheme.textSecondary)
+            statusLabel.translatesAutoresizingMaskIntoConstraints = false
+            voiceModelStatusLabels[type] = statusLabel
+
+            let actionButton = CapsuleButton(
+                title: loc.s("common.download"),
+                symbol: "arrow.down.circle",
+                style: .primary,
+                target: self,
+                action: #selector(voiceModelActionButtonClicked(_:))
+            )
+            voiceModelActionButtons[type] = actionButton
+
+            let deleteButton = CapsuleButton(
+                title: loc.s("common.remove"),
+                symbol: "trash",
+                style: .destructive,
+                target: self,
+                action: #selector(voiceModelDeleteButtonClicked(_:))
+            )
+            voiceModelDeleteButtons[type] = deleteButton
+
+            let actionsRow = NSStackView()
+            actionsRow.orientation = .horizontal
+            actionsRow.spacing = 8
+            actionsRow.alignment = .centerY
+            actionsRow.translatesAutoresizingMaskIntoConstraints = false
+            actionsRow.addArrangedSubview(actionButton)
+            actionsRow.addArrangedSubview(deleteButton)
+            actionsRow.addArrangedSubview(statusLabel)
+
+            container.addArrangedSubview(headerRow)
+            container.addArrangedSubview(descLabel)
+            container.addArrangedSubview(progressBar)
+            container.addArrangedSubview(actionsRow)
+
+            progressBar.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+            modelCards.append(container)
+            modelCards.append(DevTypeTheme.makeHairline())
+        }
+
+        stackInCard(modelsCard, views: modelCards)
+
+        // 2. Smart Dictation Options Card
+        let optionsCard = makeCard(title: loc.s("prefs.voice.options.card"), symbol: "sparkles")
+
+        voiceTonePopup.translatesAutoresizingMaskIntoConstraints = false
+        voiceTonePopup.removeAllItems()
+        for tone in DictationTone.allCases {
+            voiceTonePopup.addItem(withTitle: loc.s(tone.localizationKey))
+            voiceTonePopup.lastItem?.representedObject = tone.rawValue
+        }
+        voiceTonePopup.target = self
+        voiceTonePopup.action = #selector(voiceTonePopupChanged(_:))
+        voiceTonePopup.setAccessibilityLabel(loc.s("prefs.voice.tone"))
+
+        let toneLabel = DevTypeTheme.makeLabel(loc.s("prefs.voice.tone"), font: DevTypeTheme.font(12, .semibold), color: DevTypeTheme.textPrimary)
+        let toneRow = NSStackView(views: [toneLabel, voiceTonePopup])
+        toneRow.orientation = .horizontal
+        toneRow.spacing = 10
+        toneRow.alignment = .centerY
+        toneRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let disfluencyRow = makeToggleRow(
+            title: loc.s("prefs.voice.removeDisfluencies"),
+            toggle: voiceDisfluenciesSwitch,
+            action: #selector(voiceDisfluenciesChanged)
+        )
+        let autoPunctuateRow = makeToggleRow(
+            title: loc.s("prefs.voice.autoPunctuate"),
+            toggle: voiceAutoPunctuateSwitch,
+            action: #selector(voiceAutoPunctuateChanged)
+        )
+        let soundFeedbackRow = makeToggleRow(
+            title: loc.s("prefs.voice.soundFeedback"),
+            toggle: voiceSoundFeedbackSwitch,
+            action: #selector(voiceSoundFeedbackChanged)
+        )
+        let handsFreeRow = makeToggleRow(
+            title: loc.s("prefs.voice.handsFree"),
+            toggle: voiceHandsFreeSwitch,
+            action: #selector(voiceHandsFreeChanged)
+        )
+
+        stackInCard(optionsCard, views: [toneRow, disfluencyRow, autoPunctuateRow, soundFeedbackRow, handsFreeRow])
+
+        // 3. Hotkey Card
+        let hotkeyCard = makeCard(title: loc.s("prefs.voice.hotkey.card"), symbol: "keyboard")
+        let hotkeyHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.hotkey.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        hotkeyHint.translatesAutoresizingMaskIntoConstraints = false
+
+        let recorder = ShortcutRecorderView(shortcut: HotkeyPreferences.voiceShortcut)
+        recorder.onChange = { [weak self] shortcut in
+            self?.applyVoiceShortcut(shortcut)
+        }
+        voiceShortcutRecorder = recorder
+
+        let resetButton = CapsuleButton(
+            title: loc.s("prefs.voice.hotkey.reset"),
+            symbol: "arrow.counterclockwise",
+            style: .secondary,
+            target: self,
+            action: #selector(resetVoiceShortcut)
+        )
+        let recorderRow = NSStackView(views: [recorder, resetButton])
+        recorderRow.orientation = .horizontal
+        recorderRow.spacing = 10
+        recorderRow.translatesAutoresizingMaskIntoConstraints = false
+
+        stackInCard(hotkeyCard, views: [hotkeyHint, recorderRow])
+
+        // 4. Custom Dictionary Card
+        let dictCard = makeCard(title: loc.s("prefs.voice.dict.card"), symbol: "text.badge.plus")
+        let dictHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.dict.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        dictHint.translatesAutoresizingMaskIntoConstraints = false
+
+        voiceDictionaryTable.headerView = nil
+        voiceDictionaryTable.rowHeight = 22
+        voiceDictionaryTable.backgroundColor = .clear
+        voiceDictionaryTable.gridStyleMask = []
+        voiceDictionaryTable.usesAlternatingRowBackgroundColors = false
+        voiceDictionaryTable.dataSource = self
+        voiceDictionaryTable.delegate = self
+        if voiceDictionaryTable.tableColumns.isEmpty {
+            voiceDictionaryTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("voiceDict")))
+        }
+        voiceDictionaryTable.setAccessibilityLabel(loc.s("prefs.voice.dict.card"))
+
+        let dictScroll = NSScrollView()
+        dictScroll.translatesAutoresizingMaskIntoConstraints = false
+        dictScroll.hasVerticalScroller = true
+        dictScroll.borderType = .noBorder
+        dictScroll.drawsBackground = false
+        dictScroll.documentView = voiceDictionaryTable
+        dictScroll.heightAnchor.constraint(equalToConstant: 110).isActive = true
+
+        voiceDictionaryEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        voiceDictSpokenField.translatesAutoresizingMaskIntoConstraints = false
+        voiceDictSpokenField.placeholderString = loc.s("prefs.voice.dict.spokenPlaceholder")
+        voiceDictSpokenField.font = DevTypeTheme.font(12)
+        voiceDictSpokenField.widthAnchor.constraint(greaterThanOrEqualToConstant: 130).isActive = true
+
+        voiceDictReplacementField.translatesAutoresizingMaskIntoConstraints = false
+        voiceDictReplacementField.placeholderString = loc.s("prefs.voice.dict.replacementPlaceholder")
+        voiceDictReplacementField.font = DevTypeTheme.font(12)
+        voiceDictReplacementField.widthAnchor.constraint(greaterThanOrEqualToConstant: 130).isActive = true
+
+        let dictButtons = NSStackView(views: [
+            voiceDictSpokenField,
+            voiceDictReplacementField,
+            CapsuleButton(
+                title: loc.s("common.add"),
+                symbol: "plus",
+                style: .primary,
+                target: self,
+                action: #selector(voiceDictAddEntry)
+            ),
+            CapsuleButton(
+                title: loc.s("common.remove"),
+                symbol: "trash",
+                style: .destructive,
+                target: self,
+                action: #selector(voiceDictRemoveEntry)
+            )
+        ])
+        dictButtons.orientation = .horizontal
+        dictButtons.spacing = 8
+        dictButtons.translatesAutoresizingMaskIntoConstraints = false
+
+        stackInCard(dictCard, views: [dictHint, dictScroll, voiceDictionaryEmptyLabel, dictButtons])
+
+        for card in [modelsCard, optionsCard, hotkeyCard, dictCard] {
+            stack.addArrangedSubview(card)
+        }
+        pinWidth(of: [modelsCard, optionsCard, hotkeyCard, dictCard], to: stack)
+    }
+
+    private func reloadVoice() {
+        guard panes[.voice] != nil else { return }
+
+        let currentModel = VoicePreferences.selectedModel
+        if let index = VoiceModelType.allCases.firstIndex(of: currentModel) {
+            voiceModelPopup.selectItem(at: index)
+        }
+
+        let currentTone = VoicePreferences.tone
+        if let index = DictationTone.allCases.firstIndex(of: currentTone) {
+            voiceTonePopup.selectItem(at: index)
+        }
+
+        voiceAutoPunctuateSwitch.state = VoicePreferences.isAutoPunctuateEnabled ? .on : .off
+        voiceDisfluenciesSwitch.state = VoicePreferences.isRemoveDisfluenciesEnabled ? .on : .off
+        voiceSoundFeedbackSwitch.state = VoicePreferences.isSoundFeedbackEnabled ? .on : .off
+        voiceHandsFreeSwitch.state = VoicePreferences.isHandsFreeModeEnabled ? .on : .off
+
+        voiceShortcutRecorder?.setShortcut(HotkeyPreferences.voiceShortcut)
+
+        for type in [VoiceModelType.voxtralMini4B, VoiceModelType.funASRNano] {
+            let status = VoiceModelManager.shared.status(for: type)
+            updateVoiceModelUI(type: type, status: status)
+        }
+
+        let dict = VoicePreferences.customDictionary
+        voiceDictEntries = dict.map { (spoken: $0.key, replacement: $0.value) }.sorted { $0.spoken < $1.spoken }
+        voiceDictionaryTable.reloadData()
+        voiceDictionaryEmptyLabel.stringValue = voiceDictEntries.isEmpty ? loc.s("prefs.voice.dict.empty") : ""
+        voiceDictionaryEmptyLabel.isHidden = !voiceDictEntries.isEmpty
+    }
+
+    private func updateVoiceModelUI(type: VoiceModelType, status: VoiceModelStatus) {
+        guard let label = voiceModelStatusLabels[type],
+              let button = voiceModelActionButtons[type],
+              let progress = voiceModelDownloadProgressBars[type] else { return }
+
+        switch status {
+        case .notDownloaded:
+            label.stringValue = loc.s("prefs.voice.status.notDownloaded")
+            label.textColor = DevTypeTheme.textTertiary
+            button.title = loc.s("common.download")
+            button.buttonStyle = .primary
+            button.isEnabled = true
+            progress.isHidden = true
+
+        case .downloading(let p, let bytes, let total):
+            let formattedMb = String(format: "%.1f MB / %.1f MB", Double(bytes) / 1_000_000, Double(total) / 1_000_000)
+            label.stringValue = loc.s("prefs.voice.status.downloading", formattedMb)
+            label.textColor = DevTypeTheme.accentBright
+            button.title = loc.s("common.cancel")
+            button.buttonStyle = .destructive
+            button.isEnabled = true
+            progress.isHidden = false
+            progress.doubleValue = p
+
+        case .ready:
+            label.stringValue = loc.s("prefs.voice.status.ready")
+            label.textColor = DevTypeTheme.statusGreen
+            button.title = loc.s("prefs.voice.status.installed")
+            button.buttonStyle = .secondary
+            button.isEnabled = false
+            progress.isHidden = true
+
+        case .error(let msg):
+            label.stringValue = loc.s("prefs.voice.status.error", msg)
+            label.textColor = DevTypeTheme.statusOrange
+            button.title = loc.s("common.retry")
+            button.buttonStyle = .primary
+            button.isEnabled = true
+            progress.isHidden = true
+        }
+    }
+
+    @objc private func voiceModelPopupChanged(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String,
+              let model = VoiceModelType(rawValue: raw) else { return }
+        VoicePreferences.selectedModel = model
+    }
+
+    @objc private func voiceTonePopupChanged(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String,
+              let tone = DictationTone(rawValue: raw) else { return }
+        VoicePreferences.tone = tone
+    }
+
+    @objc private func voiceAutoPunctuateChanged() {
+        VoicePreferences.isAutoPunctuateEnabled = voiceAutoPunctuateSwitch.state == .on
+    }
+
+    @objc private func voiceDisfluenciesChanged() {
+        VoicePreferences.isRemoveDisfluenciesEnabled = voiceDisfluenciesSwitch.state == .on
+    }
+
+    @objc private func voiceSoundFeedbackChanged() {
+        VoicePreferences.isSoundFeedbackEnabled = voiceSoundFeedbackSwitch.state == .on
+    }
+
+    @objc private func voiceHandsFreeChanged() {
+        VoicePreferences.isHandsFreeModeEnabled = voiceHandsFreeSwitch.state == .on
+    }
+
+    @objc private func voiceModelActionButtonClicked(_ sender: CapsuleButton) {
+        guard let type = voiceModelActionButtons.first(where: { $0.value === sender })?.key else { return }
+
+        let status = VoiceModelManager.shared.status(for: type)
+        switch status {
+        case .downloading:
+            VoiceModelManager.shared.cancelDownload(for: type)
+        case .notDownloaded, .error:
+            VoiceModelManager.shared.startDownload(for: type)
+        case .ready:
+            break
+        }
+    }
+
+    @objc private func voiceModelDeleteButtonClicked(_ sender: CapsuleButton) {
+        guard let type = voiceModelDeleteButtons.first(where: { $0.value === sender })?.key else { return }
+
+        try? VoiceModelManager.shared.deleteModel(for: type)
+        reloadVoice()
+    }
+
+    private func applyVoiceShortcut(_ shortcut: DevTypeShortcut?) {
+        guard let shortcut else { return }
+        if let manager = hotkeyManager {
+            manager.applyVoiceShortcut(shortcut)
+        } else {
+            HotkeyPreferences.voiceShortcut = shortcut
+        }
+        reloadVoice()
+    }
+
+    @objc private func resetVoiceShortcut() {
+        HotkeyPreferences.resetVoiceShortcut()
+        if let manager = hotkeyManager {
+            manager.applyVoiceShortcut(HotkeyPreferences.voiceShortcut)
+        }
+        reloadVoice()
+    }
+
+    @objc private func voiceDictAddEntry() {
+        let spoken = voiceDictSpokenField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replacement = voiceDictReplacementField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !spoken.isEmpty, !replacement.isEmpty else { return }
+
+        VoicePreferences.addDictionaryEntry(spoken: spoken, replacement: replacement)
+        voiceDictSpokenField.stringValue = ""
+        voiceDictReplacementField.stringValue = ""
+        reloadVoice()
+    }
+
+    @objc private func voiceDictRemoveEntry() {
+        let row = voiceDictionaryTable.selectedRow
+        guard voiceDictEntries.indices.contains(row) else { return }
+        let entry = voiceDictEntries[row]
+        VoicePreferences.removeDictionaryEntry(spoken: entry.spoken)
+        reloadVoice()
+    }
+
     // MARK: AI
 
     private func buildAI(into stack: NSStackView) {
@@ -1482,6 +1947,7 @@ final class PreferencesViewController: NSViewController,
         if tableView === mutedTable { return mutedApps.count }
         if tableView === macroTable { return macros.count }
         if tableView === aiAllowlistTable { return aiAllowlist.count }
+        if tableView === voiceDictionaryTable { return voiceDictEntries.count }
         return 0
     }
 
@@ -1501,6 +1967,10 @@ final class PreferencesViewController: NSViewController,
         } else if tableView === aiAllowlistTable {
             guard aiAllowlist.indices.contains(row) else { return nil }
             text = aiAllowlist[row]
+        } else if tableView === voiceDictionaryTable {
+            guard voiceDictEntries.indices.contains(row) else { return nil }
+            let entry = voiceDictEntries[row]
+            text = "\(entry.spoken)  →  \(entry.replacement)"
         } else {
             return nil
         }
