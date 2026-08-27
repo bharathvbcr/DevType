@@ -296,6 +296,7 @@ final class PreferencesViewController: NSViewController,
     // Voice & Smart Dictation
     private let voiceModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let voiceTonePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let voiceRealTimeTypingSwitch = NSSwitch()
     private let voiceAutoPunctuateSwitch = NSSwitch()
     private let voiceDisfluenciesSwitch = NSSwitch()
     private let voiceSoundFeedbackSwitch = NSSwitch()
@@ -1307,6 +1308,11 @@ final class PreferencesViewController: NSViewController,
         toneRow.alignment = .centerY
         toneRow.translatesAutoresizingMaskIntoConstraints = false
 
+        let realTimeTypingRow = makeToggleRow(
+            title: loc.s("prefs.voice.realTimeTyping"),
+            toggle: voiceRealTimeTypingSwitch,
+            action: #selector(voiceRealTimeTypingChanged)
+        )
         let disfluencyRow = makeToggleRow(
             title: loc.s("prefs.voice.removeDisfluencies"),
             toggle: voiceDisfluenciesSwitch,
@@ -1328,7 +1334,7 @@ final class PreferencesViewController: NSViewController,
             action: #selector(voiceHandsFreeChanged)
         )
 
-        stackInCard(optionsCard, views: [toneRow, disfluencyRow, autoPunctuateRow, soundFeedbackRow, handsFreeRow])
+        stackInCard(optionsCard, views: [toneRow, realTimeTypingRow, disfluencyRow, autoPunctuateRow, soundFeedbackRow, handsFreeRow])
 
         // 3. Hotkey Card
         let hotkeyCard = makeCard(title: loc.s("prefs.voice.hotkey.card"), symbol: "keyboard")
@@ -1451,6 +1457,7 @@ final class PreferencesViewController: NSViewController,
             voiceTonePopup.selectItem(at: index)
         }
 
+        voiceRealTimeTypingSwitch.state = VoicePreferences.isRealTimeTypingEnabled ? .on : .off
         voiceAutoPunctuateSwitch.state = VoicePreferences.isAutoPunctuateEnabled ? .on : .off
         voiceDisfluenciesSwitch.state = VoicePreferences.isRemoveDisfluenciesEnabled ? .on : .off
         voiceSoundFeedbackSwitch.state = VoicePreferences.isSoundFeedbackEnabled ? .on : .off
@@ -1468,6 +1475,10 @@ final class PreferencesViewController: NSViewController,
         voiceDictionaryTable.reloadData()
         voiceDictionaryEmptyLabel.stringValue = voiceDictEntries.isEmpty ? loc.s("prefs.voice.dict.empty") : ""
         voiceDictionaryEmptyLabel.isHidden = !voiceDictEntries.isEmpty
+    }
+
+    @objc private func voiceRealTimeTypingChanged() {
+        VoicePreferences.isRealTimeTypingEnabled = voiceRealTimeTypingSwitch.state == .on
     }
 
     @objc private func requestMicrophoneAccessClicked() {

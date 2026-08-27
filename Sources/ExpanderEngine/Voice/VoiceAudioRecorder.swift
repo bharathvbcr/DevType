@@ -20,6 +20,9 @@ public final class VoiceAudioRecorder: @unchecked Sendable {
     /// Handler called with smoothed audio level (0.0 to 1.0) for live waveform visualization.
     public var onAudioLevelUpdate: (@Sendable (Float) -> Void)?
 
+    /// Handler called with live 16kHz PCM audio buffers for real-time streaming speech recognition.
+    public var onAudioBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
+
     public var voiceCacheDirectory: URL {
         cacheDirectoryURL
     }
@@ -175,6 +178,7 @@ public final class VoiceAudioRecorder: @unchecked Sendable {
                             }
                         }
                     }
+                    self.onAudioBuffer?(convertedBuffer)
                 }
             }
 

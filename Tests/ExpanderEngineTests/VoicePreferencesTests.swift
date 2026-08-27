@@ -42,4 +42,14 @@ final class VoicePreferencesTests: XCTestCase {
         VoicePreferences.selectedModel = .appleSpeech
         XCTAssertEqual(VoicePreferences.selectedModel, .appleSpeech)
     }
+
+    func testRealTimeTypingPersistence() {
+        XCTAssertTrue(VoicePreferences.isRealTimeTypingEnabled)
+
+        VoicePreferences.isRealTimeTypingEnabled = false
+        XCTAssertFalse(VoicePreferences.isRealTimeTypingEnabled)
+
+        VoicePreferences.isRealTimeTypingEnabled = true
+        XCTAssertTrue(VoicePreferences.isRealTimeTypingEnabled)
+    }
 }

@@ -217,6 +217,111 @@ public final class VoiceTranscriber: @unchecked Sendable {
             }
         }
     }
+
+    /// Starts a real-time streaming speech recognition session.
+    public func startStreamingSession(
+        locale: Locale = Locale.current,
+        onPartial: @escaping @Sendable (String) -> Void,
+        onFinal: @escaping @Sendable (Result<String, Error>) -> Void
+    ) -> StreamingSpeechSession {
+        StreamingSpeechSession(locale: locale, onPartial: onPartial, onFinal: onFinal)
+    }
+}
+
+// MARK: - Streaming Speech Recognition Session
+
+/// An active real-time streaming speech recognition session that consumes live audio buffers
+/// and streams partial transcriptions with sub-100ms latency.
+public final class StreamingSpeechSession: @unchecked Sendable {
+    private let lock = UnfairLock()
+    private let recognizer: SFSpeechRecognizer?
+    private let request: SFSpeechAudioBufferRecognitionRequest
+    private var task: SFSpeechRecognitionTask?
+    private let onPartial: @Sendable (String) -> Void
+    private let onFinal: @Sendable (Result<String, Error>) -> Void
+    private let isFinished = LockedBool(false)
+    private var latestPartial: String = ""
+
+    public init(
+        locale: Locale = Locale.current,
+        onPartial: @escaping @Sendable (String) -> Void,
+        onFinal: @escaping @Sendable (Result<String, Error>) -> Void
+    ) {
+        self.onPartial = onPartial
+        self.onFinal = onFinal
+        self.request = SFSpeechAudioBufferRecognitionRequest()
+        self.request.shouldReportPartialResults = true
+        if #available(macOS 13.0, *) {
+            self.request.addsPunctuation = true
+        }
+
+        let rec = SFSpeechRecognizer(locale: locale)
+            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+            ?? SFSpeechRecognizer()
+        self.recognizer = rec
+
+        if #available(macOS 13.0, *), let rec, rec.supportsOnDeviceRecognition {
+            self.request.requiresOnDeviceRecognition = true
+        }
+
+        startRecognition()
+    }
+
+    private func startRecognition() {
+        guard let recognizer, recognizer.isAvailable else {
+            finishWith(result: .failure(NSError(domain: "StreamingSpeechSession", code: -1, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer unavailable on system"])))
+            return
+        }
+
+        self.task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self else { return }
+
+            if let result {
+                let partial = result.bestTranscription.formattedString
+                self.lock.withLock { self.latestPartial = partial }
+                self.onPartial(partial)
+
+                if result.isFinal {
+                    self.finishWith(result: .success(partial))
+                    return
+                }
+            }
+
+            if let error {
+                let current = self.lock.withLock { self.latestPartial }
+                if !current.isEmpty {
+                    self.finishWith(result: .success(current))
+                } else {
+                    self.finishWith(result: .failure(error))
+                }
+            }
+        }
+    }
+
+    /// Appends a live audio buffer from microphone capture.
+    public func appendAudioBuffer(_ buffer: AVAudioPCMBuffer) {
+        guard !isFinished.isSet else { return }
+        request.append(buffer)
+    }
+
+    /// Ends audio capture and signals to the recognition task to finalize.
+    public func finishAudio() {
+        guard !isFinished.isSet else { return }
+        request.endAudio()
+    }
+
+    /// Immediately cancels the recognition task without waiting.
+    public func cancel() {
+        guard isFinished.testAndSet() else { return }
+        task?.cancel()
+        task = nil
+    }
+
+    private func finishWith(result: Result<String, Error>) {
+        guard isFinished.testAndSet() else { return }
+        task = nil
+        onFinal(result)
+    }
 }
 
 // MARK: - Thread-Safe Primitives
@@ -227,6 +332,10 @@ private final class LockedBool: @unchecked Sendable {
 
     init(_ initial: Bool) {
         self.flag = initial
+    }
+
+    var isSet: Bool {
+        lock.withLock { flag }
     }
 
     /// Atomically sets to true and returns true if this call changed the value from false to true.

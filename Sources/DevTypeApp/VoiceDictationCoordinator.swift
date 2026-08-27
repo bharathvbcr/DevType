@@ -2,7 +2,7 @@ import AppKit
 import ExpanderEngine
 
 /// Coordinates audio recording, HUD transitions, transcription execution,
-/// and direct text injection for Smart Dictation into focused macOS fields.
+/// and direct real-time text injection for Smart Dictation into focused macOS fields.
 public final class VoiceDictationCoordinator: @unchecked Sendable {
     public static let shared = VoiceDictationCoordinator()
 
@@ -12,6 +12,8 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
     private var lastToggleTime: DispatchTime = .now()
     private let recorder = VoiceAudioRecorder.shared
     private let transcriber = VoiceTranscriber.shared
+    private var activeStreamingSession: StreamingSpeechSession?
+    private var liveInjectedText: String = ""
 
     private init() {
         // Wire live audio meter levels to HUD
@@ -19,6 +21,11 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
             DispatchQueue.main.async {
                 VoiceHUDPanel.shared.updateAudioLevel(level)
             }
+        }
+
+        // Wire live PCM buffers to active streaming speech session
+        recorder.onAudioBuffer = { [weak self] buffer in
+            self?.activeStreamingSession?.appendAudioBuffer(buffer)
         }
     }
 
@@ -72,9 +79,25 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
 
         do {
             try recorder.startRecording()
+            self.liveInjectedText = ""
 
             let modelType = VoicePreferences.selectedModel
             let modelName = modelType.descriptor.shortName
+
+            let session = transcriber.startStreamingSession(
+                locale: Locale.current,
+                onPartial: { [weak self] partial in
+                    guard let self else { return }
+                    DispatchQueue.main.async {
+                        VoiceHUDPanel.shared.updateStreamingTranscript(partial)
+                        if VoicePreferences.isRealTimeTypingEnabled {
+                            self.handleRealTimeTyping(partial: partial)
+                        }
+                    }
+                },
+                onFinal: { _ in }
+            )
+            self.activeStreamingSession = session
 
             DispatchQueue.main.async {
                 VoiceHUDPanel.shared.updateState(.listening(modelName: modelName))
@@ -97,6 +120,9 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
             return (state, targetApp)
         }
         guard wasRecording else { return }
+
+        activeStreamingSession?.finishAudio()
+        activeStreamingSession = nil
 
         let modelType = VoicePreferences.selectedModel
         let modelName = modelType.descriptor.shortName
@@ -130,7 +156,9 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
                     }
 
                     VoiceHUDPanel.shared.updateState(.success(text: polishedText))
-                    self.injectText(polishedText, sourceApp: appToRestore)
+                    let previousInjectedCount = self.liveInjectedText.count
+                    self.liveInjectedText = ""
+                    self.injectText(polishedText, eraseCount: previousInjectedCount, sourceApp: appToRestore)
 
                 case .failure(let error):
                     VoiceHUDPanel.shared.updateState(.error(message: error.localizedDescription))
@@ -142,15 +170,75 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
     /// Cancels recording and dismisses the HUD without injecting text.
     public func cancelDictation() {
         lock.withLock { isRecording = false }
+        activeStreamingSession?.cancel()
+        activeStreamingSession = nil
         recorder.cancelRecording()
+
+        let previousInjectedCount = self.liveInjectedText.count
+        self.liveInjectedText = ""
+        if previousInjectedCount > 0 {
+            replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
+        }
+
         DispatchQueue.main.async {
             VoiceHUDPanel.shared.hide()
         }
     }
 
+    // MARK: - Real-Time Live Progressive Typing
+
+    private func handleRealTimeTyping(partial: String) {
+        guard !partial.isEmpty else { return }
+        let previous = liveInjectedText
+        guard partial != previous else { return }
+
+        if partial.hasPrefix(previous) {
+            let suffix = String(partial.dropFirst(previous.count))
+            liveInjectedText = partial
+            injectProgressiveChunk(suffix)
+        } else {
+            let eraseCount = previous.count
+            liveInjectedText = partial
+            replaceLiveDraft(eraseCount: eraseCount, newText: partial)
+        }
+    }
+
+    private func injectProgressiveChunk(_ text: String) {
+        guard !text.isEmpty else { return }
+        let snippet = SnippetModel(
+            title: "Voice Live Dictation",
+            triggerKeyword: "",
+            replacementText: text
+        )
+        TextInjectionPipeline.shared.inject(
+            snippet: snippet,
+            triggerLength: 0,
+            swallowedFinalKey: false,
+            eraseCountOverride: 0,
+            preResolvedText: text,
+            secureClipboardPaste: false
+        )
+    }
+
+    private func replaceLiveDraft(eraseCount: Int, newText: String) {
+        let snippet = SnippetModel(
+            title: "Voice Live Dictation",
+            triggerKeyword: "",
+            replacementText: newText
+        )
+        TextInjectionPipeline.shared.inject(
+            snippet: snippet,
+            triggerLength: 0,
+            swallowedFinalKey: false,
+            eraseCountOverride: eraseCount,
+            preResolvedText: newText,
+            secureClipboardPaste: false
+        )
+    }
+
     // MARK: - Text Injection
 
-    private func injectText(_ text: String, sourceApp: NSRunningApplication?) {
+    private func injectText(_ text: String, eraseCount: Int, sourceApp: NSRunningApplication?) {
         // Re-activate target app before injection
         sourceApp?.activate()
 
@@ -165,7 +253,7 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
                 snippet: snippet,
                 triggerLength: 0,
                 swallowedFinalKey: false,
-                eraseCountOverride: 0,
+                eraseCountOverride: eraseCount,
                 preResolvedText: text,
                 secureClipboardPaste: false
             ) {

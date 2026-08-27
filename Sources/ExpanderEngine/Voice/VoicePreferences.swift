@@ -8,6 +8,7 @@ public enum VoicePreferences {
     public static let removeDisfluenciesKey = "devtype.voice.removeDisfluencies"
     public static let handsFreeKey = "devtype.voice.handsFree"
     public static let soundFeedbackKey = "devtype.voice.soundFeedback"
+    public static let realTimeTypingKey = "devtype.voice.realTimeTyping"
     public static let customDictionaryKey = "devtype.voice.customDictionary"
     public static let pushToTalkShortcutKey = "devtype.voice.hotkey"
 
@@ -84,6 +85,18 @@ public enum VoicePreferences {
         }
     }
 
+    public static var isRealTimeTypingEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: realTimeTypingKey) == nil {
+                return true
+            }
+            return UserDefaults.standard.bool(forKey: realTimeTypingKey)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: realTimeTypingKey)
+        }
+    }
+
     // MARK: - Custom Dictionary
 
     public static var customDictionary: [String: String] {
@@ -132,6 +145,7 @@ public enum VoicePreferences {
         UserDefaults.standard.removeObject(forKey: autoPunctuateKey)
         UserDefaults.standard.removeObject(forKey: removeDisfluenciesKey)
         UserDefaults.standard.removeObject(forKey: soundFeedbackKey)
+        UserDefaults.standard.removeObject(forKey: realTimeTypingKey)
         UserDefaults.standard.removeObject(forKey: handsFreeKey)
         UserDefaults.standard.removeObject(forKey: customDictionaryKey)
     }

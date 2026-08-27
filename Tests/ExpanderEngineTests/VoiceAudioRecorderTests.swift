@@ -24,4 +24,16 @@ final class VoiceAudioRecorderTests: XCTestCase {
         // Ensure calling cleanupOldJournals runs smoothly
         recorder.cleanupOldJournals()
     }
+
+    func testAudioBufferHandlerRegistration() {
+        let recorder = VoiceAudioRecorder.shared
+        var received = false
+        recorder.onAudioBuffer = { _ in
+            received = true
+        }
+        XCTAssertNotNil(recorder.onAudioBuffer)
+        recorder.onAudioBuffer = nil
+        XCTAssertNil(recorder.onAudioBuffer)
+        _ = received
+    }
 }
