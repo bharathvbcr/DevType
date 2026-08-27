@@ -34,6 +34,17 @@ SKIP_NOTARIZE="${DEVTYPE_SKIP_NOTARIZE:-0}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
+case "${SKIP_NOTARIZE}" in
+  0|1) ;;
+  *) die "DEVTYPE_SKIP_NOTARIZE must be 0 or 1 (got '${SKIP_NOTARIZE}')" ;;
+esac
+
+# CI supplies the tag explicitly so git-describe cannot quietly build a version
+# other than the ref being published. Local dry-runs may omit it intentionally.
+if [[ -n "${DEVTYPE_RELEASE_TAG:-}" ]]; then
+  "${ROOT}/Scripts/release-preflight.sh" "${DEVTYPE_RELEASE_TAG}"
+fi
+
 # --- 1. Identity check ------------------------------------------------------
 if [[ "${SKIP_NOTARIZE}" != "1" ]]; then
   HAS_DEV_ID=0
@@ -123,7 +134,15 @@ rm -rf "${STAGE}"
 
 # --- 5. Verify like an end user --------------------------------------------
 echo "==> final verification"
-spctl --assess --type open --context context:primary-signature --verbose=2 "${DMG}" 2>&1 || true
+[[ -s "${DMG}" ]] || die "DMG is missing or empty: ${DMG}"
+hdiutil imageinfo "${DMG}" >/dev/null || die "DMG image verification failed: ${DMG}"
+if spctl --assess --type open --context context:primary-signature --verbose=2 "${DMG}"; then
+  echo "Gatekeeper assessment: passed"
+elif [[ "${SKIP_NOTARIZE}" == "1" ]]; then
+  echo "warning: Gatekeeper assessment rejected the intentionally unnotarized dry-run artifact"
+else
+  die "Gatekeeper assessment failed for notarized artifact"
+fi
 shasum -a 256 "${DMG}"
 echo
 echo "Done: ${DMG}"

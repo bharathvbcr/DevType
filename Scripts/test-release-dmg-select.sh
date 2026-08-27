@@ -99,5 +99,10 @@ D="$(fixture case7-empty-file)"
 : > "${D}/DevType-0.0.9.dmg"
 expect_fail "empty DMG rejected" "${D}" "0.0.9"
 
+# Case 8: malformed expected version → fatal before any filesystem selection.
+D="$(fixture case8-invalid-version)"
+printf 'dmg-bytes' > "${D}/DevType-0.0.9.dmg"
+expect_fail "malformed expected version rejected" "${D}" "0.0.9-rc1"
+
 echo "select-release-dmg tests: ${PASS} passed, ${FAIL} failed"
 [[ "${FAIL}" -eq 0 ]]

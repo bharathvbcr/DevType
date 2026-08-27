@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
   workflow_dispatch:
 
 concurrency:
@@ -16,10 +16,10 @@ permissions:
 jobs:
   release:
     name: Build & Publish Release
-    # Every step below assumes a tag ref (release name, notes file, version
-    # assertion); a manual dispatch from a branch must skip instead of
+    # Every step below assumes a strict tag ref (release name, notes file,
+    # version assertion); a manual dispatch from a branch must skip instead of
     # publishing a garbage-named release.
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref_type == 'tag'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +35,9 @@ jobs:
             exit 1
           fi
 
+      - name: Validate release ref
+        run: ./Scripts/release-preflight.sh "${GITHUB_REF_NAME}"
+
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
@@ -45,6 +48,7 @@ jobs:
         env:
           DEVTYPE_SKIP_NOTARIZE: '1'
           DEVTYPE_SKIP_AUTO_CERT: '1'
+          DEVTYPE_RELEASE_TAG: ${{ github.ref_name }}
         run: |
           ./Scripts/release.sh
 
@@ -55,13 +59,19 @@ jobs:
         run: Scripts/select-release-dmg.sh dist "${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.ref_name }}
           files: ${{ steps.dmg.outputs.dmg_path }}
           body_path: docs/releases/${{ github.ref_name }}.md
           name: DevType ${{ github.ref_name }}
           draft: false
           prerelease: false
-          generate_release_notes: true
+          # The repository maintains curated per-tag notes. Generated notes are
+          # disabled so retries cannot duplicate the body or append unrelated
+          # commit activity to the release description.
+          generate_release_notes: false
+          append_body: false
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

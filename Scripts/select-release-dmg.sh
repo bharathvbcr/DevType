@@ -28,7 +28,8 @@ usage() {
 DIST="$1"
 EXPECTED_VERSION="$2"
 
-[[ -n "${EXPECTED_VERSION}" ]] || die "expected version must be non-empty"
+[[ "${EXPECTED_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "expected version '${EXPECTED_VERSION}' is not strict SemVer MAJOR.MINOR.PATCH"
 [[ -d "${DIST}" ]] || die "dist directory not found: ${DIST}"
 
 # Recursive like the original locate step; exactly-one is enforced below.

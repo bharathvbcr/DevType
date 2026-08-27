@@ -62,6 +62,8 @@ echo "  - Checking signing identity resolution..."
 
 echo "  - Checking release DMG selection..."
 "${ROOT}/Scripts/test-release-dmg-select.sh"
+echo "  - Checking release preflight..."
+"${ROOT}/Scripts/test-release-preflight.sh"
 
 echo "==> 2. Running SwiftPM Unit Tests"
 "${ROOT}/Scripts/test.sh" -v
