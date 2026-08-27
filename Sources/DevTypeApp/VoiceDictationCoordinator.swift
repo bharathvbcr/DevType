@@ -159,9 +159,20 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
                         self.handleVoiceAICommand(aiCommand, sourceApp: appToRestore)
                     } else {
                         VoiceHUDPanel.shared.updateState(.success(text: polishedText))
-                        let previousInjectedCount = self.liveInjectedText.count
+                        let currentInjected = self.liveInjectedText
                         self.liveInjectedText = ""
-                        self.injectText(polishedText, eraseCount: previousInjectedCount, sourceApp: appToRestore)
+
+                        let diff = VoiceProgressiveTypingEngine.computeDiff(
+                            currentInjectedText: currentInjected,
+                            targetTranscript: polishedText
+                        )
+
+                        if diff.eraseCount == 0 && diff.textToInject.isEmpty {
+                            // Polished text exactly matches live stream on screen — zero flicker / no-op
+                            DevTypeLog.app.info("[Voice] dictation perfectly matches live stream chars=\(polishedText.count)")
+                        } else {
+                            self.injectText(diff.textToInject, eraseCount: diff.eraseCount, sourceApp: appToRestore)
+                        }
                     }
 
                 case .failure(let error):
@@ -176,12 +187,13 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
         let previousInjectedCount = self.liveInjectedText.count
         self.liveInjectedText = ""
 
+        if previousInjectedCount > 0 {
+            replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
+        }
+
         // Disclaimer and compatibility check for macOS 27
         guard AITextTransformSupport.isRunningOnCompatibleOS else {
             VoiceHUDPanel.shared.updateState(.error(message: "AI tools require macOS 27 (tested on macOS 26: unsupported)"))
-            if previousInjectedCount > 0 {
-                replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
-            }
             return
         }
 
@@ -192,18 +204,12 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
                 textToTransform = resolved.text
             case .failure(let failure):
                 VoiceHUDPanel.shared.updateState(.error(message: failure.message(loc: .shared)))
-                if previousInjectedCount > 0 {
-                    replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
-                }
                 return
             }
         }
 
         guard !textToTransform.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             VoiceHUDPanel.shared.updateState(.error(message: "No text provided for \(command.triggerPhrase)"))
-            if previousInjectedCount > 0 {
-                replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
-            }
             return
         }
 
@@ -225,13 +231,10 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
                             return
                         }
                         VoiceHUDPanel.shared.updateState(.success(text: output))
-                        self.injectText(output, eraseCount: previousInjectedCount, sourceApp: sourceApp)
+                        self.injectText(output, eraseCount: 0, sourceApp: sourceApp)
 
                     case .failure(let error):
                         VoiceHUDPanel.shared.updateState(.error(message: "AI failed: \(error.localizedDescription)"))
-                        if previousInjectedCount > 0 {
-                            self.replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
-                        }
                     }
                 }
             }
@@ -264,17 +267,18 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
 
     private func handleRealTimeTyping(partial: String) {
         guard !partial.isEmpty else { return }
-        let previous = liveInjectedText
-        guard partial != previous else { return }
+        let diff = VoiceProgressiveTypingEngine.computeDiff(
+            currentInjectedText: liveInjectedText,
+            targetTranscript: partial
+        )
+        guard diff.eraseCount > 0 || !diff.textToInject.isEmpty else { return }
 
-        if partial.hasPrefix(previous) {
-            let suffix = String(partial.dropFirst(previous.count))
-            liveInjectedText = partial
-            injectProgressiveChunk(suffix)
+        liveInjectedText = diff.resultingText
+
+        if diff.eraseCount == 0 {
+            injectProgressiveChunk(diff.textToInject)
         } else {
-            let eraseCount = previous.count
-            liveInjectedText = partial
-            replaceLiveDraft(eraseCount: eraseCount, newText: partial)
+            replaceLiveDraft(eraseCount: diff.eraseCount, newText: diff.textToInject)
         }
     }
 

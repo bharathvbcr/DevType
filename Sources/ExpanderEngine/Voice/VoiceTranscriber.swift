@@ -231,95 +231,191 @@ public final class VoiceTranscriber: @unchecked Sendable {
 // MARK: - Streaming Speech Recognition Session
 
 /// An active real-time streaming speech recognition session that consumes live audio buffers
-/// and streams partial transcriptions with sub-100ms latency.
+/// and streams partial transcriptions with sub-100ms latency across speech pauses and multiple utterances.
 public final class StreamingSpeechSession: @unchecked Sendable {
     private let lock = UnfairLock()
+    private let locale: Locale
     private let recognizer: SFSpeechRecognizer?
-    private let request: SFSpeechAudioBufferRecognitionRequest
-    private var task: SFSpeechRecognitionTask?
+    private var activeRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var activeTask: SFSpeechRecognitionTask?
     private let onPartial: @Sendable (String) -> Void
     private let onFinal: @Sendable (Result<String, Error>) -> Void
     private let isFinished = LockedBool(false)
-    private var latestPartial: String = ""
+
+    // Multi-utterance continuous transcription state
+    private var committedSegments: [String] = []
+    private var currentSegmentPartial: String = ""
+    private var pendingBuffers: [AVAudioPCMBuffer] = []
+    private var taskGeneration: Int = 0
 
     public init(
         locale: Locale = Locale.current,
         onPartial: @escaping @Sendable (String) -> Void,
         onFinal: @escaping @Sendable (Result<String, Error>) -> Void
     ) {
+        self.locale = locale
         self.onPartial = onPartial
         self.onFinal = onFinal
-        self.request = SFSpeechAudioBufferRecognitionRequest()
-        self.request.shouldReportPartialResults = true
-        if #available(macOS 13.0, *) {
-            self.request.addsPunctuation = true
-        }
 
         let rec = SFSpeechRecognizer(locale: locale)
             ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
             ?? SFSpeechRecognizer()
         self.recognizer = rec
 
-        if #available(macOS 13.0, *), let rec, rec.supportsOnDeviceRecognition {
-            self.request.requiresOnDeviceRecognition = true
+        lock.withLock {
+            startNewRecognitionTaskLocked()
         }
-
-        startRecognition()
     }
 
-    private func startRecognition() {
+    private func startNewRecognitionTaskLocked() {
+        guard !isFinished.isSet else { return }
         guard let recognizer, recognizer.isAvailable else {
-            finishWith(result: .failure(NSError(domain: "StreamingSpeechSession", code: -1, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer unavailable on system"])))
+            if committedSegments.isEmpty {
+                finishWith(result: .failure(NSError(domain: "StreamingSpeechSession", code: -1, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer unavailable on system"])))
+            }
             return
         }
 
-        self.task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            guard let self else { return }
+        taskGeneration += 1
+        let currentGen = taskGeneration
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        if #available(macOS 13.0, *) {
+            request.addsPunctuation = true
+            if recognizer.supportsOnDeviceRecognition {
+                request.requiresOnDeviceRecognition = true
+            }
+        }
+
+        self.activeRequest = request
+
+        // Flush any buffered frames from pause / restart window into new request
+        for buffer in pendingBuffers {
+            request.append(buffer)
+        }
+        pendingBuffers.removeAll(keepingCapacity: true)
+
+        let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            self?.handleRecognitionCallback(generation: currentGen, result: result, error: error)
+        }
+        self.activeTask = task
+    }
+
+    private func handleRecognitionCallback(generation: Int, result: SFSpeechRecognitionResult?, error: Error?) {
+        var cumulativeToEmit: String?
+        var finalResultToEmit: Result<String, Error>?
+
+        lock.withLock {
+            guard generation == self.taskGeneration else { return }
 
             if let result {
                 let partial = result.bestTranscription.formattedString
-                self.lock.withLock { self.latestPartial = partial }
-                self.onPartial(partial)
+                self.currentSegmentPartial = partial
+                let cumulative = VoiceProgressiveTypingEngine.combineUtterances(
+                    committed: self.committedSegments,
+                    activePartial: partial
+                )
+                cumulativeToEmit = cumulative
 
                 if result.isFinal {
-                    self.finishWith(result: .success(partial))
+                    if self.isFinished.isSet {
+                        finalResultToEmit = .success(cumulative)
+                    } else {
+                        // Pause / endpoint silence reached mid-recording: commit and seamlessly restart task
+                        if !partial.isEmpty {
+                            self.committedSegments.append(partial)
+                        }
+                        self.currentSegmentPartial = ""
+                        self.startNewRecognitionTaskLocked()
+                    }
                     return
                 }
             }
 
             if let error {
-                let current = self.lock.withLock { self.latestPartial }
-                if !current.isEmpty {
-                    self.finishWith(result: .success(current))
+                if self.isFinished.isSet {
+                    let cumulative = VoiceProgressiveTypingEngine.combineUtterances(
+                        committed: self.committedSegments,
+                        activePartial: self.currentSegmentPartial
+                    )
+                    if !cumulative.isEmpty {
+                        finalResultToEmit = .success(cumulative)
+                    } else {
+                        finalResultToEmit = .failure(error)
+                    }
                 } else {
-                    self.finishWith(result: .failure(error))
+                    // Task ended due to silence timeout or recoverable stream boundary: preserve transcript & continue
+                    if !self.currentSegmentPartial.isEmpty {
+                        self.committedSegments.append(self.currentSegmentPartial)
+                    }
+                    self.currentSegmentPartial = ""
+                    self.startNewRecognitionTaskLocked()
                 }
             }
+        }
+
+        if let cumulativeToEmit {
+            self.onPartial(cumulativeToEmit)
+        }
+        if let finalResultToEmit {
+            self.finishWith(result: finalResultToEmit)
         }
     }
 
     /// Appends a live audio buffer from microphone capture.
     public func appendAudioBuffer(_ buffer: AVAudioPCMBuffer) {
-        guard !isFinished.isSet else { return }
-        request.append(buffer)
+        lock.withLock {
+            guard !isFinished.isSet else { return }
+            if let request = activeRequest {
+                request.append(buffer)
+            } else {
+                pendingBuffers.append(buffer)
+            }
+        }
     }
 
     /// Ends audio capture and signals to the recognition task to finalize.
     public func finishAudio() {
-        guard !isFinished.isSet else { return }
-        request.endAudio()
+        guard isFinished.testAndSet() else { return }
+
+        var shouldFinishImmediately = false
+        var cumulative = ""
+
+        lock.withLock {
+            if let request = activeRequest {
+                request.endAudio()
+            } else {
+                shouldFinishImmediately = true
+                cumulative = VoiceProgressiveTypingEngine.combineUtterances(
+                    committed: committedSegments,
+                    activePartial: currentSegmentPartial
+                )
+            }
+        }
+
+        if shouldFinishImmediately {
+            finishWith(result: .success(cumulative))
+        }
     }
 
     /// Immediately cancels the recognition task without waiting.
     public func cancel() {
         guard isFinished.testAndSet() else { return }
-        task?.cancel()
-        task = nil
+        lock.withLock {
+            activeTask?.cancel()
+            activeTask = nil
+            activeRequest = nil
+            pendingBuffers.removeAll()
+        }
     }
 
     private func finishWith(result: Result<String, Error>) {
-        guard isFinished.testAndSet() else { return }
-        task = nil
+        lock.withLock {
+            activeTask = nil
+            activeRequest = nil
+            pendingBuffers.removeAll()
+        }
         onFinal(result)
     }
 }

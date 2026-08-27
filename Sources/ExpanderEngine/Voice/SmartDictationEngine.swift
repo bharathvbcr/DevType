@@ -58,17 +58,22 @@ public enum SmartDictationEngine: Sendable {
         var text = input
         guard !text.isEmpty, text.count <= 10_000 else { return input }
 
-        let correctionMarkers = [
+        let explicitRetractionMarkers = [
+            "scratch that",
+            "make that"
+        ]
+
+        let conversationalMarkers = [
             "actually",
             "no wait",
             "or rather",
-            "scratch that",
-            "make that",
             "i mean",
             "sorry"
         ]
 
-        for marker in correctionMarkers {
+        let allMarkers = explicitRetractionMarkers + conversationalMarkers
+
+        for marker in allMarkers {
             guard let markerRange = text.range(of: marker, options: [.caseInsensitive, .backwards]) else {
                 continue
             }
@@ -94,13 +99,30 @@ public enum SmartDictationEngine: Sendable {
 
             let beforeWords = cleanBefore.split(separator: " ")
             let afterWords = after.split(separator: " ")
+            let lowerAfter = after.lowercased()
 
+            // 1. Explicit full retractions (e.g. "scratch that", "make that", "actually, make it ...", "no wait, send it ...")
+            if explicitRetractionMarkers.contains(marker) ||
+                lowerAfter.hasPrefix("make it ") ||
+                lowerAfter.hasPrefix("send it ") ||
+                lowerAfter.hasPrefix("make that ") {
+                text = after
+                continue
+            }
+
+            // 2. Targeted token/tail replacement (e.g. "at 1pm actually 2pm" -> "at 2pm")
             if beforeWords.count > afterWords.count && afterWords.count <= 2 {
                 let prefix = beforeWords.dropLast(afterWords.count).joined(separator: " ")
                 text = "\(prefix) \(after)"
-            } else {
+                continue
+            } else if beforeWords.count == afterWords.count && afterWords.count == 1 {
                 text = after
+                continue
             }
+
+            // 3. Conversational discourse (e.g. "We finished the report, actually we delivered it yesterday")
+            // Preserve the earlier clause rather than destroying it.
+            text = "\(cleanBefore), \(after)"
         }
 
         return text

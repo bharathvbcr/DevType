@@ -160,4 +160,105 @@ final class VoiceStressTests: XCTestCase {
 
         try? FileManager.default.removeItem(at: tempDir)
     }
+
+    // MARK: - 7. Mathematical Invariant Diff Fuzzing
+
+    func testAdversarialDiffFuzzing() {
+        let sampleWords = [
+            "Hello", "world", "testing", "voice", "dictation", "pause",
+            "sentence", "roadmap", "performance", "speed", "macOS",
+            "🚀", "👨‍👩‍👧‍👦", "한국어", "日本語", "€100", "\n\t", "   "
+        ]
+
+        var rng = SystemRandomNumberGenerator()
+
+        for _ in 0..<300 {
+            // Generate random current injected text
+            let currentWordCount = Int.random(in: 0...10, using: &rng)
+            let currentWords = (0..<currentWordCount).map { _ in sampleWords.randomElement(using: &rng)! }
+            let currentText = currentWords.joined(separator: " ")
+
+            // Generate random target transcript
+            let targetWordCount = Int.random(in: 0...12, using: &rng)
+            let targetWords = (0..<targetWordCount).map { _ in sampleWords.randomElement(using: &rng)! }
+            let targetText = targetWords.joined(separator: " ")
+
+            let diff = VoiceProgressiveTypingEngine.computeDiff(
+                currentInjectedText: currentText,
+                targetTranscript: targetText
+            )
+
+            // Invariant 1: Erase count must NEVER exceed current text count
+            XCTAssertLessThanOrEqual(
+                diff.eraseCount,
+                currentText.count,
+                "Erase count \(diff.eraseCount) must not exceed current text count \(currentText.count)"
+            )
+            XCTAssertGreaterThanOrEqual(diff.eraseCount, 0)
+
+            // Invariant 2: Applying diff must EXACTLY produce targetText
+            let preservedCount = currentText.count - diff.eraseCount
+            let preservedPrefix = String(currentText.prefix(preservedCount))
+            let reconstructed = preservedPrefix + diff.textToInject
+
+            XCTAssertEqual(
+                reconstructed,
+                targetText,
+                "Diff application must exactly yield target transcript. Current: '\(currentText)', Target: '\(targetText)', Diff: (erase: \(diff.eraseCount), inject: '\(diff.textToInject)')"
+            )
+        }
+    }
+
+    // MARK: - 8. Rapid Multi-Utterance Pause Simulation Stress Test
+
+    func testRapidMultiUtterancePauseStreamingFuzz() {
+        let utterances = [
+            "Today we are shipping the new release.",
+            "All unit tests and integration tests have passed.",
+            "The performance benchmarks look excellent.",
+            "Please review the PR and approve."
+        ]
+
+        var committed: [String] = []
+        var documentState = ""
+
+        for (index, utterance) in utterances.enumerated() {
+            // Simulate progressive partials within the utterance
+            let words = utterance.split(separator: " ")
+            for wordIndex in 1...words.count {
+                let partial = words.prefix(wordIndex).joined(separator: " ")
+                let combined = VoiceProgressiveTypingEngine.combineUtterances(
+                    committed: committed,
+                    activePartial: partial
+                )
+
+                let diff = VoiceProgressiveTypingEngine.computeDiff(
+                    currentInjectedText: documentState,
+                    targetTranscript: combined
+                )
+
+                // Verify invariant: previous committed utterances are NEVER erased
+                if index > 0 {
+                    let firstUtterance = utterances[0]
+                    XCTAssertTrue(
+                        combined.hasPrefix(firstUtterance),
+                        "Cumulative text must preserve first utterance across all pauses"
+                    )
+                }
+
+                // Apply diff
+                let preservedCount = documentState.count - diff.eraseCount
+                documentState = String(documentState.prefix(preservedCount)) + diff.textToInject
+                XCTAssertEqual(documentState, combined)
+            }
+
+            // Pause: Utterance completes and is committed
+            committed.append(utterance)
+        }
+
+        XCTAssertTrue(documentState.contains("Today we are shipping the new release."))
+        XCTAssertTrue(documentState.contains("All unit tests and integration tests have passed."))
+        XCTAssertTrue(documentState.contains("The performance benchmarks look excellent."))
+        XCTAssertTrue(documentState.contains("Please review the PR and approve."))
+    }
 }

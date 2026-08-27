@@ -27,6 +27,20 @@ final class SmartDictationEngineTests: XCTestCase {
         XCTAssertEqual(unchanged, normal)
     }
 
+    func testConversationalDiscoursePreservedWithoutDeletion() {
+        let conversational1 = "We have finished the report, actually we delivered it yesterday."
+        let result1 = SmartDictationEngine.resolveSelfCorrections(conversational1)
+        XCTAssertTrue(result1.contains("finished the report"), "Expected earlier clause to be preserved, got: \(result1)")
+
+        let conversational2 = "I arrived at the office, sorry for being a few minutes late."
+        let result2 = SmartDictationEngine.resolveSelfCorrections(conversational2)
+        XCTAssertTrue(result2.contains("arrived at the office"), "Expected earlier clause to be preserved, got: \(result2)")
+
+        let conversational3 = "The system is working properly, or rather it is performing even better than expected."
+        let result3 = SmartDictationEngine.resolveSelfCorrections(conversational3)
+        XCTAssertTrue(result3.contains("working properly"), "Expected earlier clause to be preserved, got: \(result3)")
+    }
+
     func testCustomVocabularyReplacement() {
         let customDict = [
             "dev type": "DevType",
