@@ -55,98 +55,24 @@ public final class VoiceTranscriber: @unchecked Sendable {
             completion(result)
         }
 
-        // 4. Check model status
-        let modelStatus = VoiceModelManager.shared.status(for: modelType)
-
-        switch modelType {
-        case .voxtralMini4B:
-            transcribeWithVoxtral(audioURL: audioURL, modelStatus: modelStatus) { result in
-                switch result {
-                case .success(let raw):
-                    let polished = SmartDictationEngine.process(
-                        rawTranscript: raw,
-                        tone: tone,
-                        customDictionary: customDictionary,
-                        removeDisfluencies: removeDisfluencies,
-                        autoPunctuate: autoPunctuate
-                    )
-                    finish(.success(polished))
-                case .failure(let error):
-                    finish(.failure(error))
-                }
-            }
-
-        case .funASRNano:
-            transcribeWithFunASR(audioURL: audioURL, modelStatus: modelStatus) { result in
-                switch result {
-                case .success(let raw):
-                    let polished = SmartDictationEngine.process(
-                        rawTranscript: raw,
-                        tone: tone,
-                        customDictionary: customDictionary,
-                        removeDisfluencies: removeDisfluencies,
-                        autoPunctuate: autoPunctuate
-                    )
-                    finish(.success(polished))
-                case .failure(let error):
-                    finish(.failure(error))
-                }
-            }
-
-        case .appleSpeech:
-            transcribeWithAppleSpeech(audioURL: audioURL) { result in
-                switch result {
-                case .success(let raw):
-                    let polished = SmartDictationEngine.process(
-                        rawTranscript: raw,
-                        tone: tone,
-                        customDictionary: customDictionary,
-                        removeDisfluencies: removeDisfluencies,
-                        autoPunctuate: autoPunctuate
-                    )
-                    finish(.success(polished))
-                case .failure(let error):
-                    finish(.failure(error))
-                }
+        transcribeWithAppleSpeech(audioURL: audioURL) { result in
+            switch result {
+            case .success(let raw):
+                let polished = SmartDictationEngine.process(
+                    rawTranscript: raw,
+                    tone: tone,
+                    customDictionary: customDictionary,
+                    removeDisfluencies: removeDisfluencies,
+                    autoPunctuate: autoPunctuate
+                )
+                finish(.success(polished))
+            case .failure(let error):
+                finish(.failure(error))
             }
         }
     }
 
-    // MARK: - Model Specific Transcription Engines
-
-    private func transcribeWithVoxtral(
-        audioURL: URL,
-        modelStatus: VoiceModelStatus,
-        completion: @escaping @Sendable (Result<String, Error>) -> Void
-    ) {
-        switch modelStatus {
-        case .ready(let modelPath):
-            DispatchQueue.global(qos: .userInitiated).async {
-                DevTypeLog.app.info("[Voice] executing Voxtral Mini 4B at \(modelPath.path)")
-                self.transcribeWithAppleSpeech(audioURL: audioURL, completion: completion)
-            }
-
-        case .notDownloaded, .downloading, .error:
-            transcribeWithAppleSpeech(audioURL: audioURL, completion: completion)
-        }
-    }
-
-    private func transcribeWithFunASR(
-        audioURL: URL,
-        modelStatus: VoiceModelStatus,
-        completion: @escaping @Sendable (Result<String, Error>) -> Void
-    ) {
-        switch modelStatus {
-        case .ready(let modelPath):
-            DispatchQueue.global(qos: .userInitiated).async {
-                DevTypeLog.app.info("[Voice] executing Fun-ASR-Nano at \(modelPath.path)")
-                self.transcribeWithAppleSpeech(audioURL: audioURL, completion: completion)
-            }
-
-        case .notDownloaded, .downloading, .error:
-            transcribeWithAppleSpeech(audioURL: audioURL, completion: completion)
-        }
-    }
+    // MARK: - Speech Transcription Engine
 
     private func transcribeWithAppleSpeech(
         audioURL: URL,

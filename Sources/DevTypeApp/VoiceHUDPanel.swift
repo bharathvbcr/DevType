@@ -27,7 +27,7 @@ public final class VoiceHUDPanel: NSPanel {
     private let stateLabel: NSTextField
     private let transcriptLabel: NSTextField
     private var dismissWorkItem: DispatchWorkItem?
-    private var currentModelName: String = "Voxtral"
+    private var currentModelName: String = "Apple Speech"
     private var pendingTargetSize: CGSize?
     private var isResizeScheduled = false
     private var usesRealGlass = false

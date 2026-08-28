@@ -22,7 +22,7 @@ public enum DictationOutcome: Equatable, Sendable {
     case queuedForRetry
 }
 
-public enum DictationMode: Equatable, Sendable {
+public enum DictationMode: String, Codable, Equatable, Sendable {
     case hold
     case handsFree
 }
