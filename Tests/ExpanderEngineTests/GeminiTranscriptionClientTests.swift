@@ -32,6 +32,48 @@ final class GeminiTranscriptionClientTests: XCTestCase {
         XCTAssertEqual(GeminiTranscriptionError.timeout, GeminiTranscriptionError.timeout)
         XCTAssertEqual(GeminiTranscriptionError.safetyBlocked, GeminiTranscriptionError.safetyBlocked)
         XCTAssertEqual(GeminiTranscriptionError.emptyTranscript, GeminiTranscriptionError.emptyTranscript)
-        XCTAssertEqual(GeminiTranscriptionError.networkError("conn"), GeminiTranscriptionError.networkError("conn"))
+    }
+
+    func testAPIKeyValidationResultProperties() {
+        let valid = APIKeyValidationResult.valid(modelName: "gemini-3.5-transcribe")
+        XCTAssertTrue(valid.isValid)
+        XCTAssertEqual(valid.userMessage, "Key Valid & Saved")
+
+        let invalid = APIKeyValidationResult.invalidKey(reason: "API key is invalid")
+        XCTAssertFalse(invalid.isValid)
+        XCTAssertEqual(invalid.userMessage, "API key is invalid")
+
+        let rateLimited = APIKeyValidationResult.rateLimited
+        XCTAssertFalse(rateLimited.isValid)
+        XCTAssertEqual(rateLimited.userMessage, "API Rate Limited (429)")
+
+        let quota = APIKeyValidationResult.quotaExhausted
+        XCTAssertFalse(quota.isValid)
+        XCTAssertEqual(quota.userMessage, "Quota Exhausted")
+
+        let network = APIKeyValidationResult.networkError(reason: "No connection")
+        XCTAssertFalse(network.isValid)
+        XCTAssertEqual(network.userMessage, "Network Error: No connection")
+    }
+
+    func testEmptyAndMalformedAPIKeyValidation() async {
+        let client = GeminiTranscriptionClient()
+
+        let emptyResult = await client.validateAPIKeyDetailed("")
+        XCTAssertFalse(emptyResult.isValid)
+        if case .invalidKey(let reason) = emptyResult {
+            XCTAssertTrue(reason.contains("empty"))
+        } else {
+            XCTFail("Expected invalidKey for empty input")
+        }
+
+        let whitespaceResult = await client.validateAPIKeyDetailed("   ")
+        XCTAssertFalse(whitespaceResult.isValid)
+
+        let malformedResult = await client.validateAPIKeyDetailed("key with spaces")
+        XCTAssertFalse(malformedResult.isValid)
+
+        let shortResult = await client.validateAPIKeyDetailed("short")
+        XCTAssertFalse(shortResult.isValid)
     }
 }

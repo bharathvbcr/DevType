@@ -1773,17 +1773,18 @@ final class PreferencesViewController: NSViewController,
 
         geminiKeySaveButton?.isEnabled = false
         geminiKeySaveButton?.title = "Validating..."
+        geminiKeyStatusPill?.update(text: "Validating Key...", tint: DevTypeTheme.accent)
 
         Task {
-            let isValid = await GeminiTranscriptionClient.shared.validateAPIKey(key)
+            let result = await GeminiTranscriptionClient.shared.validateAPIKeyDetailed(key)
             await MainActor.run {
-                if isValid {
+                if result.isValid {
                     try? GeminiAPIKeyStore.save(key)
                     self.geminiAPIKeyField.stringValue = ""
                     self.geminiAPIKeyField.placeholderString = "Key Saved (••••••••••••••••)"
-                    self.geminiKeyStatusPill?.update(text: "Key Valid & Saved", tint: DevTypeTheme.statusGreen)
+                    self.geminiKeyStatusPill?.update(text: result.userMessage, tint: DevTypeTheme.statusGreen)
                 } else {
-                    self.geminiKeyStatusPill?.update(text: "Invalid API Key", tint: DevTypeTheme.statusOrange)
+                    self.geminiKeyStatusPill?.update(text: result.userMessage, tint: DevTypeTheme.statusOrange)
                 }
                 self.geminiKeySaveButton?.title = "Save & Validate"
                 self.geminiKeySaveButton?.isEnabled = true
