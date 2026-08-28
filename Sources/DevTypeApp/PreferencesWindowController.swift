@@ -923,6 +923,7 @@ final class PreferencesViewController: NSViewController,
         SecretPreferences.setRequireBiometry(requireBiometrySwitch.state == .on)
         // Turning it on must take effect now, not after the current reuse window expires.
         BiometricGate.shared.invalidate()
+        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
     }
 
     private func buildSnippets(into stack: NSStackView) {
@@ -1138,6 +1139,7 @@ final class PreferencesViewController: NSViewController,
         guard let manager = hotkeyManager else {
             HotkeyPreferences.inlineSearchShortcut = shortcut
             reloadHotkeys()
+            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
             return
         }
         let status = manager.applyInlineSearchShortcut(shortcut)
@@ -1187,7 +1189,10 @@ final class PreferencesViewController: NSViewController,
             )
         )
         let failures = hotkeyManager?.applyMacros(macros) ?? []
-        if hotkeyManager == nil { HotkeyPreferences.saveMacros(macros) }
+        if hotkeyManager == nil {
+            HotkeyPreferences.saveMacros(macros)
+            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+        }
         reportRegistrationFailures(failures)
         macroArgumentField.stringValue = ""
         macroRecorder?.setShortcut(nil)
@@ -1212,7 +1217,10 @@ final class PreferencesViewController: NSViewController,
         guard macros.indices.contains(row) else { return }
         macros.remove(at: row)
         hotkeyManager?.applyMacros(macros)
-        if hotkeyManager == nil { HotkeyPreferences.saveMacros(macros) }
+        if hotkeyManager == nil {
+            HotkeyPreferences.saveMacros(macros)
+            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+        }
         reloadHotkeys()
     }
 
@@ -1949,6 +1957,7 @@ final class PreferencesViewController: NSViewController,
             manager.applyVoiceShortcut(shortcut)
         } else {
             HotkeyPreferences.voiceShortcut = shortcut
+            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         }
         reloadVoice()
     }
@@ -1957,6 +1966,8 @@ final class PreferencesViewController: NSViewController,
         HotkeyPreferences.resetVoiceShortcut()
         if let manager = hotkeyManager {
             manager.applyVoiceShortcut(HotkeyPreferences.voiceShortcut)
+        } else {
+            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         }
         reloadVoice()
     }
@@ -2195,6 +2206,7 @@ final class PreferencesViewController: NSViewController,
         guard let manager = hotkeyManager else {
             HotkeyPreferences.aiPaletteShortcut = shortcut
             reloadAI()
+            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
             return
         }
         let status = manager.applyAIPaletteShortcut(shortcut)

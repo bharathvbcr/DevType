@@ -16,6 +16,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var restartEngineMenuItem: NSMenuItem?
     private var permissionRecoveryMenuItem: NSMenuItem?
     private var openAtLoginMenuItem: NSMenuItem?
+    private var inlineSearchMenuItem: NSMenuItem?
+    private var smartDictationMenuItem: NSMenuItem?
+    private var shortcutsToggleMenuItem: NSMenuItem?
+    private var conflictsToggleMenuItem: NSMenuItem?
     private var menuHeaderStatusPill: PillBadgeView?
     /// §5.1: the custom menu-header view whose AX label tracks the status pill.
     private var menuHeaderAccessibilityHost: NSView?
@@ -94,6 +98,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.installEditMenu(force: true)
             self?.rebuildMenu()
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: .devTypePreferencesChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateDynamicMenuItems()
         }
 
         // §5.2: Differentiate Without Color / Reduce Motion / Reduce Transparency
@@ -455,20 +467,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             key: "M",
             modifiers: [.command, .shift]
         ))
-        menu.addItem(item(
+        let inlineItem = item(
             loc.s("menu.inlineSearch"),
             "magnifyingglass",
             #selector(toggleInlineSearch(_:)),
             key: hotkeyMenuKeyEquivalent(),
             modifiers: hotkeyMenuModifiers()
-        ))
-        menu.addItem(item(
+        )
+        menu.addItem(inlineItem)
+        inlineSearchMenuItem = inlineItem
+
+        let dictationItem = item(
             loc.s("menu.smartDictation"),
             "waveform.and.mic",
             #selector(startSmartDictation(_:)),
-            key: "v",
-            modifiers: [.command, .option]
-        ))
+            key: voiceMenuKeyEquivalent(),
+            modifiers: voiceMenuModifiers()
+        )
+        menu.addItem(dictationItem)
+        smartDictationMenuItem = dictationItem
         // The two secure-field routes. Neither needs a keystroke DevType has to observe: the menu
         // is driven by the mouse, the clipboard write is an API call, and the ⌘V is the user's own
         // key going to their own app. That is the whole reason these exist — inside a password
@@ -555,6 +572,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         shortcutsItem.state = HotkeyPreferences.shortcutsDisabled ? .off : .on
         menu.addItem(shortcutsItem)
+        shortcutsToggleMenuItem = shortcutsItem
 
         let conflictsItem = item(
             loc.s("menu.conflicts.toggle"),
@@ -563,6 +581,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         conflictsItem.state = SnippetStore.isConflictDetectionEnabled ? .on : .off
         menu.addItem(conflictsItem)
+        conflictsToggleMenuItem = conflictsItem
 
         menu.addItem(NSMenuItem.separator())
 
@@ -595,6 +614,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if carbon & UInt32(controlKey) != 0 { flags.insert(.control) }
         if carbon & UInt32(shiftKey) != 0 { flags.insert(.shift) }
         return flags
+    }
+
+    private func voiceMenuKeyEquivalent() -> String {
+        guard !HotkeyPreferences.shortcutsDisabled else { return "" }
+        let name = DevTypeShortcut.keyName(for: hotkeyManager.voiceShortcut.keyCode)
+        return name.count == 1 ? name.lowercased() : ""
+    }
+
+    private func voiceMenuModifiers() -> NSEvent.ModifierFlags {
+        let carbon = hotkeyManager.voiceShortcut.carbonModifiers
+        var flags: NSEvent.ModifierFlags = []
+        if carbon & UInt32(cmdKey) != 0 { flags.insert(.command) }
+        if carbon & UInt32(optionKey) != 0 { flags.insert(.option) }
+        if carbon & UInt32(controlKey) != 0 { flags.insert(.control) }
+        if carbon & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+        return flags
+    }
+
+    /// Synchronize all preference-dependent and dynamic menu items.
+    func updateDynamicMenuItems() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.updateDynamicMenuItems() }
+            return
+        }
+        assertMainThread()
+        inlineSearchMenuItem?.keyEquivalent = hotkeyMenuKeyEquivalent()
+        inlineSearchMenuItem?.keyEquivalentModifierMask = hotkeyMenuModifiers()
+
+        smartDictationMenuItem?.keyEquivalent = voiceMenuKeyEquivalent()
+        smartDictationMenuItem?.keyEquivalentModifierMask = voiceMenuModifiers()
+
+        shortcutsToggleMenuItem?.state = HotkeyPreferences.shortcutsDisabled ? .off : .on
+        conflictsToggleMenuItem?.state = SnippetStore.isConflictDetectionEnabled ? .on : .off
+
+        rebuildSecretsMenu()
+        rebuildRecentMenu()
+        refreshStatusItemUI()
     }
 
     private func rebuildRecentMenu() {
@@ -2021,11 +2077,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Status menu open/close
 
 extension AppDelegate: NSMenuDelegate {
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        updateDynamicMenuItems()
+    }
+
     /// AppKit paints the selection fill behind the status button while the menu is
     /// open but leaves a non-template image untouched, so the monogram is redrawn
     /// in the selected-menu ink for as long as the menu is up.
     public func menuWillOpen(_ menu: NSMenu) {
         isStatusMenuOpen = true
+        updateDynamicMenuItems()
     }
 
     public func menuDidClose(_ menu: NSMenu) {

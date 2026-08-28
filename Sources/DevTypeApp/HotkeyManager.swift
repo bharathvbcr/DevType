@@ -74,6 +74,7 @@ final class HotkeyManager {
         inlineSearchShortcut = shortcut
         lastRegistrationStatus = noErr
         registerAll()
+        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         return lastRegistrationStatus
     }
 
@@ -84,6 +85,7 @@ final class HotkeyManager {
         aiPaletteShortcut = shortcut
         lastAIPaletteRegistrationStatus = noErr
         registerAll()
+        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         return lastAIPaletteRegistrationStatus
     }
 
@@ -94,6 +96,7 @@ final class HotkeyManager {
         voiceShortcut = shortcut
         lastVoiceRegistrationStatus = noErr
         registerAll()
+        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         return lastVoiceRegistrationStatus
     }
 
@@ -109,6 +112,7 @@ final class HotkeyManager {
         HotkeyPreferences.saveMacros(updated)
         macros = updated
         registerAll()
+        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         return lastMacroRegistrationFailures
     }
 

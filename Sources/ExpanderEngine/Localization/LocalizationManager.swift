@@ -6,6 +6,8 @@ extension Notification.Name {
     /// `executableTarget`, which the test target cannot import) and into `ExpanderEngine`,
     /// so the en/ko/ja key + format-specifier parity can actually be asserted.
     public static let devTypeLanguageChanged = Notification.Name("devtype.language.changed")
+    /// Posted when preferences (hotkeys, voice, ai, general, secrets) are updated.
+    public static let devTypePreferencesChanged = Notification.Name("devtype.preferences.changed")
 }
 
 public enum AppLanguage: String, CaseIterable, Identifiable {
