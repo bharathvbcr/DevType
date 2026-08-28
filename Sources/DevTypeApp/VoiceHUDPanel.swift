@@ -8,7 +8,7 @@ public enum VoiceHUDState: Equatable, Sendable {
     case listening(modelName: String)
     case streaming(transcript: String, modelName: String)
     case transcribing(modelName: String)
-    case success(text: String)
+    case success(text: String, diffSegments: [TranscriptDiffEngine.Segment]? = nil)
     case error(message: String)
 }
 
@@ -176,16 +176,38 @@ public final class VoiceHUDPanel: NSPanel {
             updateAccessibility(status: stateLabel.stringValue, transcript: transcriptLabel.stringValue)
             showOnScreen()
 
-        case .success(let text):
+        case .success(let text, let diffSegments):
             updateStatus(loc.s("voice.hud.status.inserted"), color: DevTypeTheme.statusGreen)
-            let preview = text.count > 100 ? String(text.prefix(97)) + "…" : text
-            transcriptLabel.stringValue = preview
-            transcriptLabel.textColor = DevTypeTheme.textPrimary
+            if let diffSegments, diffSegments.contains(where: { $0.isCut }) {
+                let attrStr = NSMutableAttributedString()
+                for seg in diffSegments {
+                    if seg.isCut {
+                        let cutAttrs: [NSAttributedString.Key: Any] = [
+                            .font: DevTypeTheme.font(14.5, .regular),
+                            .foregroundColor: DevTypeTheme.textTertiary,
+                            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                            .strikethroughColor: DevTypeTheme.statusOrange
+                        ]
+                        attrStr.append(NSAttributedString(string: seg.text + " ", attributes: cutAttrs))
+                    } else {
+                        let keptAttrs: [NSAttributedString.Key: Any] = [
+                            .font: DevTypeTheme.font(14.5, .regular),
+                            .foregroundColor: DevTypeTheme.textPrimary
+                        ]
+                        attrStr.append(NSAttributedString(string: seg.text + " ", attributes: keptAttrs))
+                    }
+                }
+                transcriptLabel.attributedStringValue = attrStr
+            } else {
+                let preview = text.count > 100 ? String(text.prefix(97)) + "…" : text
+                transcriptLabel.stringValue = preview
+                transcriptLabel.textColor = DevTypeTheme.textPrimary
+            }
             fluidWaveView.isTranscribing = false
             updateAudioLevel(0)
             blobContainer.setActive(false)
-            scheduleSize(forText: preview)
-            updateAccessibility(status: stateLabel.stringValue, transcript: preview)
+            scheduleSize(forText: text)
+            updateAccessibility(status: stateLabel.stringValue, transcript: text)
             showOnScreen()
             scheduleAutoDismiss(after: VoiceHUDPresentationTiming.successHoldDuration)
 

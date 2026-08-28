@@ -142,6 +142,7 @@ public final class VoiceAudioRecorder: @unchecked Sendable {
 
             let bufferSize: AVAudioFrameCount = 1024
 
+            inputNode.removeTap(onBus: 0)
             inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] buffer, _ in
                 guard let self else { return }
 
@@ -225,7 +226,8 @@ public final class VoiceAudioRecorder: @unchecked Sendable {
             let sessionID = activeSessionUUID?.uuidString ?? UUID().uuidString
             let finalWavURL = cacheDirectoryURL.appendingPathComponent("session_\(sessionID).wav")
 
-            if let rawData = try? Data(contentsOf: journal), rawData.count > 0 {
+            if let rawData = try? Data(contentsOf: journal), rawData.count > 640 {
+                // 640 bytes = 20ms at 16kHz/16-bit mono — anything smaller is noise/silence
                 let wavData = Self.createWavData(fromPCM: rawData, sampleRate: 16000, channels: 1, bitsPerSample: 16)
                 try? wavData.write(to: finalWavURL)
                 try? FileManager.default.removeItem(at: journal)
@@ -234,6 +236,8 @@ public final class VoiceAudioRecorder: @unchecked Sendable {
                 return finalWavURL
             }
 
+            // Zero-buffer or trivially short recording — no usable audio captured
+            DevTypeLog.app.info("[Voice] Discarding recording with \(self.totalBytesRecorded) bytes (below minimum threshold)")
             try? FileManager.default.removeItem(at: journal)
             self.journalURL = nil
             return nil

@@ -1253,12 +1253,12 @@ final class PreferencesViewController: NSViewController,
         )
         modelsHint.translatesAutoresizingMaskIntoConstraints = false
 
-        // Active model selector row
+        // Active transcription engine selector row
         voiceModelPopup.translatesAutoresizingMaskIntoConstraints = false
         voiceModelPopup.removeAllItems()
-        for model in VoiceModelType.allCases {
-            voiceModelPopup.addItem(withTitle: model.descriptor.name)
-            voiceModelPopup.lastItem?.representedObject = model.rawValue
+        for engine in TranscriptionEngine.allCases {
+            voiceModelPopup.addItem(withTitle: engine.displayName)
+            voiceModelPopup.lastItem?.representedObject = engine.rawValue
         }
         voiceModelPopup.target = self
         voiceModelPopup.action = #selector(voiceModelPopupChanged(_:))
@@ -1572,8 +1572,8 @@ final class PreferencesViewController: NSViewController,
             tint: micGranted ? DevTypeTheme.statusGreen : DevTypeTheme.accent
         )
 
-        let currentModel = VoicePreferences.selectedModel
-        if let index = VoiceModelType.allCases.firstIndex(of: currentModel) {
+        let currentEngine = VoicePreferences.transcriptionEngine
+        if let index = TranscriptionEngine.allCases.firstIndex(of: currentEngine) {
             voiceModelPopup.selectItem(at: index)
         }
 
@@ -1688,8 +1688,8 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func voiceModelPopupChanged(_ sender: NSPopUpButton) {
         guard let raw = sender.selectedItem?.representedObject as? String,
-              let model = VoiceModelType(rawValue: raw) else { return }
-        VoicePreferences.selectedModel = model
+              let engine = TranscriptionEngine(rawValue: raw) else { return }
+        VoicePreferences.transcriptionEngine = engine
     }
 
     @objc private func voiceTonePopupChanged(_ sender: NSPopUpButton) {

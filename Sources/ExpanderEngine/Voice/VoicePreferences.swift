@@ -11,6 +11,12 @@ public enum VoicePreferences {
     public static let realTimeTypingKey = "devtype.voice.realTimeTyping"
     public static let customDictionaryKey = "devtype.voice.customDictionary"
     public static let pushToTalkShortcutKey = "devtype.voice.hotkey"
+    public static let transcriptionEngineKey = "devtype.voice.transcriptionEngine"
+    public static let verbatimModeKey = "devtype.voice.verbatimMode"
+    public static let perAppToneOverridesKey = "devtype.voice.perAppToneOverrides"
+    public static let localLLMEndpointKey = "devtype.voice.localLLMEndpoint"
+    public static let localLLMModelKey = "devtype.voice.localLLMModel"
+    public static let localLLMTimeoutKey = "devtype.voice.localLLMTimeout"
 
     // MARK: - Selected Model
 
@@ -139,6 +145,108 @@ public enum VoicePreferences {
         customDictionary = dict
     }
 
+    // MARK: - Transcription Engine
+
+    /// The active transcription engine. Defaults to `.gemini` (Gemini 3.5 Transcribe).
+    /// Falls back to `.appleSpeech` when no API key is configured.
+    public static var transcriptionEngine: TranscriptionEngine {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: transcriptionEngineKey),
+                  let engine = TranscriptionEngine(rawValue: raw) else {
+                return .gemini
+            }
+            return engine
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: transcriptionEngineKey)
+        }
+    }
+
+    /// The effective engine after checking prerequisites (API key availability).
+    /// Use this instead of `transcriptionEngine` at call sites to ensure graceful fallback.
+    public static var effectiveEngine: TranscriptionEngine {
+        let preferred = transcriptionEngine
+        if preferred.requiresAPIKey && !GeminiAPIKeyStore.hasKey {
+            return .appleSpeech
+        }
+        return preferred
+    }
+
+    // MARK: - Verbatim Mode
+
+    /// When enabled, bypasses all model cleanup — raw transcript only.
+    public static var isVerbatimModeEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: verbatimModeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: verbatimModeKey) }
+    }
+
+    // MARK: - Per-App Tone Overrides
+
+    /// User-customizable bundle-id → ToneCategory overrides.
+    /// Augments `ToneCategory.category(forBundleID:)` with user preferences.
+    public static var perAppToneOverrides: [String: String] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: perAppToneOverridesKey),
+                  let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
+                return [:]
+            }
+            return dict
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: perAppToneOverridesKey)
+            }
+        }
+    }
+
+    /// Resolves the effective tone category for a given app, checking user overrides first.
+    public static func effectiveToneCategory(forBundleID bundleID: String?) -> ToneCategory {
+        if let bundleID,
+           let overrideRaw = perAppToneOverrides[bundleID],
+           let override = ToneCategory(rawValue: overrideRaw) {
+            return override
+        }
+        return ToneCategory.category(forBundleID: bundleID)
+    }
+
+    // MARK: - Local LLM Configuration
+
+    /// The local OpenAI-compatible or Ollama endpoint URL (e.g. `http://localhost:11434/v1/chat/completions` or `http://localhost:1234/v1/chat/completions`).
+    public static var localLLMEndpoint: URL {
+        get {
+            if let string = UserDefaults.standard.string(forKey: localLLMEndpointKey),
+               let url = URL(string: string) {
+                return url
+            }
+            return URL(string: "http://localhost:11434/v1/chat/completions")!
+        }
+        set {
+            UserDefaults.standard.set(newValue.absoluteString, forKey: localLLMEndpointKey)
+        }
+    }
+
+    /// The model name identifier to pass to the local LLM server (e.g. `llama3.2`, `qwen2.5`, `mistral`).
+    public static var localLLMModel: String {
+        get {
+            UserDefaults.standard.string(forKey: localLLMModelKey) ?? "llama3.2"
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: localLLMModelKey)
+        }
+    }
+
+    /// Watchdog timeout in seconds for local LLM cleanup before falling back to raw transcript.
+    /// Keeps user dictation fast and responsive (default: 3.0s).
+    public static var localLLMTimeout: TimeInterval {
+        get {
+            let val = UserDefaults.standard.double(forKey: localLLMTimeoutKey)
+            return val > 0 ? val : 3.0
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: localLLMTimeoutKey)
+        }
+    }
+
     public static let customVoiceTriggersKey = "devtype.voice.customTriggers"
 
     // MARK: - Custom Voice AI Triggers
@@ -206,5 +314,11 @@ public enum VoicePreferences {
         UserDefaults.standard.removeObject(forKey: handsFreeKey)
         UserDefaults.standard.removeObject(forKey: customDictionaryKey)
         UserDefaults.standard.removeObject(forKey: customVoiceTriggersKey)
+        UserDefaults.standard.removeObject(forKey: transcriptionEngineKey)
+        UserDefaults.standard.removeObject(forKey: verbatimModeKey)
+        UserDefaults.standard.removeObject(forKey: perAppToneOverridesKey)
+        UserDefaults.standard.removeObject(forKey: localLLMEndpointKey)
+        UserDefaults.standard.removeObject(forKey: localLLMModelKey)
+        UserDefaults.standard.removeObject(forKey: localLLMTimeoutKey)
     }
 }
