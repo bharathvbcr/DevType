@@ -30,6 +30,7 @@ public struct GeminiTranscriptionResult: Sendable, Equatable {
 
 /// A raw URLSession-based Gemini API client for the `gemini-3.5-transcribe` model.
 public actor GeminiTranscriptionClient {
+    public static let shared = GeminiTranscriptionClient()
     private let session: URLSession
     private let baseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-transcribe:streamGenerateContent?alt=sse")!
     

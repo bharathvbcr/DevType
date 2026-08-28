@@ -352,6 +352,16 @@ final class PreferencesViewController: NSViewController,
     private var voiceModelListenerToken: UUID?
     private var voiceMicPermissionPill: PillBadgeView?
 
+    // Voice Engine & API Settings
+    private let geminiAPIKeyField = NSSecureTextField()
+    private var geminiKeyStatusPill: PillBadgeView?
+    private var geminiKeySaveButton: CapsuleButton?
+    private var geminiKeyDeleteButton: CapsuleButton?
+    private let geminiConfigContainer = NSStackView()
+    private let localLLMEndpointField = NSTextField()
+    private let localLLMModelField = NSTextField()
+    private let localLLMConfigContainer = NSStackView()
+
     init(hotkeyManager: HotkeyManager?) {
         self.hotkeyManager = hotkeyManager
         super.init(nibName: nil, bundle: nil)
@@ -1243,10 +1253,10 @@ final class PreferencesViewController: NSViewController,
 
         stackInCard(permCard, views: [permHint, permActionsRow])
 
-        // 1. Models Card
+        // 1. Models Card / Engine Configuration Card
         let modelsCard = makeCard(title: loc.s("prefs.voice.models.card"), symbol: "waveform.and.mic")
         let modelsHint = DevTypeTheme.makeLabel(
-            loc.s("prefs.voice.models.hint"),
+            "Select your speech recognition and correction engine. Gemini 3.5 Transcribe delivers high-speed speech-to-text with contextual self-correction formatting.",
             font: DevTypeTheme.font(10.5),
             color: DevTypeTheme.textTertiary,
             wrapping: true
@@ -1270,85 +1280,94 @@ final class PreferencesViewController: NSViewController,
             font: DevTypeTheme.font(12, .semibold)
         )
 
-        var modelCards: [NSView] = [modelsHint, activeModelRow, DevTypeTheme.makeHairline()]
+        // Gemini API Configuration Box
+        geminiConfigContainer.orientation = .vertical
+        geminiConfigContainer.alignment = .leading
+        geminiConfigContainer.spacing = 6
+        geminiConfigContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        for type in [VoiceModelType.voxtralMini4B, VoiceModelType.funASRNano] {
-            let desc = type.descriptor
-            let container = NSStackView()
-            container.orientation = .vertical
-            container.alignment = .leading
-            container.spacing = 4
-            container.translatesAutoresizingMaskIntoConstraints = false
+        let geminiLabel = DevTypeTheme.makeLabel("Gemini API Key (Securely stored in macOS Keychain):", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
 
-            let headerRow = NSStackView()
-            headerRow.orientation = .horizontal
-            headerRow.alignment = .centerY
-            headerRow.spacing = 8
-            headerRow.translatesAutoresizingMaskIntoConstraints = false
+        geminiAPIKeyField.translatesAutoresizingMaskIntoConstraints = false
+        geminiAPIKeyField.font = DevTypeTheme.font(12)
+        geminiAPIKeyField.placeholderString = GeminiAPIKeyStore.hasKey ? "Key Saved (••••••••••••••••)" : "Paste Gemini API Key (AIzaSy...)"
+        geminiAPIKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
 
-            let nameLabel = DevTypeTheme.makeLabel(desc.name, font: DevTypeTheme.font(12.5, .bold), color: DevTypeTheme.textPrimary)
-            let badge = PillBadgeView(text: desc.modelSizeFormatted, tint: desc.isRecommended ? DevTypeTheme.accent : DevTypeTheme.statusGray, showsDot: false)
-            let paramLabel = DevTypeTheme.makeLabel(desc.parameterCount, font: DevTypeTheme.font(10.5), color: DevTypeTheme.textTertiary)
+        let keyPill = PillBadgeView(text: GeminiAPIKeyStore.hasKey ? "Key Configured" : "No Key Set", tint: GeminiAPIKeyStore.hasKey ? DevTypeTheme.statusGreen : DevTypeTheme.statusOrange, showsDot: true)
+        keyPill.translatesAutoresizingMaskIntoConstraints = false
+        geminiKeyStatusPill = keyPill
 
-            headerRow.addArrangedSubview(nameLabel)
-            headerRow.addArrangedSubview(badge)
-            headerRow.addArrangedSubview(paramLabel)
+        let saveBtn = CapsuleButton(
+            title: "Save & Validate",
+            symbol: "key.fill",
+            style: .primary,
+            target: self,
+            action: #selector(geminiKeySaveClicked)
+        )
+        geminiKeySaveButton = saveBtn
 
-            let descLabel = DevTypeTheme.makeLabel(desc.description, font: DevTypeTheme.font(10.5), color: DevTypeTheme.textSecondary, wrapping: true)
-            descLabel.translatesAutoresizingMaskIntoConstraints = false
+        let deleteBtn = CapsuleButton(
+            title: "Delete",
+            symbol: "trash",
+            style: .destructive,
+            target: self,
+            action: #selector(geminiKeyDeleteClicked)
+        )
+        geminiKeyDeleteButton = deleteBtn
 
-            let progressBar = NSProgressIndicator()
-            progressBar.translatesAutoresizingMaskIntoConstraints = false
-            progressBar.isIndeterminate = false
-            progressBar.minValue = 0.0
-            progressBar.maxValue = 1.0
-            progressBar.doubleValue = 0.0
-            progressBar.style = .bar
-            progressBar.isHidden = true
-            progressBar.controlSize = .small
-            voiceModelDownloadProgressBars[type] = progressBar
+        let geminiActionsRow = NSStackView(views: [geminiAPIKeyField, keyPill, saveBtn, deleteBtn])
+        geminiActionsRow.orientation = .horizontal
+        geminiActionsRow.spacing = 8
+        geminiActionsRow.alignment = .centerY
+        geminiActionsRow.translatesAutoresizingMaskIntoConstraints = false
 
-            let statusLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10.5, .medium), color: DevTypeTheme.textSecondary)
-            statusLabel.translatesAutoresizingMaskIntoConstraints = false
-            voiceModelStatusLabels[type] = statusLabel
+        let geminiSubHint = DevTypeTheme.makeLabel(
+            "Uses gemini-3.5-transcribe via streaming URLSession. Get an API key from Google AI Studio (aistudio.google.com).",
+            font: DevTypeTheme.font(10),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
 
-            let actionButton = CapsuleButton(
-                title: loc.s("common.download"),
-                symbol: "arrow.down.circle",
-                style: .primary,
-                target: self,
-                action: #selector(voiceModelActionButtonClicked(_:))
-            )
-            voiceModelActionButtons[type] = actionButton
+        geminiConfigContainer.addArrangedSubview(geminiLabel)
+        geminiConfigContainer.addArrangedSubview(geminiActionsRow)
+        geminiConfigContainer.addArrangedSubview(geminiSubHint)
 
-            let deleteButton = CapsuleButton(
-                title: loc.s("common.remove"),
-                symbol: "trash",
-                style: .destructive,
-                target: self,
-                action: #selector(voiceModelDeleteButtonClicked(_:))
-            )
-            voiceModelDeleteButtons[type] = deleteButton
+        // Local LLM Configuration Box
+        localLLMConfigContainer.orientation = .vertical
+        localLLMConfigContainer.alignment = .leading
+        localLLMConfigContainer.spacing = 6
+        localLLMConfigContainer.translatesAutoresizingMaskIntoConstraints = false
 
-            let actionsRow = NSStackView()
-            actionsRow.orientation = .horizontal
-            actionsRow.spacing = 8
-            actionsRow.alignment = .centerY
-            actionsRow.translatesAutoresizingMaskIntoConstraints = false
-            actionsRow.addArrangedSubview(actionButton)
-            actionsRow.addArrangedSubview(deleteButton)
-            actionsRow.addArrangedSubview(statusLabel)
+        let localEndpointLabel = DevTypeTheme.makeLabel("Local LLM Endpoint URL:", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+        localLLMEndpointField.translatesAutoresizingMaskIntoConstraints = false
+        localLLMEndpointField.font = DevTypeTheme.font(12)
+        localLLMEndpointField.placeholderString = "http://localhost:11434/v1/chat/completions"
+        localLLMEndpointField.target = self
+        localLLMEndpointField.action = #selector(localLLMEndpointChanged)
+        localLLMEndpointField.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
 
-            container.addArrangedSubview(headerRow)
-            container.addArrangedSubview(descLabel)
-            container.addArrangedSubview(progressBar)
-            container.addArrangedSubview(actionsRow)
+        let localModelLabel = DevTypeTheme.makeLabel("Local Model Name:", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+        localLLMModelField.translatesAutoresizingMaskIntoConstraints = false
+        localLLMModelField.font = DevTypeTheme.font(12)
+        localLLMModelField.placeholderString = "llama3.2"
+        localLLMModelField.target = self
+        localLLMModelField.action = #selector(localLLMModelChanged)
+        localLLMModelField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
-            progressBar.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
-            modelCards.append(container)
-            modelCards.append(DevTypeTheme.makeHairline())
-        }
+        let localSubHint = DevTypeTheme.makeLabel(
+            "Uses Apple Intelligence (SystemLanguageModel) on macOS 26+, or your local Ollama / LM Studio server.",
+            font: DevTypeTheme.font(10),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
 
+        localLLMConfigContainer.addArrangedSubview(localEndpointLabel)
+        localLLMConfigContainer.addArrangedSubview(localLLMEndpointField)
+        localLLMConfigContainer.addArrangedSubview(localModelLabel)
+        localLLMConfigContainer.addArrangedSubview(localLLMModelField)
+        localLLMConfigContainer.addArrangedSubview(localSubHint)
+
+        let modelCards: [NSView] = [modelsHint, activeModelRow, DevTypeTheme.makeHairline(), geminiConfigContainer, localLLMConfigContainer]
         stackInCard(modelsCard, views: modelCards)
 
         // 2. Smart Dictation Options Card
@@ -1577,6 +1596,27 @@ final class PreferencesViewController: NSViewController,
             voiceModelPopup.selectItem(at: index)
         }
 
+        let hasGeminiKey = GeminiAPIKeyStore.hasKey
+        geminiKeyStatusPill?.update(
+            text: hasGeminiKey ? "Key Configured" : "No Key Set",
+            tint: hasGeminiKey ? DevTypeTheme.statusGreen : DevTypeTheme.statusOrange
+        )
+        if hasGeminiKey && geminiAPIKeyField.stringValue.isEmpty {
+            geminiAPIKeyField.placeholderString = "Key Saved (••••••••••••••••)"
+        } else if !hasGeminiKey {
+            geminiAPIKeyField.placeholderString = "Paste Gemini API Key (AIzaSy...)"
+        }
+
+        geminiConfigContainer.isHidden = currentEngine != .gemini
+        localLLMConfigContainer.isHidden = currentEngine != .localLLM
+
+        if localLLMEndpointField.stringValue.isEmpty {
+            localLLMEndpointField.stringValue = VoicePreferences.localLLMEndpoint.absoluteString
+        }
+        if localLLMModelField.stringValue.isEmpty {
+            localLLMModelField.stringValue = VoicePreferences.localLLMModel
+        }
+
         let currentTone = VoicePreferences.tone
         if let index = DictationTone.allCases.firstIndex(of: currentTone) {
             voiceTonePopup.selectItem(at: index)
@@ -1690,6 +1730,53 @@ final class PreferencesViewController: NSViewController,
         guard let raw = sender.selectedItem?.representedObject as? String,
               let engine = TranscriptionEngine(rawValue: raw) else { return }
         VoicePreferences.transcriptionEngine = engine
+        reloadVoice()
+    }
+
+    @objc private func geminiKeySaveClicked() {
+        let key = geminiAPIKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+
+        geminiKeySaveButton?.isEnabled = false
+        geminiKeySaveButton?.title = "Validating..."
+
+        Task {
+            let isValid = await GeminiTranscriptionClient.shared.validateAPIKey(key)
+            await MainActor.run {
+                if isValid {
+                    try? GeminiAPIKeyStore.save(key)
+                    self.geminiAPIKeyField.stringValue = ""
+                    self.geminiAPIKeyField.placeholderString = "Key Saved (••••••••••••••••)"
+                    self.geminiKeyStatusPill?.update(text: "Key Valid & Saved", tint: DevTypeTheme.statusGreen)
+                } else {
+                    self.geminiKeyStatusPill?.update(text: "Invalid API Key", tint: DevTypeTheme.statusOrange)
+                }
+                self.geminiKeySaveButton?.title = "Save & Validate"
+                self.geminiKeySaveButton?.isEnabled = true
+                self.reloadVoice()
+            }
+        }
+    }
+
+    @objc private func geminiKeyDeleteClicked() {
+        try? GeminiAPIKeyStore.delete()
+        geminiAPIKeyField.stringValue = ""
+        geminiAPIKeyField.placeholderString = "Paste Gemini API Key (AIzaSy...)"
+        reloadVoice()
+    }
+
+    @objc private func localLLMEndpointChanged() {
+        let text = localLLMEndpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty, let url = URL(string: text) {
+            VoicePreferences.localLLMEndpoint = url
+        }
+    }
+
+    @objc private func localLLMModelChanged() {
+        let text = localLLMModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty {
+            VoicePreferences.localLLMModel = text
+        }
     }
 
     @objc private func voiceTonePopupChanged(_ sender: NSPopUpButton) {
