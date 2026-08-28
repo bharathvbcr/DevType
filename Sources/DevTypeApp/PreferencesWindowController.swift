@@ -359,7 +359,10 @@ final class PreferencesViewController: NSViewController,
     private var geminiKeyDeleteButton: CapsuleButton?
     private let geminiConfigContainer = NSStackView()
     private let localLLMEndpointField = NSTextField()
+    private let localLLMModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let localLLMModelField = NSTextField()
+    private var localLLMScanButton: CapsuleButton?
+    private var localLLMStatusPill: PillBadgeView?
     private let localLLMConfigContainer = NSStackView()
 
     init(hotkeyManager: HotkeyManager?) {
@@ -1338,33 +1341,66 @@ final class PreferencesViewController: NSViewController,
         localLLMConfigContainer.spacing = 6
         localLLMConfigContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        let localEndpointLabel = DevTypeTheme.makeLabel("Local LLM Endpoint URL:", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+        let localEndpointLabel = DevTypeTheme.makeLabel("Local LLM Server Endpoint:", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+
         localLLMEndpointField.translatesAutoresizingMaskIntoConstraints = false
         localLLMEndpointField.font = DevTypeTheme.font(12)
         localLLMEndpointField.placeholderString = "http://localhost:11434/v1/chat/completions"
         localLLMEndpointField.target = self
         localLLMEndpointField.action = #selector(localLLMEndpointChanged)
-        localLLMEndpointField.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
+        localLLMEndpointField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
 
-        let localModelLabel = DevTypeTheme.makeLabel("Local Model Name:", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+        let scanBtn = CapsuleButton(
+            title: "Scan Models",
+            symbol: "arrow.clockwise",
+            style: .secondary,
+            target: self,
+            action: #selector(scanLocalModelsClicked)
+        )
+        localLLMScanButton = scanBtn
+
+        let statusPill = PillBadgeView(text: "Local Endpoint", tint: DevTypeTheme.statusGray, showsDot: false)
+        statusPill.translatesAutoresizingMaskIntoConstraints = false
+        localLLMStatusPill = statusPill
+
+        let endpointRow = NSStackView(views: [localLLMEndpointField, scanBtn, statusPill])
+        endpointRow.orientation = .horizontal
+        endpointRow.spacing = 8
+        endpointRow.alignment = .centerY
+        endpointRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let localModelLabel = DevTypeTheme.makeLabel("Available Speech / Cleanup Models:", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+
+        localLLMModelPopup.translatesAutoresizingMaskIntoConstraints = false
+        localLLMModelPopup.target = self
+        localLLMModelPopup.action = #selector(localLLMModelPopupChanged(_:))
+        localLLMModelPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+
         localLLMModelField.translatesAutoresizingMaskIntoConstraints = false
         localLLMModelField.font = DevTypeTheme.font(12)
-        localLLMModelField.placeholderString = "llama3.2"
+        localLLMModelField.placeholderString = "Custom model identifier"
         localLLMModelField.target = self
         localLLMModelField.action = #selector(localLLMModelChanged)
         localLLMModelField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        localLLMModelField.isHidden = true
+
+        let modelPickerRow = NSStackView(views: [localLLMModelPopup, localLLMModelField])
+        modelPickerRow.orientation = .horizontal
+        modelPickerRow.spacing = 8
+        modelPickerRow.alignment = .centerY
+        modelPickerRow.translatesAutoresizingMaskIntoConstraints = false
 
         let localSubHint = DevTypeTheme.makeLabel(
-            "Uses Apple Intelligence (SystemLanguageModel) on macOS 26+, or your local Ollama / LM Studio server.",
+            "Select an installed Ollama / LM Studio model from the dropdown, or scan your local server to detect active models.",
             font: DevTypeTheme.font(10),
             color: DevTypeTheme.textTertiary,
             wrapping: true
         )
 
         localLLMConfigContainer.addArrangedSubview(localEndpointLabel)
-        localLLMConfigContainer.addArrangedSubview(localLLMEndpointField)
+        localLLMConfigContainer.addArrangedSubview(endpointRow)
         localLLMConfigContainer.addArrangedSubview(localModelLabel)
-        localLLMConfigContainer.addArrangedSubview(localLLMModelField)
+        localLLMConfigContainer.addArrangedSubview(modelPickerRow)
         localLLMConfigContainer.addArrangedSubview(localSubHint)
 
         let modelCards: [NSView] = [modelsHint, activeModelRow, DevTypeTheme.makeHairline(), geminiConfigContainer, localLLMConfigContainer]
@@ -1613,9 +1649,7 @@ final class PreferencesViewController: NSViewController,
         if localLLMEndpointField.stringValue.isEmpty {
             localLLMEndpointField.stringValue = VoicePreferences.localLLMEndpoint.absoluteString
         }
-        if localLLMModelField.stringValue.isEmpty {
-            localLLMModelField.stringValue = VoicePreferences.localLLMModel
-        }
+        refreshLocalLLMModelsPopup()
 
         let currentTone = VoicePreferences.tone
         if let index = DictationTone.allCases.firstIndex(of: currentTone) {
@@ -1776,6 +1810,91 @@ final class PreferencesViewController: NSViewController,
         let text = localLLMModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty {
             VoicePreferences.localLLMModel = text
+        }
+    }
+
+    @objc private func localLLMModelPopupChanged(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String else { return }
+        if raw == "__custom__" {
+            localLLMModelField.isHidden = false
+            localLLMModelField.stringValue = VoicePreferences.localLLMModel
+        } else {
+            localLLMModelField.isHidden = true
+            VoicePreferences.localLLMModel = raw
+            localLLMModelField.stringValue = raw
+        }
+    }
+
+    @objc private func scanLocalModelsClicked() {
+        localLLMScanButton?.isEnabled = false
+        localLLMScanButton?.title = "Scanning..."
+        localLLMStatusPill?.update(text: "Scanning...", tint: DevTypeTheme.accent)
+
+        let endpoint = VoicePreferences.localLLMEndpoint
+        Task {
+            let discovered = await LocalLLMCleanupClient.shared.fetchAvailableLocalModels(endpoint: endpoint)
+            await MainActor.run {
+                self.localLLMScanButton?.isEnabled = true
+                self.localLLMScanButton?.title = "Scan Models"
+                if discovered.isEmpty {
+                    self.localLLMStatusPill?.update(text: "No Server / No Models", tint: DevTypeTheme.statusOrange)
+                } else {
+                    self.localLLMStatusPill?.update(text: "\(discovered.count) Models Found", tint: DevTypeTheme.statusGreen)
+                }
+                self.refreshLocalLLMModelsPopup(additionalDiscoveredModels: discovered)
+            }
+        }
+    }
+
+    private func refreshLocalLLMModelsPopup(additionalDiscoveredModels: [String] = []) {
+        let currentSelectedModel = VoicePreferences.localLLMModel
+        localLLMModelPopup.removeAllItems()
+
+        // 1. Preset recommended models
+        let presets: [(title: String, id: String)] = [
+            ("Llama 3.2 (3B - Fast & Recommended)", "llama3.2"),
+            ("Llama 3.2 1B (1B - Ultra Fast)", "llama3.2:1b"),
+            ("Qwen 2.5 (3B)", "qwen2.5:3b"),
+            ("Qwen 2.5 (7B)", "qwen2.5:7b"),
+            ("Phi-3.5 (3.8B)", "phi3.5"),
+            ("Mistral (7B)", "mistral"),
+            ("Gemma 2 (2B)", "gemma2:2b"),
+            ("DeepSeek R1 (1.5B)", "deepseek-r1:1.5b"),
+            ("DeepSeek R1 (7B)", "deepseek-r1:7b")
+        ]
+
+        for p in presets {
+            localLLMModelPopup.addItem(withTitle: p.title)
+            localLLMModelPopup.lastItem?.representedObject = p.id
+        }
+
+        // 2. Add dynamically discovered models from Ollama / LM Studio (if not already in presets)
+        var addedSeparator = false
+        for modelName in additionalDiscoveredModels {
+            if !presets.contains(where: { $0.id == modelName }) {
+                if !addedSeparator {
+                    localLLMModelPopup.menu?.addItem(NSMenuItem.separator())
+                    addedSeparator = true
+                }
+                localLLMModelPopup.addItem(withTitle: "\(modelName) (Installed)")
+                localLLMModelPopup.lastItem?.representedObject = modelName
+            }
+        }
+
+        // 3. Custom model option
+        localLLMModelPopup.menu?.addItem(NSMenuItem.separator())
+        localLLMModelPopup.addItem(withTitle: "Custom Model Identifier...")
+        localLLMModelPopup.lastItem?.representedObject = "__custom__"
+
+        // Select the active model
+        if let matchIndex = localLLMModelPopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == currentSelectedModel }) {
+            localLLMModelPopup.selectItem(at: matchIndex)
+            localLLMModelField.isHidden = true
+        } else {
+            // It's a custom model
+            localLLMModelPopup.selectItem(at: localLLMModelPopup.numberOfItems - 1)
+            localLLMModelField.isHidden = false
+            localLLMModelField.stringValue = currentSelectedModel
         }
     }
 

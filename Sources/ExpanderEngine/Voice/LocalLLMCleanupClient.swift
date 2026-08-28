@@ -172,6 +172,53 @@ public actor LocalLLMCleanupClient {
         }
     }
 
+    /// Discovers available models from the local endpoint (Ollama `/api/tags` or OpenAI-compatible `/v1/models`).
+    public func fetchAvailableLocalModels(endpoint: URL) async -> [String] {
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            return []
+        }
+
+        var discovered: [String] = []
+
+        // 1. Try Ollama /api/tags
+        components.path = "/api/tags"
+        if let ollamaURL = components.url {
+            var req = URLRequest(url: ollamaURL)
+            req.timeoutInterval = 2.0
+            if let (data, resp) = try? await session.data(for: req),
+               let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let models = json["models"] as? [[String: Any]] {
+                for m in models {
+                    if let name = m["name"] as? String {
+                        discovered.append(name)
+                    }
+                }
+            }
+        }
+
+        // 2. If no models from Ollama, try OpenAI-compatible /v1/models (LM Studio, vLLM, LocalAI)
+        if discovered.isEmpty {
+            components.path = "/v1/models"
+            if let modelsURL = components.url {
+                var req = URLRequest(url: modelsURL)
+                req.timeoutInterval = 2.0
+                if let (data, resp) = try? await session.data(for: req),
+                   let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let dataArr = json["data"] as? [[String: Any]] {
+                    for m in dataArr {
+                        if let id = m["id"] as? String {
+                            discovered.append(id)
+                        }
+                    }
+                }
+            }
+        }
+
+        return discovered
+    }
+
     // MARK: - Prompt Optimization for Small / Local LLMs
 
     /// Builds a compact, few-shot prompt tailored specifically for smaller (1B - 8B) models.

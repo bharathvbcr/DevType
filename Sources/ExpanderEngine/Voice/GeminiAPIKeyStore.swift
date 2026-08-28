@@ -3,15 +3,17 @@ import Security
 
 /// Keychain-backed storage for the Gemini API key
 public enum GeminiAPIKeyStore {
-    private static let serviceName = "com.devtype.gemini-api-key"
+    public static let defaultServiceName = "com.devtype.gemini-api-key"
+    public static let accountName = "GeminiAPIKey"
     
     /// Saves the API key to the keychain
-    public static func save(_ key: String) throws {
+    public static func save(_ key: String, serviceName: String = defaultServiceName) throws {
         let keyData = key.data(using: .utf8)!
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: accountName
         ]
         
         var status = SecItemCopyMatching(query as CFDictionary, nil)
@@ -30,6 +32,7 @@ public enum GeminiAPIKeyStore {
             let addQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: serviceName,
+                kSecAttrAccount as String: accountName,
                 kSecValueData as String: keyData,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
             ]
@@ -43,10 +46,11 @@ public enum GeminiAPIKeyStore {
     }
     
     /// Loads the API key from the keychain
-    public static func load() -> String? {
+    public static func load(serviceName: String = defaultServiceName) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: accountName,
             kSecReturnData as String: kCFBooleanTrue!,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -62,10 +66,11 @@ public enum GeminiAPIKeyStore {
     }
     
     /// Deletes the API key from the keychain
-    public static func delete() throws {
+    public static func delete(serviceName: String = defaultServiceName) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: accountName
         ]
         
         let status = SecItemDelete(query as CFDictionary)
