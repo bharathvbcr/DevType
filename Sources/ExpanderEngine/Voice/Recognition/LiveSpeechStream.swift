@@ -37,6 +37,9 @@ public final class LiveSpeechStream: @unchecked Sendable {
     private var taskGeneration = 0
     private var segmentIndex = 0
     private var currentRevision: UInt64 = 0
+    /// Last text seen for the segment in flight, so the segment can be sealed with its
+    /// best transcription when the task ends without reporting `isFinal`.
+    private var currentText = ""
     private var consecutiveEmptyRestarts = 0
     private var isFinished = false
 
@@ -148,6 +151,7 @@ public final class LiveSpeechStream: @unchecked Sendable {
             if let result {
                 let text = result.bestTranscription.formattedString
                 currentRevision += 1
+                currentText = text
 
                 let isEndpoint = result.isFinal
                 toEmit = SpeechSegment(
@@ -165,12 +169,27 @@ public final class LiveSpeechStream: @unchecked Sendable {
             }
 
             if error != nil {
-                // A recognition task ends at a silence timeout as well as on a real error.
-                // Mid-session that is an endpoint, not a failure: seal the segment and
-                // continue so the user can keep talking.
-                if !isFinished {
-                    advanceSegmentLocked(hadSpeech: false)
+                // A recognition task ends on a silence timeout as well as on a real error,
+                // and with a buffer request that is the *usual* way a pause surfaces —
+                // `isFinal` generally only arrives after `endAudio()`. Mid-session this is
+                // an endpoint, not a failure.
+                //
+                // The segment is sealed here with its best transcription. Without this the
+                // utterance was left unlabelled, and a consumer waiting for `.final` would
+                // wait forever.
+                guard !isFinished else { return }
+
+                let settled = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !settled.isEmpty {
+                    currentRevision += 1
+                    toEmit = SpeechSegment(
+                        segmentID: "live-\(segmentIndex)",
+                        revision: currentRevision,
+                        text: settled,
+                        finality: .final
+                    )
                 }
+                advanceSegmentLocked(hadSpeech: !settled.isEmpty)
             }
         }
 
@@ -184,6 +203,7 @@ public final class LiveSpeechStream: @unchecked Sendable {
         consecutiveEmptyRestarts = hadSpeech ? 0 : consecutiveEmptyRestarts + 1
         segmentIndex += 1
         currentRevision = 0
+        currentText = ""
         activeTask = nil
         activeRequest = nil
         guard !isFinished else { return }

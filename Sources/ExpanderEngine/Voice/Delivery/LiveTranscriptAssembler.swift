@@ -53,6 +53,18 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
             return true
         }
 
+        // A new segment id means the recognizer moved on, so everything before it is
+        // settled — whether or not it ever reported `isFinal`.
+        //
+        // This is the invariant the whole design rests on, and it must not be conditional
+        // on the recognizer's cooperation. `SFSpeechRecognizer` fed from an audio buffer
+        // generally reports `isFinal` only after `endAudio()`; a mid-stream pause just ends
+        // the task. Waiting for a flag that never arrives left every utterance volatile and
+        // erasable, which is exactly how a pause came to wipe earlier text.
+        for index in entries.indices where !entries[index].entry.isFinal {
+            entries[index].entry.isFinal = true
+        }
+
         guard entries.count < Self.maxSegments else { return false }
 
         // An utterance that finalizes with no speech carries no text; recording it would
@@ -66,13 +78,34 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
         return true
     }
 
-    /// The full transcript implied by everything received so far.
-    public var cumulativeText: String {
-        let finalized = entries.filter { $0.entry.isFinal }.map(\.entry.text)
-        let volatileTail = entries.last.flatMap { $0.entry.isFinal ? nil : $0.entry.text } ?? ""
+    /// Everything the recognizer has settled: all segments except a trailing one that is
+    /// still being revised. This is the text the commit barrier may safely be advanced to.
+    public var settledText: String {
+        let settled = entries.last?.entry.isFinal == true ? entries : Array(entries.dropLast())
         return VoiceTranscriptReconciler.combineUtterances(
-            committed: finalized,
-            activePartial: volatileTail
+            committed: settled.map(\.entry.text),
+            activePartial: ""
+        )
+    }
+
+    /// The utterance still being revised, if any.
+    public var activeText: String {
+        guard let last = entries.last, !last.entry.isFinal else { return "" }
+        return last.entry.text
+    }
+
+    /// The full transcript implied by everything received so far.
+    ///
+    /// Every segment contributes. An earlier version only counted segments explicitly
+    /// marked final plus the trailing one, so an utterance that was superseded without ever
+    /// being finalised vanished from the transcript — and the reconciler, seeing the text
+    /// shrink, erased it from the document.
+    public var cumulativeText: String {
+        let last = entries.last
+        let committed = last?.entry.isFinal == true ? entries : Array(entries.dropLast())
+        return VoiceTranscriptReconciler.combineUtterances(
+            committed: committed.map(\.entry.text),
+            activePartial: activeText
         )
     }
 

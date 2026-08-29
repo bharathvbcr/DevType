@@ -56,9 +56,10 @@ public final class VoiceInsertionService {
         let edit = reconciler.reconcile(target: assembler.cumulativeText)
         inject(edit)
 
-        if segment.finality == .final {
-            reconciler.commitBoundary()
-        }
+        // Seal exactly what the recognizer has moved past. Driven by the assembler rather
+        // than by this segment's `finality` flag, because a superseded utterance is settled
+        // whether or not the recognizer ever labelled it final.
+        reconciler.sealPrefix(assembler.settledText)
     }
 
     // MARK: - Final delivery

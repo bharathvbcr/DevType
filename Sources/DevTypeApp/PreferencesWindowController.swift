@@ -2510,10 +2510,21 @@ final class PreferencesViewController: NSViewController,
                 : (loc.s("prefs.voice.speechModels.status.needsKey"), DevTypeTheme.statusOrange, nil)
 
         case .whisperLocal:
+            // Detection is filesystem-only and synchronous here; the reachability probe is
+            // async and runs when the user opens the setup sheet. Distinguishing "not
+            // installed" from "installed but not started" is what makes the next step
+            // obvious rather than leaving the user with a dead endpoint field.
+            if let binaryPath = WhisperServerSetup.installedBinaryPath() {
+                return (
+                    loc.s("prefs.voice.speechModels.status.needsServer"),
+                    DevTypeTheme.statusOrange,
+                    WhisperServerSetup.pendingCommands(for: .installedNotRunning(binaryPath: binaryPath))
+                )
+            }
             return (
-                loc.s("prefs.voice.speechModels.status.needsServer"),
+                loc.s("prefs.voice.speechModels.status.needsSetup"),
                 DevTypeTheme.textTertiary,
-                VoicePreferences.whisperEndpoint.absoluteString
+                WhisperServerSetup.pendingCommands(for: .notInstalled)
             )
 
         case .localLLM, .appleSpeech:

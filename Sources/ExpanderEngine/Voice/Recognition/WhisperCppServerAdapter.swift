@@ -25,25 +25,17 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
             return .requiresConfiguration(.invalidEndpointFormat)
         }
 
-        // Test probe to server
-        var req = URLRequest(url: endpointURL.deletingLastPathComponent().appendingPathComponent("health"))
-        req.timeoutInterval = 2.0
-        do {
-            let (_, response) = try await URLSession.shared.data(for: req)
-            if let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
-                let evidence = ProviderEvidence(
-                    providerID: descriptor.id,
-                    modelVersion: descriptor.modelVersion,
-                    probeTimestamp: Date(),
-                    capabilities: ["localLoopback", "whisperInference"]
-                )
-                return .ready(evidence)
-            } else {
-                return .temporarilyUnavailable(retryAfterSeconds: 5.0, reason: .endpointUnreachable)
-            }
-        } catch {
+        guard await WhisperServerSetup.isReachable(endpoint: endpointURL, timeout: 2.0) else {
             return .temporarilyUnavailable(retryAfterSeconds: 5.0, reason: .endpointUnreachable)
         }
+
+        let evidence = ProviderEvidence(
+            providerID: descriptor.id,
+            modelVersion: descriptor.modelVersion,
+            probeTimestamp: Date(),
+            capabilities: ["localLoopback", "whisperInference"]
+        )
+        return .ready(evidence)
     }
 
     public func transcribe(_ request: SpeechRequest) -> AsyncThrowingStream<SpeechEvent, Error> {
@@ -51,7 +43,10 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
             Task {
                 let startTime = Date()
                 do {
-                    let audioData = try Data(contentsOf: request.audio.fileURL)
+                    // whisper.cpp decodes 16 kHz mono PCM WAV natively; other containers
+                    // depend on how the server was built. Capture is CAF, so it is
+                    // converted here rather than hoping the server can read it.
+                    let audioData = try WhisperAudioPayload.wav16kMono(from: request.audio.fileURL)
                     var urlRequest = URLRequest(url: endpointURL)
                     urlRequest.httpMethod = "POST"
                     urlRequest.timeoutInterval = max(1.0, request.deadline.timeIntervalSince(Date()))
@@ -60,11 +55,28 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
                     urlRequest.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
                     var body = Data()
+                    func field(_ name: String, _ value: String) {
+                        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                        body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+                        body.append(value.data(using: .utf8)!)
+                        body.append("\r\n".data(using: .utf8)!)
+                    }
+
                     body.append("--\(boundary)\r\n".data(using: .utf8)!)
-                    body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.caf\"\r\n".data(using: .utf8)!)
-                    body.append("Content-Type: audio/x-caf\r\n\r\n".data(using: .utf8)!)
+                    body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n".data(using: .utf8)!)
+                    body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
                     body.append(audioData)
-                    body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+                    body.append("\r\n".data(using: .utf8)!)
+
+                    // Ask for JSON explicitly; the server otherwise answers in plain text
+                    // and the decode below would fail on a perfectly good transcription.
+                    field("response_format", "json")
+                    field("temperature", "0.0")
+                    if !request.locale.identifier.isEmpty {
+                        field("language", String(request.locale.identifier.prefix(2)))
+                    }
+
+                    body.append("--\(boundary)--\r\n".data(using: .utf8)!)
                     urlRequest.httpBody = body
 
                     let (data, response) = try await URLSession.shared.data(for: urlRequest)

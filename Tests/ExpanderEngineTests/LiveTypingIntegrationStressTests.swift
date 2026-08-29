@@ -39,9 +39,7 @@ final class LiveTypingIntegrationStressTests: XCTestCase {
             let edit = reconciler.reconcile(target: assembler.cumulativeText)
             apply(edit, to: &document)
 
-            if segment.finality == .final {
-                reconciler.commitBoundary()
-            }
+            reconciler.sealPrefix(assembler.settledText)
 
             XCTAssertEqual(
                 document, preexisting + reconciler.ownedText,
@@ -118,6 +116,107 @@ final class LiveTypingIntegrationStressTests: XCTestCase {
             )
         }
         XCTAssertTrue(result.document.hasPrefix(preexisting))
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MARK: - 1b. The recognizer never reports isFinal mid-stream
+    // ═══════════════════════════════════════════════════════════════
+
+    /// `SFSpeechRecognizer` fed from an audio buffer generally reports `isFinal` only after
+    /// `endAudio()`. A mid-stream pause simply ends the task, and the stream opens a new
+    /// segment. So a whole dictation can arrive with **every** segment volatile.
+    ///
+    /// The original fixtures in this file always appended a `.final` per utterance, which
+    /// modelled the recognizer as assumed rather than as observed — and hid a defect where
+    /// a superseded utterance vanished from the transcript and was erased from the
+    /// document. These cases pin the observed behaviour.
+    private func volatileOnlyUtterance(index: Int, words: [String]) -> [SpeechSegment] {
+        (1...words.count).map { count in
+            SpeechSegment(
+                segmentID: "live-\(index)",
+                revision: UInt64(count),
+                text: words.prefix(count).joined(separator: " "),
+                finality: .volatile
+            )
+        }
+    }
+
+    func testUtterancesSurviveWhenNoFinalEverArrives() {
+        let segments =
+            volatileOnlyUtterance(index: 0, words: ["hello", "world"])
+            + volatileOnlyUtterance(index: 1, words: ["how", "are", "you"])
+            + volatileOnlyUtterance(index: 2, words: ["good", "thanks"])
+
+        let result = runSession(segments: segments)
+
+        XCTAssertTrue(result.document.contains("hello world"),
+            "First utterance lost when no isFinal arrived: \(result.document)")
+        XCTAssertTrue(result.document.contains("how are you"))
+        XCTAssertTrue(result.document.contains("good thanks"))
+    }
+
+    /// The specific regression: opening a new segment must not erase the previous one.
+    func testNewSegmentNeverErasesThePreviousUtterance() {
+        var assembler = LiveTranscriptAssembler()
+        let reconciler = VoiceTranscriptReconciler()
+        var document = ""
+
+        for segment in volatileOnlyUtterance(index: 0, words: ["hello", "world"]) {
+            guard assembler.ingest(segment) else { continue }
+            apply(reconciler.reconcile(target: assembler.cumulativeText), to: &document)
+            reconciler.sealPrefix(assembler.settledText)
+        }
+        XCTAssertEqual(document, "hello world")
+
+        // The pause. A new segment id opens; the first utterance was never marked final.
+        let first = SpeechSegment(segmentID: "live-1", revision: 1, text: "how", finality: .volatile)
+        _ = assembler.ingest(first)
+        let edit = reconciler.reconcile(target: assembler.cumulativeText)
+
+        XCTAssertEqual(edit.eraseCount, 0,
+            "Opening a new segment erased \(edit.eraseCount) characters of the previous utterance")
+        apply(edit, to: &document)
+        XCTAssertEqual(document, "hello world how")
+    }
+
+    /// Once superseded, an utterance is settled — a late revision of it must be ignored
+    /// rather than rewriting text the user has already seen settle.
+    func testSupersededUtteranceIsSealedAgainstLateRevision() {
+        var assembler = LiveTranscriptAssembler()
+        _ = assembler.ingest(SpeechSegment(segmentID: "live-0", revision: 1, text: "hello world", finality: .volatile))
+        _ = assembler.ingest(SpeechSegment(segmentID: "live-1", revision: 1, text: "next", finality: .volatile))
+
+        XCTAssertEqual(assembler.settledText, "hello world")
+
+        let changed = assembler.ingest(
+            SpeechSegment(segmentID: "live-0", revision: 2, text: "HELLO WORLD REVISED", finality: .volatile)
+        )
+        XCTAssertFalse(changed, "A superseded utterance accepted a late revision")
+        XCTAssertEqual(assembler.cumulativeText, "hello world next")
+    }
+
+    /// The head of a settled utterance getting re-cased must not reach behind the barrier.
+    func testRecasedHeadAfterSupersessionIsAbsorbed() {
+        var assembler = LiveTranscriptAssembler()
+        let reconciler = VoiceTranscriptReconciler()
+        var document = ""
+
+        for segment in [
+            SpeechSegment(segmentID: "live-0", revision: 1, text: "hello world", finality: .volatile),
+            SpeechSegment(segmentID: "live-1", revision: 1, text: "next up", finality: .volatile),
+        ] {
+            guard assembler.ingest(segment) else { continue }
+            apply(reconciler.reconcile(target: assembler.cumulativeText), to: &document)
+            reconciler.sealPrefix(assembler.settledText)
+        }
+        XCTAssertEqual(document, "hello world next up")
+
+        // The final transcript re-cases and punctuates the whole thing.
+        let edit = reconciler.reconcile(target: "Hello, world. Next up.")
+        apply(edit, to: &document)
+
+        XCTAssertTrue(document.hasPrefix("hello world"),
+            "Re-casing reached behind the commit barrier: \(document)")
     }
 
     // ═══════════════════════════════════════════════════════════════

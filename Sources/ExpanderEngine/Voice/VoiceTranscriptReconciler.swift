@@ -175,6 +175,24 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
         }
     }
 
+    /// Advances the barrier to cover exactly `prefix`, leaving the rest volatile.
+    ///
+    /// Unlike `commitBoundary`, this does not assume the whole in-flight tail is settled —
+    /// the caller knows which part the recognizer has moved past and which part it is still
+    /// revising. Only ever moves forward, and only when `prefix` agrees with what is
+    /// actually owned, so a confused caller cannot mark text committed that is not on
+    /// screen.
+    public func sealPrefix(_ prefix: String) {
+        lock.withLock {
+            let owned = _committed + _volatile
+            guard prefix.count > _committed.count,
+                  prefix.count <= owned.count,
+                  owned.hasPrefix(prefix) else { return }
+            _committed = prefix
+            _volatile = String(owned.dropFirst(prefix.count))
+        }
+    }
+
     /// Erases everything dictation owns (cancellation / undo of the whole draft).
     public func rollbackAll() -> VoiceReconciledEdit {
         lock.withLock {
