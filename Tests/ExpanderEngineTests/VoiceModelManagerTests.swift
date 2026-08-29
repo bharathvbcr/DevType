@@ -44,4 +44,26 @@ final class VoiceModelManagerTests: XCTestCase {
         let dir = VoiceModelManager.shared.modelsDirectory
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
     }
+
+    func testInvalidArtifactIsNotReportedAsMerelyMissing() throws {
+        let baseDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DevTypeVoiceModelManagerTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: baseDirectory) }
+
+        let manager = VoiceModelManager(baseDirectory: baseDirectory)
+        let modelURL = manager.modelFileURL(for: .voxtralMini4B)
+        try FileManager.default.createDirectory(
+            at: modelURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("Invalid username or password.".utf8).write(to: modelURL)
+
+        guard case .error(let message) = manager.status(for: .voxtralMini4B) else {
+            return XCTFail("A present but invalid artifact must be distinguished from a model that was never downloaded.")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("invalid"))
+        XCTAssertThrowsError(try manager.installLocalModel(from: modelURL, for: .funASRNano)) { error in
+            XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("invalid"))
+        }
+    }
 }

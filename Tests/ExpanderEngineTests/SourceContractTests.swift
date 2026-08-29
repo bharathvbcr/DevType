@@ -708,7 +708,7 @@ final class SourceContractTests: XCTestCase {
         XCTAssertEqual(
             uses,
             6,
-            "Five list cards plus the helper declaration must flow through makeTableArea."
+            "Five list/table cards plus the helper declaration must flow through makeTableArea."
         )
         XCTAssertTrue(
             preferences.contains("macroEmptyLabel"),
@@ -734,6 +734,40 @@ final class SourceContractTests: XCTestCase {
             body.contains("toggle.leadingAnchor.constraint(equalTo: row.leadingAnchor)"),
             "Switches belong at the trailing edge of a full-width settings row."
         )
+    }
+
+    /// Speech recognizers and transcript-cleanup LLMs answer different questions, but their
+    /// inventory does not need the data-table treatment intended for user-authored mappings.
+    func testVoicePreferencesSeparatesSpeechModelsFromCleanupModels() throws {
+        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+
+        XCTAssertTrue(
+            preferences.contains("makeVoiceRecognitionModelInventory"),
+            "Voice Preferences must keep speech models visible in a compact inventory."
+        )
+        XCTAssertFalse(
+            preferences.contains("voiceRecognitionModelsTable"),
+            "The table treatment belongs to vocabulary and trigger mappings, not model inventory."
+        )
+        XCTAssertTrue(
+            preferences.contains("prefs.voice.cleanupModels"),
+            "Local chat models must be labeled as transcript-cleanup models, not speech models."
+        )
+        XCTAssertFalse(
+            preferences.contains("Available Speech / Cleanup Models"),
+            "A combined label falsely presents chat-only models as speech recognizers."
+        )
+    }
+
+    func testVoiceVocabularyAndTriggersUseNamedTableColumns() throws {
+        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+
+        XCTAssertTrue(preferences.contains("configureVoiceDictionaryTable"))
+        XCTAssertTrue(preferences.contains("voiceDictSpoken"))
+        XCTAssertTrue(preferences.contains("voiceDictReplacement"))
+        XCTAssertTrue(preferences.contains("configureVoiceTriggersTable"))
+        XCTAssertTrue(preferences.contains("voiceTriggerPhrase"))
+        XCTAssertTrue(preferences.contains("voiceTriggerAction"))
     }
 
 }

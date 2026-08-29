@@ -320,6 +320,7 @@ final class PreferencesViewController: NSViewController,
 
     // Voice & Smart Dictation
     private let voiceModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let voiceRecognitionModels = VoiceModelType.allCases
     private let voiceTonePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let voiceRealTimeTypingSwitch = NSSwitch()
     private let voiceAutoPunctuateSwitch = NSSwitch()
@@ -345,11 +346,6 @@ final class PreferencesViewController: NSViewController,
     private let voiceTriggerPhraseField = NSTextField()
     private let voiceTriggerActionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private var voiceTriggerEntries: [(phrase: String, action: String)] = []
-    private var voiceModelDownloadProgressBars: [VoiceModelType: NSProgressIndicator] = [:]
-    private var voiceModelStatusLabels: [VoiceModelType: NSTextField] = [:]
-    private var voiceModelActionButtons: [VoiceModelType: CapsuleButton] = [:]
-    private var voiceModelDeleteButtons: [VoiceModelType: CapsuleButton] = [:]
-    private var voiceModelListenerToken: UUID?
     private var voiceMicPermissionPill: PillBadgeView?
 
     // Voice Engine & API Settings
@@ -368,21 +364,6 @@ final class PreferencesViewController: NSViewController,
     init(hotkeyManager: HotkeyManager?) {
         self.hotkeyManager = hotkeyManager
         super.init(nibName: nil, bundle: nil)
-        setupVoiceModelListener()
-    }
-
-    deinit {
-        if let token = voiceModelListenerToken {
-            VoiceModelManager.shared.removeStatusListener(token)
-        }
-    }
-
-    private func setupVoiceModelListener() {
-        voiceModelListenerToken = VoiceModelManager.shared.addStatusListener { [weak self] type, status in
-            DispatchQueue.main.async {
-                self?.updateVoiceModelUI(type: type, status: status)
-            }
-        }
     }
 
     /// Re-point at the live manager. Called by `PreferencesWindowController.show`
@@ -1267,7 +1248,7 @@ final class PreferencesViewController: NSViewController,
         // 1. Models Card / Engine Configuration Card
         let modelsCard = makeCard(title: loc.s("prefs.voice.models.card"), symbol: "waveform.and.mic")
         let modelsHint = DevTypeTheme.makeLabel(
-            "Select your speech recognition and correction engine. Gemini 3.5 Transcribe delivers high-speed speech-to-text with contextual self-correction formatting.",
+            loc.s("prefs.voice.models.hint"),
             font: DevTypeTheme.font(10.5),
             color: DevTypeTheme.textTertiary,
             wrapping: true
@@ -1289,6 +1270,20 @@ final class PreferencesViewController: NSViewController,
             title: loc.s("prefs.voice.activeModel"),
             control: voiceModelPopup,
             font: DevTypeTheme.font(12, .semibold)
+        )
+
+        let speechModelsLabel = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.speechModels"),
+            font: DevTypeTheme.font(11.5, .semibold),
+            color: DevTypeTheme.textPrimary
+        )
+        let speechModelsInventory = makeVoiceRecognitionModelInventory()
+
+        let speechModelsHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.speechModels.hint"),
+            font: DevTypeTheme.font(10),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
         )
 
         // Gemini API Configuration Box
@@ -1359,7 +1354,7 @@ final class PreferencesViewController: NSViewController,
         localLLMEndpointField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
 
         let scanBtn = CapsuleButton(
-            title: "Scan Models",
+            title: loc.s("prefs.voice.cleanupModels.scan"),
             symbol: "arrow.clockwise",
             style: .secondary,
             target: self,
@@ -1377,7 +1372,11 @@ final class PreferencesViewController: NSViewController,
         endpointRow.alignment = .centerY
         endpointRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let localModelLabel = DevTypeTheme.makeLabel("Available Speech / Cleanup Models:", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+        let localModelLabel = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.cleanupModels"),
+            font: DevTypeTheme.font(11.5, .medium),
+            color: DevTypeTheme.textPrimary
+        )
 
         localLLMModelPopup.translatesAutoresizingMaskIntoConstraints = false
         localLLMModelPopup.target = self
@@ -1399,7 +1398,7 @@ final class PreferencesViewController: NSViewController,
         modelPickerRow.translatesAutoresizingMaskIntoConstraints = false
 
         let localSubHint = DevTypeTheme.makeLabel(
-            "Select an installed Ollama / LM Studio model from the dropdown, or scan your local server to detect active models.",
+            loc.s("prefs.voice.cleanupModels.hint"),
             font: DevTypeTheme.font(10),
             color: DevTypeTheme.textTertiary,
             wrapping: true
@@ -1411,7 +1410,16 @@ final class PreferencesViewController: NSViewController,
         localLLMConfigContainer.addArrangedSubview(modelPickerRow)
         localLLMConfigContainer.addArrangedSubview(localSubHint)
 
-        let modelCards: [NSView] = [modelsHint, activeModelRow, DevTypeTheme.makeHairline(), geminiConfigContainer, localLLMConfigContainer]
+        let modelCards: [NSView] = [
+            modelsHint,
+            activeModelRow,
+            speechModelsLabel,
+            speechModelsInventory,
+            speechModelsHint,
+            DevTypeTheme.makeHairline(),
+            geminiConfigContainer,
+            localLLMConfigContainer
+        ]
         stackInCard(modelsCard, views: modelCards)
 
         // 2. Smart Dictation Options Card
@@ -1504,9 +1512,10 @@ final class PreferencesViewController: NSViewController,
         let dictionaryArea = makeTableArea(
             table: voiceDictionaryTable,
             accessibilityLabel: loc.s("prefs.voice.dict.card"),
-            columnIdentifier: "voiceDict",
+            columnIdentifier: "voiceDictSpoken",
             emptyLabel: voiceDictionaryEmptyLabel
         )
+        configureVoiceDictionaryTable()
 
         voiceDictSpokenField.translatesAutoresizingMaskIntoConstraints = false
         voiceDictSpokenField.placeholderString = loc.s("prefs.voice.dict.spokenPlaceholder")
@@ -1576,10 +1585,11 @@ final class PreferencesViewController: NSViewController,
         let triggersArea = makeTableArea(
             table: voiceTriggersTable,
             accessibilityLabel: loc.s("prefs.voice.triggers.card"),
-            columnIdentifier: "voiceTriggers",
+            columnIdentifier: "voiceTriggerPhrase",
             emptyLabel: voiceTriggersEmptyLabel,
             height: 120
         )
+        configureVoiceTriggersTable()
 
         voiceTriggerPhraseField.translatesAutoresizingMaskIntoConstraints = false
         voiceTriggerPhraseField.placeholderString = loc.s("prefs.voice.triggers.phrasePlaceholder")
@@ -1624,6 +1634,119 @@ final class PreferencesViewController: NSViewController,
             stack.addArrangedSubview(card)
         }
         pinWidth(of: [permCard, modelsCard, optionsCard, hotkeyCard, dictCard, triggersCard], to: stack)
+    }
+
+    private func configureVoiceDictionaryTable() {
+        guard let spokenColumn = voiceDictionaryTable.tableColumns.first else { return }
+        spokenColumn.title = loc.s("prefs.voice.dict.column.spoken")
+        spokenColumn.minWidth = 160
+        spokenColumn.width = 250
+        spokenColumn.resizingMask = [.autoresizingMask, .userResizingMask]
+
+        let replacementColumn = NSTableColumn(
+            identifier: NSUserInterfaceItemIdentifier("voiceDictReplacement")
+        )
+        replacementColumn.title = loc.s("prefs.voice.dict.column.replacement")
+        replacementColumn.minWidth = 160
+        replacementColumn.width = 250
+        replacementColumn.resizingMask = [.autoresizingMask, .userResizingMask]
+        voiceDictionaryTable.addTableColumn(replacementColumn)
+        voiceDictionaryTable.headerView = NSTableHeaderView()
+        voiceDictionaryTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        voiceDictionaryTable.allowsColumnReordering = false
+    }
+
+    private func configureVoiceTriggersTable() {
+        guard let phraseColumn = voiceTriggersTable.tableColumns.first else { return }
+        phraseColumn.title = loc.s("prefs.voice.triggers.column.phrase")
+        phraseColumn.minWidth = 180
+        phraseColumn.width = 260
+        phraseColumn.resizingMask = [.autoresizingMask, .userResizingMask]
+
+        let actionColumn = NSTableColumn(
+            identifier: NSUserInterfaceItemIdentifier("voiceTriggerAction")
+        )
+        actionColumn.title = loc.s("prefs.voice.triggers.column.action")
+        actionColumn.minWidth = 160
+        actionColumn.width = 240
+        actionColumn.resizingMask = [.autoresizingMask, .userResizingMask]
+        voiceTriggersTable.addTableColumn(actionColumn)
+        voiceTriggersTable.headerView = NSTableHeaderView()
+        voiceTriggersTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        voiceTriggersTable.allowsColumnReordering = false
+    }
+
+    private func makeVoiceRecognitionModelInventory() -> NSView {
+        let inventory = PreferenceRowView()
+        inventory.translatesAutoresizingMaskIntoConstraints = false
+        inventory.wantsLayer = true
+        inventory.layer?.cornerRadius = DevTypeTheme.Radius.control
+        inventory.layer?.backgroundColor = DevTypeTheme.contrastOverlay(0.035).cgColor
+        inventory.layer?.borderWidth = 1
+        inventory.layer?.borderColor = DevTypeTheme.hairline.cgColor
+
+        let rows = NSStackView()
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 0
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        inventory.addSubview(rows)
+
+        for (index, model) in voiceRecognitionModels.enumerated() {
+            let presentation = voiceRecognitionModelStatus(for: model)
+            let name = DevTypeTheme.makeLabel(
+                model.descriptor.shortName,
+                font: DevTypeTheme.font(11, .medium),
+                color: DevTypeTheme.textPrimary
+            )
+            name.lineBreakMode = .byTruncatingTail
+
+            let source = DevTypeTheme.makeLabel(
+                model == .appleSpeech
+                    ? loc.s("prefs.voice.speechModels.source.system")
+                    : loc.s("prefs.voice.speechModels.source.local"),
+                font: DevTypeTheme.font(10.5),
+                color: DevTypeTheme.textSecondary
+            )
+            source.widthAnchor.constraint(equalToConstant: 76).isActive = true
+
+            let status = DevTypeTheme.makeLabel(
+                presentation.text,
+                font: DevTypeTheme.font(10.5, .medium),
+                color: presentation.color
+            )
+            status.lineBreakMode = .byTruncatingTail
+            status.toolTip = presentation.detail
+            status.widthAnchor.constraint(greaterThanOrEqualToConstant: 176).isActive = true
+
+            let row = NSStackView(views: [name, source, status])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 10
+            row.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.heightAnchor.constraint(equalToConstant: 32).isActive = true
+            row.setAccessibilityLabel("\(name.stringValue), \(source.stringValue), \(status.stringValue)")
+            name.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            status.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+
+            rows.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+
+            if index < voiceRecognitionModels.count - 1 {
+                let separator = DevTypeTheme.makeHairline()
+                rows.addArrangedSubview(separator)
+                separator.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+            }
+        }
+
+        NSLayoutConstraint.activate([
+            rows.topAnchor.constraint(equalTo: inventory.topAnchor, constant: 2),
+            rows.leadingAnchor.constraint(equalTo: inventory.leadingAnchor),
+            rows.trailingAnchor.constraint(equalTo: inventory.trailingAnchor),
+            rows.bottomAnchor.constraint(equalTo: inventory.bottomAnchor, constant: -2)
+        ])
+        return inventory
     }
 
     private func reloadVoice() {
@@ -1672,11 +1795,6 @@ final class PreferencesViewController: NSViewController,
 
         voiceShortcutRecorder?.setShortcut(HotkeyPreferences.voiceShortcut)
 
-        for type in [VoiceModelType.voxtralMini4B, VoiceModelType.funASRNano] {
-            let status = VoiceModelManager.shared.status(for: type)
-            updateVoiceModelUI(type: type, status: status)
-        }
-
         let dict = VoicePreferences.customDictionary
         voiceDictEntries = dict.map { (spoken: $0.key, replacement: $0.value) }.sorted { $0.spoken < $1.spoken }
         voiceDictionaryTable.reloadData()
@@ -1724,48 +1842,6 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func openMicrophoneSettingsClicked() {
         SettingsDeepLinker.shared.open(for: .microphone)
-    }
-
-    private func updateVoiceModelUI(type: VoiceModelType, status: VoiceModelStatus) {
-        guard let label = voiceModelStatusLabels[type],
-              let button = voiceModelActionButtons[type],
-              let progress = voiceModelDownloadProgressBars[type] else { return }
-
-        switch status {
-        case .notDownloaded:
-            label.stringValue = loc.s("prefs.voice.status.notDownloaded")
-            label.textColor = DevTypeTheme.textTertiary
-            button.title = loc.s("common.download")
-            button.buttonStyle = .primary
-            button.isEnabled = true
-            progress.isHidden = true
-
-        case .downloading(let p, let bytes, let total):
-            let formattedMb = String(format: "%.1f MB / %.1f MB", Double(bytes) / 1_000_000, Double(total) / 1_000_000)
-            label.stringValue = loc.s("prefs.voice.status.downloading", formattedMb)
-            label.textColor = DevTypeTheme.accentBright
-            button.title = loc.s("common.cancel")
-            button.buttonStyle = .destructive
-            button.isEnabled = true
-            progress.isHidden = false
-            progress.doubleValue = p
-
-        case .ready:
-            label.stringValue = loc.s("prefs.voice.status.ready")
-            label.textColor = DevTypeTheme.statusGreen
-            button.title = loc.s("prefs.voice.status.installed")
-            button.buttonStyle = .secondary
-            button.isEnabled = false
-            progress.isHidden = true
-
-        case .error(let msg):
-            label.stringValue = loc.s("prefs.voice.status.error", msg)
-            label.textColor = DevTypeTheme.statusOrange
-            button.title = loc.s("common.retry")
-            button.buttonStyle = .primary
-            button.isEnabled = true
-            progress.isHidden = true
-        }
     }
 
     @objc private func voiceModelPopupChanged(_ sender: NSPopUpButton) {
@@ -1836,19 +1912,28 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func scanLocalModelsClicked() {
         localLLMScanButton?.isEnabled = false
-        localLLMScanButton?.title = "Scanning..."
-        localLLMStatusPill?.update(text: "Scanning...", tint: DevTypeTheme.accent)
+        localLLMScanButton?.title = loc.s("prefs.voice.cleanupModels.scanning")
+        localLLMStatusPill?.update(
+            text: loc.s("prefs.voice.cleanupModels.scanning"),
+            tint: DevTypeTheme.accent
+        )
 
         let endpoint = VoicePreferences.localLLMEndpoint
         Task {
             let discovered = await LocalLLMCleanupClient.shared.fetchAvailableLocalModels(endpoint: endpoint)
             await MainActor.run {
                 self.localLLMScanButton?.isEnabled = true
-                self.localLLMScanButton?.title = "Scan Models"
+                self.localLLMScanButton?.title = self.loc.s("prefs.voice.cleanupModels.scan")
                 if discovered.isEmpty {
-                    self.localLLMStatusPill?.update(text: "No Server / No Models", tint: DevTypeTheme.statusOrange)
+                    self.localLLMStatusPill?.update(
+                        text: self.loc.s("prefs.voice.cleanupModels.none"),
+                        tint: DevTypeTheme.statusOrange
+                    )
                 } else {
-                    self.localLLMStatusPill?.update(text: "\(discovered.count) Models Found", tint: DevTypeTheme.statusGreen)
+                    self.localLLMStatusPill?.update(
+                        text: self.loc.s("prefs.voice.cleanupModels.found", discovered.count),
+                        tint: DevTypeTheme.statusGreen
+                    )
                 }
                 self.refreshLocalLLMModelsPopup(additionalDiscoveredModels: discovered)
             }
@@ -1927,28 +2012,6 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func voiceHandsFreeChanged() {
         VoicePreferences.isHandsFreeModeEnabled = voiceHandsFreeSwitch.state == .on
-    }
-
-    @objc private func voiceModelActionButtonClicked(_ sender: CapsuleButton) {
-        guard let type = voiceModelActionButtons.first(where: { $0.value === sender })?.key else { return }
-
-        let status = VoiceModelManager.shared.status(for: type)
-        switch status {
-        case .downloading:
-            VoiceModelManager.shared.cancelDownload(for: type)
-        case .notDownloaded, .error:
-            VoiceModelManager.shared.startDownload(for: type)
-        case .ready:
-            break
-        }
-        reloadVoice()
-    }
-
-    @objc private func voiceModelDeleteButtonClicked(_ sender: CapsuleButton) {
-        guard let type = voiceModelDeleteButtons.first(where: { $0.value === sender })?.key else { return }
-
-        try? VoiceModelManager.shared.deleteModel(for: type)
-        reloadVoice()
     }
 
     private func applyVoiceShortcut(_ shortcut: DevTypeShortcut?) {
@@ -2391,31 +2454,84 @@ final class PreferencesViewController: NSViewController,
         } else if tableView === voiceDictionaryTable {
             guard voiceDictEntries.indices.contains(row) else { return nil }
             let entry = voiceDictEntries[row]
-            text = "\(entry.spoken)  →  \(entry.replacement)"
+            switch tableColumn?.identifier.rawValue {
+            case "voiceDictSpoken": text = entry.spoken
+            case "voiceDictReplacement": text = entry.replacement
+            default: return nil
+            }
         } else if tableView === voiceTriggersTable {
             guard voiceTriggerEntries.indices.contains(row) else { return nil }
             let entry = voiceTriggerEntries[row]
-            let actionName = loc.s("ai.kind.\(entry.action)")
-            text = "“\(entry.phrase)”  →  \(actionName)"
+            switch tableColumn?.identifier.rawValue {
+            case "voiceTriggerPhrase": text = entry.phrase
+            case "voiceTriggerAction": text = loc.s("ai.kind.\(entry.action)")
+            default: return nil
+            }
         } else {
             return nil
         }
 
-        let identifier = NSUserInterfaceItemIdentifier("prefsRow")
+        let columnIdentifier = tableColumn?.identifier.rawValue ?? "single"
+        let identifier = NSUserInterfaceItemIdentifier("prefsRow.\(columnIdentifier)")
         let label: NSTextField
         if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField {
             label = reused
         } else {
             label = NSTextField(labelWithString: "")
             label.identifier = identifier
-            label.font = DevTypeTheme.mono(11)
             label.lineBreakMode = .byTruncatingTail
         }
+        label.font = (tableView === voiceDictionaryTable || tableView === voiceTriggersTable)
+            ? DevTypeTheme.font(11)
+            : DevTypeTheme.mono(11)
         label.stringValue = text
         label.textColor = DevTypeTheme.textPrimary
         // §5.1: rows read as their content instead of "row N".
         label.setAccessibilityLabel(text)
         return label
+    }
+
+    private func voiceRecognitionModelStatus(
+        for model: VoiceModelType
+    ) -> (text: String, color: NSColor, detail: String?) {
+        switch VoiceModelManager.shared.status(for: model) {
+        case .notDownloaded:
+            return (
+                loc.s("prefs.voice.speechModels.status.notInstalled"),
+                DevTypeTheme.textTertiary,
+                nil
+            )
+        case .downloading(_, let bytesWritten, let totalBytes):
+            let progress = String(
+                format: "%.1f MB / %.1f MB",
+                Double(bytesWritten) / 1_000_000,
+                Double(totalBytes) / 1_000_000
+            )
+            return (
+                loc.s("prefs.voice.status.downloading", progress),
+                DevTypeTheme.accentBright,
+                nil
+            )
+        case .ready:
+            if model == .appleSpeech {
+                return (
+                    loc.s("prefs.voice.speechModels.status.ready"),
+                    DevTypeTheme.statusGreen,
+                    nil
+                )
+            }
+            return (
+                loc.s("prefs.voice.speechModels.status.stored"),
+                DevTypeTheme.statusOrange,
+                loc.s("prefs.voice.speechModels.hint")
+            )
+        case .error(let message):
+            return (
+                loc.s("prefs.voice.speechModels.status.invalid"),
+                DevTypeTheme.statusOrange,
+                message
+            )
+        }
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {

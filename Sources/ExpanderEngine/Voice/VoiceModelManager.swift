@@ -95,15 +95,35 @@ public final class VoiceModelManager: NSObject, @unchecked Sendable {
             }
 
             let fileURL = modelFileURL(for: type)
-            if fileManager.fileExists(atPath: fileURL.path) {
-                // If file size is valid (> 10MB)
-                if let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
-                   let size = attrs[.size] as? Int64, size > 10_000_000 {
-                    return .ready(fileURL)
-                }
+            guard fileManager.fileExists(atPath: fileURL.path) else {
+                return .notDownloaded
             }
-            return .notDownloaded
+            if let validationError = artifactValidationError(at: fileURL) {
+                return .error(validationError)
+            }
+            return .ready(fileURL)
         }
+    }
+
+    /// Rejects error pages and truncated downloads before the UI treats them as model files.
+    /// Both downloadable legacy descriptors are GGUF artifacts, whose first four bytes are
+    /// the ASCII magic `GGUF`.
+    private func artifactValidationError(at fileURL: URL) -> String? {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+              let size = attributes[.size] as? Int64 else {
+            return "Invalid model artifact: file metadata is unreadable."
+        }
+        guard size > 10_000_000 else {
+            return "Invalid model artifact: file is truncated or is not a model."
+        }
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+            return "Invalid model artifact: file is unreadable."
+        }
+        defer { try? handle.close() }
+        guard let magic = try? handle.read(upToCount: 4), magic == Data("GGUF".utf8) else {
+            return "Invalid model artifact: GGUF header is missing."
+        }
+        return nil
     }
 
     // MARK: - Listeners
@@ -195,6 +215,9 @@ public final class VoiceModelManager: NSObject, @unchecked Sendable {
 
     /// Installs a local model file directly (e.g. from local path or test fixture).
     public func installLocalModel(from sourceURL: URL, for type: VoiceModelType) throws {
+        if let validationError = artifactValidationError(at: sourceURL) {
+            throw modelArtifactError(validationError)
+        }
         let destinationURL = modelFileURL(for: type)
         let destinationFolder = destinationURL.deletingLastPathComponent()
 
@@ -204,6 +227,14 @@ public final class VoiceModelManager: NSObject, @unchecked Sendable {
         }
         try fileManager.copyItem(at: sourceURL, to: destinationURL)
         notifyStatusChanged(type: type, status: .ready(destinationURL))
+    }
+
+    private func modelArtifactError(_ description: String) -> NSError {
+        NSError(
+            domain: "VoiceModelManager",
+            code: 422,
+            userInfo: [NSLocalizedDescriptionKey: description]
+        )
     }
 
     /// Validates SHA256 checksum of an installed file.
@@ -269,6 +300,9 @@ extension VoiceModelManager: URLSessionDownloadDelegate {
         let targetFolder = targetURL.deletingLastPathComponent()
 
         do {
+            if let validationError = artifactValidationError(at: location) {
+                throw modelArtifactError(validationError)
+            }
             try fileManager.createDirectory(at: targetFolder, withIntermediateDirectories: true)
             if fileManager.fileExists(atPath: targetURL.path) {
                 try fileManager.removeItem(at: targetURL)
