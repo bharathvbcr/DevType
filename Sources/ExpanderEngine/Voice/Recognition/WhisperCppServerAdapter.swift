@@ -2,10 +2,13 @@ import Foundation
 
 public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendable {
     public let descriptor: SpeechProviderDescriptor
-    public let endpointURL: URL
+    private let endpointOverride: URL?
 
-    public init(endpointURL: URL = URL(string: "http://127.0.0.1:8080/inference")!) {
-        self.endpointURL = endpointURL
+    /// Resolved per call so a Preferences change applies without relaunching.
+    public var endpointURL: URL { endpointOverride ?? VoicePreferences.whisperEndpoint }
+
+    public init(endpointURL: URL? = nil) {
+        self.endpointOverride = endpointURL
         self.descriptor = SpeechProviderDescriptor(
             id: "whispercpp.server",
             displayName: "Local whisper.cpp Server",

@@ -26,9 +26,31 @@ final class VoiceSubsystemHardeningStressTests: XCTestCase {
         ]
 
         for (input, exp) in zip(inputsWithReasoning, expected) {
-            let stripped = TranscriptionValidationGate.stripArtifacts(input)
+            let stripped = CorrectionOutputSanitizer.sanitize(input)
             XCTAssertEqual(stripped, exp)
         }
+    }
+
+    /// Ported from the retired `TranscriptionValidationGate` onto `CorrectionValidator`,
+    /// which is the gate that actually runs in the correction pipeline.
+    private func outcome(raw: String, cleaned: String) -> ValidationOutcome {
+        let rawTranscript = RawTranscript(
+            text: raw, localeIdentifier: "en_US", providerID: "test", modelVersion: "1"
+        )
+        let candidate = CorrectionCandidate(
+            text: cleaned, providerID: "test", modelVersion: "1"
+        )
+        return CorrectionValidator.validate(
+            candidate: candidate,
+            raw: rawTranscript,
+            policy: CorrectionPolicy(),
+            protectedSpans: ProtectedSpanExtractor.extract(from: raw)
+        )
+    }
+
+    private func isAccepted(_ outcome: ValidationOutcome) -> Bool {
+        if case .accepted = outcome { return true }
+        return false
     }
 
     func testShortUtteranceFastPath() {
@@ -41,25 +63,39 @@ final class VoiceSubsystemHardeningStressTests: XCTestCase {
         ]
 
         for (raw, cleaned) in shortPairs {
-            let verdict = TranscriptionValidationGate.validate(raw: raw, cleaned: cleaned)
-            XCTAssertTrue(verdict.accepted, "Short utterance '\(raw)' should be accepted: \(verdict.reason ?? "")")
+            XCTAssertTrue(
+                isAccepted(outcome(raw: raw, cleaned: cleaned)),
+                "Short utterance '\(raw)' should be accepted"
+            )
         }
     }
 
     func testAdversarialHallucinationsAndAnswerDivergence() {
         let testCases = [
-            // Question answering hallucination
-            (raw: "What is the capital of Japan?", cleaned: "Tokyo is the capital of Japan and has a population of over 13 million."),
-            // Complete rewrite / conversation drift
-            (raw: "Please write a test", cleaned: "Here is a test: func testExample() { XCTAssert(true) }"),
-            // Out of bounds length explosion
-            (raw: "Hello world", cleaned: "Hello world this is an AI model generating lots and lots of extra redundant words.")
+            // The model answered the dictation instead of cleaning it.
+            (raw: "What is the capital of Japan?",
+             cleaned: "Tokyo is the capital of Japan and has a population of over 13 million."),
+            // Complete rewrite / conversation drift.
+            (raw: "Please write a test",
+             cleaned: "Here is a test: func testExample() { XCTAssert(true) }"),
+            // Length explosion.
+            (raw: "Hello world",
+             cleaned: "Hello world this is an AI model generating lots and lots of extra redundant words."),
         ]
 
         for testCase in testCases {
-            let verdict = TranscriptionValidationGate.validate(raw: testCase.raw, cleaned: testCase.cleaned)
-            XCTAssertFalse(verdict.accepted, "Hallucination should be rejected: raw='\(testCase.raw)', cleaned='\(testCase.cleaned)'")
+            XCTAssertFalse(
+                isAccepted(outcome(raw: testCase.raw, cleaned: testCase.cleaned)),
+                "Hallucination should be rejected: raw='\(testCase.raw)', cleaned='\(testCase.cleaned)'"
+            )
         }
+    }
+
+    func testLegitimateCleanupIsStillAccepted() {
+        XCTAssertTrue(isAccepted(outcome(
+            raw: "um lets meet at 2 pm tomorrow to discuss the project",
+            cleaned: "Let's meet at 2 PM tomorrow to discuss the project."
+        )))
     }
 
     // MARK: - 2. Punctuation-Agnostic Transcript Diff Fuzzing
@@ -122,7 +158,7 @@ final class VoiceSubsystemHardeningStressTests: XCTestCase {
         }
 
         // Write as 48kHz stereo WAV file
-        let wavData = VoiceAudioRecorder.createWavData(fromPCM: pcmData, sampleRate: 48000, channels: 2, bitsPerSample: 16)
+        let wavData = WavTestData.createWavData(fromPCM: pcmData, sampleRate: 48000, channels: 2, bitsPerSample: 16)
         try wavData.write(to: wavURL)
 
         // Encode 48kHz stereo WAV to 16kHz mono FLAC using dynamic converter
@@ -131,30 +167,86 @@ final class VoiceSubsystemHardeningStressTests: XCTestCase {
         XCTAssertGreaterThan(result.byteCount, 0)
     }
 
-    // MARK: - 4. State Machine Concurrent Burst Fuzzing
+    // MARK: - 4. Session Reducer Concurrent Burst Fuzzing
 
-    func testStateMachineMassiveConcurrentFuzzing() {
-        let allEvents: [DictationEvent] = [
-            .hotkeyDown,
-            .hotkeyUp,
-            .lockIn,
+    /// Ported from the deleted `DictationStateMachine` onto `VoiceSessionReducer`.
+    ///
+    /// Hammers the reducer with out-of-order events from many threads. The reducer is a
+    /// pure function over `inout` state, so each worker owns its own state value; what is
+    /// being checked is that no event sequence can drive it into an undefined phase, and
+    /// that terminal phases stay terminal.
+    func testSessionReducerMassiveConcurrentFuzzing() {
+        let artifact = AudioArtifact(
+            fileURL: URL(fileURLWithPath: "/tmp/fuzz.caf"),
+            format: "caf",
+            sampleRate: 16000,
+            channelCount: 1,
+            frameCount: 1000,
+            durationSeconds: 1.0,
+            byteCount: 2000,
+            sha256Hex: "deadbeef",
+            gapCount: 0
+        )
+        let raw = RawTranscript(
+            text: "fuzz transcript",
+            localeIdentifier: "en-US",
+            providerID: "test",
+            modelVersion: "1"
+        )
+        let allEvents: [VoiceSessionEvent] = [
+            .startCapture(mode: .hold),
+            .lockInHandsFree,
+            .liveSegmentReceived(SpeechSegment(segmentID: "live-0", text: "hello", finality: .volatile)),
+            .liveSegmentReceived(SpeechSegment(segmentID: "live-0", text: "Hello.", finality: .final)),
+            .stopCapture,
+            .audioFinalized(artifact),
+            .speechSegmentReceived(SpeechSegment(segmentID: "s0", text: "seg", finality: .final)),
+            .speechCompleted(SpeechCompletion(rawTranscript: raw, finalSegmentCount: 1, totalDurationSeconds: 1)),
+            .rawValidationPassed(raw),
+            .targetLeaseInvalidated(reason: "fuzz"),
             .cancel,
-            .encodingComplete(URL(fileURLWithPath: "/tmp/a.flac")),
-            .transcriptReady("Test transcript"),
-            .insertionComplete(.inserted),
-            .error(.network("fuzz error")),
-            .error(.timeout),
-            .error(.auth)
+            .failureOccurred(VoiceFailure(stage: .recognition, code: .requestTimeout))
         ]
 
         DispatchQueue.concurrentPerform(iterations: 50) { iteration in
-            var state: DictationState = .idle
+            let generation = SessionGeneration(rawValue: 1)
+            let snapshot = VoiceSessionSnapshot(
+                generation: generation,
+                speechProvider: SpeechProviderDescriptor(
+                    id: "test", displayName: "Test", modelVersion: "1",
+                    privacyRoute: .onDeviceOnly, supportsStreaming: true,
+                    supportsContextualStrings: false
+                ),
+                correctionProvider: CorrectionProviderDescriptor(
+                    id: "deterministic.none", displayName: "None", modelVersion: "1",
+                    privacyRoute: .onDeviceOnly, supportsStructuredOutput: false
+                ),
+                privacyRoute: .onDeviceOnly,
+                targetLease: TargetLease(bundleIdentifier: "com.test", processIdentifier: 1)
+            )
+            var state = VoiceSessionState(snapshot: snapshot, phase: .preparing)
+
             for step in 0..<100 {
                 let event = allEvents[(iteration * 31 + step * 7) % allEvents.count]
-                state = DictationStateMachine.transition(state, on: event)
+                let wasTerminal = Self.isTerminal(state.phase)
+                let before = state.phase
+
+                _ = VoiceSessionReducer.reduce(state: &state, event: event, eventGeneration: generation)
+
+                if wasTerminal {
+                    XCTAssertEqual(
+                        state.phase, before,
+                        "A terminal phase must never be reopened by a later event"
+                    )
+                }
             }
-            // Must end in a valid defined state without crashing
-            XCTAssertNotNil(state)
+        }
+    }
+
+    private static func isTerminal(_ phase: SessionPhase) -> Bool {
+        switch phase {
+        case .completed, .failed, .cancelled: return true
+        default: return false
         }
     }
 

@@ -249,7 +249,7 @@ public enum CommandPaletteCatalog {
                 trigger: "voice",
                 titleKey: "palette.voice.dictation",
                 subtitleKey: "palette.voice.dictation.detail",
-                aliases: ["voice", "dictate", "smart dictation", "transcribe", "speech", "speech to text", "voxtral", "fun asr"],
+                aliases: ["voice", "dictate", "smart dictation", "transcribe", "speech", "speech to text", "whisper"],
                 action: .voiceDictation
             ),
             PaletteCommand(

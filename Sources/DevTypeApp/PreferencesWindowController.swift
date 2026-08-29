@@ -325,13 +325,12 @@ final class PreferencesViewController: NSViewController,
 
     // Voice & Smart Dictation
     private let voiceModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let voiceRecognitionModels = VoiceModelType.allCases
+    private let voiceEngines = TranscriptionEngine.allCases
     private let voiceTonePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let voiceRealTimeTypingSwitch = NSSwitch()
     private let voiceAutoPunctuateSwitch = NSSwitch()
     private let voiceDisfluenciesSwitch = NSSwitch()
     private let voiceSoundFeedbackSwitch = NSSwitch()
-    private let voiceHandsFreeSwitch = NSSwitch()
     private var voiceShortcutRecorder: ShortcutRecorderView?
     private let voiceDictionaryTable = NSTableView()
     private let voiceDictionaryEmptyLabel = DevTypeTheme.makeLabel(
@@ -1479,13 +1478,7 @@ final class PreferencesViewController: NSViewController,
             toggle: voiceSoundFeedbackSwitch,
             action: #selector(voiceSoundFeedbackChanged)
         )
-        let handsFreeRow = makeToggleRow(
-            title: loc.s("prefs.voice.handsFree"),
-            toggle: voiceHandsFreeSwitch,
-            action: #selector(voiceHandsFreeChanged)
-        )
-
-        stackInCard(optionsCard, views: [toneRow, realTimeTypingRow, disfluencyRow, autoPunctuateRow, soundFeedbackRow, handsFreeRow])
+        stackInCard(optionsCard, views: [toneRow, realTimeTypingRow, disfluencyRow, autoPunctuateRow, soundFeedbackRow])
 
         // 3. Hotkey Card
         let hotkeyCard = makeCard(title: loc.s("prefs.voice.hotkey.card"), symbol: "keyboard")
@@ -1710,19 +1703,17 @@ final class PreferencesViewController: NSViewController,
         rows.translatesAutoresizingMaskIntoConstraints = false
         inventory.addSubview(rows)
 
-        for (index, model) in voiceRecognitionModels.enumerated() {
-            let presentation = voiceRecognitionModelStatus(for: model)
+        for (index, engine) in voiceEngines.enumerated() {
+            let presentation = voiceEngineStatus(for: engine)
             let name = DevTypeTheme.makeLabel(
-                model.descriptor.shortName,
+                engine.displayName,
                 font: DevTypeTheme.font(11, .medium),
                 color: DevTypeTheme.textPrimary
             )
             name.lineBreakMode = .byTruncatingTail
 
             let source = DevTypeTheme.makeLabel(
-                model == .appleSpeech
-                    ? loc.s("prefs.voice.speechModels.source.system")
-                    : loc.s("prefs.voice.speechModels.source.local"),
+                loc.s(Self.sourceKey(for: engine)),
                 font: DevTypeTheme.font(10.5),
                 color: DevTypeTheme.textSecondary
             )
@@ -1751,7 +1742,7 @@ final class PreferencesViewController: NSViewController,
             rows.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
 
-            if index < voiceRecognitionModels.count - 1 {
+            if index < voiceEngines.count - 1 {
                 let separator = DevTypeTheme.makeHairline()
                 rows.addArrangedSubview(separator)
                 separator.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
@@ -1770,7 +1761,7 @@ final class PreferencesViewController: NSViewController,
     private func reloadVoice() {
         guard panes[.voice] != nil else { return }
 
-        let micGranted = VoiceAudioRecorder.checkMicrophonePermission()
+        let micGranted = DurableVoiceCapture.checkMicrophonePermission()
         voiceMicPermissionPill?.update(
             text: micGranted ? loc.s("status.active") : loc.s("status.needsPermissions"),
             tint: micGranted ? DevTypeTheme.statusGreen : DevTypeTheme.accent
@@ -1809,7 +1800,6 @@ final class PreferencesViewController: NSViewController,
         voiceAutoPunctuateSwitch.state = VoicePreferences.isAutoPunctuateEnabled ? .on : .off
         voiceDisfluenciesSwitch.state = VoicePreferences.isRemoveDisfluenciesEnabled ? .on : .off
         voiceSoundFeedbackSwitch.state = VoicePreferences.isSoundFeedbackEnabled ? .on : .off
-        voiceHandsFreeSwitch.state = VoicePreferences.isHandsFreeModeEnabled ? .on : .off
 
         voiceShortcutRecorder?.setShortcut(HotkeyPreferences.voiceShortcut)
 
@@ -1851,7 +1841,7 @@ final class PreferencesViewController: NSViewController,
     }
 
     @objc private func requestMicrophoneAccessClicked() {
-        VoiceAudioRecorder.requestMicrophonePermission { [weak self] _ in
+        DurableVoiceCapture.requestMicrophonePermission { [weak self] _ in
             DispatchQueue.main.async {
                 self?.reloadVoice()
             }
@@ -1938,7 +1928,7 @@ final class PreferencesViewController: NSViewController,
 
         let endpoint = VoicePreferences.localLLMEndpoint
         Task {
-            let discovered = await LocalLLMCleanupClient.shared.fetchAvailableLocalModels(endpoint: endpoint)
+            let discovered = await LocalLLMModelCatalog.shared.fetchAvailableLocalModels(endpoint: endpoint)
             await MainActor.run {
                 self.localLLMScanButton?.isEnabled = true
                 self.localLLMScanButton?.title = self.loc.s("prefs.voice.cleanupModels.scan")
@@ -2026,10 +2016,6 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func voiceSoundFeedbackChanged() {
         VoicePreferences.isSoundFeedbackEnabled = voiceSoundFeedbackSwitch.state == .on
-    }
-
-    @objc private func voiceHandsFreeChanged() {
-        VoicePreferences.isHandsFreeModeEnabled = voiceHandsFreeSwitch.state == .on
     }
 
     private func applyVoiceShortcut(_ shortcut: DevTypeShortcut?) {
@@ -2509,46 +2495,39 @@ final class PreferencesViewController: NSViewController,
         return label
     }
 
-    private func voiceRecognitionModelStatus(
-        for model: VoiceModelType
+    /// Configuration readiness for each engine.
+    ///
+    /// Replaces an inventory of downloadable ASR models that no engine could actually use
+    /// and whose download URLs no longer resolve. This reports something the user can act
+    /// on: whether the selected engine will work, and what is missing if it will not.
+    private func voiceEngineStatus(
+        for engine: TranscriptionEngine
     ) -> (text: String, color: NSColor, detail: String?) {
-        switch VoiceModelManager.shared.status(for: model) {
-        case .notDownloaded:
+        switch engine {
+        case .gemini:
+            return GeminiAPIKeyStore.hasKey
+                ? (loc.s("prefs.voice.speechModels.status.ready"), DevTypeTheme.statusGreen, nil)
+                : (loc.s("prefs.voice.speechModels.status.needsKey"), DevTypeTheme.statusOrange, nil)
+
+        case .whisperLocal:
             return (
-                loc.s("prefs.voice.speechModels.status.notInstalled"),
+                loc.s("prefs.voice.speechModels.status.needsServer"),
                 DevTypeTheme.textTertiary,
-                nil
+                VoicePreferences.whisperEndpoint.absoluteString
             )
-        case .downloading(_, let bytesWritten, let totalBytes):
-            let progress = String(
-                format: "%.1f MB / %.1f MB",
-                Double(bytesWritten) / 1_000_000,
-                Double(totalBytes) / 1_000_000
-            )
-            return (
-                loc.s("prefs.voice.status.downloading", progress),
-                DevTypeTheme.accentBright,
-                nil
-            )
-        case .ready:
-            if model == .appleSpeech {
-                return (
-                    loc.s("prefs.voice.speechModels.status.ready"),
-                    DevTypeTheme.statusGreen,
-                    nil
-                )
-            }
-            return (
-                loc.s("prefs.voice.speechModels.status.stored"),
-                DevTypeTheme.statusOrange,
-                loc.s("prefs.voice.speechModels.hint")
-            )
-        case .error(let message):
-            return (
-                loc.s("prefs.voice.speechModels.status.invalid"),
-                DevTypeTheme.statusOrange,
-                message
-            )
+
+        case .localLLM, .appleSpeech:
+            // On-device recognition needs no configuration; correction degrades to
+            // deterministic rules on its own when no model is reachable.
+            return (loc.s("prefs.voice.speechModels.status.ready"), DevTypeTheme.statusGreen, nil)
+        }
+    }
+
+    private static func sourceKey(for engine: TranscriptionEngine) -> String {
+        switch engine {
+        case .gemini: return "prefs.voice.speechModels.source.cloud"
+        case .whisperLocal: return "prefs.voice.speechModels.source.local"
+        case .localLLM, .appleSpeech: return "prefs.voice.speechModels.source.system"
         }
     }
 

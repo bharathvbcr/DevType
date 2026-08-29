@@ -15,35 +15,22 @@ public final class LegacyAppleSpeechAdapter: SpeechRecognizer, @unchecked Sendab
         )
     }
 
+    /// Observational only — never prompts. See `SpeechAuthorization` for why a readiness
+    /// check must not have the side effect of asking the user for permission.
     public func probe() async -> ProviderReadiness {
-        let authStatus = SFSpeechRecognizer.authorizationStatus()
-        switch authStatus {
+        switch SpeechAuthorization.status() {
         case .authorized:
             guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
                 return .temporarilyUnavailable(retryAfterSeconds: 2.0, reason: .endpointUnreachable)
             }
-            let evidence = ProviderEvidence(
+            return .ready(ProviderEvidence(
                 providerID: descriptor.id,
                 modelVersion: descriptor.modelVersion,
                 probeTimestamp: Date(),
                 capabilities: ["onDeviceRecognition", "contextualStrings", "offline"]
-            )
-            return .ready(evidence)
-        case .denied, .restricted:
+            ))
+        case .notDetermined, .unavailable:
             return .requiresPermission(.speechRecognition)
-        case .notDetermined:
-            let granted = await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { status in
-                    continuation.resume(returning: status == .authorized)
-                }
-            }
-            if granted {
-                return await probe()
-            } else {
-                return .requiresPermission(.speechRecognition)
-            }
-        @unknown default:
-            return .unsupported(reason: .modelLoadFailed)
         }
     }
 

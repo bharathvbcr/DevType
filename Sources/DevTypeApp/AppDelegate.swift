@@ -1024,7 +1024,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.presentAIPalette()
         }
         hotkeyManager.onVoiceDictation = {
-            VoiceDictationCoordinator.shared.toggleDictation()
+            VoiceDictationController.shared.toggleDictation()
         }
         hotkeyManager.onInsertText = { text in
             TextInjectionPipeline.shared.inject(
@@ -1060,10 +1060,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         hotkeyManager.registerAll()
+        VoiceDictationController.shared.performLaunchRecovery()
     }
 
     @objc private func startSmartDictation(_ sender: Any?) {
-        VoiceDictationCoordinator.shared.toggleDictation()
+        VoiceDictationController.shared.toggleDictation()
     }
 
     /// Records the reason for an otherwise-silent `SIGABRT`.
@@ -1179,7 +1180,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             injectPaletteText(original, sourceApp: sourceApp)
 
         case .voiceDictation:
-            VoiceDictationCoordinator.shared.toggleDictation(sourceApp: sourceApp)
+            VoiceDictationController.shared.toggleDictation(sourceApp: sourceApp)
 
         case .navigate(let target):
             switch target {

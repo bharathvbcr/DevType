@@ -33,10 +33,30 @@ public struct SessionGeneration: Hashable, Codable, Sendable, Comparable {
 
 // MARK: - Privacy Route
 
+/// How capture is driven: hold the hotkey, or lock in for hands-free dictation.
+public enum DictationMode: String, Codable, Equatable, Sendable {
+    case hold
+    case handsFree
+}
+
 public enum PrivacyRoute: String, Codable, Sendable {
     case onDeviceOnly
     case localNetworkOnly
     case cloudPermitted
+
+    /// Whether a session on this route may use a provider declaring `providerRoute`.
+    ///
+    /// A provider may only ever be *narrower* than the session, never wider. This is the
+    /// rule that keeps a stale preference or a mis-built snapshot from sending audio
+    /// somewhere the user excluded, so it has exactly one implementation — both registries
+    /// call this rather than each carrying a copy that could drift.
+    public func permits(_ providerRoute: PrivacyRoute) -> Bool {
+        switch self {
+        case .onDeviceOnly:     return providerRoute == .onDeviceOnly
+        case .localNetworkOnly: return providerRoute != .cloudPermitted
+        case .cloudPermitted:   return true
+        }
+    }
 }
 
 // MARK: - Provider Descriptors & Evidence

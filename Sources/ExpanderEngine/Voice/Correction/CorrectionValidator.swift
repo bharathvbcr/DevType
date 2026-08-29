@@ -1,6 +1,15 @@
 import Foundation
 
 public enum CorrectionValidator {
+
+    /// Case-folded words with punctuation removed. Used to decide whether two transcripts
+    /// say the same thing, independent of how they are punctuated.
+    static func contentWords(_ text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+    }
+
     private static let refusalMarkers = [
         "as an ai", "i am an ai", "an ai", "ai model", "language model", "i cannot", "i am unable", "unable to",
         "i'm sorry", "sorry,", "cannot fulfill", "cannot transcribe",
@@ -24,7 +33,19 @@ public enum CorrectionValidator {
             return .fallbackToRaw(reason: .correctionRefusal)
         }
 
-        // 2. Refusal / AI preamble / Markdown fence check
+        // 2. Verbatim policy is enforced, not merely requested.
+        //
+        // The prompt asks a model for a verbatim result, but a model that rewrites anyway
+        // must not be trusted — verbatim is the one mode where a "better" transcript is
+        // exactly the wrong answer. Only whitespace may differ.
+        if policy.tone == .exact {
+            if Self.contentWords(candidateText) != Self.contentWords(rawText) {
+                return .fallbackToRaw(reason: .correctionUnsupportedEdit)
+            }
+            return .accepted(metrics: ["exactMatch": 1.0])
+        }
+
+        // 3. Refusal / AI preamble / Markdown fence check
         let lower = candidateText.lowercased()
         for marker in refusalMarkers {
             if lower.hasPrefix(marker) || (lower.contains(marker) && !rawText.lowercased().contains(marker)) {
@@ -35,7 +56,7 @@ public enum CorrectionValidator {
             return .fallbackToRaw(reason: .correctionRefusal)
         }
 
-        // 3. Protected Spans Invariant Check
+        // 4. Protected Spans Invariant Check
         if policy.preserveProtectedSpans {
             for span in protectedSpans {
                 let canonical = span.canonicalForm
@@ -50,7 +71,7 @@ public enum CorrectionValidator {
             }
         }
 
-        // 4. Token & Length Boundaries
+        // 5. Token & Length Boundaries
         let rawTokens = rawText.split(whereSeparator: \.isWhitespace)
         let candidateTokens = candidateText.split(whereSeparator: \.isWhitespace)
 

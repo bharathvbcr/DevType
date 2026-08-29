@@ -82,4 +82,73 @@ public final class VoiceRecoveryService: Sendable {
 
         return results.sorted { $0.snapshot.createdAt > $1.snapshot.createdAt }
     }
+
+    /// Sessions that produced text but were never delivered — the app was killed, or the
+    /// target app went away mid-insert. These are the ones worth offering back to the user.
+    public func recoverableUndelivered(baseDirectory: URL? = nil) -> [RecoverableVoiceSession] {
+        scanRecoverableSessions(baseDirectory: baseDirectory).filter { session in
+            guard !session.isDelivered else { return false }
+            let text = session.finalTranscript?.text ?? session.rawTranscript?.text ?? ""
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    /// The best text a recovered session can offer.
+    public static func recoveredText(_ session: RecoverableVoiceSession) -> String {
+        let final = session.finalTranscript?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !final.isEmpty { return final }
+        return session.rawTranscript?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    /// Deletes session directories that are no longer useful.
+    ///
+    /// Every dictation writes a directory containing the captured audio, so without this
+    /// the store grows without bound — a long-running install would accumulate gigabytes of
+    /// recordings that nothing will ever read again.
+    ///
+    /// Delivered sessions past `olderThan` go first. Undelivered ones are kept longer
+    /// because they are the only copy of something the user said and never received, but
+    /// they are still bounded: past `keepingAtMost` the oldest are dropped.
+    @discardableResult
+    public func prune(
+        olderThan maxAge: TimeInterval = 7 * 24 * 60 * 60,
+        keepingAtMost limit: Int = 50,
+        baseDirectory: URL? = nil,
+        now: Date = Date()
+    ) -> Int {
+        let sessions = scanRecoverableSessions(baseDirectory: baseDirectory)
+        var removed = 0
+
+        var survivors: [RecoverableVoiceSession] = []
+        for session in sessions {
+            let age = now.timeIntervalSince(session.snapshot.createdAt)
+            let expired = session.isDelivered && age > maxAge
+            if expired {
+                if discard(session) { removed += 1 }
+            } else {
+                survivors.append(session)
+            }
+        }
+
+        // `scanRecoverableSessions` returns newest first, so anything past the cap is oldest.
+        if survivors.count > limit {
+            for session in survivors[limit...] where discard(session) {
+                removed += 1
+            }
+        }
+
+        return removed
+    }
+
+    /// Removes one session's directory. Returns whether anything was deleted.
+    @discardableResult
+    public func discard(_ session: RecoverableVoiceSession) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: session.directoryURL)
+            return true
+        } catch {
+            DevTypeLog.app.error("[Voice] could not remove recovered session directory: \(error)")
+            return false
+        }
+    }
 }

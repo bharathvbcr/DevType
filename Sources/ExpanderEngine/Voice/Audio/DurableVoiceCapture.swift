@@ -1,5 +1,5 @@
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 
 public actor DurableVoiceCapture {
     public static let shared = DurableVoiceCapture()
@@ -20,12 +20,32 @@ public actor DurableVoiceCapture {
 
     private init() {}
 
+    /// Actor-isolated setters — the handlers are stored state, so they cannot be
+    /// assigned from outside the actor.
+    public func setOnPCMBuffer(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {
+        onPCMBuffer = handler
+    }
+
+    public func setOnAudioLevelUpdate(_ handler: (@Sendable (Float) -> Void)?) {
+        onAudioLevelUpdate = handler
+    }
+
     public static func checkMicrophonePermission() -> Bool {
         #if os(macOS)
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         return status == .authorized
         #else
         return true
+        #endif
+    }
+
+    /// Closure form for callers that cannot await — notably `PermissionRequester`, which
+    /// runs inside a synchronous permission audit.
+    public static func requestMicrophonePermission(completion: @escaping @Sendable (Bool) -> Void) {
+        #if os(macOS)
+        AVCaptureDevice.requestAccess(for: .audio) { granted in completion(granted) }
+        #else
+        completion(true)
         #endif
     }
 

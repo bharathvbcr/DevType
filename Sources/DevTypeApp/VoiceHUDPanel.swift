@@ -211,7 +211,7 @@ public final class VoiceHUDPanel: NSPanel {
 
     @objc private func cancelRecording() {
         stopTimer()
-        VoiceDictationCoordinator.shared.cancelDictation()
+        VoiceDictationController.shared.cancelDictation()
         hide()
     }
 

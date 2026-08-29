@@ -2,11 +2,9 @@ import Foundation
 
 /// Persistence for Voice Dictation preferences (`devtype.voice.*`).
 public enum VoicePreferences {
-    public static let selectedModelKey = "devtype.voice.selectedModel"
     public static let toneKey = "devtype.voice.tone"
     public static let autoPunctuateKey = "devtype.voice.autoPunctuate"
     public static let removeDisfluenciesKey = "devtype.voice.removeDisfluencies"
-    public static let handsFreeKey = "devtype.voice.handsFree"
     public static let soundFeedbackKey = "devtype.voice.soundFeedback"
     public static let realTimeTypingKey = "devtype.voice.realTimeTyping"
     public static let customDictionaryKey = "devtype.voice.customDictionary"
@@ -17,21 +15,7 @@ public enum VoicePreferences {
     public static let localLLMEndpointKey = "devtype.voice.localLLMEndpoint"
     public static let localLLMModelKey = "devtype.voice.localLLMModel"
     public static let localLLMTimeoutKey = "devtype.voice.localLLMTimeout"
-
-    // MARK: - Selected Model
-
-    public static var selectedModel: VoiceModelType {
-        get {
-            guard let raw = UserDefaults.standard.string(forKey: selectedModelKey),
-                  let model = VoiceModelType(rawValue: raw) else {
-                return .voxtralMini4B
-            }
-            return model
-        }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: selectedModelKey)
-        }
-    }
+    public static let whisperEndpointKey = "devtype.voice.whisperEndpoint"
 
     // MARK: - Tone
 
@@ -72,11 +56,6 @@ public enum VoicePreferences {
         set {
             UserDefaults.standard.set(newValue, forKey: removeDisfluenciesKey)
         }
-    }
-
-    public static var isHandsFreeModeEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: handsFreeKey) }
-        set { UserDefaults.standard.set(newValue, forKey: handsFreeKey) }
     }
 
     public static var isSoundFeedbackEnabled: Bool {
@@ -122,7 +101,6 @@ public enum VoicePreferences {
 
     public static let defaultDictionary: [String: String] = [
         "dev type": "DevType",
-        "voxtral": "Voxtral",
         "fun asr": "Fun-ASR",
         "k8s": "Kubernetes",
         "swift pm": "SwiftPM",
@@ -212,6 +190,21 @@ public enum VoicePreferences {
     // MARK: - Local LLM Configuration
 
     /// The local OpenAI-compatible or Ollama endpoint URL (e.g. `http://localhost:11434/v1/chat/completions` or `http://localhost:1234/v1/chat/completions`).
+    /// Endpoint of a local `whisper.cpp` server. Constrained to loopback by the adapter's
+    /// probe, so this preference cannot be used to ship audio off the machine.
+    public static var whisperEndpoint: URL {
+        get {
+            if let string = UserDefaults.standard.string(forKey: whisperEndpointKey),
+               let url = URL(string: string) {
+                return url
+            }
+            return URL(string: "http://127.0.0.1:8080/inference")!
+        }
+        set {
+            UserDefaults.standard.set(newValue.absoluteString, forKey: whisperEndpointKey)
+        }
+    }
+
     public static var localLLMEndpoint: URL {
         get {
             if let string = UserDefaults.standard.string(forKey: localLLMEndpointKey),
@@ -305,13 +298,11 @@ public enum VoicePreferences {
     }
 
     public static func resetAllForTesting() {
-        UserDefaults.standard.removeObject(forKey: selectedModelKey)
         UserDefaults.standard.removeObject(forKey: toneKey)
         UserDefaults.standard.removeObject(forKey: autoPunctuateKey)
         UserDefaults.standard.removeObject(forKey: removeDisfluenciesKey)
         UserDefaults.standard.removeObject(forKey: soundFeedbackKey)
         UserDefaults.standard.removeObject(forKey: realTimeTypingKey)
-        UserDefaults.standard.removeObject(forKey: handsFreeKey)
         UserDefaults.standard.removeObject(forKey: customDictionaryKey)
         UserDefaults.standard.removeObject(forKey: customVoiceTriggersKey)
         UserDefaults.standard.removeObject(forKey: transcriptionEngineKey)
@@ -320,5 +311,6 @@ public enum VoicePreferences {
         UserDefaults.standard.removeObject(forKey: localLLMEndpointKey)
         UserDefaults.standard.removeObject(forKey: localLLMModelKey)
         UserDefaults.standard.removeObject(forKey: localLLMTimeoutKey)
+        UserDefaults.standard.removeObject(forKey: whisperEndpointKey)
     }
 }

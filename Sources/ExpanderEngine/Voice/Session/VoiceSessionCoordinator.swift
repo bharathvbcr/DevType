@@ -9,25 +9,75 @@ public actor VoiceSessionCoordinator {
     private let capture = DurableVoiceCapture.shared
     private let store = VoiceSessionStore.shared
     private let speechRegistry = SpeechProviderRegistry.shared
+    private let correctionRegistry = CorrectionProviderRegistry.shared
 
     public var onPhaseChange: (@Sendable (SessionPhase) -> Void)?
 
+    /// Emitted for each live segment while audio is still being captured, so the delivery
+    /// layer can type progressively. `.volatile` segments are still being revised;
+    /// `.final` marks an endpoint and seals a commit barrier.
+    public var onLiveSegment: (@Sendable (SpeechSegment) -> Void)?
+
+    /// Live microphone level, forwarded for HUD metering.
+    public var onAudioLevel: (@Sendable (Float) -> Void)?
+
+    /// Gives the app a chance to claim the transcript as a spoken command before it is
+    /// typed. Returning `true` means the app handled it and nothing should be inserted.
+    public var onDeliveryIntercept: (@Sendable (String) async -> Bool)?
+
+    private var liveStream: LiveSpeechStream?
+
+    /// Bounds every phase after capture ends. See `SessionWatchdog`.
+    private let watchdog = SessionWatchdog()
+
     private init() {}
+
+    // Actor-isolated setters — callbacks are stored state and cannot be assigned
+    // from outside the actor.
+    public func setOnPhaseChange(_ handler: (@Sendable (SessionPhase) -> Void)?) {
+        onPhaseChange = handler
+    }
+
+    public func setOnLiveSegment(_ handler: (@Sendable (SpeechSegment) -> Void)?) {
+        onLiveSegment = handler
+    }
+
+    public func setOnAudioLevel(_ handler: (@Sendable (Float) -> Void)?) {
+        onAudioLevel = handler
+    }
+
+    public func setOnDeliveryIntercept(_ handler: (@Sendable (String) async -> Bool)?) {
+        onDeliveryIntercept = handler
+    }
 
     public func activePhase() -> SessionPhase? {
         activeState?.phase
+    }
+
+    /// The raw and corrected transcripts of the current session, once recognition has run.
+    /// Used to show the user what cleanup changed, and to offer a revert.
+    public func transcripts() -> (raw: String, final: String)? {
+        guard let state = activeState,
+              let raw = state.rawTranscript,
+              let final = state.finalTranscript else { return nil }
+        return (raw.text, final.text)
     }
 
     public func startSession(snapshot: VoiceSessionSnapshot, mode: DictationMode = .hold) async throws {
         // If an existing session is running, cancel it cleanly
         if let existingBag = taskBag {
             existingBag.advanceGenerationAndCancelAll()
+            disarmWatchdog()
+            liveStream?.cancel()
+            liveStream = nil
             await capture.cancelCapture()
         }
 
         let generation = snapshot.generation
         let bag = SessionTaskBag(sessionID: snapshot.sessionID, generation: generation)
         self.taskBag = bag
+
+        await MainActor.run { VoiceInsertionService.shared.beginSession() }
 
         let state = VoiceSessionState(snapshot: snapshot, phase: .preparing)
         self.activeState = state
@@ -48,7 +98,11 @@ public actor VoiceSessionCoordinator {
     public func cancelSession() async {
         guard activeState != nil, let bag = taskBag else { return }
         let generation = bag.advanceGenerationAndCancelAll()
+        disarmWatchdog()
+        liveStream?.cancel()
+        liveStream = nil
         await capture.cancelCapture()
+        _ = await MainActor.run { VoiceInsertionService.shared.rollback() }
         _ = processEvent(.cancel, generation: generation)
         self.activeState = nil
         self.taskBag = nil
@@ -77,6 +131,103 @@ public actor VoiceSessionCoordinator {
         }
     }
 
+    // MARK: - Watchdog
+
+    private func armWatchdog(seconds: Double, generation: SessionGeneration) {
+        Task { [weak self] in
+            await self?.watchdog.arm(seconds: seconds, generation: generation) { [weak self] expired in
+                await self?.failOnTimeout(generation: expired, after: seconds)
+            }
+        }
+    }
+
+    private func disarmWatchdog() {
+        Task { [watchdog] in await watchdog.disarm() }
+    }
+
+    private func failOnTimeout(generation: SessionGeneration, after seconds: Double) {
+        guard let state = activeState else { return }
+        switch state.phase {
+        case .completed, .failed, .cancelled:
+            return   // finished in time
+        default:
+            break
+        }
+
+        liveStream?.cancel()
+        liveStream = nil
+
+        let failure = VoiceFailure(
+            stage: Self.stage(for: state.phase),
+            code: .requestTimeout,
+            retryClass: .afterUserAction,
+            redactedDetail: "Session exceeded \(Int(seconds))s in phase \(state.phase)"
+        )
+        _ = processEvent(.failureOccurred(failure), generation: generation)
+    }
+
+    /// Attributes a timeout to the stage that was actually running, so the diagnostic
+    /// names the component that stalled rather than reporting a generic failure.
+    static func stage(for phase: SessionPhase) -> FailureStage {
+        switch phase {
+        case .preparing, .capturing: return .audioCapture
+        case .finalizingAudio: return .audioFinalization
+        case .recognizing: return .recognition
+        case .validatingRaw: return .rawValidation
+        case .correcting: return .correction
+        case .validatingCorrection: return .correctionValidation
+        case .readyForDelivery, .delivering: return .delivery
+        case .completed, .failed, .cancelled, .recoverable: return .protocolViolation
+        }
+    }
+
+    private func startLiveRecognition(snapshot: VoiceSessionSnapshot, generation: SessionGeneration) async {
+        liveStream?.cancel()
+
+        let stream = LiveSpeechStream(
+            locale: Locale(identifier: snapshot.localeIdentifier),
+            contextualStrings: snapshot.vocabularySnapshot.terms,
+            onSegment: { [weak self] segment in
+                Task { [weak self] in
+                    guard let self else { return }
+                    _ = await self.ingestLiveSegment(segment, generation: generation)
+                }
+            },
+            onFailure: { [weak self] failure in
+                Task { [weak self] in
+                    guard let self else { return }
+                    _ = await self.ingestLiveFailure(failure, generation: generation)
+                }
+            }
+        )
+        liveStream = stream
+
+        await capture.setOnPCMBuffer { [weak stream] buffer in
+            stream?.append(buffer)
+        }
+        await capture.setOnAudioLevelUpdate { [weak self] level in
+            guard let self else { return }
+            Task { await self.emitAudioLevel(level) }
+        }
+    }
+
+    private func finishLiveRecognition() async {
+        await capture.setOnPCMBuffer(nil)
+        liveStream?.finish()
+    }
+
+    private func emitAudioLevel(_ level: Float) {
+        onAudioLevel?(level)
+    }
+
+    private func ingestLiveSegment(_ segment: SpeechSegment, generation: SessionGeneration) -> Bool {
+        processEvent(.liveSegmentReceived(segment), generation: generation)
+    }
+
+    private func ingestLiveFailure(_ failure: VoiceFailure, generation: SessionGeneration) -> Bool {
+        processEvent(.failureOccurred(failure), generation: generation)
+    }
+
     private func executeCommands(_ commands: [VoiceSessionCommand], for snapshot: VoiceSessionSnapshot, generation: SessionGeneration) {
         for command in commands {
             switch command {
@@ -88,6 +239,7 @@ public actor VoiceSessionCoordinator {
                 let task = Task { [weak self] in
                     guard let self = self else { return }
                     do {
+                        await self.startLiveRecognition(snapshot: snapshot, generation: generation)
                         try await self.capture.startCapture(sessionDirectory: sessionDir)
                     } catch {
                         let fail = (error as? VoiceFailure) ?? VoiceFailure(
@@ -101,9 +253,11 @@ public actor VoiceSessionCoordinator {
                 _ = taskBag?.add(task)
 
             case .finalizeAudioCapture:
+                armWatchdog(seconds: snapshot.timeoutSeconds, generation: generation)
                 let task = Task { [weak self] in
                     guard let self = self else { return }
                     do {
+                        await self.finishLiveRecognition()
                         let artifact = try await self.capture.stopCapture()
                         _ = await self.processEvent(.audioFinalized(artifact), generation: generation)
                     } catch {
@@ -165,16 +319,27 @@ public actor VoiceSessionCoordinator {
             case .correctTranscript(let raw):
                 let task = Task { [weak self] in
                     guard let self = self else { return }
-                    let corrector: TranscriptCorrector
-                    switch snapshot.correctionProvider.id {
-                    case "ollama.corrector":
-                        corrector = OllamaCorrector()
-                    case "openaicompatible.corrector":
-                        corrector = OpenAICompatibleCorrector()
-                    case "apple.foundation-models":
-                        corrector = FoundationLanguageModelCorrector()
-                    default:
-                        corrector = DeterministicCorrector()
+
+                    // Resolution enforces the session's privacy route and probes the
+                    // provider, so an endpoint that is down falls back immediately instead
+                    // of stalling the dictation for the whole timeout.
+                    let corrector = await self.correctionRegistry.resolveActiveCorrector(
+                        preferredID: snapshot.correctionProvider.id,
+                        privacyRoute: snapshot.privacyRoute
+                    )
+
+                    guard let corrector else {
+                        // Correction disabled — deliver exactly what was recognized.
+                        _ = await self.processEvent(
+                            .correctionValidationPassed(FinalTranscript(
+                                text: raw.text,
+                                rawTranscript: raw,
+                                correctionCandidate: nil,
+                                validationOutcome: .notApplicable
+                            )),
+                            generation: generation
+                        )
+                        return
                     }
 
                     let final = await CorrectionPipeline.execute(
@@ -192,12 +357,32 @@ public actor VoiceSessionCoordinator {
                 }
                 _ = taskBag?.add(task)
 
-            case .validateCorrectionCandidate, .cleanupResources:
+            case .applyLiveSegment(let segment):
+                Task { @MainActor in
+                    VoiceInsertionService.shared.applyLiveSegment(segment)
+                }
+                onLiveSegment?(segment)
+
+            case .validateCorrectionCandidate:
                 break
+
+            case .cleanupResources:
+                disarmWatchdog()
+                liveStream = nil
 
             case .deliverTranscript(let finalTranscript, let lease):
                 let task = Task { [weak self] in
                     guard let self = self else { return }
+
+                    if let intercept = await self.onDeliveryIntercept,
+                       await intercept(finalTranscript.text) {
+                        _ = await self.processEvent(
+                            .deliveryIntercepted(command: finalTranscript.text),
+                            generation: generation
+                        )
+                        return
+                    }
+
                     let receipt = await VoiceInsertionService.shared.deliver(
                         text: finalTranscript.text,
                         targetLease: lease,

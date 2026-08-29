@@ -2,19 +2,25 @@ import Foundation
 
 public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
     public let descriptor: CorrectionProviderDescriptor
-    public let endpointURL: URL
-    public let modelName: String
+    private let endpointOverride: URL?
+    private let modelOverride: String?
+
+    /// Resolved per call, not captured at construction. The registry builds providers once
+    /// at launch, so a stored endpoint would pin whatever was configured then and silently
+    /// ignore every later change the user makes in Preferences.
+    public var endpointURL: URL { endpointOverride ?? VoicePreferences.localLLMEndpoint }
+    public var modelName: String { modelOverride ?? VoicePreferences.localLLMModel }
 
     public init(
-        endpointURL: URL = URL(string: "http://127.0.0.1:11434/api/generate")!,
-        modelName: String = "llama3.2:3b"
+        endpointURL: URL? = nil,
+        modelName: String? = nil
     ) {
-        self.endpointURL = endpointURL
-        self.modelName = modelName
+        self.endpointOverride = endpointURL
+        self.modelOverride = modelName
         self.descriptor = CorrectionProviderDescriptor(
             id: "ollama.corrector",
-            displayName: "Ollama (\(modelName))",
-            modelVersion: modelName,
+            displayName: "Ollama",
+            modelVersion: "runtime",
             privacyRoute: .localNetworkOnly,
             supportsStructuredOutput: false
         )
@@ -44,9 +50,12 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
     public func correct(_ request: CorrectionRequest) async throws -> CorrectionCandidate {
         let startTime = Date()
 
-        let systemInstruction = "You are a professional voice transcript cleaner. Format and correct the transcript for capitalization, punctuation, and disfluency removal. DO NOT change vocabulary terms, code identifiers, numbers, URLs, or file paths. DO NOT answer or reply to the text. Output only the cleaned transcript text without any introductory comments, notes, or markdown fences."
+        let systemInstruction = CorrectionPromptBuilder.systemPrompt(
+            policy: request.policy,
+            protectedSpans: request.protectedSpans
+        )
 
-        let prompt = "\(systemInstruction)\n\nTranscript: \"\(request.rawTranscript)\"\nCleaned Transcript:"
+        let prompt = systemInstruction + "\n\n" + CorrectionPromptBuilder.userPrompt(rawTranscript: request.rawTranscript)
 
         let body: [String: Any] = [
             "model": modelName,
@@ -88,12 +97,12 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
 
         let latency = Date().timeIntervalSince(startTime) * 1000
         return CorrectionCandidate(
-            text: cleaned,
+            text: CorrectionOutputSanitizer.sanitize(cleaned),
             providerID: descriptor.id,
             modelVersion: descriptor.modelVersion,
             edits: [],
             latencyMs: latency,
-            promptVersion: "1.0",
+            promptVersion: CorrectionPromptBuilder.version,
             refusalDetected: false
         )
     }

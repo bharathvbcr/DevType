@@ -9,12 +9,10 @@ final class VoicePreferencesTests: XCTestCase {
     }
 
     func testDefaultPreferences() {
-        XCTAssertEqual(VoicePreferences.selectedModel, .voxtralMini4B)
         XCTAssertEqual(VoicePreferences.tone, .natural)
         XCTAssertTrue(VoicePreferences.isAutoPunctuateEnabled)
         XCTAssertTrue(VoicePreferences.isRemoveDisfluenciesEnabled)
         XCTAssertTrue(VoicePreferences.isSoundFeedbackEnabled)
-        XCTAssertFalse(VoicePreferences.isHandsFreeModeEnabled)
     }
 
     func testCustomDictionaryPersistence() {
@@ -36,11 +34,7 @@ final class VoicePreferencesTests: XCTestCase {
     }
 
     func testModelPersistence() {
-        VoicePreferences.selectedModel = .funASRNano
-        XCTAssertEqual(VoicePreferences.selectedModel, .funASRNano)
 
-        VoicePreferences.selectedModel = .appleSpeech
-        XCTAssertEqual(VoicePreferences.selectedModel, .appleSpeech)
     }
 
     func testRealTimeTypingPersistence() {

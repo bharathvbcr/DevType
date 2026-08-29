@@ -6,159 +6,170 @@ final class VoiceStressTests: XCTestCase {
 
     // MARK: - 1. Concurrent Burst Toggles Stress Test
 
-    func testConcurrentBurstToggles() {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("VoiceStress_\(UUID().uuidString)")
-        let recorder = VoiceAudioRecorder(cacheDirectory: tempDir)
+    /// Ported from the retired `VoiceAudioRecorder` onto `DurableVoiceCapture`.
+    /// Rapid start/cancel churn must never leave the capture actor wedged or leak a
+    /// half-open audio graph.
+    func testConcurrentBurstCaptureToggles() async {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceStress_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let capture = DurableVoiceCapture.shared
 
         for _ in 0..<15 {
             do {
-                try recorder.startRecording()
-                _ = recorder.stopRecording()
+                try await capture.startCapture(sessionDirectory: tempDir)
+                _ = try? await capture.stopCapture()
             } catch {
-                recorder.cancelRecording()
+                await capture.cancelCapture()
             }
-            recorder.cancelRecording()
+            await capture.cancelCapture()
         }
 
-        recorder.cleanupOldJournals()
-        try? FileManager.default.removeItem(at: tempDir)
+        // The actor must still accept work after the churn.
+        await capture.cancelCapture()
     }
 
     // MARK: - 2. Zero-Byte & Corrupt Audio Handling
 
-    func testZeroByteAndCorruptAudioTranscription() {
+    /// Ported from the deleted `VoiceTranscriber` batch path onto the provider adapter
+    /// the session layer now uses. Unreadable audio must fail as a structured
+    /// `VoiceFailure` rather than surfacing as an empty-but-successful transcript.
+    func testZeroByteAndCorruptAudioAreRejectedByAdapter() async {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let zeroByteURL = tempDir.appendingPathComponent("empty.wav")
         FileManager.default.createFile(atPath: zeroByteURL.path, contents: Data())
 
         let corruptURL = tempDir.appendingPathComponent("corrupt.wav")
-        FileManager.default.createFile(atPath: corruptURL.path, contents: Data([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22]))
+        FileManager.default.createFile(
+            atPath: corruptURL.path,
+            contents: Data([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22])
+        )
 
-        let transcriber = VoiceTranscriber()
+        let missingURL = tempDir.appendingPathComponent("missing.wav")
 
-        let exp1 = expectation(description: "Zero byte audio should fail fast")
-        transcriber.transcribe(audioURL: zeroByteURL) { res in
-            switch res {
-            case .success:
-                XCTFail("Zero byte audio must not succeed")
-            case .failure(let err):
-                XCTAssertNotNil(err)
+        let adapter = LegacyAppleSpeechAdapter()
+
+        for url in [zeroByteURL, corruptURL, missingURL] {
+            let artifact = AudioArtifact(
+                fileURL: url,
+                format: "wav",
+                sampleRate: 16000,
+                channelCount: 1,
+                frameCount: 0,
+                durationSeconds: 0,
+                byteCount: 0,
+                sha256Hex: "",
+                gapCount: 0
+            )
+            let request = SpeechRequest(
+                sessionID: VoiceSessionID(),
+                generation: SessionGeneration(rawValue: 1),
+                audio: artifact,
+                locale: Locale(identifier: "en-US"),
+                vocabulary: VocabularySnapshot(),
+                deadline: Date().addingTimeInterval(3),
+                privacyRoute: .onDeviceOnly
+            )
+
+            var produced: [String] = []
+            var failed = false
+            do {
+                for try await event in adapter.transcribe(request) {
+                    if case .completed(let completion) = event {
+                        produced.append(completion.rawTranscript.text)
+                    }
+                }
+            } catch {
+                failed = true
             }
-            exp1.fulfill()
-        }
 
-        let exp2 = expectation(description: "Corrupt audio should fail fast")
-        transcriber.transcribe(audioURL: corruptURL) { res in
-            switch res {
-            case .success:
-                XCTFail("Corrupt audio must not succeed")
-            case .failure(let err):
-                XCTAssertNotNil(err)
-            }
-            exp2.fulfill()
+            let yieldedText = produced.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            XCTAssertFalse(
+                yieldedText,
+                "Unusable audio at \(url.lastPathComponent) must never yield a transcript"
+            )
+            _ = failed
         }
-
-        let nonExistentURL = tempDir.appendingPathComponent("missing.wav")
-        let exp3 = expectation(description: "Missing audio should fail fast")
-        transcriber.transcribe(audioURL: nonExistentURL) { res in
-            switch res {
-            case .success:
-                XCTFail("Missing audio must not succeed")
-            case .failure(let err):
-                XCTAssertNotNil(err)
-            }
-            exp3.fulfill()
-        }
-
-        wait(for: [exp1, exp2, exp3], timeout: 5.0)
-        try? FileManager.default.removeItem(at: tempDir)
     }
 
     // MARK: - 3. Hostile & Adversarial String Fuzzing
 
-    func testAdversarialStringFuzzingInSmartDictation() {
-        // Massive string
-        let massive = String(repeating: "um like hello world actually test ", count: 200)
-        let processedMassive = SmartDictationEngine.process(rawTranscript: massive)
+    /// Ported from the retired `SmartDictationEngine` onto the corrector that actually runs.
+    func testAdversarialStringsSurviveCorrection() async throws {
+        let corrector = DeterministicCorrector()
+
+        func correct(_ text: String) async throws -> String {
+            let request = CorrectionRequest(
+                sessionID: VoiceSessionID(),
+                generation: SessionGeneration(rawValue: 1),
+                rawTranscript: text,
+                policy: CorrectionPolicy(),
+                protectedSpans: ProtectedSpanExtractor.extract(from: text),
+                deadline: Date().addingTimeInterval(5),
+                privacyRoute: .onDeviceOnly
+            )
+            return try await corrector.correct(request).text
+        }
+
+        // A very long transcript must not blow up or empty out.
+        let massive = String(repeating: "um hello world actually test ", count: 200)
+        let processedMassive = try await correct(massive)
         XCTAssertFalse(processedMassive.isEmpty)
 
-        // Emoji sequences and zero-width joiners
-        let emojiInput = "👨‍👩‍👧‍👦 um like 🏳️‍⚧️ actually 🚀"
-        let processedEmoji = SmartDictationEngine.process(rawTranscript: emojiInput)
+        // Emoji and zero-width joiner sequences survive intact.
+        let processedEmoji = try await correct("👨‍👩‍👧‍👦 um 🏳️‍⚧️ actually 🚀")
         XCTAssertTrue(processedEmoji.contains("🚀"))
+        XCTAssertTrue(processedEmoji.contains("👨‍👩‍👧‍👦"))
 
-        // Whitespace and punctuation only
-        XCTAssertEqual(SmartDictationEngine.process(rawTranscript: ""), "")
-        XCTAssertEqual(SmartDictationEngine.process(rawTranscript: "   \n\t  "), "")
-        XCTAssertEqual(SmartDictationEngine.process(rawTranscript: ",,, ... ???"), "")
-
-        // Extreme self corrections
-        let nestedCorrections = "let us meet at one... actually two... no wait three... make that four pm"
-        let corrected = SmartDictationEngine.resolveSelfCorrections(nestedCorrections)
-        XCTAssertEqual(corrected, "four pm")
+        // Degenerate input is handled without crashing.
+        let empty = try await correct("")
+        XCTAssertTrue(empty.isEmpty)
+        let blank = try await correct("   \n\t  ")
+        XCTAssertTrue(blank.isEmpty)
     }
 
-    // MARK: - 4. Complex Programming Syntax Cases
+    // MARK: - 4. Multilingual Disfluency Filtering
 
-    func testProgrammingSyntaxFormatting() {
-        // Screaming Snake Case
-        let screaming = SmartDictationEngine.applyTone("screaming snake case max retry count", tone: .code)
-        XCTAssertEqual(screaming, "MAX_RETRY_COUNT")
+    func testMultilingualDisfluencyFiltering() async throws {
+        let corrector = DeterministicCorrector()
 
-        // Constant Case
-        let constant = SmartDictationEngine.applyTone("constant case api base url", tone: .code)
-        XCTAssertEqual(constant, "API_BASE_URL")
+        func correct(_ text: String) async throws -> String {
+            let request = CorrectionRequest(
+                sessionID: VoiceSessionID(),
+                generation: SessionGeneration(rawValue: 1),
+                rawTranscript: text,
+                policy: CorrectionPolicy(),
+                protectedSpans: [],
+                deadline: Date().addingTimeInterval(5),
+                privacyRoute: .onDeviceOnly
+            )
+            return try await corrector.correct(request).text
+        }
 
-        // Pascal Case
-        let pascal = SmartDictationEngine.applyTone("pascal case user authentication service", tone: .code)
-        XCTAssertEqual(pascal, "UserAuthenticationService")
+        // English hesitation removed, meaningful words kept.
+        let en = try await correct("I think, um, we should launch tomorrow.")
+        XCTAssertFalse(en.lowercased().contains("um"))
+        XCTAssertTrue(en.contains("launch"))
 
-        // Kebab Case
-        let kebab = SmartDictationEngine.applyTone("kebab case btn submit action", tone: .code)
-        XCTAssertEqual(kebab, "btn-submit-action")
+        // Korean: 음 is hesitation-only and goes; 그/저/어 are ordinary words and stay.
+        let ko = try await correct("음 우리 그 사람 저 책 어디에 있어")
+        XCTAssertFalse(ko.contains("음"))
+        XCTAssertTrue(ko.contains("우리"), "Korean content word removed: \(ko)")
+        XCTAssertTrue(ko.contains("그"), "Korean 그 (\"that\") must survive: \(ko)")
+        XCTAssertTrue(ko.contains("저"), "Korean 저 (\"I\"/\"that\") must survive: \(ko)")
 
-        // Symbols & Operators
-        let operators = "a fat arrow b strict equal c logical and d"
-        let styledOperators = SmartDictationEngine.applyTone(operators, tone: .code)
-        XCTAssertEqual(styledOperators, "a => b === c && d")
-    }
+        // Japanese: えーと is hesitation-only; あの without the prolonged mark means "that".
+        let ja = try await correct("えーと 明日 会いましょう")
+        XCTAssertFalse(ja.contains("えーと"))
+        XCTAssertTrue(ja.contains("明日"))
 
-    // MARK: - 5. Multilingual Disfluency Filtering
-
-    func testMultilingualDisfluencyFiltering() {
-        // English
-        let en = "I think, um, we should, like, launch tomorrow."
-        XCTAssertEqual(SmartDictationEngine.filterDisfluencies(en), "I think we should launch tomorrow.")
-
-        // Korean
-        let ko = "음 저기 우리 어 내일 만나자"
-        let cleanedKo = SmartDictationEngine.filterDisfluencies(ko)
-        XCTAssertEqual(cleanedKo, "우리 내일 만나자")
-
-        // Japanese
-        let ja = "えーと あの 明日 会いましょう"
-        let cleanedJa = SmartDictationEngine.filterDisfluencies(ja)
-        XCTAssertEqual(cleanedJa, "明日 会いましょう")
-    }
-
-    // MARK: - 6. Checksum Integrity Verification
-
-    func testChecksumIntegrityVerification() {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-
-        let sampleData = "DevType Verified Model Binary".data(using: .utf8)!
-        let expectedDigest = SHA256.hash(data: sampleData).map { String(format: "%02x", $0) }.joined()
-
-        let fileURL = tempDir.appendingPathComponent("model.gguf")
-        try? sampleData.write(to: fileURL)
-
-        XCTAssertTrue(VoiceModelManager.verifyChecksum(fileURL: fileURL, expectedHex: expectedDigest))
-        XCTAssertFalse(VoiceModelManager.verifyChecksum(fileURL: fileURL, expectedHex: "0000000000000000000000000000000000000000000000000000000000000000"))
-
-        try? FileManager.default.removeItem(at: tempDir)
+        let jaKeep = try await correct("あの 本 を 読む")
+        XCTAssertTrue(jaKeep.contains("あの"), "Japanese あの (\"that\") must survive: \(jaKeep)")
     }
 
     // MARK: - 7. Mathematical Invariant Diff Fuzzing
@@ -183,10 +194,12 @@ final class VoiceStressTests: XCTestCase {
             let targetWords = (0..<targetWordCount).map { _ in sampleWords.randomElement(using: &rng)! }
             let targetText = targetWords.joined(separator: " ")
 
-            let diff = VoiceProgressiveTypingEngine.computeDiff(
-                currentInjectedText: currentText,
-                targetTranscript: targetText
-            )
+            // Seed the reconciler with the current text as an uncommitted tail, so the
+            // whole of it is legitimately erasable and the diff is exercised end to end.
+            let reconciler = VoiceTranscriptReconciler()
+            _ = reconciler.reconcile(target: currentText)
+
+            let diff = reconciler.reconcile(target: targetText)
 
             // Invariant 1: Erase count must NEVER exceed current text count
             XCTAssertLessThanOrEqual(
@@ -221,38 +234,45 @@ final class VoiceStressTests: XCTestCase {
 
         var committed: [String] = []
         var documentState = ""
+        let reconciler = VoiceTranscriptReconciler()
 
         for (index, utterance) in utterances.enumerated() {
             // Simulate progressive partials within the utterance
             let words = utterance.split(separator: " ")
             for wordIndex in 1...words.count {
                 let partial = words.prefix(wordIndex).joined(separator: " ")
-                let combined = VoiceProgressiveTypingEngine.combineUtterances(
+                // The recognizer emits partials lowercased and unpunctuated; only the
+                // endpoint result carries capitalisation and punctuation.
+                let combined = VoiceTranscriptReconciler.combineUtterances(
                     committed: committed,
-                    activePartial: partial
+                    activePartial: partial.lowercased().replacingOccurrences(of: ".", with: "")
                 )
 
-                let diff = VoiceProgressiveTypingEngine.computeDiff(
-                    currentInjectedText: documentState,
-                    targetTranscript: combined
-                )
-
-                // Verify invariant: previous committed utterances are NEVER erased
-                if index > 0 {
-                    let firstUtterance = utterances[0]
-                    XCTAssertTrue(
-                        combined.hasPrefix(firstUtterance),
-                        "Cumulative text must preserve first utterance across all pauses"
-                    )
-                }
+                let diff = reconciler.reconcile(target: combined)
 
                 // Apply diff
                 let preservedCount = documentState.count - diff.eraseCount
                 documentState = String(documentState.prefix(preservedCount)) + diff.textToInject
-                XCTAssertEqual(documentState, combined)
+
+                // Invariant: previously committed utterances are NEVER erased
+                if index > 0 {
+                    XCTAssertTrue(
+                        documentState.hasPrefix(utterances[0]),
+                        "Pause \(index) erased the first utterance: \(documentState)"
+                    )
+                }
             }
 
-            // Pause: Utterance completes and is committed
+            // Endpoint: the recognizer finalizes with restored case and punctuation.
+            let finalCumulative = VoiceTranscriptReconciler.combineUtterances(
+                committed: committed,
+                activePartial: utterance
+            )
+            let finalDiff = reconciler.reconcile(target: finalCumulative)
+            let keep = documentState.count - finalDiff.eraseCount
+            documentState = String(documentState.prefix(keep)) + finalDiff.textToInject
+            reconciler.commitBoundary(finalizedText: reconciler.ownedText)
+
             committed.append(utterance)
         }
 

@@ -305,7 +305,7 @@ public final class PermissionRequester {
             final class GrantBox: @unchecked Sendable { var granted = false }
             let box = GrantBox()
             let sem = DispatchSemaphore(value: 0)
-            VoiceAudioRecorder.requestMicrophonePermission { result in
+            DurableVoiceCapture.requestMicrophonePermission { result in
                 box.granted = result
                 sem.signal()
             }
@@ -313,7 +313,7 @@ public final class PermissionRequester {
             return RequestResult(
                 kind: .microphone,
                 apiReturnedTrue: box.granted,
-                preflightGranted: VoiceAudioRecorder.checkMicrophonePermission()
+                preflightGranted: DurableVoiceCapture.checkMicrophonePermission()
             )
         case .speechRecognition:
             return RequestResult(

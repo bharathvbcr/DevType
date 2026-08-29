@@ -262,7 +262,7 @@ final class SourceContractTests: XCTestCase {
         for path in [
             "Sources/DevTypeApp/AITransformFlow.swift",
             "Sources/DevTypeApp/AppDelegate.swift",
-            "Sources/DevTypeApp/VoiceDictationCoordinator.swift",
+            "Sources/DevTypeApp/VoiceDictationController.swift",
         ] {
             let text = try source(path)
             XCTAssertTrue(
@@ -275,15 +275,23 @@ final class SourceContractTests: XCTestCase {
             )
         }
 
+        // The invariant is the exact *set* of authorized files; file-enumeration order
+        // is incidental, so compare as sets and report the difference either way.
+        let authorized: Set<String> = [
+            "Sources/ExpanderEngine/AI/SelectionReader.swift",
+            "Sources/DevTypeApp/AITransformFlow.swift",
+            "Sources/DevTypeApp/VoiceDictationController.swift",
+            "Sources/DevTypeApp/AppDelegate.swift",
+        ]
+        let actual = Set(try sourceFilesContaining("readSelectionForExplicitAIAction("))
         XCTAssertEqual(
-            try sourceFilesContaining("readSelectionForExplicitAIAction("),
-            [
-                "Sources/ExpanderEngine/AI/SelectionReader.swift",
-                "Sources/DevTypeApp/AITransformFlow.swift",
-                "Sources/DevTypeApp/VoiceDictationCoordinator.swift",
-                "Sources/DevTypeApp/AppDelegate.swift",
-            ],
-            "No non-AI source path may acquire the synthetic-copy capability."
+            actual,
+            authorized,
+            """
+            No non-AI source path may acquire the synthetic-copy capability.
+            unexpected: \(actual.subtracting(authorized).sorted())
+            missing:    \(authorized.subtracting(actual).sorted())
+            """
         )
     }
 

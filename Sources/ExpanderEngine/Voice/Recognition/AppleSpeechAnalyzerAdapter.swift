@@ -1,55 +1,50 @@
 import Foundation
 import Speech
 
+/// Placeholder for the macOS 26 `SpeechAnalyzer` / `SpeechTranscriber` path.
+///
+/// **Not implemented.** `probe()` reports `.incompatible` unconditionally, so the registry
+/// never selects it and the ladder falls through to `LegacyAppleSpeechAdapter`.
+///
+/// It previously reported `.ready` with capabilities `["speechAnalyzer", "volatileRevisions"]`
+/// while `transcribe` constructed a legacy adapter and returned that. A probe that claims a
+/// capability it does not exercise is indistinguishable from one that ran and passed, which
+/// is how "supported" comes to mean "unexamined" — so it now refuses until the real
+/// implementation lands.
+///
+/// Implementing it means: build a `SpeechTranscriber` with `reportingOptions: [.volatileResults]`,
+/// feed one `AsyncStream<AnalyzerInput>` for the whole session, map `result.isFinal` onto
+/// `Finality.final` (which is already the shape `LiveSpeechStream` emits), and install models
+/// through `AssetInventory`. The advantage over the legacy path is that volatile-versus-final
+/// is reported by the framework instead of inferred from endpoint restarts.
 public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable {
     public let descriptor: SpeechProviderDescriptor
 
     public init() {
         self.descriptor = SpeechProviderDescriptor(
             id: "apple.speech.analyzer",
-            displayName: "Apple SpeechAnalyzer",
-            modelVersion: "system-v27",
+            displayName: "Apple SpeechAnalyzer (not implemented)",
+            modelVersion: "unimplemented",
             privacyRoute: .onDeviceOnly,
-            supportsStreaming: true,
-            supportsContextualStrings: true
+            supportsStreaming: false,
+            supportsContextualStrings: false
         )
     }
 
     public func probe() async -> ProviderReadiness {
-        if #available(macOS 26.0, *) {
-            // Modern SpeechAnalyzer path
-            let authStatus = SFSpeechRecognizer.authorizationStatus()
-            if authStatus == .authorized {
-                let evidence = ProviderEvidence(
-                    providerID: descriptor.id,
-                    modelVersion: descriptor.modelVersion,
-                    probeTimestamp: Date(),
-                    capabilities: ["speechAnalyzer", "onDevice", "volatileRevisions"]
-                )
-                return .ready(evidence)
-            } else if authStatus == .notDetermined {
-                let granted = await withCheckedContinuation { continuation in
-                    SFSpeechRecognizer.requestAuthorization { status in
-                        continuation.resume(returning: status == .authorized)
-                    }
-                }
-                if granted {
-                    return await probe()
-                } else {
-                    return .requiresPermission(.speechRecognition)
-                }
-            } else {
-                return .requiresPermission(.speechRecognition)
-            }
-        } else {
-            return .incompatible(reason: .modelNotFound)
-        }
+        .incompatible(reason: .modelNotFound)
     }
 
     public func transcribe(_ request: SpeechRequest) -> AsyncThrowingStream<SpeechEvent, Error> {
-        // Fall back to legacy SFSpeechRecognizer mechanism under the hood if running on pre-v26 OS
-        let legacy = LegacyAppleSpeechAdapter(locale: request.locale)
-        return legacy.transcribe(request)
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: VoiceFailure(
+                stage: .recognition,
+                code: .modelNotFound,
+                providerID: descriptor.id,
+                userAction: .retryWithOtherProvider,
+                redactedDetail: "SpeechAnalyzer adapter is not implemented; select another provider"
+            ))
+        }
     }
 
     public func cancel(sessionID: VoiceSessionID) async {}

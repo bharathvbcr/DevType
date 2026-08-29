@@ -40,6 +40,9 @@ public enum VoiceSessionEvent: Sendable, Equatable {
     case stopCapture
     case audioFinalized(AudioArtifact)
     case speechSegmentReceived(SpeechSegment)
+    /// A segment produced by the live recognizer *while audio is still being captured*.
+    /// Distinct from `speechSegmentReceived`, which belongs to the post-capture pass.
+    case liveSegmentReceived(SpeechSegment)
     case speechCompleted(SpeechCompletion)
     case rawValidationPassed(RawTranscript)
     case correctionCandidateReceived(CorrectionCandidate)
@@ -47,6 +50,9 @@ public enum VoiceSessionEvent: Sendable, Equatable {
     case correctionValidationFailedFallbackRaw(FinalTranscript)
     case deliveryCompleted(DeliveryReceipt)
     case targetLeaseInvalidated(reason: String)
+    /// The transcript was a spoken command (e.g. "rewrite this") and was handled by the
+    /// app instead of being inserted verbatim.
+    case deliveryIntercepted(command: String)
     case cancel
     case failureOccurred(VoiceFailure)
 }
@@ -55,6 +61,9 @@ public enum VoiceSessionCommand: Sendable, Equatable {
     case startAudioCapture(mode: DictationMode)
     case finalizeAudioCapture
     case transcribeAudio(audio: AudioArtifact)
+    /// Hand a live segment to the delivery layer for progressive typing. `finality`
+    /// tells the reconciler whether to reconcile (volatile) or seal a commit barrier (final).
+    case applyLiveSegment(SpeechSegment)
     case validateRawTranscript(RawTranscript)
     case correctTranscript(raw: RawTranscript)
     case validateCorrectionCandidate(candidate: CorrectionCandidate, raw: RawTranscript)
@@ -118,6 +127,25 @@ public enum VoiceSessionReducer {
             commands.append(.startAudioCapture(mode: mode))
             commands.append(.notifyHUD(phase: state.phase))
             commands.append(.persistManifest(phase: state.phase))
+
+        // Live recognition during capture — progressive typing.
+        case (.capturing, .liveSegmentReceived(let segment)):
+            if let idx = state.segments.firstIndex(where: { $0.segmentID == segment.segmentID }) {
+                // Ignore out-of-order revisions; the recognizer may retract and resend.
+                guard segment.revision >= state.segments[idx].revision else {
+                    return .success(commands)
+                }
+                state.segments[idx] = segment
+            } else {
+                state.segments.append(segment)
+            }
+            commands.append(.applyLiveSegment(segment))
+
+        // Late live segments can arrive after the stop event; absorb them without
+        // faulting the session, but do not type them — capture has already ended.
+        case (.finalizingAudio, .liveSegmentReceived),
+             (.recognizing, .liveSegmentReceived):
+            return .success(commands)
 
         // Capturing transitions
         case (.capturing(.hold), .lockInHandsFree):
@@ -221,6 +249,13 @@ public enum VoiceSessionReducer {
             let outcome: SessionOutcome = .inserted(receipt)
             state.phase = .completed(outcome)
             commands.append(.persistReceipt(receipt))
+            commands.append(.notifyHUD(phase: state.phase))
+            commands.append(.persistManifest(phase: state.phase))
+            commands.append(.cleanupResources)
+
+        case (.readyForDelivery, .deliveryIntercepted(let command)):
+            let outcome: SessionOutcome = .voiceCommandExecuted(command: command)
+            state.phase = .completed(outcome)
             commands.append(.notifyHUD(phase: state.phase))
             commands.append(.persistManifest(phase: state.phase))
             commands.append(.cleanupResources)

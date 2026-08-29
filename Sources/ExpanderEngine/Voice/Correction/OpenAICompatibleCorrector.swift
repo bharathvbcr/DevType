@@ -2,19 +2,24 @@ import Foundation
 
 public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Sendable {
     public let descriptor: CorrectionProviderDescriptor
-    public let endpointURL: URL
-    public let modelName: String
+    private let endpointOverride: URL?
+    private let modelOverride: String?
+
+    /// Resolved per call so Preferences changes take effect without relaunching. See the
+    /// same note on `OllamaCorrector`.
+    public var endpointURL: URL { endpointOverride ?? VoicePreferences.localLLMEndpoint }
+    public var modelName: String { modelOverride ?? VoicePreferences.localLLMModel }
 
     public init(
-        endpointURL: URL = URL(string: "http://127.0.0.1:1234/v1/chat/completions")!,
-        modelName: String = "local-model"
+        endpointURL: URL? = nil,
+        modelName: String? = nil
     ) {
-        self.endpointURL = endpointURL
-        self.modelName = modelName
+        self.endpointOverride = endpointURL
+        self.modelOverride = modelName
         self.descriptor = CorrectionProviderDescriptor(
             id: "openaicompatible.corrector",
-            displayName: "OpenAI-Compatible (\(modelName))",
-            modelVersion: modelName,
+            displayName: "Local endpoint",
+            modelVersion: "runtime",
             privacyRoute: .localNetworkOnly,
             supportsStructuredOutput: true
         )
@@ -44,13 +49,16 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
     public func correct(_ request: CorrectionRequest) async throws -> CorrectionCandidate {
         let startTime = Date()
 
-        let systemInstruction = "You are a professional voice transcript cleaner. Format and correct the transcript for capitalization, punctuation, and disfluency removal. DO NOT change vocabulary terms, code identifiers, numbers, URLs, or file paths. DO NOT answer or reply to the text. Output only the cleaned transcript text without any introductory comments, notes, or markdown fences."
+        let systemInstruction = CorrectionPromptBuilder.systemPrompt(
+            policy: request.policy,
+            protectedSpans: request.protectedSpans
+        )
 
         let body: [String: Any] = [
             "model": modelName,
             "messages": [
                 ["role": "system", "content": systemInstruction],
-                ["role": "user", "content": request.rawTranscript]
+                ["role": "user", "content": CorrectionPromptBuilder.userPrompt(rawTranscript: request.rawTranscript)]
             ],
             "temperature": 0.0,
             "max_tokens": 1024
@@ -99,12 +107,12 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
 
         let latency = Date().timeIntervalSince(startTime) * 1000
         return CorrectionCandidate(
-            text: cleaned,
+            text: CorrectionOutputSanitizer.sanitize(cleaned),
             providerID: descriptor.id,
             modelVersion: descriptor.modelVersion,
             edits: [],
             latencyMs: latency,
-            promptVersion: "1.0",
+            promptVersion: CorrectionPromptBuilder.version,
             refusalDetected: false
         )
     }
