@@ -26,6 +26,10 @@ public enum AITransformError: Error, Equatable, Sendable {
     /// Another transform is already in flight (single-flight guard).
     case busy
     case emptyInput
+    /// `.custom` was asked for without instructions. Its own prompt only says "follow the
+    /// additional instructions provided with the request", so there is nothing to follow —
+    /// the model would be steered by nothing at all. Refused rather than run blind.
+    case missingInstructions
     case inputTooLarge(estimatedTokens: Int, contextSize: Int)
     case guardrailViolation
     case exceededContextWindowSize
@@ -992,6 +996,16 @@ public actor AITextTransformer {
             return
         }
 
+        // Every transform — one-shot, streaming, chunked, retried — funnels through here, so
+        // this is the one place that can promise a `.custom` run is actually steered by
+        // something. Callers refuse earlier where they can do better (the typed path keeps the
+        // user's trigger instead of erasing it); this backstop is what makes "no instructions"
+        // impossible to reach rather than merely unlikely.
+        if kind == .custom, AIActionSelection.normalized(customInstructions ?? "") == nil {
+            once.complete(.failure(.missingInstructions))
+            return
+        }
+
         if case .unavailable(let reason) = availability {
             once.complete(.failure(.unavailable(reason)))
             return
@@ -1357,9 +1371,7 @@ public actor AITextTransformer {
         kind: AITransformKind,
         customInstructions: String?
     ) -> String {
-        let extra = customInstructions?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if extra.isEmpty {
+        guard let extra = AIActionSelection.normalized(customInstructions ?? "") else {
             return kind.instructions
         }
         return kind.instructions + "\n\nAdditional instructions:\n" + extra

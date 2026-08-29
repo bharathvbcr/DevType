@@ -344,9 +344,19 @@ public final class EventTapEngine {
     /// Localization key when a fresh cache exists but the host is weak-AX (Chrome/Slack/Electron).
     public static let aiWeakAXHintKey = "ai.typed.weakAX"
 
-    /// Typed AI path: selection unavailable. Invoked on the main queue with a localization key
-    /// (see `aiSelectionUnavailableHintKey` / `aiWeakAXHintKey`).
-    public var presentAITransformHint: ((String) -> Void)?
+    /// Localization key when the snippet's transform is `.custom` but its body — which *is* the
+    /// instruction set for `.custom` — is blank.
+    public static let aiCustomInstructionsMissingHintKey = "ai.typed.customInstructionsMissing"
+
+    /// Titles paired with the hints above. A missing-instructions refusal is not a selection
+    /// problem, and telling the user "No Selection" when their selection was fine sends them
+    /// looking in the wrong place.
+    public static let aiSelectionHintTitleKey = "ai.alert.noSelection.title"
+    public static let aiRefusedHintTitleKey = "ai.alert.failed.title"
+
+    /// Typed AI path: refused before anything was erased. Invoked on the main queue with a
+    /// title key and a message key (see the `ai.typed.*` keys above).
+    public var presentAITransformHint: ((_ titleKey: String, _ messageKey: String) -> Void)?
 
     /// Keycodes that desync the ring buffer. Return/Tab intentionally omitted — DevType may
     /// treat them as terminators and swallow (unlike SnipKey listenOnly clearBuffer).
@@ -2217,6 +2227,31 @@ public final class EventTapEngine {
             return
         }
 
+        // For `.custom` the snippet body *is* the prompt — the kind contributes only a wrapper
+        // that defers to it. A blank body is therefore not a transform, and refusing here (before
+        // the guarded erase, alongside the unknown-kind guard) is what keeps the user's trigger
+        // on screen instead of erasing it to run the model on nothing. `AITextTransformer`
+        // refuses the same case for callers that get this far.
+        let customInstructions: String? = kind == .custom
+            ? AIActionSelection.normalized(snippet.replacementText)
+            : nil
+        if kind == .custom, customInstructions == nil {
+            refuseAfterSwallow(
+                reason: "Custom AI transform has no instructions",
+                swallowedUnicode: swallowedUnicode,
+                swallowedKeyCode: swallowedKeyCode,
+                swallowedFlags: swallowedFlags
+            )
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.presentAITransformHint?(
+                    Self.aiRefusedHintTitleKey,
+                    Self.aiCustomInstructionsMissingHintKey
+                )
+            }
+            return
+        }
+
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
 
@@ -2286,7 +2321,7 @@ public final class EventTapEngine {
                 let hintKey = weakAXBlocked
                     ? Self.aiWeakAXHintKey
                     : Self.aiSelectionUnavailableHintKey
-                self.presentAITransformHint?(hintKey)
+                self.presentAITransformHint?(Self.aiSelectionHintTitleKey, hintKey)
                 return
             }
 
@@ -2320,11 +2355,6 @@ public final class EventTapEngine {
                 self.endExpansion()
                 let sourceApp = NSWorkspace.shared.frontmostApplication
                 let selectedText = selection.text
-                let customInstructions: String? = {
-                    guard kind == .custom else { return nil }
-                    let body = snippet.replacementText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return body.isEmpty ? nil : body
-                }()
                 guard let presenter = self.presentAITransform else {
                     DevTypeLog.eventTap.error(
                         "[EventTap] AI transform presenter cleared after erase — trigger already removed"

@@ -519,6 +519,9 @@ public final class LocalizationManager: ObservableObject {
             "editor.save": "Save Snippet",
             "editor.error.emptyTrigger": "Enter a trigger to save this snippet.",
             "editor.error.emptyReplacement": "Enter the text this snippet expands to.",
+            "editor.error.customInstructions":
+                "With the Custom AI action, this text is the instruction sent to the model. "
+                + "Write what it should do, or choose a different AI action.",
             "editor.error.conflict": "“%@” conflicts with existing trigger “%@”.",
 
             // §1: new-snippet guide. Teaches the trigger rule live as the user types.
@@ -965,6 +968,9 @@ public final class LocalizationManager: ObservableObject {
                 + "Select a smaller passage and try again.",
 
             "ai.error.emptyInput": "No text to transform.",
+            "ai.error.missingInstructions":
+                "A Custom transform is only the instructions you write for it, and this one "
+                + "has none. Nothing was sent to the model.",
 
             "ai.preview.subtitle": "Review the result, then Replace, Copy, Retry, or Cancel.",
             "ai.preview.waiting": "Generating…",
@@ -1007,6 +1013,9 @@ public final class LocalizationManager: ObservableObject {
                 "No usable selection for a typed AI trigger. Select the text and use the AI hotkey instead.",
             "ai.typed.weakAX":
                 "This app doesn't report selections reliably — select the text and use ⌘⌥A here instead.",
+            "ai.typed.customInstructionsMissing":
+                "This snippet's AI action is Custom, so its text is the instructions — and it is empty. "
+                + "Edit the snippet and write what the model should do. Your trigger was left alone.",
 
             "panel.ai.title": "AI Transform",
             "panel.ai.subtitle": "Choose an action for the selected text.",
@@ -1850,6 +1859,9 @@ public final class LocalizationManager: ObservableObject {
             "editor.save": "스니펫 저장",
             "editor.error.emptyTrigger": "저장하려면 트리거를 입력하세요.",
             "editor.error.emptyReplacement": "이 스니펫이 확장될 텍스트를 입력하세요.",
+            "editor.error.customInstructions":
+                "사용자 지정 AI 동작에서는 이 텍스트가 모델에 전달되는 지시문입니다. "
+                + "무엇을 해야 하는지 적거나 다른 AI 동작을 선택하세요.",
             "editor.error.conflict": "“%@”이(가) 기존 트리거 “%@”와(과) 충돌합니다.",
 
             // §1
@@ -2276,6 +2288,9 @@ public final class LocalizationManager: ObservableObject {
                 + "더 짧은 부분을 선택한 뒤 다시 시도하세요.",
 
             "ai.error.emptyInput": "변환할 텍스트가 없습니다.",
+            "ai.error.missingInstructions":
+                "사용자 지정 변환은 직접 작성한 지시문이 전부인데, 이 변환에는 지시문이 없습니다. "
+                + "모델에 아무것도 보내지 않았습니다.",
 
             "ai.preview.subtitle": "결과를 확인한 뒤 바꾸기, 복사, 다시 시도, 취소를 하세요.",
             "ai.preview.waiting": "생성 중…",
@@ -2318,6 +2333,9 @@ public final class LocalizationManager: ObservableObject {
                 "입력형 AI 트리거에 쓸 수 있는 선택이 없습니다. 텍스트를 선택한 뒤 AI 단축키를 사용하세요.",
             "ai.typed.weakAX":
                 "이 앱은 선택을 안정적으로 보고하지 않습니다 — 텍스트를 선택한 뒤 여기서 ⌘⌥A를 사용하세요.",
+            "ai.typed.customInstructionsMissing":
+                "이 스니펫의 AI 동작이 사용자 지정이므로 스니펫 본문이 곧 지시문인데, 본문이 비어 있습니다. "
+                + "스니펫을 편집해 모델이 무엇을 해야 하는지 적어 주세요. 입력한 트리거는 그대로 두었습니다.",
 
             "panel.ai.title": "AI 변환",
             "panel.ai.subtitle": "선택한 텍스트에 적용할 동작을 고르세요.",
@@ -3151,6 +3169,9 @@ public final class LocalizationManager: ObservableObject {
             "editor.save": "スニペットを保存",
             "editor.error.emptyTrigger": "保存するにはトリガーを入力してください。",
             "editor.error.emptyReplacement": "このスニペットが展開されるテキストを入力してください。",
+            "editor.error.customInstructions":
+                "カスタム AI 操作では、このテキストがモデルへの指示になります。"
+                + "何をさせるかを書くか、別の AI 操作を選んでください。",
             "editor.error.conflict": "「%@」は既存のトリガー「%@」と競合しています。",
 
             // §1
@@ -3577,6 +3598,9 @@ public final class LocalizationManager: ObservableObject {
                 + "もっと短い範囲を選択してからお試しください。",
 
             "ai.error.emptyInput": "変換するテキストがありません。",
+            "ai.error.missingInstructions":
+                "カスタム変換は自分で書いた指示がすべてですが、この変換には指示がありません。"
+                + "モデルには何も送信していません。",
 
             "ai.preview.subtitle": "結果を確認してから置換・コピー・再試行・キャンセルしてください。",
             "ai.preview.waiting": "生成中…",
@@ -3619,6 +3643,9 @@ public final class LocalizationManager: ObservableObject {
                 "入力型 AI トリガーに使える選択がありません。テキストを選択して AI ショートカットを使ってください。",
             "ai.typed.weakAX":
                 "このアプリは選択を安定して報告しません — テキストを選択し、ここで ⌘⌥A を使ってください。",
+            "ai.typed.customInstructionsMissing":
+                "このスニペットの AI 操作はカスタムのため本文が指示になりますが、本文が空です。"
+                + "スニペットを編集して、モデルに何をさせるかを書いてください。入力したトリガーはそのままです。",
 
             "panel.ai.title": "AI 変換",
             "panel.ai.subtitle": "選択したテキストに対する操作を選んでください。",

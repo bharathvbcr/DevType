@@ -153,6 +153,8 @@ public extension AITransformError {
             return "ai.error.busy"
         case .emptyInput:
             return "ai.error.emptyInput"
+        case .missingInstructions:
+            return "ai.error.missingInstructions"
         case .inputTooLarge:
             return "ai.error.inputTooLarge"
         case .guardrailViolation:

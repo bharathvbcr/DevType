@@ -220,7 +220,15 @@ private final class AIPreviewController: NSViewController {
     private let input: String
     private var kind: AITransformKind
     private let sourceApp: NSRunningApplication?
-    private var customInstructions: String?
+    /// The user's own instruction, fixed for the life of the panel.
+    private let authoredInstructions: String?
+    /// The tone menu's preset, if any. Kept apart from `authoredInstructions` so choosing a
+    /// tone refines the request instead of replacing it — this used to be one stored property,
+    /// and picking a tone silently discarded whatever the user had typed.
+    private var toneInstruction: String?
+    private var customInstructions: String? {
+        AIActionSelection.merged([authoredInstructions, toneInstruction])
+    }
     private let loc: LocalizationManager
     private let isCurrent: () -> Bool
     private let onReplace: (String, NSRunningApplication?) -> Void
@@ -261,7 +269,7 @@ private final class AIPreviewController: NSViewController {
         self.input = input
         self.kind = kind
         self.sourceApp = sourceApp
-        self.customInstructions = customInstructions
+        self.authoredInstructions = customInstructions
         self.loc = loc
         self.isCurrent = isCurrent
         self.onReplace = onReplace
@@ -688,10 +696,10 @@ private final class AIPreviewController: NSViewController {
 
     @objc private func toneChanged() {
         switch tonePopup.indexOfSelectedItem {
-        case 1: customInstructions = "Maintain a formal, authoritative, and professional tone."
-        case 2: customInstructions = "Maintain a friendly, conversational, and casual tone."
-        case 3: customInstructions = "Be highly concise, punchy, and to the point."
-        default: customInstructions = nil
+        case 1: toneInstruction = "Maintain a formal, authoritative, and professional tone."
+        case 2: toneInstruction = "Maintain a friendly, conversational, and casual tone."
+        case 3: toneInstruction = "Be highly concise, punchy, and to the point."
+        default: toneInstruction = nil
         }
         beginTransform()
     }

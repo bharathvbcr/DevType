@@ -591,4 +591,97 @@ final class AIPlumbingTests: XCTestCase {
         throw XCTSkip("FoundationModels unavailable at compile time")
         #endif
     }
+
+    // MARK: - `.custom` without instructions
+
+    /// `.custom`'s own prompt only says to follow the instructions supplied with the request.
+    /// Running it with none is not a weak transform, it is an unsteered one — and it looks
+    /// exactly like a transform that ran and worked. The refusal is the only thing separating
+    /// "the model was told nothing" from "the model was told something and answered".
+    ///
+    /// This guard sits ahead of the availability check on purpose, so it holds on machines
+    /// where Apple Intelligence is off and is what makes the case unreachable rather than rare.
+    func testCustomWithoutInstructionsIsRefusedBeforeTheModelIsReached() async throws {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("AI transforms require macOS 26+")
+        }
+        for instructions: String? in [nil, "", "   ", "\n\t "] {
+            let result = await AITextTransformer().transform(
+                kind: .custom,
+                input: "the text to transform",
+                customInstructions: instructions
+            )
+            guard case .failure(let error) = result else {
+                return XCTFail("expected refusal for \(instructions.debugDescription), got \(result)")
+            }
+            XCTAssertEqual(
+                error,
+                .missingInstructions,
+                "instructions: \(instructions.debugDescription)"
+            )
+        }
+        #else
+        throw XCTSkip("FoundationModels unavailable at compile time")
+        #endif
+    }
+
+    /// The refusal must be about the instructions, not about `.custom` — a real instruction
+    /// gets through to the model (whatever the model then does with it).
+    func testCustomWithInstructionsIsNotRefusedForMissingInstructions() async throws {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("AI transforms require macOS 26+")
+        }
+        let result = await AITextTransformer().transform(
+            kind: .custom,
+            input: "the text to transform",
+            customInstructions: "translate to Portuguese"
+        )
+        if case .failure(.missingInstructions) = result {
+            XCTFail("a supplied instruction must not be refused as missing")
+        }
+        #else
+        throw XCTSkip("FoundationModels unavailable at compile time")
+        #endif
+    }
+
+    /// Built-in kinds carry their own instructions; the guard must not touch them.
+    func testBuiltInKindsAreNeverRefusedForMissingInstructions() async throws {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("AI transforms require macOS 26+")
+        }
+        let result = await AITextTransformer().transform(
+            kind: .proofread,
+            input: "teh quick brown fox",
+            customInstructions: nil
+        )
+        if case .failure(.missingInstructions) = result {
+            XCTFail("proofread supplies its own instructions")
+        }
+        #else
+        throw XCTSkip("FoundationModels unavailable at compile time")
+        #endif
+    }
+
+    /// A refusal the user cannot read is a silent failure with extra steps.
+    func testMissingInstructionsRefusalIsLocalized() {
+        XCTAssertEqual(
+            AITransformError.missingInstructions.localizationKey,
+            "ai.error.missingInstructions"
+        )
+        for key in [
+            "ai.error.missingInstructions",
+            EventTapEngine.aiCustomInstructionsMissingHintKey,
+            EventTapEngine.aiRefusedHintTitleKey,
+            EventTapEngine.aiSelectionHintTitleKey,
+            "editor.error.customInstructions"
+        ] {
+            XCTAssertNotNil(
+                LocalizationManager.stringTable(for: .en)[key],
+                "\(key) has no English string"
+            )
+        }
+    }
 }

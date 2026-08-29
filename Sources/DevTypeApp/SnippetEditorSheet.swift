@@ -1854,6 +1854,16 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             showError(loc.s("editor.error.emptyReplacement"))
             return
         }
+        // For the Custom AI action the body is not an expansion, it is the prompt — the kind's
+        // own instructions say only "follow the additional instructions provided". A blank one
+        // is refused here rather than at trigger time, where the user has already committed to
+        // an expansion. Trimmed, unlike the check above: a body of one space expands to
+        // something, but it instructs the model in nothing.
+        if AITransformKind.named(selectedAITransform) == .custom,
+           AIActionSelection.normalized(replacement) == nil {
+            showError(loc.s("editor.error.customInstructions"))
+            return
+        }
         var snippet = existing ?? SnippetModel(
             title: "",
             triggerKeyword: trigger,

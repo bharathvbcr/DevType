@@ -343,8 +343,11 @@ public enum CommandPaletteCatalog {
         }
 
         if trimmed.hasPrefix(">") {
-            let instructions = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !instructions.isEmpty else { return nil }
+            // Same normalization the AI action panel's instruction field uses, so the two
+            // ways to author a custom transform cannot disagree about what counts as empty.
+            guard let instructions = AIActionSelection.normalized(String(trimmed.dropFirst())) else {
+                return nil
+            }
             return .customAI(instructions: instructions)
         }
 

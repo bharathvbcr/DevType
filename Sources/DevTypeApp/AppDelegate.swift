@@ -1031,11 +1031,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.injectAIReplacement(text: text, sourceApp: app)
             }
         }
-        EventTapEngine.shared.presentAITransformHint = { [weak self] localizationKey in
+        EventTapEngine.shared.presentAITransformHint = { [weak self] titleKey, messageKey in
             guard let self else { return }
             DevTypeAlert.info(
-                title: self.loc.s("ai.alert.noSelection.title"),
-                message: self.loc.s(localizationKey)
+                title: self.loc.s(titleKey),
+                message: self.loc.s(messageKey)
             )
         }
     }
@@ -1343,12 +1343,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         customInstructions: String?,
         sourceApp: NSRunningApplication?
     ) {
+        let picked = AIActionSelection(kind: kind, customInstructions: customInstructions)
         AITransformFlow.run(
             input: resolved.text,
-            kind: kind,
+            kind: picked.kind,
             sourceApp: sourceApp,
-            customInstructions: customInstructions,
-            forcePreview: kind == .custom || customInstructions != nil,
+            customInstructions: picked.customInstructions,
+            forcePreview: picked.requiresPreview,
             loc: loc
         ) { [weak self] text, app in
             self?.injectAIReplacement(text: text, sourceApp: app)

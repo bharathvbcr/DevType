@@ -314,6 +314,92 @@ final class SourceContractTests: XCTestCase {
         )
     }
 
+    // MARK: - A custom transform must carry the instructions the user typed
+
+    /// The action panel ran `.custom` and left the typed instruction in its text field: the
+    /// pick was a bare `AITransformKind`, and the hotkey flow hard-coded `customInstructions:
+    /// nil`. `.custom`'s prompt is a wrapper that defers to those instructions, so the model
+    /// got no direction at all. Both halves of the pairing are asserted here.
+    func testHotkeyPathCarriesTypedCustomInstructions() throws {
+        let flow = try source("Sources/DevTypeApp/AITransformFlow.swift")
+        let panel = try source("Sources/DevTypeApp/AIActionPanel.swift")
+
+        XCTAssertTrue(
+            panel.contains("AIActionSelection.confirmingReturn"),
+            "The panel must resolve ⏎ through AIActionSelection so kind and instructions travel together."
+        )
+        XCTAssertTrue(
+            flow.contains("customInstructions: picked.customInstructions"),
+            "The hotkey flow must forward the picked instructions into the transform."
+        )
+        XCTAssertFalse(
+            flow.contains("customInstructions: nil"),
+            "No path may hard-code away the instructions a `.custom` transform is made of."
+        )
+    }
+
+    /// A focused `NSTextField` is not the window's first responder — its field editor is —
+    /// so identity comparisons against the control silently never match. That is how ⏎ in
+    /// the instruction field ran the highlighted row, and how digits typed into either field
+    /// fired the 1–9 quick picks instead of being typed.
+    func testActionPanelAsksTheFieldEditorWhoIsBeingEdited() throws {
+        let panel = try source("Sources/DevTypeApp/AIActionPanel.swift")
+        XCTAssertTrue(
+            panel.contains("currentEditor() != nil"),
+            "Editing state must come from the field editor, not from a first-responder comparison."
+        )
+        XCTAssertFalse(
+            panel.contains("firstResponder ===") || panel.contains("firstResponder !=="),
+            "Comparing the window's first responder against an NSTextField never matches."
+        )
+    }
+
+    /// A snippet whose AI action is Custom keeps its instructions in its body. When that body
+    /// is blank the expansion must be refused *before* `performGuardedErase` — refusing after
+    /// it would take the user's trigger away and give nothing back.
+    func testBlankCustomSnippetIsRefusedBeforeTheTriggerIsErased() throws {
+        let engine = try source("Sources/ExpanderEngine/Engine/EventTapEngine.swift")
+        guard let refusal = engine.range(of: "Custom AI transform has no instructions") else {
+            return XCTFail("The typed AI path must refuse a Custom snippet with no instructions.")
+        }
+        guard let erase = engine.range(of: "performGuardedErase") else {
+            return XCTFail("Expected the typed AI path to erase the trigger via performGuardedErase.")
+        }
+        XCTAssertTrue(
+            refusal.lowerBound < erase.lowerBound,
+            "The refusal must come before the erase, or the trigger is destroyed for nothing."
+        )
+    }
+
+    /// The authoring boundary: the snippet editor refuses to save a Custom snippet with no
+    /// instructions, so the failure surfaces while the user is writing it rather than at the
+    /// moment they type the trigger.
+    func testSnippetEditorRefusesACustomSnippetWithNoInstructions() throws {
+        let editor = try source("Sources/DevTypeApp/SnippetEditorSheet.swift")
+        XCTAssertTrue(
+            editor.contains("AITransformKind.named(selectedAITransform) == .custom"),
+            "The editor must recognise a Custom AI snippet when validating the body."
+        )
+        XCTAssertTrue(
+            editor.contains("editor.error.customInstructions"),
+            "A refused save must say why, in the user's language."
+        )
+    }
+
+    /// The preview panel's tone menu is a refinement of the request, not a replacement for
+    /// it — it once assigned over the instruction the user had typed.
+    func testPreviewPanelToneDoesNotReplaceAuthoredInstructions() throws {
+        let preview = try source("Sources/DevTypeApp/AIPreviewPanel.swift")
+        XCTAssertTrue(
+            preview.contains("AIActionSelection.merged([authoredInstructions, toneInstruction])"),
+            "Tone must be merged with the user's own instructions, never assigned over them."
+        )
+        XCTAssertFalse(
+            preview.contains("customInstructions ="),
+            "`customInstructions` is derived; assigning to it is what discarded authored text."
+        )
+    }
+
     // MARK: - Failed selection reads must explain themselves
 
     /// Every path that tells the user there is no selection must render the *typed* failure.

@@ -55,13 +55,16 @@ enum AITransformFlow {
             input: selection.text,
             source: selection.source,
             loc: loc
-        ) { kind, sourceApp in
+        ) { picked, sourceApp in
+            // `picked.customInstructions` is the whole contract of a `.custom` pick — the kind's
+            // own prompt is a wrapper with no direction in it. Dropping it here (this argument
+            // was hard-coded `nil`) ran the model on nothing.
             run(
                 input: selection.text,
-                kind: kind,
+                kind: picked.kind,
                 sourceApp: sourceApp,
-                customInstructions: nil,
-                forcePreview: false,
+                customInstructions: picked.customInstructions,
+                forcePreview: picked.requiresPreview,
                 loc: loc,
                 onInject: onInject
             )
@@ -197,6 +200,8 @@ enum AITransformFlow {
             return loc.s("ai.error.busy")
         case .emptyInput:
             return loc.s("ai.error.emptyInput")
+        case .missingInstructions:
+            return loc.s("ai.error.missingInstructions")
         case .inputTooLarge(let estimated, let context):
             return loc.s("ai.error.inputTooLarge", estimated, context)
         case .guardrailViolation:

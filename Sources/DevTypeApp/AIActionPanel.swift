@@ -26,7 +26,7 @@ enum AIActionPanel {
         input: String,
         source: SelectionReader.Source,
         loc: LocalizationManager = .shared,
-        onPick: @escaping (AITransformKind, NSRunningApplication?) -> Void,
+        onPick: @escaping (AIActionSelection, NSRunningApplication?) -> Void,
         onCancel: (() -> Void)? = nil
     ) {
         if isOpen { close() }
@@ -51,7 +51,7 @@ enum AIActionPanel {
         input: String,
         source: SelectionReader.Source,
         loc: LocalizationManager,
-        onPick: @escaping (AITransformKind, NSRunningApplication?) -> Void,
+        onPick: @escaping (AIActionSelection, NSRunningApplication?) -> Void,
         onCancel: (() -> Void)?
     ) {
         let sourceApp = NSWorkspace.shared.frontmostApplication
@@ -79,9 +79,9 @@ enum AIActionPanel {
             input: input,
             source: source,
             loc: loc,
-            onPick: { kind in
+            onPick: { selection in
                 close(resumeMatching: true)
-                onPick(kind, sourceApp)
+                onPick(selection, sourceApp)
             },
             onCancel: {
                 close(resumeMatching: true)
@@ -178,7 +178,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
     private let rawInput: String
     private let source: SelectionReader.Source
     private let loc: LocalizationManager
-    private let onPick: (AITransformKind) -> Void
+    private let onPick: (AIActionSelection) -> Void
     private let onCancel: () -> Void
     private let allActions = AITransformKind.builtInPalette
     private var filteredActions: [AITransformKind] = []
@@ -194,7 +194,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         input: String,
         source: SelectionReader.Source,
         loc: LocalizationManager,
-        onPick: @escaping (AITransformKind) -> Void,
+        onPick: @escaping (AIActionSelection) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.rawInput = input
@@ -420,17 +420,34 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         view.window?.makeFirstResponder(tableView)
     }
 
+    /// Whether the instruction field is taking keystrokes.
+    ///
+    /// A focused `NSTextField` is *not* the window's first responder — its field editor
+    /// (an `NSTextView`) is, so identity-comparing the responder against the control never
+    /// matched. That silent mismatch is why ⏎ in this field ran the highlighted row instead
+    /// of the instruction typed into it. `currentEditor()` answers the question the
+    /// responder comparison was trying to ask.
+    private var isEditingInstructionField: Bool {
+        customField.currentEditor() != nil
+    }
+
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
 
-            // Check direct number shortcut 1..9 if search field is not focused or modifier is Cmd/Ctrl
+            // Quick pick 1..9. This monitor runs before the field editor sees the event, so
+            // the guard decides whether a digit is a shortcut or a character. In the filter
+            // it stays a shortcut (that is the footer's "1-9 Quick", and no action name has
+            // a digit in it); in the instruction field it is part of a sentence the user is
+            // composing — "summarize in 3 bullets" must not fire action 3 and throw the rest
+            // away. ⌘ asks for the shortcut from either field.
             let chars = event.charactersIgnoringModifiers ?? ""
-            if let num = Int(chars), num >= 1 && num <= 9, (self.view.window?.firstResponder !== self.searchField || event.modifierFlags.contains(.command)) {
+            if let num = Int(chars), num >= 1 && num <= 9,
+               !self.isEditingInstructionField || event.modifierFlags.contains(.command) {
                 let idx = num - 1
                 if idx < self.filteredActions.count {
-                    self.onPick(self.filteredActions[idx])
+                    self.onPick(AIActionSelection(kind: self.filteredActions[idx]))
                     return nil
                 }
             }
@@ -447,15 +464,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
                 return nil
             case kVK_Return, kVK_ANSI_KeypadEnter:
                 if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
-                    if self.view.window?.firstResponder === self.customField {
-                        let text = self.customField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !text.isEmpty {
-                            // Run custom prompt
-                            self.onPick(.custom)
-                            return nil
-                        }
-                    }
-                    self.confirmSelection()
+                    self.confirmReturn()
                     return nil
                 }
                 return event
@@ -493,9 +502,26 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         tableView.scrollRowToVisible(selection)
     }
 
+    /// ⏎: the instruction field wins while it is being edited, otherwise the highlighted row.
+    /// `AIActionSelection` owns that decision so the typed text and `.custom` travel together —
+    /// `.custom` on its own is a wrapper prompt with no direction in it.
+    private func confirmReturn() {
+        guard let selection = AIActionSelection.confirmingReturn(
+            instructionFieldText: customField.stringValue,
+            isEditingInstructionField: isEditingInstructionField,
+            highlightedAction: highlightedAction
+        ) else { return }
+        onPick(selection)
+    }
+
+    /// Double-click: always the row under the cursor, never the instruction field.
     @objc private func confirmSelection() {
-        guard filteredActions.indices.contains(selection) else { return }
-        onPick(filteredActions[selection])
+        guard let kind = highlightedAction else { return }
+        onPick(AIActionSelection(kind: kind))
+    }
+
+    private var highlightedAction: AITransformKind? {
+        filteredActions.indices.contains(selection) ? filteredActions[selection] : nil
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { filteredActions.count }
