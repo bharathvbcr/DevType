@@ -674,7 +674,11 @@ final class PreferencesViewController: NSViewController,
         if tab == .home {
             let homeVC = HomeViewController(store: store, hotkeyManager: hotkeyManager)
             homeViewController = homeVC
-            return homeVC.view
+            let homeView = homeVC.view
+            // The Home controller owns an NSScrollView, but its view is embedded in this
+            // constraint-managed host just like every other Preferences pane.
+            homeView.translatesAutoresizingMaskIntoConstraints = false
+            return homeView
         }
 
         let scroll = NSScrollView()

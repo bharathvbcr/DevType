@@ -43,6 +43,10 @@ final class HomeViewController: NSViewController {
 
     override func loadView() {
         let scroll = NSScrollView()
+        // Preferences embeds this scroll view in a constraint-managed pane host. Keep the
+        // outer view in that same layout system instead of generating autoresizing-mask
+        // constraints that compete with the host's edge constraints.
+        scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder

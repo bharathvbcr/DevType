@@ -698,6 +698,23 @@ final class SourceContractTests: XCTestCase {
         )
     }
 
+    /// The Home dashboard is itself an `NSScrollView`, but Preferences embeds its view in a
+    /// constraint-managed pane host. Leaving the outer scroll view's autoresizing mask enabled
+    /// adds a second set of constraints at that seam and can collapse every preferences pane.
+    func testEmbeddedHomePreferencesPaneDisablesAutoresizingMaskConstraints() throws {
+        let home = try source("Sources/DevTypeApp/HomeViewController.swift")
+        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+
+        XCTAssertTrue(
+            home.contains("scroll.translatesAutoresizingMaskIntoConstraints = false"),
+            "The Home scroll view must be constraint-managed before Preferences embeds it."
+        )
+        XCTAssertTrue(
+            preferences.contains("homeView.translatesAutoresizingMaskIntoConstraints = false"),
+            "The Preferences pane host must explicitly own the embedded Home view's constraints."
+        )
+    }
+
     /// Every list-shaped preference needs the same in-context empty state. A label below a fixed
     /// 110-point table leaves a large blank box that looks broken, and the macro table previously
     /// had no empty message at all.
