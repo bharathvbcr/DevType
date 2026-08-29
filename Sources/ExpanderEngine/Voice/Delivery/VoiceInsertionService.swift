@@ -33,6 +33,11 @@ public final class VoiceInsertionService {
     public func beginSession() {
         reconciler.reset()
         assembler.reset()
+        DevTypeLog.voice.info("[Voice] session begin realTimeTyping=\(VoicePreferences.isRealTimeTypingEnabled)")
+        VoiceDiagnosticsRecorder.shared.beginSession(
+            engine: VoicePreferences.effectiveEngine.rawValue,
+            realTimeTyping: VoicePreferences.isRealTimeTypingEnabled
+        )
     }
 
     /// Text dictation currently believes it has typed.
@@ -48,29 +53,79 @@ public final class VoiceInsertionService {
     public func applyLiveSegment(_ segment: SpeechSegment) {
         let changed = assembler.ingest(segment)
 
+        VoiceDiagnosticsRecorder.shared.record(
+            changed ? "segment.ingested" : "segment.ignored",
+            segment: segment,
+            settled: assembler.settledText,
+            active: assembler.activeText,
+            cumulative: assembler.cumulativeText
+        )
+
         // With progressive typing off, nothing is on screen yet; the assembler still tracks
         // the transcript so final delivery knows it owns nothing.
         guard VoicePreferences.isRealTimeTypingEnabled else { return }
         guard changed else { return }
 
-        let edit = reconciler.reconcile(target: assembler.cumulativeText)
+        let target = assembler.cumulativeText
+        let edit = reconciler.reconcile(target: target)
+
+        // The line that matters when text disappears: it names the erase and the state that
+        // produced it, so a report can be diagnosed without reproducing it locally.
+        if edit.eraseCount > 0 {
+            DevTypeLog.voice.info(
+                """
+                [Voice] live edit erase=\(edit.eraseCount) inject=\(edit.textToInject.count) \
+                committed=\(self.reconciler.committedText.count) volatile=\(self.reconciler.volatileText.count) \
+                target=\(target.count) segment=\(segment.segmentID) rev=\(segment.revision) \
+                suppressed=\(edit.suppressedCommittedRevision)
+                """
+            )
+        }
+
+        VoiceDiagnosticsRecorder.shared.record(
+            "reconcile",
+            segment: segment,
+            cumulative: target,
+            committedLength: reconciler.committedText.count,
+            volatileLength: reconciler.volatileText.count,
+            erase: edit.eraseCount,
+            inject: edit.textToInject,
+            suppressed: edit.suppressedCommittedRevision
+        )
+
         inject(edit)
 
         // Seal exactly what the recognizer has moved past. Driven by the assembler rather
         // than by this segment's `finality` flag, because a superseded utterance is settled
         // whether or not the recognizer ever labelled it final.
-        reconciler.sealPrefix(assembler.settledText)
+        let settled = assembler.settledText
+        let before = reconciler.committedText.count
+        reconciler.sealPrefix(settled)
+        if reconciler.committedText.count != before {
+            VoiceDiagnosticsRecorder.shared.record(
+                "barrier.sealed",
+                settled: settled,
+                committedLength: reconciler.committedText.count,
+                volatileLength: reconciler.volatileText.count
+            )
+        }
     }
 
     // MARK: - Final delivery
 
     /// Delivers the authoritative transcript, reconciled against whatever live typing
     /// already placed in the document.
+    /// - Parameter replacingOwnedText: the transcript *supersedes* what live typing put on
+    ///   screen rather than refining it — a proofread or rewrite pass legitimately changes
+    ///   words the commit barrier has already sealed. The replacement is still bounded to
+    ///   text dictation owns, so it can never reach the user's own content; it simply lifts
+    ///   the barrier for this one deliberate edit at the end of the session.
     public func deliver(
         text: String,
         targetLease: TargetLease,
         sessionID: VoiceSessionID,
-        generation: SessionGeneration
+        generation: SessionGeneration,
+        replacingOwnedText: Bool = false
     ) async -> DeliveryReceipt {
         let startTime = Date()
 
@@ -90,6 +145,35 @@ public final class VoiceInsertionService {
         }
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if replacingOwnedText, !trimmed.isEmpty, trimmed != reconciler.ownedText {
+            // One deliberate replacement of everything dictation owns. Bounded by
+            // `rollbackAll`, so the erase can only ever cover text this session typed.
+            let removed = reconciler.rollbackAll()
+            DevTypeLog.voice.info(
+                "[Voice] final transcript supersedes live text: replacing \(removed.eraseCount) chars"
+            )
+            VoiceDiagnosticsRecorder.shared.record(
+                "deliver.replace", cumulative: trimmed, erase: removed.eraseCount
+            )
+            inject(VoiceReconciledEdit(
+                eraseCount: removed.eraseCount,
+                textToInject: trimmed,
+                resultingText: trimmed
+            ))
+            _ = reconciler.reconcile(target: trimmed)
+            reconciler.commitBoundary()
+
+            return receipt(
+                sessionID: sessionID,
+                generation: generation,
+                lease: targetLease,
+                length: trimmed.count,
+                quality: .settledUnverifiedPaste,
+                startTime: startTime
+            )
+        }
+
         let edit = reconciler.reconcile(target: trimmed)
         reconciler.commitBoundary()
 
@@ -111,6 +195,16 @@ public final class VoiceInsertionService {
             )
         }
 
+        DevTypeLog.voice.info(
+            "[Voice] final delivery erase=\(edit.eraseCount) inject=\(edit.textToInject.count) owned=\(self.reconciler.ownedText.count)"
+        )
+        VoiceDiagnosticsRecorder.shared.record(
+            "deliver.final",
+            cumulative: trimmed,
+            erase: edit.eraseCount,
+            inject: edit.textToInject,
+            suppressed: edit.suppressedCommittedRevision
+        )
         inject(edit)
 
         return receipt(
@@ -128,6 +222,10 @@ public final class VoiceInsertionService {
     @discardableResult
     public func rollback() -> Int {
         let edit = reconciler.rollbackAll()
+        if edit.eraseCount > 0 {
+            DevTypeLog.voice.info("[Voice] rollback erase=\(edit.eraseCount)")
+            VoiceDiagnosticsRecorder.shared.record("rollback", erase: edit.eraseCount)
+        }
         assembler.reset()
         inject(edit)
         return edit.eraseCount

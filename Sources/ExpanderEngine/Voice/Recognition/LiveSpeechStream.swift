@@ -77,6 +77,7 @@ public final class LiveSpeechStream: @unchecked Sendable {
 
     /// Ends audio input. Any in-flight utterance is emitted as `.final`.
     public func finish() {
+        VoiceDiagnosticsRecorder.shared.record("stream.finishAudio")
         let request: SFSpeechAudioBufferRecognitionRequest? = lock.withLock {
             guard !isFinished else { return nil }
             isFinished = true
@@ -100,8 +101,20 @@ public final class LiveSpeechStream: @unchecked Sendable {
 
     private func startTaskLocked() {
         guard !isFinished else { return }
-        guard consecutiveEmptyRestarts < Self.maxConsecutiveEmptyRestarts else { return }
-        guard segmentIndex < Self.maxSegments else { return }
+        guard consecutiveEmptyRestarts < Self.maxConsecutiveEmptyRestarts else {
+            // Recognition has stopped for the rest of the session; without this line that
+            // is completely silent to the user and to a bug report.
+            DevTypeLog.voice.info("[Voice] live recognition stopped: \(Self.maxConsecutiveEmptyRestarts) empty restarts")
+            VoiceDiagnosticsRecorder.shared.record(
+                "stream.gaveUp", note: "emptyRestarts=\(consecutiveEmptyRestarts)"
+            )
+            return
+        }
+        guard segmentIndex < Self.maxSegments else {
+            DevTypeLog.voice.info("[Voice] live recognition stopped: segment cap reached")
+            VoiceDiagnosticsRecorder.shared.record("stream.gaveUp", note: "segmentCap")
+            return
+        }
 
         guard let recognizer, recognizer.isAvailable else {
             let failure = VoiceFailure(
@@ -116,6 +129,11 @@ public final class LiveSpeechStream: @unchecked Sendable {
 
         taskGeneration += 1
         let generation = taskGeneration
+        VoiceDiagnosticsRecorder.shared.record(
+            "stream.taskStarted",
+            note: "segment=live-\(segmentIndex) taskGen=\(generation) "
+                + "pendingBuffers=\(pendingBuffers.count) emptyRestarts=\(consecutiveEmptyRestarts)"
+        )
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -143,23 +161,55 @@ public final class LiveSpeechStream: @unchecked Sendable {
     }
 
     private func handle(generation: Int, result: SFSpeechRecognitionResult?, error: Error?) {
-        var toEmit: SpeechSegment?
+        var toEmit: [SpeechSegment] = []
 
         lock.withLock {
             guard generation == taskGeneration else { return }
 
             if let result {
                 let text = result.bestTranscription.formattedString
+
+                // The recognizer signals an utterance boundary by *replacing* its result
+                // rather than by reporting `isFinal`, so the boundary has to be inferred.
+                // Seal the finished utterance under its own id before opening the next,
+                // otherwise it is simply overwritten and the text disappears.
+                if UtteranceBoundaryDetector.isReset(previous: currentText, current: text) {
+                    currentRevision += 1
+                    toEmit.append(SpeechSegment(
+                        segmentID: "live-\(segmentIndex)",
+                        revision: currentRevision,
+                        text: currentText,
+                        finality: .final
+                    ))
+                    VoiceDiagnosticsRecorder.shared.record(
+                        "stream.utteranceBoundary",
+                        note: "sealed=live-\(segmentIndex) length=\(currentText.count) next=\(text.count)"
+                    )
+                    DevTypeLog.voice.info(
+                        "[Voice] utterance boundary: sealed \(self.currentText.count) chars, new utterance \(text.count) chars"
+                    )
+                    segmentIndex += 1
+                    currentRevision = 0
+                    consecutiveEmptyRestarts = 0
+                }
+
                 currentRevision += 1
                 currentText = text
 
                 let isEndpoint = result.isFinal
-                toEmit = SpeechSegment(
+                let segment = SpeechSegment(
                     segmentID: "live-\(segmentIndex)",
                     revision: currentRevision,
                     text: text,
                     confidence: nil,
                     finality: isEndpoint ? .final : .volatile
+                )
+                toEmit.append(segment)
+
+                VoiceDiagnosticsRecorder.shared.record(
+                    "stream.result",
+                    segment: segment,
+                    note: "isFinal=\(isEndpoint) taskGen=\(taskGeneration)"
                 )
 
                 if isEndpoint {
@@ -179,22 +229,29 @@ public final class LiveSpeechStream: @unchecked Sendable {
                 // wait forever.
                 guard !isFinished else { return }
 
+                VoiceDiagnosticsRecorder.shared.record(
+                    "stream.taskEnded",
+                    note: "segment=live-\(segmentIndex) taskGen=\(taskGeneration) "
+                        + "textLength=\(currentText.count) error=\(error.map { String(describing: type(of: $0)) } ?? "nil")"
+                )
+
                 let settled = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !settled.isEmpty {
                     currentRevision += 1
-                    toEmit = SpeechSegment(
+                    toEmit.append(SpeechSegment(
                         segmentID: "live-\(segmentIndex)",
                         revision: currentRevision,
                         text: settled,
                         finality: .final
-                    )
+                    ))
                 }
                 advanceSegmentLocked(hadSpeech: !settled.isEmpty)
             }
         }
 
-        if let toEmit {
-            onSegment(toEmit)
+        // In order: a sealing final for the finished utterance, then the new one.
+        for segment in toEmit {
+            onSegment(segment)
         }
     }
 

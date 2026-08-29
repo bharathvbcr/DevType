@@ -61,5 +61,26 @@ git -C "${REPO}" checkout -q --detach HEAD
 git -C "${REPO}" commit --allow-empty -q -m 'test: move checkout away from tag'
 expect_fail "checkout not at tag rejected" v0.1.0 "${REPO}"
 
+# The voice diagnostic trace records dictated text. Preflight must refuse a release while
+# it is defaulted on, and must not object once it is off.
+VOICE_DIR="${REPO}/Sources/ExpanderEngine/Voice"
+mkdir -p "${VOICE_DIR}"
+
+printf '%s\n' '    public static let voiceTracingDefaultsOn = true' > "${VOICE_DIR}/VoicePreferences.swift"
+git -C "${REPO}" add Sources
+git -C "${REPO}" commit -q -m 'test: tracing defaulted on'
+git -C "${REPO}" tag -f v0.2.0 >/dev/null 2>&1
+printf '%s\n' '# DevType v0.2.0' > "${REPO}/docs/releases/v0.2.0.md"
+git -C "${REPO}" add docs/releases/v0.2.0.md
+git -C "${REPO}" commit -q --amend --no-edit
+git -C "${REPO}" tag -f v0.2.0 >/dev/null 2>&1
+expect_fail "release refused while voice tracing defaults on" v0.2.0 "${REPO}"
+
+printf '%s\n' '    public static let voiceTracingDefaultsOn = false' > "${VOICE_DIR}/VoicePreferences.swift"
+git -C "${REPO}" add Sources
+git -C "${REPO}" commit -q --amend --no-edit
+git -C "${REPO}" tag -f v0.2.0 >/dev/null 2>&1
+expect_ok "release allowed once voice tracing defaults off" v0.2.0 "${REPO}"
+
 echo "release preflight tests: ${PASS} passed, ${FAIL} failed"
 [[ "${FAIL}" -eq 0 ]]

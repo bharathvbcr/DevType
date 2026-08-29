@@ -328,6 +328,10 @@ final class PreferencesViewController: NSViewController,
     private let voiceEngines = TranscriptionEngine.allCases
     private let voiceTonePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let voiceRealTimeTypingSwitch = NSSwitch()
+    private let voiceTracingSwitch = NSSwitch()
+    private let voiceProofreadSwitch = NSSwitch()
+    private let whisperServerButton = NSButton()
+    private let whisperModelButton = NSButton()
     private let voiceAutoPunctuateSwitch = NSSwitch()
     private let voiceDisfluenciesSwitch = NSSwitch()
     private let voiceSoundFeedbackSwitch = NSSwitch()
@@ -1478,7 +1482,82 @@ final class PreferencesViewController: NSViewController,
             toggle: voiceSoundFeedbackSwitch,
             action: #selector(voiceSoundFeedbackChanged)
         )
-        stackInCard(optionsCard, views: [toneRow, realTimeTypingRow, disfluencyRow, autoPunctuateRow, soundFeedbackRow])
+        let proofreadRow = makeToggleRow(
+            title: loc.s("prefs.voice.proofreadBeforeInsert"),
+            toggle: voiceProofreadSwitch,
+            action: #selector(voiceProofreadChanged)
+        )
+
+        // Diagnostics. Off by default and last in the card, because switching it on starts
+        // recording what the user dictates — it exists to capture a problem, not to run.
+        let tracingRow = makeToggleRow(
+            title: loc.s("prefs.voice.tracing"),
+            toggle: voiceTracingSwitch,
+            action: #selector(voiceTracingChanged)
+        )
+        // Local Whisper server control. Placed with the other voice controls rather than
+        // buried in a sheet: it is something the user starts before dictating and stops
+        // afterwards, not a one-time setup step.
+        whisperServerButton.title = loc.s("prefs.voice.whisper.start")
+        whisperServerButton.bezelStyle = .rounded
+        whisperServerButton.controlSize = .small
+        whisperServerButton.target = self
+        whisperServerButton.action = #selector(toggleWhisperServer)
+        whisperServerButton.translatesAutoresizingMaskIntoConstraints = false
+
+        whisperModelButton.title = loc.s("prefs.voice.whisper.getModel")
+        whisperModelButton.bezelStyle = .rounded
+        whisperModelButton.controlSize = .small
+        whisperModelButton.target = self
+        whisperModelButton.action = #selector(downloadWhisperModel)
+        whisperModelButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let whisperRow = PreferenceRowView()
+        whisperRow.translatesAutoresizingMaskIntoConstraints = false
+        let whisperLabel = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.whisper.server"),
+            font: DevTypeTheme.font(12.5, .medium),
+            color: DevTypeTheme.textPrimary,
+            wrapping: true
+        )
+        whisperLabel.translatesAutoresizingMaskIntoConstraints = false
+        whisperRow.addSubview(whisperLabel)
+        whisperRow.addSubview(whisperModelButton)
+        whisperRow.addSubview(whisperServerButton)
+        NSLayoutConstraint.activate([
+            whisperLabel.leadingAnchor.constraint(equalTo: whisperRow.leadingAnchor),
+            whisperLabel.centerYAnchor.constraint(equalTo: whisperRow.centerYAnchor),
+            whisperLabel.trailingAnchor.constraint(lessThanOrEqualTo: whisperModelButton.leadingAnchor, constant: -12),
+            whisperModelButton.trailingAnchor.constraint(equalTo: whisperServerButton.leadingAnchor, constant: -8),
+            whisperModelButton.centerYAnchor.constraint(equalTo: whisperRow.centerYAnchor),
+            whisperServerButton.trailingAnchor.constraint(equalTo: whisperRow.trailingAnchor),
+            whisperServerButton.topAnchor.constraint(equalTo: whisperRow.topAnchor, constant: 2),
+            whisperServerButton.bottomAnchor.constraint(equalTo: whisperRow.bottomAnchor, constant: -2)
+        ])
+
+        let revealTraceButton = NSButton(
+            title: loc.s("prefs.voice.tracing.reveal"),
+            target: self,
+            action: #selector(revealVoiceTrace)
+        )
+        revealTraceButton.bezelStyle = .rounded
+        revealTraceButton.controlSize = .small
+        revealTraceButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let revealRow = PreferenceRowView()
+        revealRow.translatesAutoresizingMaskIntoConstraints = false
+        revealRow.addSubview(revealTraceButton)
+        NSLayoutConstraint.activate([
+            revealTraceButton.leadingAnchor.constraint(equalTo: revealRow.leadingAnchor),
+            revealTraceButton.topAnchor.constraint(equalTo: revealRow.topAnchor, constant: 2),
+            revealTraceButton.bottomAnchor.constraint(equalTo: revealRow.bottomAnchor, constant: -2)
+        ])
+
+        stackInCard(optionsCard, views: [
+            toneRow, realTimeTypingRow, disfluencyRow, autoPunctuateRow, proofreadRow,
+            soundFeedbackRow, whisperRow, tracingRow, revealRow
+        ])
+        refreshWhisperServerButton()
 
         // 3. Hotkey Card
         let hotkeyCard = makeCard(title: loc.s("prefs.voice.hotkey.card"), symbol: "keyboard")
@@ -1797,6 +1876,8 @@ final class PreferencesViewController: NSViewController,
         }
 
         voiceRealTimeTypingSwitch.state = VoicePreferences.isRealTimeTypingEnabled ? .on : .off
+        voiceTracingSwitch.state = VoicePreferences.isVoiceTracingEnabled ? .on : .off
+        voiceProofreadSwitch.state = VoicePreferences.isProofreadBeforeInsertEnabled ? .on : .off
         voiceAutoPunctuateSwitch.state = VoicePreferences.isAutoPunctuateEnabled ? .on : .off
         voiceDisfluenciesSwitch.state = VoicePreferences.isRemoveDisfluenciesEnabled ? .on : .off
         voiceSoundFeedbackSwitch.state = VoicePreferences.isSoundFeedbackEnabled ? .on : .off
@@ -1816,6 +1897,110 @@ final class PreferencesViewController: NSViewController,
         voiceTriggersEmptyLabel.stringValue = voiceTriggerEntries.isEmpty ? loc.s("prefs.voice.triggers.empty") : ""
         voiceTriggersEmptyLabel.isHidden = !voiceTriggerEntries.isEmpty
         refreshRemovalButton(for: voiceTriggersTable)
+    }
+
+    /// Reflects who owns the running server, if anyone. Three states, because they need
+    /// three different actions: ours (stop it), someone else's (leave it alone), none
+    /// (start one).
+    private func refreshWhisperServerButton() {
+        // The model is the prerequisite: without it Start can only report why it failed.
+        let hasModel = WhisperServerSetup.hasModel()
+        whisperModelButton.isHidden = hasModel
+        whisperModelButton.isEnabled = !hasModel
+        if !hasModel { whisperModelButton.title = loc.s("prefs.voice.whisper.getModel") }
+
+        if WhisperServerController.shared.isManagedByApp {
+            whisperServerButton.title = loc.s("prefs.voice.whisper.stop")
+            whisperServerButton.isEnabled = true
+            return
+        }
+        whisperServerButton.title = loc.s("prefs.voice.whisper.start")
+        whisperServerButton.isEnabled = true
+
+        Task { @MainActor in
+            let external = await WhisperServerSetup.isReachable()
+            guard !WhisperServerController.shared.isManagedByApp else { return }
+            if external {
+                // Started outside DevType — usable, but not ours to stop.
+                self.whisperServerButton.title = self.loc.s("prefs.voice.whisper.external")
+                self.whisperServerButton.isEnabled = false
+            }
+        }
+    }
+
+    @objc private func downloadWhisperModel() {
+        whisperModelButton.isEnabled = false
+        whisperModelButton.title = loc.s("prefs.voice.whisper.downloading")
+
+        Task { @MainActor in
+            let result = await WhisperServerController.shared.downloadModel { fraction in
+                DispatchQueue.main.async {
+                    self.whisperModelButton.title = "\(Int(fraction * 100))%"
+                }
+            }
+            switch result {
+            case .success:
+                break
+            case .failure(let failure):
+                DevTypeAlert.warn(
+                    title: self.loc.s("prefs.voice.whisper.modelFailed"),
+                    message: failure.userMessage,
+                    window: self.view.window
+                )
+            }
+            self.refreshWhisperServerButton()
+        }
+    }
+
+    @objc private func toggleWhisperServer() {
+        if WhisperServerController.shared.isManagedByApp {
+            WhisperServerController.shared.stop()
+            refreshWhisperServerButton()
+            return
+        }
+
+        whisperServerButton.isEnabled = false
+        whisperServerButton.title = loc.s("prefs.voice.whisper.starting")
+
+        Task { @MainActor in
+            let result = await WhisperServerController.shared.start()
+            switch result {
+            case .success:
+                break
+            case .failure(let failure):
+                DevTypeAlert.warn(
+                    title: self.loc.s("prefs.voice.whisper.failed"),
+                    message: failure.userMessage,
+                    window: self.view.window
+                )
+            }
+            self.refreshWhisperServerButton()
+        }
+    }
+
+    @objc private func voiceProofreadChanged() {
+        VoicePreferences.isProofreadBeforeInsertEnabled = voiceProofreadSwitch.state == .on
+    }
+
+    @objc private func voiceTracingChanged() {
+        let enabled = voiceTracingSwitch.state == .on
+        VoicePreferences.isVoiceTracingEnabled = enabled
+        // Starting a fresh capture is the point; a trace mixed with an earlier run is far
+        // harder to read.
+        if enabled { VoiceDiagnosticsRecorder.shared.clear() }
+    }
+
+    @objc private func revealVoiceTrace() {
+        let url = VoiceDiagnosticsRecorder.traceURL
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            DevTypeAlert.info(
+                title: loc.s("prefs.voice.tracing.empty.title"),
+                message: loc.s("prefs.voice.tracing.empty.message"),
+                window: view.window
+            )
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     @objc private func voiceRealTimeTypingChanged() {

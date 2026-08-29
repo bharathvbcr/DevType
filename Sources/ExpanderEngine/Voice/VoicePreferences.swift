@@ -16,6 +16,7 @@ public enum VoicePreferences {
     public static let localLLMModelKey = "devtype.voice.localLLMModel"
     public static let localLLMTimeoutKey = "devtype.voice.localLLMTimeout"
     public static let whisperEndpointKey = "devtype.voice.whisperEndpoint"
+    public static let voiceTracingKey = "devtype.voice.tracing"
 
     // MARK: - Tone
 
@@ -190,6 +191,25 @@ public enum VoicePreferences {
     // MARK: - Local LLM Configuration
 
     /// The local OpenAI-compatible or Ollama endpoint URL (e.g. `http://localhost:11434/v1/chat/completions` or `http://localhost:1234/v1/chat/completions`).
+    /// Whether the trace defaults on when the user has never chosen.
+    ///
+    /// This records what the user dictates, so release builds must keep it off unless the
+    /// user explicitly enables it in Voice preferences. `Scripts/release-preflight.sh`
+    /// independently enforces this privacy boundary.
+    public static let voiceTracingDefaultsOn = false
+
+    /// Records the live dictation path — including the dictated text — to a local file.
+    /// See `VoiceDiagnosticsRecorder`.
+    public static var isVoiceTracingEnabled: Bool {
+        get {
+            guard UserDefaults.standard.object(forKey: voiceTracingKey) != nil else {
+                return voiceTracingDefaultsOn
+            }
+            return UserDefaults.standard.bool(forKey: voiceTracingKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: voiceTracingKey) }
+    }
+
     /// Endpoint of a local `whisper.cpp` server. Constrained to loopback by the adapter's
     /// probe, so this preference cannot be used to ship audio off the machine.
     public static var whisperEndpoint: URL {
@@ -241,6 +261,37 @@ public enum VoicePreferences {
     }
 
     public static let customVoiceTriggersKey = "devtype.voice.customTriggers"
+    public static let voiceWakeWordsKey = "devtype.voice.wakeWords"
+    public static let proofreadBeforeInsertKey = "devtype.voice.proofreadBeforeInsert"
+
+    /// Runs an Apple Intelligence proofread pass over every dictation before it is inserted.
+    ///
+    /// Off by default: it adds a round trip before the text lands, and the deterministic
+    /// cleanup is already enough for most dictation. Worth turning on when what you dictate
+    /// goes somewhere it will be read — email, documentation, a pull request.
+    ///
+    /// It replaces the correction stage rather than adding a second pass, so it inherits the
+    /// protected spans, the validator and the fallback-to-raw that stage already has.
+    public static var isProofreadBeforeInsertEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: proofreadBeforeInsertKey) }
+        set { UserDefaults.standard.set(newValue, forKey: proofreadBeforeInsertKey) }
+    }
+
+    /// Words that mark an utterance as a command rather than dictation: "dev rewrite this".
+    ///
+    /// A wake word is optional — "rewrite this" still works — but speaking one makes the
+    /// intent unambiguous, which matters when the thing being dictated could itself read as
+    /// a command.
+    public static var voiceCommandWakeWords: [String] {
+        get {
+            guard let stored = UserDefaults.standard.stringArray(forKey: voiceWakeWordsKey),
+                  !stored.isEmpty else {
+                return ["dev", "ai"]
+            }
+            return stored
+        }
+        set { UserDefaults.standard.set(newValue, forKey: voiceWakeWordsKey) }
+    }
 
     // MARK: - Custom Voice AI Triggers
 
@@ -305,6 +356,8 @@ public enum VoicePreferences {
         UserDefaults.standard.removeObject(forKey: realTimeTypingKey)
         UserDefaults.standard.removeObject(forKey: customDictionaryKey)
         UserDefaults.standard.removeObject(forKey: customVoiceTriggersKey)
+        UserDefaults.standard.removeObject(forKey: voiceWakeWordsKey)
+        UserDefaults.standard.removeObject(forKey: proofreadBeforeInsertKey)
         UserDefaults.standard.removeObject(forKey: transcriptionEngineKey)
         UserDefaults.standard.removeObject(forKey: verbatimModeKey)
         UserDefaults.standard.removeObject(forKey: perAppToneOverridesKey)
@@ -312,5 +365,6 @@ public enum VoicePreferences {
         UserDefaults.standard.removeObject(forKey: localLLMModelKey)
         UserDefaults.standard.removeObject(forKey: localLLMTimeoutKey)
         UserDefaults.standard.removeObject(forKey: whisperEndpointKey)
+        UserDefaults.standard.removeObject(forKey: voiceTracingKey)
     }
 }

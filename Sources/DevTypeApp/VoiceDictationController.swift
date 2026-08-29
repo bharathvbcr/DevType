@@ -278,8 +278,10 @@ public final class VoiceDictationController: @unchecked Sendable {
         }
 
         return await MainActor.run {
-            // Anything progressive typing already inserted was the spoken command, not
-            // content the user wants kept.
+            // Whatever progressive typing put on screen was the spoken command, not content
+            // the user wants kept — except when the command acts on it, which is captured
+            // before the rollback.
+            let justInserted = VoiceInsertionService.shared.ownedText
             VoiceInsertionService.shared.rollback()
 
             guard AITextTransformSupport.isRunningOnCompatibleOS else {
@@ -289,8 +291,18 @@ public final class VoiceDictationController: @unchecked Sendable {
                 return true
             }
 
-            var input = command.payloadText
-            if command.requiresSelectionFallback || input.isEmpty {
+            let input: String
+            switch command.target {
+            case .spoken(let text):
+                input = text
+
+            case .lastInsertion:
+                // "proofread final insertion" — the text this session just typed. It is not
+                // selected, and asking the user to select it first would defeat the point of
+                // asking by voice.
+                input = justInserted
+
+            case .selection:
                 switch SelectionReader.readSelectionForExplicitAIAction() {
                 case .selection(let resolved):
                     input = resolved.text
@@ -302,18 +314,41 @@ public final class VoiceDictationController: @unchecked Sendable {
 
             guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 VoiceHUDPanel.shared.updateState(
-                    .error(message: "No text provided for \(command.triggerPhrase)")
+                    .error(message: self.emptyTargetMessage(for: command))
                 )
                 return true
             }
 
-            self.runAITransform(command, input: input)
+            // For `.lastInsertion` the user's dictated text has already been rolled back
+            // off screen, so a failed transform would destroy it. Hand it over as the thing
+            // to put back — an AI that declines must cost the user nothing.
+            self.runAITransform(
+                command,
+                input: input,
+                restoringOnFailure: command.target == .lastInsertion ? justInserted : nil
+            )
             return true
         }
     }
 
+    /// Names what was missing, so "nothing happened" is never the whole story.
+    private func emptyTargetMessage(for command: VoiceAICommand) -> String {
+        switch command.target {
+        case .lastInsertion:
+            return "Nothing was dictated yet to \(command.triggerPhrase)"
+        case .selection:
+            return "No text selected for \(command.triggerPhrase)"
+        case .spoken:
+            return "No text provided for \(command.triggerPhrase)"
+        }
+    }
+
     @MainActor
-    private func runAITransform(_ command: VoiceAICommand, input: String) {
+    private func runAITransform(
+        _ command: VoiceAICommand,
+        input: String,
+        restoringOnFailure fallback: String? = nil
+    ) {
         VoiceHUDPanel.shared.updateState(.transcribing(modelName: "AI (\(command.kind.rawValue))"))
 
         #if canImport(FoundationModels)
@@ -342,10 +377,12 @@ public final class VoiceDictationController: @unchecked Sendable {
                         )
                     case .success:
                         VoiceHUDPanel.shared.updateState(.error(message: "AI produced empty output"))
+                        self.restore(fallback)
                     case .failure(let error):
                         VoiceHUDPanel.shared.updateState(
                             .error(message: "AI failed: \(error.localizedDescription)")
                         )
+                        self.restore(fallback)
                     }
                 }
             }
@@ -355,6 +392,22 @@ public final class VoiceDictationController: @unchecked Sendable {
 
         VoiceHUDPanel.shared.updateState(
             .error(message: LocalizationManager.shared.s("ai.availability.unsupportedOS"))
+        )
+        restore(fallback)
+    }
+
+    /// Puts back text that was rolled back for a transform that then failed.
+    @MainActor
+    private func restore(_ text: String?) {
+        guard let text, !text.isEmpty else { return }
+        let snippet = SnippetModel(title: "Voice AI", triggerKeyword: "", replacementText: text)
+        TextInjectionPipeline.shared.inject(
+            snippet: snippet,
+            triggerLength: 0,
+            swallowedFinalKey: false,
+            eraseCountOverride: 0,
+            preResolvedText: text,
+            secureClipboardPaste: false
         )
     }
 

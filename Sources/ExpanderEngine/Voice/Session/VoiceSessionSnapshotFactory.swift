@@ -16,6 +16,7 @@ public enum VoiceSessionSnapshotFactory {
         public static let whisperServer = "whispercpp.server"
 
         public static let deterministicCorrector = "deterministic.local"
+        public static let proofreadCorrector = "apple.transform.proofread"
         public static let appleFoundationModels = "apple.foundation-models"
         public static let ollamaCorrector = "ollama.corrector"
         public static let openAICompatibleCorrector = "openaicompatible.corrector"
@@ -113,6 +114,18 @@ public enum VoiceSessionSnapshotFactory {
         for engine: TranscriptionEngine,
         route: PrivacyRoute
     ) -> CorrectionProviderDescriptor {
+        // Proofread-before-insert replaces the correction stage for every engine, including
+        // Gemini: the user asked for their words to be proofread, and which recognizer
+        // produced them does not change that. The registry probes it and falls back on its
+        // own if Apple Intelligence is unavailable.
+        if VoicePreferences.isProofreadBeforeInsertEnabled, #available(macOS 26.0, *) {
+            return descriptor(
+                id: ProviderID.proofreadCorrector,
+                name: "Apple Intelligence (proofread)",
+                route: .onDeviceOnly
+            )
+        }
+
         switch engine {
         case .gemini:
             // Gemini punctuates and formats during transcription; a second correction

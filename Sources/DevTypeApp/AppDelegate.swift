@@ -2076,6 +2076,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        // A server DevType spawned must not outlive it.
+        WhisperServerController.shared.stopIfManaged()
+
         // Before anything else can fail: quitting must not be the way a copied secret outlives
         // its clear timer, which dies with the process. Still guarded by change-count ownership,
         // so quitting never wipes something the user copied after us.

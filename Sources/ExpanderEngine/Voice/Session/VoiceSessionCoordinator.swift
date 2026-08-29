@@ -232,6 +232,9 @@ public actor VoiceSessionCoordinator {
         for command in commands {
             switch command {
             case .notifyHUD(let phase):
+                VoiceDiagnosticsRecorder.shared.record(
+                    "session.phase", note: String(describing: phase)
+                )
                 onPhaseChange?(phase)
 
             case .startAudioCapture:
@@ -358,7 +361,15 @@ public actor VoiceSessionCoordinator {
                 _ = taskBag?.add(task)
 
             case .applyLiveSegment(let segment):
-                Task { @MainActor in
+                // `DispatchQueue.main.async`, not `Task { @MainActor }`.
+                //
+                // Unstructured tasks carry no ordering guarantee: several are in flight at
+                // once at speaking speed, and if a later segment is applied before an
+                // earlier one, a new segment id lands out of order and the transcript is
+                // assembled in the wrong sequence — which the reconciler then corrects by
+                // erasing. The main queue is FIFO, so segments arrive in the order the
+                // recognizer produced them.
+                DispatchQueue.main.async {
                     VoiceInsertionService.shared.applyLiveSegment(segment)
                 }
                 onLiveSegment?(segment)
@@ -387,7 +398,11 @@ public actor VoiceSessionCoordinator {
                         text: finalTranscript.text,
                         targetLease: lease,
                         sessionID: snapshot.sessionID,
-                        generation: generation
+                        generation: generation,
+                        // A proofread or rewrite pass supersedes the live text rather than
+                        // refining it, so it is allowed past the commit barrier.
+                        replacingOwnedText: AITransformCorrector
+                            .isTransformProvider(snapshot.correctionProvider.id)
                     )
                     if receipt.evidenceQuality == .targetMismatch {
                         _ = await self.processEvent(.targetLeaseInvalidated(reason: "Target application PID changed before delivery"), generation: generation)

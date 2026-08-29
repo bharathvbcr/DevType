@@ -38,6 +38,15 @@ if [[ -n "$(git -C "${ROOT}" status --porcelain --untracked-files=all)" ]]; then
   die "checkout is not clean; commit or remove changes before releasing '${TAG}'"
 fi
 
+# The voice diagnostic trace records what the user dictates. It is defaulted on while a
+# defect is being chased, which is fine on a developer's machine and not fine in a build
+# handed to anyone else. Fail here rather than trusting it to be remembered.
+VOICE_PREFS="${ROOT}/Sources/ExpanderEngine/Voice/VoicePreferences.swift"
+if [[ -f "${VOICE_PREFS}" ]] \
+  && grep -qE '^\s*public static let voiceTracingDefaultsOn = true' "${VOICE_PREFS}"; then
+  die "voiceTracingDefaultsOn is true; set it to false before releasing '${TAG}' (it records dictated text)"
+fi
+
 NOTES="${ROOT}/docs/releases/${TAG}.md"
 [[ -s "${NOTES}" ]] || die "release notes are missing or empty: ${NOTES}"
 

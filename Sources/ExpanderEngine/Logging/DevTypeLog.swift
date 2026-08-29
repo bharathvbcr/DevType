@@ -24,6 +24,19 @@ public enum DevTypeLog {
     /// suffix *content* — only lengths, generations, and outcomes.
     public static let debounce = Logger(subsystem: subsystem, category: "Debounce")
 
+    /// Voice dictation: session lifecycle, live segments, reconciliation decisions and
+    /// injections.
+    ///
+    /// Its own category because the live-typing path is where text can be *erased*, and
+    /// diagnosing that needs the whole sequence — which segment arrived, what the assembler
+    /// made of it, what the reconciler decided, how many characters were removed. Mixed
+    /// into `App` those lines are unfindable.
+    ///
+    /// Logs lengths, counts and outcomes — never dictated content. Content goes only to the
+    /// opt-in `VoiceDiagnosticsRecorder`, which writes to a local file the user chooses to
+    /// share.
+    public static let voice = Logger(subsystem: subsystem, category: "Voice")
+
     /// AX selection reads for the AI paths.
     ///
     /// Its own category because "Prompt Enhance says no text is selected" is diagnosed from a

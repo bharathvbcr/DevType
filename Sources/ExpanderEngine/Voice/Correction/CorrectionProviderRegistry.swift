@@ -33,6 +33,7 @@ public actor CorrectionProviderRegistry {
         for provider in [
             DeterministicCorrector() as TranscriptCorrector,
             FoundationLanguageModelCorrector(),
+            AITransformCorrector(kind: .proofread),
             OllamaCorrector(),
             OpenAICompatibleCorrector()
         ] {
