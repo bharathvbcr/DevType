@@ -20,16 +20,27 @@ enum AITransformFlow {
             return
         }
 
+        // The model being unavailable does not make every action unavailable. Open the
+        // panel with the ones that run locally and let it say why the list is short —
+        // Apple Intelligence needs macOS 26 and DevType supports macOS 14, so refusing
+        // outright turns most users away from transforms that would have worked.
+        //
+        // Refuse only when nothing at all would be offered; an empty picker is worse than
+        // the alert it replaced.
+        let modelUnavailable: AIModelAvailability.Reason?
         switch AITextTransformSupport.availability {
         case .available:
-            break
+            modelUnavailable = nil
         case .unavailable(let reason):
-            softAlert(
-                title: loc.s("ai.alert.unavailable.title"),
-                message: localizedAvailability(reason, loc: loc),
-                loc: loc
-            )
-            return
+            guard !AITransformKind.palette(modelAvailable: false).isEmpty else {
+                softAlert(
+                    title: loc.s("ai.alert.unavailable.title"),
+                    message: localizedAvailability(reason, loc: loc),
+                    loc: loc
+                )
+                return
+            }
+            modelUnavailable = reason
         }
 
         // Typed outcome, not `Result?`: the reason decides the message. "Select text first" is
@@ -54,7 +65,8 @@ enum AITransformFlow {
         AIActionPanel.present(
             input: selection.text,
             source: selection.source,
-            loc: loc
+            loc: loc,
+            modelUnavailable: modelUnavailable
         ) { kind, sourceApp in
             run(
                 input: selection.text,
@@ -142,6 +154,36 @@ enum AITransformFlow {
         // exactly once (`AITransformOnceCompletion`, including on discard), and even if that
         // guarantee were ever broken, dropping the last reference to this token releases it.
         let suspension = EventTapEngine.shared.suspendMatching(reason: "AITransformFlow")
+
+        // Local kinds work on every OS DevType supports, so they are answered before the
+        // availability branch below — which would otherwise refuse them on any Mac without
+        // Apple Intelligence, for a transform that never wanted it.
+        if let local = AILocalTransform.run(kind: kind, input: input) {
+            suspension.release()
+            switch local {
+            case .success(let text):
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    softAlert(
+                        title: loc.s("ai.alert.failed.title"),
+                        message: localizedError(.decodingFailure, loc: loc),
+                        loc: loc
+                    )
+                    sourceApp?.activate()
+                    return
+                }
+                AIUndoStore.stash(input)
+                onInject(text, sourceApp)
+            case .failure(let error):
+                if case .discarded = error { return }
+                softAlert(
+                    title: loc.s("ai.alert.failed.title"),
+                    message: localizedError(error, loc: loc),
+                    loc: loc
+                )
+                sourceApp?.activate()
+            }
+            return
+        }
 
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {

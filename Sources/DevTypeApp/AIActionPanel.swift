@@ -22,15 +22,26 @@ enum AIActionPanel {
 
     static var isOpen: Bool { panel?.isVisible == true }
 
+    /// - Parameter modelUnavailable: why the on-device model cannot be used, when it
+    ///   cannot. The panel then lists only the actions that do not need it and says so,
+    ///   instead of offering twenty rows that would all fail.
     static func present(
         input: String,
         source: SelectionReader.Source,
         loc: LocalizationManager = .shared,
+        modelUnavailable: AIModelAvailability.Reason? = nil,
         onPick: @escaping (AITransformKind, NSRunningApplication?) -> Void,
         onCancel: (() -> Void)? = nil
     ) {
         if isOpen { close() }
-        open(input: input, source: source, loc: loc, onPick: onPick, onCancel: onCancel)
+        open(
+            input: input,
+            source: source,
+            loc: loc,
+            modelUnavailable: modelUnavailable,
+            onPick: onPick,
+            onCancel: onCancel
+        )
     }
 
     static func close(resumeMatching: Bool = true) {
@@ -51,6 +62,7 @@ enum AIActionPanel {
         input: String,
         source: SelectionReader.Source,
         loc: LocalizationManager,
+        modelUnavailable: AIModelAvailability.Reason?,
         onPick: @escaping (AITransformKind, NSRunningApplication?) -> Void,
         onCancel: (() -> Void)?
     ) {
@@ -61,7 +73,8 @@ enum AIActionPanel {
         suspension = EventTapEngine.shared.suspendMatching(reason: "AIActionPanel")
 
         #if canImport(FoundationModels)
-        if #available(macOS 26.0, *) {
+        // No point warming a session for a panel that is about to offer only local work.
+        if #available(macOS 26.0, *), modelUnavailable == nil {
             Task { await AITextTransformer.shared.prewarm(kind: .proofread) }
         }
         #endif
@@ -79,6 +92,7 @@ enum AIActionPanel {
             input: input,
             source: source,
             loc: loc,
+            modelUnavailable: modelUnavailable,
             onPick: { kind in
                 close(resumeMatching: true)
                 onPick(kind, sourceApp)
@@ -180,7 +194,8 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
     private let loc: LocalizationManager
     private let onPick: (AITransformKind) -> Void
     private let onCancel: () -> Void
-    private let allActions = AITransformKind.builtInPalette
+    private let modelUnavailable: AIModelAvailability.Reason?
+    private let allActions: [AITransformKind]
     private var filteredActions: [AITransformKind] = []
     private var selection = 0
     private var keyMonitor: Any?
@@ -194,9 +209,12 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         input: String,
         source: SelectionReader.Source,
         loc: LocalizationManager,
+        modelUnavailable: AIModelAvailability.Reason?,
         onPick: @escaping (AITransformKind) -> Void,
         onCancel: @escaping () -> Void
     ) {
+        self.modelUnavailable = modelUnavailable
+        self.allActions = AITransformKind.palette(modelAvailable: modelUnavailable == nil)
         self.rawInput = input
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let preview = trimmed
@@ -235,12 +253,16 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
             color: DevTypeTheme.textPrimary
         )
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        // A short list needs a reason, or it reads as actions having gone missing. The
+        // subtitle already sits under the title and says what the panel is for; when the
+        // model is out, saying why is more useful than saying that again.
+        let subtitleText = modelUnavailable == nil
+            ? loc.s(source == .clipboard ? "ai.palette.clipboardSubtitle" : "ai.palette.subtitle")
+            : loc.s("ai.palette.localOnly")
         let subtitleLabel = DevTypeTheme.makeLabel(
-            loc.s(source == .clipboard
-                ? "ai.palette.clipboardSubtitle"
-                : "ai.palette.subtitle"),
+            subtitleText,
             font: DevTypeTheme.font(10.5),
-            color: DevTypeTheme.textTertiary
+            color: modelUnavailable == nil ? DevTypeTheme.textTertiary : DevTypeTheme.statusOrange
         )
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
 
@@ -315,7 +337,10 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         root.addSubview(scrollView)
 
         // Custom Instruction Field
-        customField.placeholderString = loc.s("ai.palette.hint.pick") + " / Custom instruction…"
+        customField.placeholderString = modelUnavailable == nil
+            ? loc.s("ai.palette.hint.pick") + " / Custom instruction…"
+            : loc.s("ai.palette.customUnavailable")
+        customField.isEnabled = modelUnavailable == nil
         customField.font = DevTypeTheme.font(12)
         customField.focusRingType = .none
         customField.delegate = self
@@ -447,7 +472,8 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
                 return nil
             case kVK_Return, kVK_ANSI_KeypadEnter:
                 if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
-                    if self.view.window?.firstResponder === self.customField {
+                    if self.view.window?.firstResponder === self.customField,
+                       self.modelUnavailable == nil {
                         let text = self.customField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !text.isEmpty {
                             // Run custom prompt
@@ -555,6 +581,8 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         case .translate: return "Translate text into English"
         case .translateTelugu: return "Translate into Romanized Telugu"
         case .translateHindi: return "Translate into Romanized Hindi"
+        case .removeMarkdown: return "Strip Markdown down to plain text"
+        case .toMarkdown: return "Structure plain text as Markdown"
         case .custom: return "Apply custom instructions"
         }
     }
@@ -563,11 +591,11 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         switch kind {
         case .proofread, .translate, .translateTelugu, .translateHindi:
             return "Preserves length"
-        case .condense, .gitCommitMessage:
+        case .condense, .gitCommitMessage, .removeMarkdown:
             return "Shortens"
         case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
             return "Expands"
-        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance, .toJson, .sqlQuery, .fixCode, .custom:
+        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance, .toJson, .sqlQuery, .fixCode, .custom, .toMarkdown:
             return "Rewrites"
         }
     }
@@ -576,11 +604,11 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         switch kind {
         case .proofread, .translate, .translateTelugu, .translateHindi:
             return DevTypeTheme.statusGreen
-        case .condense, .gitCommitMessage:
+        case .condense, .gitCommitMessage, .removeMarkdown:
             return DevTypeTheme.statusOrange
         case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
             return DevTypeTheme.statusBlue
-        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance, .toJson, .sqlQuery, .fixCode, .custom:
+        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance, .toJson, .sqlQuery, .fixCode, .custom, .toMarkdown:
             return DevTypeTheme.accent
         }
     }

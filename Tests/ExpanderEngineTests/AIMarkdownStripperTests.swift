@@ -403,7 +403,7 @@ final class AIMarkdownStripperTests: XCTestCase {
     func testEveryKindHasADeliberatePolicy() {
         // Code and structured output: `*`, `_`, `#` and backticks are the program.
         for kind in [AITransformKind.fixCode, .generateDocstring, .toJson,
-                     .generateUnitTests, .sqlQuery, .promptEnhance] {
+                     .generateUnitTests, .sqlQuery, .promptEnhance, .toMarkdown] {
             XCTAssertEqual(kind.markdownPolicy, .preserve, "\(kind.rawValue) must not be stripped")
         }
         // Kinds that owe the author their layout.
@@ -413,11 +413,13 @@ final class AIMarkdownStripperTests: XCTestCase {
         }
         // Prose.
         for kind in [AITransformKind.rewrite, .paraphrase, .expand, .condense, .formal,
-                     .friendly, .explainCode, .explainRegex, .gitCommitMessage, .custom] {
+                     .friendly, .explainCode, .explainRegex, .gitCommitMessage, .custom,
+                     .removeMarkdown] {
             XCTAssertEqual(kind.markdownPolicy, .strip, "\(kind.rawValue)")
         }
-        // And no kind is left undecided.
-        XCTAssertEqual(AITransformKind.allCases.count, 21)
+        // And no kind is left undecided. A new case fails here until it is classified
+        // above — the policy is a decision, not something to inherit by accident.
+        XCTAssertEqual(AITransformKind.allCases.count, 23)
     }
 
     /// A layout-preserving kind must never break the line-structure contract that the

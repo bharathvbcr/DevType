@@ -36,6 +36,10 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     case gitCommitMessage = "gitcommit"
     case explainRegex = "explainregex"
     case sqlQuery = "sqlquery"
+    /// Markdown in, the same text as plain prose out. Runs locally, no model.
+    case removeMarkdown = "removemarkdown"
+    /// Plain prose in, the same text structured as Markdown out.
+    case toMarkdown = "tomarkdown"
     /// Anything (usually Telugu / Hindi typed in English letters) → English.
     case translate
     /// English → Telugu, written in English letters.
@@ -74,6 +78,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             return "Fix bugs and issues in the following code:\n\n"
         case .toJson:
             return "Convert the following into valid formatted JSON:\n\n"
+        case .toMarkdown:
+            return "Format the text below as Markdown:\n\n"
         case .generateUnitTests:
             return "Write comprehensive unit tests for the following code:\n\n"
         case .gitCommitMessage:
@@ -83,12 +89,29 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
              .bulletize, .promptEnhance, .custom:
             return Self.genericFraming
+        case .removeMarkdown:
+            // Never sent — `requiresModel` is false and `AILocalTransform` answers first.
+            return Self.genericFraming
         }
     }
 
     /// Palette actions (excludes `custom`, which needs caller-supplied instructions).
     public static var builtInPalette: [AITransformKind] {
         allCases.filter { $0 != .custom }
+    }
+
+    /// The actions the AI palette offers, given whether the on-device model is usable.
+    ///
+    /// When it is not, the list narrows to the kinds that never needed it rather than the
+    /// panel refusing to open. Apple Intelligence needs macOS 26 and DevType's deployment
+    /// target is macOS 14, so "model unavailable" is the ordinary case for a large share
+    /// of users — and turning them away from a transform that would have worked, because
+    /// an unrelated one is missing, is the worse failure.
+    ///
+    /// An empty result is possible in principle (if every kind required a model) and the
+    /// caller must handle it; that is the case where refusing to open is right.
+    public static func palette(modelAvailable: Bool) -> [AITransformKind] {
+        modelAvailable ? builtInPalette : builtInPalette.filter { !$0.requiresModel }
     }
 
     /// Localization key for the human title (`ai.kind.proofread`, …).
@@ -248,6 +271,31 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             You transform the user's text according to the additional instructions
             provided with the request. Return only the transformed text.
             """
+        case .toMarkdown:
+            return """
+            You format the user's text as clean, idiomatic Markdown.
+
+            Add the structure the text already implies and nothing more: headings for
+            what reads as a heading, `-` bullets for what reads as a list, numbered
+            items for ordered steps, `**bold**` for genuine emphasis, backticks for
+            code, identifiers, paths, and commands, and fenced blocks with a language
+            tag for code that stands on its own.
+
+            Never change the wording, add content, remove content, reorder ideas, or
+            translate. Keep the original language. If a passage has no structure to
+            surface, leave it as a plain paragraph rather than inventing a heading for
+            it — over-formatting is the failure mode here.
+
+            Return ONLY the Markdown — no commentary, labels, or preamble, and never
+            wrap the whole answer in a code fence.
+            """
+        case .removeMarkdown:
+            // Never sent to a model. Kept as the written contract of what the local
+            // implementation does, so the two cannot drift silently.
+            return """
+            Removes Markdown formatting from the text and leaves the words alone.
+            Performed locally by AIMarkdownStripper; no model is involved.
+            """
         }
     }
 
@@ -283,9 +331,10 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
 
     public var temperature: Double {
         switch self {
-        case .proofread, .translate, .translateTelugu, .translateHindi, .toJson, .sqlQuery, .fixCode:
+        case .proofread, .translate, .translateTelugu, .translateHindi, .toJson,
+             .sqlQuery, .fixCode, .removeMarkdown:
             return 0.2
-        case .promptEnhance:
+        case .promptEnhance, .toMarkdown:
             return 0.35
         case .rewrite, .paraphrase, .condense, .formal, .friendly, .bulletize, .explainCode, .generateDocstring, .explainRegex, .gitCommitMessage:
             return 0.4
@@ -301,11 +350,12 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     /// `AITextTransformer.generationOptions`) or the Retry button would be a no-op.
     public var isDeterministic: Bool {
         switch self {
-        case .proofread, .translate, .translateTelugu, .translateHindi, .toJson, .sqlQuery, .fixCode, .explainRegex:
+        case .proofread, .translate, .translateTelugu, .translateHindi, .toJson,
+             .sqlQuery, .fixCode, .explainRegex, .removeMarkdown:
             return true
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
              .bulletize, .promptEnhance, .explainCode, .generateDocstring,
-             .generateUnitTests, .gitCommitMessage, .custom:
+             .generateUnitTests, .gitCommitMessage, .custom, .toMarkdown:
             return false
         }
     }
@@ -314,7 +364,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     /// asking nicely is not enough on a model this size.
     public var scriptPolicy: AIScriptPolicy {
         switch self {
-        case .proofread:
+        case .proofread, .removeMarkdown:
             return .sameAsInput
         // These three all answer in English letters: English, or romanized Telugu /
         // Hindi. Native script in the reply is unusable in the field it lands in.
@@ -323,7 +373,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
              .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
-             .explainRegex, .sqlQuery, .custom:
+             .explainRegex, .sqlQuery, .custom, .toMarkdown:
             return .unconstrained
         }
     }
@@ -332,13 +382,15 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     /// alone are held to it; rewriting kinds are supposed to change length.
     public var lengthPolicy: AILengthPolicy {
         switch self {
-        case .proofread:
+        // Never grows — `AIMarkdownStripper` rejects a result longer than its input.
+        case .proofread, .removeMarkdown:
             return .correction
+        // Markdown syntax is characters the source did not have, so growth is expected.
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
              .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
              .explainRegex, .sqlQuery, .translate, .translateTelugu,
-             .translateHindi, .custom:
+             .translateHindi, .custom, .toMarkdown:
             return .unconstrained
         }
     }
@@ -365,11 +417,34 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread, .translate, .translateTelugu, .translateHindi, .bulletize:
             return .stripPreservingLayout
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .explainCode, .explainRegex, .gitCommitMessage, .custom:
+             .explainCode, .explainRegex, .gitCommitMessage, .custom, .removeMarkdown:
             return .strip
+        // `.toMarkdown` above all: the automatic pass would otherwise delete the exact
+        // formatting this kind was asked to produce.
         case .promptEnhance, .fixCode, .generateDocstring, .toJson,
-             .generateUnitTests, .sqlQuery:
+             .generateUnitTests, .sqlQuery, .toMarkdown:
             return .preserve
+        }
+    }
+
+    /// Whether this kind needs the on-device language model at all.
+    ///
+    /// `removeMarkdown` does not: `AIMarkdownStripper` already answers the question
+    /// exactly, in microseconds, with the same answer every time. Asking a small model to
+    /// do it instead would be slower, occasionally wrong, and refusable — and would fail
+    /// outright on the macOS versions where Apple Intelligence does not exist, which is
+    /// most of the range DevType supports. So the kind is listed with the others for
+    /// discoverability and runs locally, and `AILocalTransform` answers before any code
+    /// path reaches a session.
+    public var requiresModel: Bool {
+        switch self {
+        case .removeMarkdown:
+            return false
+        case .proofread, .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
+             .bulletize, .promptEnhance, .explainCode, .generateDocstring, .fixCode,
+             .toJson, .generateUnitTests, .gitCommitMessage, .explainRegex, .sqlQuery,
+             .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown:
+            return true
         }
     }
 
@@ -380,22 +455,25 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         switch self {
         case .proofread, .translate, .translateTelugu, .translateHindi:
             return true
+        // Removing a fence or a rule takes its whole line with it, by design.
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
              .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
-             .explainRegex, .sqlQuery, .custom:
+             .explainRegex, .sqlQuery, .custom, .removeMarkdown, .toMarkdown:
             return false
         }
     }
 
     public var defaultOutputMode: AIOutputMode {
         switch self {
-        case .proofread:
+        // Deterministic and instant, and `AIUndoStore` holds the selection either way.
+        case .proofread, .removeMarkdown:
             return .direct
+        // Restructures the whole selection, so it is reviewed before it replaces anything.
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly, .bulletize,
              .promptEnhance, .explainCode, .generateDocstring, .fixCode, .toJson,
              .generateUnitTests, .gitCommitMessage, .explainRegex, .sqlQuery,
-             .translate, .translateTelugu, .translateHindi, .custom:
+             .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown:
             return .preview
         }
     }
@@ -425,6 +503,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .translate: return 1.6
         case .translateTelugu, .translateHindi: return 2.0
         case .custom: return 1.5
+        case .toMarkdown: return 1.4        // syntax on top of every line it structures
+        case .removeMarkdown: return 1.0     // unused: no generation to budget for
         }
     }
 
@@ -435,12 +515,14 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         // All local edits: a paragraph translated or corrected on its own says the
         // same thing as one handled in context.
         case .proofread, .formal, .friendly, .bulletize,
-             .translate, .translateTelugu, .translateHindi:
+             .translate, .translateTelugu, .translateHindi, .removeMarkdown:
             return true
+        // Heading levels and list continuity are decisions about the whole document; a
+        // paragraph formatted alone cannot know it is the third item of a list.
         case .rewrite, .paraphrase, .expand, .condense, .promptEnhance,
              .explainCode, .generateDocstring, .fixCode, .toJson,
              .generateUnitTests, .gitCommitMessage, .explainRegex,
-             .sqlQuery, .custom:
+             .sqlQuery, .custom, .toMarkdown:
             return false
         }
     }
