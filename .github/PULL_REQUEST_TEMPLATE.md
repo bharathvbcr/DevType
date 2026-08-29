@@ -20,7 +20,7 @@ Fixes # <!-- Link related issue(s) here, e.g. Fixes #123 -->
 
 ## Invariants & Safety Checklist
 
-- [ ] **Privacy Invariant**: No cloud telemetry, network requests, or analytics SDKs were added.
+- [ ] **Privacy Invariant**: No telemetry or analytics SDK was added. Any new network path is opt-in, off by default, and disclosed in the UI.
 - [ ] **Secure Input Safety**: Event tap pausing / fail-closed behavior in password fields is preserved.
 - [ ] **Secret Snippets**: Secret values remain absent from general storage, exports, and diagnostics.
 - [ ] **MainActor Compliance**: All AppKit UI interactions execute on `@MainActor`.

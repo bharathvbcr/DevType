@@ -32,12 +32,13 @@
     <string>0.1.1</string>
     <key>CFBundleVersion</key>
     <string>2</string>
-    <!-- §7.5: Sparkle appcast. Update the URL when a release host exists; the
-         Sparkle framework is not yet embedded, so this is inert until it is. -->
-    <key>SUFeedURL</key>
-    <string>https://github.com/bharath/DevType/releases/latest/download/appcast.xml</string>
-    <key>SUEnableInstallerLauncherService</key>
-    <false/>
+    <!-- §7.5: update checking is DevType's own (Sources/ExpanderEngine/Updates/), not Sparkle.
+         The former SUFeedURL/SUEnableInstallerLauncherService pair is gone: Sparkle was never
+         embedded, so those keys configured a framework that does not exist, and the URL pointed
+         at `github.com/bharath/DevType` — an account that is not this project's (`bharathvbcr`).
+         UpdateChecker asks the GitHub Releases API directly, only when the user opts in, and
+         opens the release page rather than installing anything. -->
+
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

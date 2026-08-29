@@ -91,6 +91,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // diagnostic report can answer for incidents older than what logd retains.
         DevLogMirror.shared.start()
 
+        // §7.5: no-op unless the user opted in AND a day has passed. It reports only a genuine
+        // update — never a failure — so a launch without connectivity stays silent. Async and
+        // off the launch path: a slow DNS lookup must not delay the status item appearing.
+        UpdateFlow.checkAutomaticallyIfDue()
+
         NotificationCenter.default.addObserver(
             forName: .devTypeLanguageChanged,
             object: nil,
@@ -592,8 +597,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Always present, regardless of the automatic-check preference: the preference governs
+        // whether DevType checks *on its own*, never whether the user may ask.
+        menu.addItem(item(
+            loc.s("menu.checkForUpdates"),
+            "arrow.down.circle",
+            #selector(checkForUpdates(_:))
+        ))
+
+        menu.addItem(NSMenuItem.separator())
+
         menu.addItem(item(loc.s("menu.quit"), "power", #selector(quitApp(_:)), key: "q"))
         return menu
+    }
+
+    /// §7.5 — explicit user request; reports every outcome, including failures.
+    ///
+    /// `@MainActor` because `UpdateFlow` is main-actor isolated: menu actions already arrive on
+    /// the main thread, and stating it lets the compiler prove it rather than assuming it.
+    @MainActor
+    @objc private func checkForUpdates(_ sender: Any?) {
+        UpdateFlow.checkManually()
     }
 
     /// §4.2: the menu hint follows the user's recorded shortcut instead of

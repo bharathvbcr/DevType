@@ -44,6 +44,14 @@ public enum DevTypeLog {
     /// traffic. Never logs the selected text — only outcome, app, attribute, and length.
     public static let selection = Logger(subsystem: subsystem, category: "Selection")
 
+    /// Update checks: whether one ran, and how it ended.
+    ///
+    /// Its own category because "DevType never told me about the update" and "DevType keeps
+    /// telling me to update" are both diagnosed from the sequence of check outcomes, which is
+    /// unfindable mixed into `App`. Logs outcomes and version strings only — the check sends no
+    /// user data, and nothing about the machine is written here either.
+    public static let updates = Logger(subsystem: subsystem, category: "Updates")
+
     /// Boolean TCC-style result for CG/AX preflights (macOS has no notDetermined here).
     public static func grantLabel(_ granted: Bool) -> String {
         granted ? "granted" : "denied"

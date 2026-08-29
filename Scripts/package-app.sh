@@ -90,7 +90,7 @@ sha256_file() {
 #
 # CFBundleShortVersionString: nearest tag, e.g. "0.2.1" (or "0.2.1-4-gabc1234" when
 #   ahead of the tag, "+dirty" appended for an unclean tree).
-# CFBundleVersion: monotonic commit count, which is what macOS / Sparkle compare.
+# CFBundleVersion: monotonic commit count, which is what macOS compares between bundles.
 compute_version() {
   local tag desc count dirty
   if ! git -C "${ROOT}" rev-parse --git-dir >/dev/null 2>&1; then

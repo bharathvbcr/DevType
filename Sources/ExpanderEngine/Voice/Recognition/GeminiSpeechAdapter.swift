@@ -89,7 +89,17 @@ public final class GeminiSpeechAdapter: SpeechRecognizer, @unchecked Sendable {
                         apiKey: apiKey
                     )
 
-                    let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Gemini transcribes with a general-purpose model, and a general-purpose
+                    // model formats: asked for a heading it heard, it writes `## `. When
+                    // correction is off — or on, and it falls back to raw — this text is
+                    // what lands in the user's field, so the Markdown pass belongs here, at
+                    // the boundary where a model's answer becomes a transcript. Only the
+                    // Markdown pass: the wrapper and preamble passes are the correction
+                    // stage's job and would be second-guessing the recognizer's words.
+                    let text = AIMarkdownStripper.strip(
+                        result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                        policy: AIPreferences.voiceMarkdownPolicy
+                    )
                     guard !text.isEmpty else {
                         continuation.finish(throwing: VoiceFailure(
                             stage: .recognition,

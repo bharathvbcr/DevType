@@ -42,6 +42,32 @@ public enum AIPreferences {
         UserDefaults.standard.removeObject(forKey: outputModeKey(for: kind))
     }
 
+    // MARK: - Markdown removal
+
+    public static let removesMarkdownKey = "devtype.ai.removeMarkdown"
+
+    /// Whether Markdown a model volunteers is taken off before the text is written.
+    ///
+    /// Defaults **on**, which is why this cannot use `UserDefaults.bool` — that reads an
+    /// unset key as `false`, and the default that matters here is the one a user who has
+    /// never opened Preferences gets. DevType writes into fields that render no Markdown;
+    /// leaving it in is the surprising behaviour, not removing it.
+    public static var removesMarkdown: Bool {
+        get {
+            guard UserDefaults.standard.object(forKey: removesMarkdownKey) != nil else {
+                return true
+            }
+            return UserDefaults.standard.bool(forKey: removesMarkdownKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: removesMarkdownKey) }
+    }
+
+    /// Policy for the voice correction stage. Dictation is spoken, so there is no author
+    /// layout to owe — anything Markdown-shaped in the result was added by the model.
+    public static var voiceMarkdownPolicy: AIMarkdownPolicy {
+        removesMarkdown ? .strip : .preserve
+    }
+
     // MARK: - Typed-path allowlist
 
     /// Bundle IDs allowed to use the typed AI path. Empty = every app.

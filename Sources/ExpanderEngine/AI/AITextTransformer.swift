@@ -1004,6 +1004,14 @@ public actor AITextTransformer {
             kind: kind,
             customInstructions: customInstructions
         )
+        // Resolved once per transform, not per generation: the answer to "may this kind's
+        // Markdown be taken off" must not change between the single-shot attempt, its
+        // re-roll, and the per-chunk pass, or the seams where chunks rejoin disagree.
+        let markdownPolicy = AIMarkdownStripper.policy(
+            for: kind,
+            customInstructions: customInstructions,
+            enabled: AIPreferences.removesMarkdown
+        )
         // Same kind + instructions + input as last time means the user pressed Retry.
         let attempt = repeats.attempt(
             for: kind.rawValue + "\u{1f}" + instructions + "\u{1f}" + trimmed
@@ -1024,6 +1032,7 @@ public actor AITextTransformer {
                 kind: kind,
                 instructions: instructions,
                 input: trimmed,
+                markdownPolicy: markdownPolicy,
                 maxResponseTokens: budget.maxResponseTokens,
                 attempt: attempt,
                 streamPartials: streamPartials,
@@ -1091,6 +1100,7 @@ public actor AITextTransformer {
                     kind: kind,
                     instructions: instructions,
                     input: chunk.body,
+                    markdownPolicy: markdownPolicy,
                     maxResponseTokens: budget.maxResponseTokens,
                     attempt: attempt,
                     streamPartials: false,
@@ -1137,6 +1147,7 @@ public actor AITextTransformer {
         kind: AITransformKind,
         instructions: String,
         input: String,
+        markdownPolicy: AIMarkdownPolicy,
         maxResponseTokens: Int,
         attempt: Int,
         streamPartials: Bool,
@@ -1148,6 +1159,7 @@ public actor AITextTransformer {
                 kind: kind,
                 instructions: instructions,
                 input: input,
+                markdownPolicy: markdownPolicy,
                 maxResponseTokens: maxResponseTokens,
                 attempt: attempt + extraAttempt,
                 streamPartials: streamPartials,
@@ -1217,6 +1229,7 @@ public actor AITextTransformer {
         kind: AITransformKind,
         instructions: String,
         input: String,
+        markdownPolicy: AIMarkdownPolicy,
         maxResponseTokens: Int,
         attempt: Int,
         streamPartials: Bool,
@@ -1245,7 +1258,11 @@ public actor AITextTransformer {
             var lastText = ""
             for try await snapshot in stream {
                 lastText = snapshot.content
-                onPartial(lastText)
+                // A partial is not decoration: `AIPreviewPanel` keeps the last one as its
+                // result, and Replace stays enabled on it when generation then fails. So
+                // the preview shows — and can inject — the same stripped text the finished
+                // answer would produce, instead of Markdown that vanishes at the end.
+                onPartial(AIMarkdownStripper.strip(lastText, policy: markdownPolicy, original: input))
             }
             raw = lastText
         } else {
@@ -1253,7 +1270,11 @@ public actor AITextTransformer {
             raw = response.content
         }
 
-        let cleaned = AITransformText.sanitize(
+        // Order matters: the echo pass and `sanitize` remove the wrapper *around* the
+        // answer, and only then is what is left the answer whose Markdown may come off.
+        // Stripping first would hand those two a body whose fence it had already eaten,
+        // and `sanitize`'s "did the input have one" test would misfire.
+        let unwrapped = AITransformText.sanitize(
             AIPromptEcho.stripped(
                 raw,
                 input: input,
@@ -1261,6 +1282,13 @@ public actor AITextTransformer {
             ),
             input: input
         )
+        let cleaned = AIMarkdownStripper.strip(unwrapped, policy: markdownPolicy, original: input)
+        if cleaned != unwrapped {
+            // Counts only — this line never carries the user's text.
+            DevTypeLog.store.debug(
+                "[AI] markdown stripped kind=\(kind.rawValue, privacy: .public) chars \(unwrapped.count, privacy: .public) -> \(cleaned.count, privacy: .public)"
+            )
+        }
         // An empty response is a failed generation, not a result. Letting it through
         // means the direct path replaces the user's selection with nothing.
         guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

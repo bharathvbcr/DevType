@@ -343,6 +343,36 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         }
     }
 
+    /// How much Markdown may be taken off this kind's answer before it is written into
+    /// whatever field has focus.
+    ///
+    /// Three groups, and the line between them is what the answer *is*:
+    ///
+    /// - **Prose** (`.strip`). The answer is sentences. A `##` or a `**` in it is the
+    ///   model decorating, and the field it lands in renders neither.
+    /// - **Prose that owes the author its layout** (`.stripPreservingLayout`).
+    ///   `proofread` and the translations hand back the user's own text; `bulletize`
+    ///   promises a list. Emphasis and links still come off, but nothing may change how
+    ///   many lines there are — `preservesLineStructure` is checked right after this.
+    /// - **Code and structured formats** (`.preserve`). In SQL, JSON, a docstring, or a
+    ///   unit test, `*`, `_`, `#` and backticks are the program. `promptEnhance` is here
+    ///   too: its answer is read by another model, and Markdown is how you talk to one.
+    ///
+    /// A whole-answer code fence is unwrapped for every kind by `AITransformText.sanitize`
+    /// before this runs, so `.preserve` still does not leak ```` ``` ```` into a field.
+    public var markdownPolicy: AIMarkdownPolicy {
+        switch self {
+        case .proofread, .translate, .translateTelugu, .translateHindi, .bulletize:
+            return .stripPreservingLayout
+        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
+             .explainCode, .explainRegex, .gitCommitMessage, .custom:
+            return .strip
+        case .promptEnhance, .fixCode, .generateDocstring, .toJson,
+             .generateUnitTests, .sqlQuery:
+            return .preserve
+        }
+    }
+
     /// Kinds whose output must have the same line count as the input. Verified after
     /// generation and repaired line by line — the model flattens multi-line text into
     /// one paragraph no matter how the prompt is worded.

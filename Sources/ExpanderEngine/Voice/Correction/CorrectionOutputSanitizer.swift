@@ -39,16 +39,44 @@ public enum CorrectionOutputSanitizer {
         "Clean:"
     ]
 
+    /// - Parameters:
+    ///   - text: the model's answer.
+    ///   - original: the raw transcript it was asked to clean. Used only by the Markdown
+    ///     pass, to leave alone any markup the speaker's own text already carried.
+    ///   - markdown: how much Markdown may be taken off. Dictation is spoken, so a
+    ///     heading or a bold marker in the result came from the model, not the speaker —
+    ///     but the caller still owns the decision, because the user can turn the whole
+    ///     behaviour off in Preferences.
+    public static func sanitize(
+        _ text: String,
+        original: String = "",
+        markdown: AIMarkdownPolicy = .strip
+    ) -> String {
+        // Unwrap, then take the Markdown off once, then unwrap again.
+        //
+        // Once, not inside the loop: the Markdown pass is idempotent everywhere except
+        // over a fence it has already opened, where a second pass would read the code it
+        // freed as prose and strip the underscores out of it. Running it between two
+        // fixed-point unwrap passes still gets the case that motivated putting it in the
+        // loop — a model answering `**Cleaned:** "hello"`, whose label the preamble pass
+        // cannot see until the asterisks are gone — without ever running it twice.
+        var result = unwrapping(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        result = AIMarkdownStripper.strip(result, policy: markdown, original: original)
+        return unwrapping(result)
+    }
+
+    /// The wrapper passes, iterated to a fixed point.
+    ///
     /// Wrappers nest — a model will answer `Result: ```…``` ` or `"Cleaned: …"` — and one
-    /// pass in a fixed order only unwraps the outermost layer. Iterating to a fixed point
-    /// makes the result independent of the order the model happened to stack them in, and
-    /// makes the function idempotent, which matters because the correctors and the
-    /// validator both run over this text.
+    /// pass in a fixed order only unwraps the outermost layer. Iterating makes the result
+    /// independent of the order the model happened to stack them in, and makes this step
+    /// idempotent, which matters because the correctors and the validator both run over
+    /// this text.
     ///
     /// Bounded so a pathological input cannot spin: five layers is far more than any real
     /// model emits, and text that is still wrapped after that is left as-is for the
     /// validator to reject.
-    public static func sanitize(_ text: String) -> String {
+    private static func unwrapping(_ text: String) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         for _ in 0..<5 {

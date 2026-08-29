@@ -252,7 +252,11 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
                 group.cancelAll()
                 guard let first else { return nil }
 
-                let cleaned = CorrectionOutputSanitizer.sanitize(first)
+                let cleaned = CorrectionOutputSanitizer.sanitize(
+                    first,
+                    original: transcript,
+                    markdown: AIPreferences.voiceMarkdownPolicy
+                )
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return cleaned.isEmpty ? nil : cleaned
             }

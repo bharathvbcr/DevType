@@ -101,9 +101,19 @@ lldb .build/DevType.app/Contents/MacOS/DevType
 DevType avoids hardcoded version strings. `Resources/Info.plist` ships placeholders (`0.0.1` / build `1`) that are overwritten at packaging time from Git:
 
 - **`CFBundleShortVersionString`** = nearest tag from `git describe --tags` (v-prefix stripped; e.g. `0.0.9`, or `0.0.9-3-gabc1234` when ahead of the tag, with `+dirty` appended for an unclean tree).
-- **`CFBundleVersion`** = monotonic commit count — the number macOS and Sparkle-style updaters compare.
+- **`CFBundleVersion`** = monotonic commit count — the number macOS compares when deciding which of two bundles is newer.
 
 Outside a Git checkout, packaging falls back to the plist values. Local CI fails the build if a placeholder version survives stamping, so field diagnostics always map to an exact commit.
+
+### Update Checking
+
+DevType checks for updates itself (`Sources/ExpanderEngine/Updates/`); Sparkle is not embedded, and the inert `SUFeedURL` / `SUEnableInstallerLauncherService` keys that used to sit in `Info.plist` have been removed — they configured a framework that was never present, and pointed at an account that is not this project's.
+
+- **`AppVersion`** parses and orders version strings. It is deliberately not a plain SemVer comparator: `git describe`'s `-<N>-g<sha>` suffix means *N commits **after*** the tag, while SemVer reads the same characters as a *pre-release **of*** it. Reading it the SemVer way tells anyone running a post-tag build to "update" to the release they are already ahead of, so the distance suffix is detected specifically and ordered above the bare tag. `AppVersionTests` pins the full ordering.
+- **`UpdateChecker`** asks the GitHub Releases API for the latest release, and does nothing else — it never downloads or installs. Acting on a result opens the release page in the browser. That is a constraint, not an omission: `release.yml` publishes with `DEVTYPE_SKIP_NOTARIZE=1`, so CI DMGs are signed but not notarized, and silently installing a non-notarized bundle is precisely what Gatekeeper exists to stop. An in-place updater has to enable notarization in CI first.
+- **Off by default.** Nothing contacts the network until the user enables *Preferences → General → Updates*; automatic checks then run at most once a day. "Check for Updates…" in the menu bar is an explicit request and always works.
+- **Failure is never silence.** `UpdateCheckOutcome` keeps `.failed` and `.undeterminedLocalVersion` distinct from `.upToDate`, so a check that could not run never renders as one that ran and found nothing.
+- The request carries no version, machine, or install identifier — a static `User-Agent`, an ephemeral session with no cookie or credential storage, and a bounded response read.
 
 ### Creating a Release
 ```bash

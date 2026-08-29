@@ -119,7 +119,16 @@ public final class AITransformCorrector: TranscriptCorrector, @unchecked Sendabl
             let result = await AITextTransformer.shared.transform(kind: kind, input: chunk)
             switch result {
             case .success(let output):
-                let cleaned = CorrectionOutputSanitizer.sanitize(output)
+                // `.preserve`, deliberately: this output came from `AITextTransformer`,
+                // which already applied `kind.markdownPolicy` to it. A second pass under a
+                // different policy would both override that kind's contract and be the one
+                // place where the stripper runs twice over the same text — which is exactly
+                // where its idempotence stops holding, over freed fence bodies.
+                let cleaned = CorrectionOutputSanitizer.sanitize(
+                    output,
+                    original: chunk,
+                    markdown: .preserve
+                )
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 corrected.append(cleaned.isEmpty ? chunk : cleaned)
             case .failure(let error):

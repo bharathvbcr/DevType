@@ -245,6 +245,13 @@ final class PreferencesViewController: NSViewController,
 
     // General
     private let openAtLoginSwitch = NSSwitch()
+    private let automaticUpdateSwitch = NSSwitch()
+    private let updateStatusLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(10.5),
+        color: DevTypeTheme.textTertiary,
+        wrapping: true
+    )
     private let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let mutedTable = NSTableView()
     private let mutedEmptyLabel = DevTypeTheme.makeLabel(
@@ -305,6 +312,7 @@ final class PreferencesViewController: NSViewController,
 
     // AI
     private let aiEnabledSwitch = NSSwitch()
+    private let aiRemoveMarkdownSwitch = NSSwitch()
     private let requireBiometrySwitch = NSSwitch()
     private let aiAvailabilityLabel = DevTypeTheme.makeLabel(
         "",
@@ -801,14 +809,46 @@ final class PreferencesViewController: NSViewController,
 
         stackInCard(mutedCard, views: [mutedHint, mutedArea, mutedButtons])
 
+        // Updates (§7.5). Off by default — the toggle governs only whether DevType checks on
+        // its own; the menu bar's "Check for Updates…" works regardless.
+        let updatesCard = makeCard(title: loc.s("prefs.general.updates"), symbol: "arrow.down.circle")
+        let updatesRow = makeToggleRow(
+            title: loc.s("prefs.general.updates.auto"),
+            toggle: automaticUpdateSwitch,
+            action: #selector(automaticUpdateCheckChanged)
+        )
+        let updatesNote = DevTypeTheme.makeLabel(
+            loc.s("prefs.general.updates.note"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        updatesNote.translatesAutoresizingMaskIntoConstraints = false
+        updateStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        let checkNowButton = CapsuleButton(
+            title: loc.s("prefs.general.updates.checkNow"),
+            symbol: "arrow.clockwise",
+            style: .secondary,
+            target: self,
+            action: #selector(checkForUpdatesNow)
+        )
+        let updatesButtons = NSStackView(views: [checkNowButton])
+        updatesButtons.orientation = .horizontal
+        updatesButtons.spacing = 8
+        updatesButtons.translatesAutoresizingMaskIntoConstraints = false
+        stackInCard(updatesCard, views: [updatesRow, updatesNote, updateStatusLabel, updatesButtons])
+
         stack.addArrangedSubview(startupCard)
         stack.addArrangedSubview(languageCard)
+        stack.addArrangedSubview(updatesCard)
         stack.addArrangedSubview(mutedCard)
-        pinWidth(of: [startupCard, languageCard, mutedCard], to: stack)
+        pinWidth(of: [startupCard, languageCard, updatesCard, mutedCard], to: stack)
     }
 
     private func reloadGeneral() {
         openAtLoginSwitch.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        automaticUpdateSwitch.state = UpdatePreferences.automaticCheckEnabled ? .on : .off
+        refreshUpdateStatusLabel()
         let current = loc.language.rawValue
         for (index, language) in AppLanguage.allCases.enumerated()
         where language.rawValue == current {
@@ -819,6 +859,38 @@ final class PreferencesViewController: NSViewController,
         mutedEmptyLabel.stringValue = mutedApps.isEmpty ? loc.s("prefs.general.mutedApps.empty") : ""
         mutedEmptyLabel.isHidden = !mutedApps.isEmpty
         refreshRemovalButton(for: mutedTable)
+    }
+
+    @objc private func automaticUpdateCheckChanged() {
+        UpdatePreferences.automaticCheckEnabled = automaticUpdateSwitch.state == .on
+        refreshUpdateStatusLabel()
+    }
+
+    @objc private func checkForUpdatesNow() {
+        // Reports every outcome, including failures — the user asked.
+        UpdateFlow.checkManually(window: view.window)
+        // The check is async; refresh once it has had a chance to write its timestamp.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.refreshUpdateStatusLabel()
+        }
+    }
+
+    /// Shows the running version plus when a check last *succeeded*.
+    ///
+    /// "Never checked" is shown until one completes, so a run of failed checks never renders as
+    /// a recent successful one.
+    private func refreshUpdateStatusLabel() {
+        let version = AppVersion.current()?.rawValue ?? "—"
+        var lines = [loc.s("prefs.general.updates.currentVersion", version)]
+        if let last = UpdatePreferences.lastSuccessfulCheck {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
+            lines.append(loc.s("prefs.general.updates.lastChecked", formatter.string(from: last)))
+        } else {
+            lines.append(loc.s("prefs.general.updates.never"))
+        }
+        updateStatusLabel.stringValue = lines.joined(separator: " · ")
     }
 
     @objc private func openAtLoginChanged() {
@@ -2322,7 +2394,19 @@ final class PreferencesViewController: NSViewController,
             wrapping: true
         )
         modesHint.translatesAutoresizingMaskIntoConstraints = false
-        var modeRows: [NSView] = [modesHint]
+        let markdownRow = makeToggleRow(
+            title: loc.s("prefs.ai.removeMarkdown"),
+            toggle: aiRemoveMarkdownSwitch,
+            action: #selector(aiRemoveMarkdownChanged)
+        )
+        let markdownHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.removeMarkdown.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        markdownHint.translatesAutoresizingMaskIntoConstraints = false
+        var modeRows: [NSView] = [modesHint, markdownRow, markdownHint]
         aiOutputModePopups.removeAll()
         for kind in AITransformKind.builtInPalette {
             let popup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -2416,6 +2500,7 @@ final class PreferencesViewController: NSViewController,
     private func reloadAI() {
         guard panes[.ai] != nil else { return }
         aiEnabledSwitch.state = AIPreferences.isEnabled ? .on : .off
+        aiRemoveMarkdownSwitch.state = AIPreferences.removesMarkdown ? .on : .off
         aiAvailabilityLabel.stringValue = loc.s(
             "prefs.ai.availability",
             loc.s(AITextTransformSupport.availability.localizationKey)
@@ -2444,6 +2529,10 @@ final class PreferencesViewController: NSViewController,
     @objc private func aiEnabledChanged() {
         AIPreferences.isEnabled = aiEnabledSwitch.state == .on
         reloadAI()
+    }
+
+    @objc private func aiRemoveMarkdownChanged() {
+        AIPreferences.removesMarkdown = aiRemoveMarkdownSwitch.state == .on
     }
 
     @objc private func aiOutputModeChanged(_ sender: NSPopUpButton) {

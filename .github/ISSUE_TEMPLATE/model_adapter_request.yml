@@ -1,0 +1,135 @@
+name: 🧠 Model / Adapter Request
+description: Request support for a new speech recognition model, transcript correction backend, or AI provider adapter.
+title: "[Adapter]: "
+labels: ["adapter", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to request a new **model or provider adapter** — not a general feature.
+
+        DevType routes every recognition and correction backend through a registry rather than
+        hard-coding call sites:
+
+        - **Speech recognition** → `SpeechProviderRegistry` (`Sources/ExpanderEngine/Voice/Recognition/`)
+          Existing adapters: `AppleSpeechAnalyzerAdapter`, `LegacyAppleSpeechAdapter`,
+          `WhisperCppServerAdapter`, `GeminiSpeechAdapter`.
+        - **Transcript correction / LLM cleanup** → `CorrectionProviderRegistry` (`Sources/ExpanderEngine/Voice/Correction/`)
+          Existing adapters: `FoundationLanguageModelCorrector`, `OllamaCorrector`,
+          `OpenAICompatibleCorrector`, `DeterministicCorrector`, `AITransformCorrector`.
+
+        Before filing, please check whether your provider already speaks an **OpenAI-compatible**
+        or **Ollama** API — if so, it may already work today via the existing adapters and no new
+        code is needed. See [docs/VOICE_DICTATION.md](https://github.com/bharathvbcr/DevType/blob/main/docs/VOICE_DICTATION.md).
+
+  - type: dropdown
+    id: adapter_kind
+    attributes:
+      label: Adapter Type
+      description: Which registry would this plug into?
+      options:
+        - "Speech recognition (SpeechProviderRegistry)"
+        - "Transcript correction / LLM cleanup (CorrectionProviderRegistry)"
+        - "AI text transform provider (AI transforms, ⌘⌥A)"
+        - "Not sure — please triage"
+    validations:
+      required: true
+
+  - type: input
+    id: model_name
+    attributes:
+      label: Model / Provider Name
+      description: The exact model or provider you want supported.
+      placeholder: "e.g. Parakeet TDT 0.6B, mlx-whisper, LM Studio, Parakeet-MLX"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: execution
+    attributes:
+      label: Where does it run?
+      description: |
+        DevType's default posture is on-device and offline. Cloud providers are supported only
+        as an explicit, opt-in choice the user turns on themselves (as Gemini is today), never
+        as a default and never silently.
+      options:
+        - "Fully on-device (local weights, no network)"
+        - "Local server on localhost (Ollama, llama.cpp, LM Studio, vLLM)"
+        - "Cloud API (requires user-supplied API key, opt-in only)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: interface
+    attributes:
+      label: Interface / API Surface
+      description: |
+        How is this model invoked? Link the API reference or the local server's endpoint spec.
+        If it is a local binary or Python package, say which and how it is installed.
+      placeholder: |
+        - Protocol: HTTP / gRPC / CLI / Swift package / Core ML
+        - Endpoint or entry point: e.g. POST http://localhost:8080/v1/audio/transcriptions
+        - Docs: https://...
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this model?
+      description: |
+        What does it do better than the adapters DevType already ships? Accuracy, latency,
+        memory footprint, language coverage, hardware support — be concrete where you can.
+      placeholder: "Runs at ~0.3x realtime on M1 with 1.2 GB RSS and handles German far better than..."
+    validations:
+      required: true
+
+  - type: input
+    id: licensing
+    attributes:
+      label: Model & Code License
+      description: |
+        DevType is MIT. State the license of both the model weights and any client library, and
+        note any commercial-use or redistribution restriction.
+      placeholder: "e.g. Weights: Apache-2.0 · Client: MIT"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: streaming
+    attributes:
+      label: Streaming Support
+      description: Push-to-talk dictation delivers partial results as you speak. Does this model stream?
+      options:
+        - "Streaming / incremental results"
+        - "Batch only (single result at end of utterance)"
+        - "Unknown"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: privacy_ack
+    attributes:
+      label: Privacy Acknowledgement
+      description: DevType ships zero telemetry. Please confirm you understand the constraints.
+      options:
+        - label: "This adapter would send audio or text off-device ONLY when the user explicitly enables it, and never by default."
+          required: true
+        - label: "No analytics, tracking, or usage-reporting SDK is bundled with this model or its client library."
+          required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: "I am willing to open a PR implementing this adapter."
+          required: false
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Benchmarks, sample output, hardware requirements, or anything else useful.
+    validations:
+      required: false

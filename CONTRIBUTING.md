@@ -84,7 +84,8 @@ DevType/
 │   │   ├── Voice/                         # Voxtral & Fun-ASR Smart Dictation, crash journaling
 │   │   ├── Models/                        # Snippet models, SecretStore, usage stats
 │   │   ├── Permissions/                   # TCC checks, AX verification, recovery
-│   │   └── Sync/                          # Import/export (TextExpander bundles, Espanso YAML), search, palette catalog
+│   │   ├── Sync/                          # Import/export (TextExpander bundles, Espanso YAML), search, palette catalog
+│   │   └── Updates/                       # Version parsing/ordering, opt-in GitHub release check
 │   │
 │   └── DevTypeSafety/       # Objective-C Runtime Exception Trampoline
 │       └── include/DevTypeSafety.h        # @try/@catch wrappers for unsafe AppKit/AX calls
@@ -106,7 +107,8 @@ For detailed component interaction, data flow diagrams, and safety contracts, se
 When writing code for DevType, please keep the following core principles in mind:
 
 ### 1. Zero Telemetry & Absolute Privacy
-- **No network calls**: DevType is strictly 100% offline. Never add third-party analytics, network logging, or cloud telemetry SDKs.
+- **Zero telemetry, always**: never add analytics, network logging, crash reporting, or usage-tracking SDKs. There is no exception to this one, and no setting that turns it on.
+- **Offline by default; network only when the user asks**: every feature works with the network unplugged. A handful of features *may* reach out, but only after the user explicitly enables them, and each is off until they do — cloud transcription (`GeminiTranscriptionClient`), local LLM servers on `localhost` (`OllamaCorrector`, `OpenAICompatibleCorrector`), Whisper model downloads (`WhisperServerController`), and the update check (`UpdateChecker`). If you add a network path, it must follow the same shape: opt-in, off by default, disclosed in the UI, and sending nothing about the user or their machine beyond what the feature strictly requires.
 - **Fail-Closed Security**: Never capture or process keystrokes during password entry (`NSSecureTextField`), Secure Event Input locks, or in muted applications.
 - **Secrets Protection**: Secret snippets are AES-GCM encrypted and gated behind Touch ID. Never log secrets, leak them to clipboard history, or expose them in diagnostic exports.
 
@@ -178,8 +180,10 @@ We follow clear, descriptive commit messages. Use prefixes where applicable:
 
 ## 💬 Getting Help & Reporting Issues
 
+- **Looking for something to work on?** Start with [`good first issue`](https://github.com/bharathvbcr/DevType/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) — those are scoped to be self-contained, with the relevant files and acceptance criteria named in the issue. [`help wanted`](https://github.com/bharathvbcr/DevType/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) is work that is ready to pick up but assumes more context. Comment on an issue before starting so two people don't build the same thing.
 - **Bug Reports**: Open an issue using the [Bug Report template](.github/ISSUE_TEMPLATE/bug_report.yml).
 - **Feature Requests**: Open an issue using the [Feature Request template](.github/ISSUE_TEMPLATE/feature_request.yml).
+- **New Model or Provider Adapter**: Use the [Model / Adapter Request template](.github/ISSUE_TEMPLATE/model_adapter_request.yml). Speech and correction backends plug into `SpeechProviderRegistry` and `CorrectionProviderRegistry` — add a case to the registry rather than a new call site.
 - **Security Inquiries**: See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 - **General Questions**: See [SUPPORT.md](SUPPORT.md) or visit GitHub Discussions.
 

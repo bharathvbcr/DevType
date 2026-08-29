@@ -107,7 +107,11 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
 
         let latency = Date().timeIntervalSince(startTime) * 1000
         return CorrectionCandidate(
-            text: CorrectionOutputSanitizer.sanitize(cleaned),
+            text: CorrectionOutputSanitizer.sanitize(
+                cleaned,
+                original: request.rawTranscript,
+                markdown: AIPreferences.voiceMarkdownPolicy
+            ),
             providerID: descriptor.id,
             modelVersion: descriptor.modelVersion,
             edits: [],
