@@ -76,30 +76,52 @@ enum SnippetImportFlow {
         isImporting = true
         stateLock.unlock()
 
-        // Parse + merge + save move off the main thread: a large library used to
-        // beachball the whole app for the duration of the import. Every store
-        // listener already hops to main internally (manager list, palette, health
-        // banner), and the result alert below is marshalled back explicitly —
-        // nothing here touches UI off-main.
+        // Parse + preview + merge + save
         DispatchQueue.global(qos: .userInitiated).async { [store] in
-            let outcome: Result<
-                (result: SnippetImporter.ImportResult, summary: SnippetStore.ImportSummary),
-                Error
-            >
             do {
-                // §1.10: `.merge` matches by trigger inside same-named groups and
-                // appends the rest — it never removes a local snippet.
-                outcome = .success(try store.importSnippets(from: url, mode: .merge))
+                let parsed = try SnippetImporter.importFrom(url)
+                DispatchQueue.main.async {
+                    SnippetImportPreviewSheet.present(
+                        from: window,
+                        incomingGroups: parsed.groups,
+                        existingGroups: store.loadGroups()
+                    ) { mode, _ in
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let outcome: Result<
+                                (result: SnippetImporter.ImportResult, summary: SnippetStore.ImportSummary),
+                                Error
+                            >
+                            do {
+                                outcome = .success(try store.importSnippets(from: url, mode: mode))
+                            } catch {
+                                outcome = .failure(error)
+                            }
+                            DispatchQueue.main.async {
+                                stateLock.lock()
+                                isImporting = false
+                                stateLock.unlock()
+                                report(outcome, window: window, loc: loc, completion: completion)
+                            }
+                        }
+                    } onCancel: {
+                        resetImportState()
+                    }
+                }
             } catch {
-                outcome = .failure(error)
-            }
-            DispatchQueue.main.async {
-                stateLock.lock()
-                isImporting = false
-                stateLock.unlock()
-                report(outcome, window: window, loc: loc, completion: completion)
+                DispatchQueue.main.async {
+                    stateLock.lock()
+                    isImporting = false
+                    stateLock.unlock()
+                    report(.failure(error), window: window, loc: loc, completion: completion)
+                }
             }
         }
+    }
+
+    private static func resetImportState() {
+        stateLock.lock()
+        isImporting = false
+        stateLock.unlock()
     }
 
     private typealias ImportOutcome = Result<

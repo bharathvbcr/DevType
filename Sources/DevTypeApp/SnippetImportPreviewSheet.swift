@@ -1,0 +1,313 @@
+import AppKit
+import ExpanderEngine
+
+/// §15: Snippet Import Preview Sheet.
+///
+/// Previews incoming snippets before committing them to the library,
+/// surfacing counts of new/updated/conflicting items and allowing mode selection.
+final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    typealias SnippetImportMode = SnippetStore.ImportMode
+
+    public static func present(
+        from window: NSWindow?,
+        incomingGroups: [SnippetGroup],
+        existingGroups: [SnippetGroup],
+        onConfirm: @escaping (SnippetImportMode, [SnippetGroup]) -> Void,
+        onCancel: (() -> Void)? = nil
+    ) {
+        let vc = SnippetImportPreviewSheet(
+            incomingGroups: incomingGroups,
+            existingGroups: existingGroups,
+            onConfirm: onConfirm,
+            onCancel: onCancel
+        )
+        let sheetWindow = NSWindow(contentViewController: vc)
+        sheetWindow.title = LocalizationManager.shared.s("import.preview.title")
+        sheetWindow.styleMask = [.titled, .closable, .resizable]
+        sheetWindow.setContentSize(NSSize(width: 620, height: 480))
+        sheetWindow.minSize = NSSize(width: 520, height: 380)
+        DevTypeTheme.styleWindow(sheetWindow, title: LocalizationManager.shared.s("import.preview.title"))
+
+        if let window {
+            window.beginSheet(sheetWindow)
+        } else {
+            sheetWindow.center()
+            sheetWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private let incomingGroups: [SnippetGroup]
+    private let existingGroups: [SnippetGroup]
+    private let onConfirm: (SnippetImportMode, [SnippetGroup]) -> Void
+    private let onCancel: (() -> Void)?
+    private let loc = LocalizationManager.shared
+
+    private let modePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let tableView = NSTableView()
+    private var didConfirm = false
+    private var didCancel = false
+
+    private struct PreviewItem {
+        let snippet: SnippetModel
+        let groupName: String
+        let status: Status
+
+        enum Status {
+            case isNew
+            case isUpdate
+            case isConflict
+        }
+    }
+
+    private var previewItems: [PreviewItem] = []
+
+    init(
+        incomingGroups: [SnippetGroup],
+        existingGroups: [SnippetGroup],
+        onConfirm: @escaping (SnippetImportMode, [SnippetGroup]) -> Void,
+        onCancel: (() -> Void)?
+    ) {
+        self.incomingGroups = incomingGroups
+        self.existingGroups = existingGroups
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        finishCancelledIfNeeded()
+    }
+
+    override func loadView() {
+        let root = NSView()
+        root.wantsLayer = true
+        root.layer?.backgroundColor = DevTypeTheme.windowBackground.cgColor
+
+        let header = DevTypeTheme.makeLabel(
+            loc.s("import.preview.title"),
+            font: DevTypeTheme.font(16, .bold),
+            color: DevTypeTheme.textPrimary
+        )
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        let totalSnippets = incomingGroups.flatMap(\.snippets).count
+        let countLabel = DevTypeTheme.makeLabel(
+            loc.s("import.preview.count", totalSnippets, incomingGroups.count),
+            font: DevTypeTheme.font(12),
+            color: DevTypeTheme.textSecondary
+        )
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        buildPreviewItems()
+
+        // Stat Badges Row
+        let newCount = previewItems.filter { $0.status == .isNew }.count
+        let updateCount = previewItems.filter { $0.status == .isUpdate }.count
+        let conflictCount = previewItems.filter { $0.status == .isConflict }.count
+
+        let newPill = PillBadgeView(text: loc.s("import.preview.stat.new", newCount), tint: DevTypeTheme.statusGreen)
+        let updatePill = PillBadgeView(text: loc.s("import.preview.stat.updated", updateCount), tint: DevTypeTheme.statusBlue)
+        let conflictPill = PillBadgeView(text: loc.s("import.preview.stat.conflicts", conflictCount), tint: conflictCount > 0 ? DevTypeTheme.statusOrange : DevTypeTheme.textTertiary)
+
+        let statsRow = NSStackView(views: [newPill, updatePill, conflictPill])
+        statsRow.orientation = .horizontal
+        statsRow.spacing = 8
+        statsRow.translatesAutoresizingMaskIntoConstraints = false
+
+        // Mode Selector Row
+        modePopup.removeAllItems()
+        modePopup.addItem(withTitle: loc.s("import.preview.mode.merge"))
+        modePopup.addItem(withTitle: loc.s("import.preview.mode.skip"))
+        modePopup.addItem(withTitle: loc.s("import.preview.mode.duplicate"))
+        modePopup.translatesAutoresizingMaskIntoConstraints = false
+
+        let modeLabel = DevTypeTheme.makeLabel(
+            loc.s("import.preview.mode"),
+            font: DevTypeTheme.font(12, .medium),
+            color: DevTypeTheme.textSecondary
+        )
+        let modeRow = NSStackView(views: [modeLabel, modePopup])
+        modeRow.orientation = .horizontal
+        modeRow.spacing = 8
+        modeRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+
+        tableView.headerView = nil
+        tableView.rowHeight = 44
+        tableView.intercellSpacing = NSSize(width: 0, height: 4)
+        tableView.backgroundColor = .clear
+        tableView.selectionHighlightStyle = .none
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("importItemCol")))
+        scroll.documentView = tableView
+
+        let cancelBtn = CapsuleButton(
+            title: loc.s("common.cancel"),
+            style: .secondary,
+            target: self,
+            action: #selector(cancelTapped)
+        )
+
+        let confirmBtn = CapsuleButton(
+            title: loc.s("import.preview.confirm"),
+            style: .primary,
+            target: self,
+            action: #selector(confirmTapped)
+        )
+
+        let buttonsRow = NSStackView(views: [cancelBtn, confirmBtn])
+        buttonsRow.orientation = .horizontal
+        buttonsRow.spacing = 8
+        buttonsRow.translatesAutoresizingMaskIntoConstraints = false
+
+        root.addSubview(header)
+        root.addSubview(countLabel)
+        root.addSubview(statsRow)
+        root.addSubview(modePopup)
+        root.addSubview(scroll)
+        root.addSubview(buttonsRow)
+
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+
+            countLabel.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 4),
+            countLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+
+            statsRow.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: 10),
+            statsRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+
+            modePopup.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            modePopup.centerYAnchor.constraint(equalTo: statsRow.centerYAnchor),
+
+            scroll.topAnchor.constraint(equalTo: statsRow.bottomAnchor, constant: 12),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
+            scroll.bottomAnchor.constraint(equalTo: buttonsRow.topAnchor, constant: -12),
+
+            buttonsRow.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            buttonsRow.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14)
+        ])
+
+        view = root
+    }
+
+    private func buildPreviewItems() {
+        var existingTriggers: [String: SnippetModel] = [:]
+        for g in existingGroups {
+            for s in g.snippets {
+                existingTriggers[s.triggerKeyword.lowercased()] = s
+            }
+        }
+
+        var items: [PreviewItem] = []
+        for group in incomingGroups {
+            for snippet in group.snippets {
+                let lower = snippet.triggerKeyword.lowercased()
+                let status: PreviewItem.Status
+                if let existing = existingTriggers[lower] {
+                    if existing.id == snippet.id || existing.triggerKeyword == snippet.triggerKeyword {
+                        status = .isUpdate
+                    } else {
+                        status = .isConflict
+                    }
+                } else {
+                    status = .isNew
+                }
+                items.append(PreviewItem(snippet: snippet, groupName: group.name, status: status))
+            }
+        }
+        previewItems = items
+    }
+
+    @objc private func cancelTapped() {
+        finishCancelledIfNeeded()
+        closeSheet()
+    }
+
+    @objc private func confirmTapped() {
+        didConfirm = true
+        let mode: SnippetStore.ImportMode
+        switch modePopup.indexOfSelectedItem {
+        case 1: mode = .skipConflicts
+        case 2: mode = .intoNewGroup
+        default: mode = .merge
+        }
+        closeSheet()
+        onConfirm(mode, incomingGroups)
+    }
+
+    private func finishCancelledIfNeeded() {
+        guard !didConfirm, !didCancel else { return }
+        didCancel = true
+        onCancel?()
+    }
+
+    private func closeSheet() {
+        if let window = view.window, let sheetParent = window.sheetParent {
+            sheetParent.endSheet(window)
+        } else {
+            view.window?.close()
+        }
+    }
+
+    // MARK: - Table
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        previewItems.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard previewItems.indices.contains(row) else { return nil }
+        let item = previewItems[row]
+
+        let cell = NSTableCellView()
+        let pill = PillBadgeView(text: item.snippet.triggerKeyword, tint: DevTypeTheme.accent, font: DevTypeTheme.mono(11, .bold))
+        let titleLabel = DevTypeTheme.makeLabel(item.snippet.displayTitle, font: DevTypeTheme.font(12, .medium), color: DevTypeTheme.textPrimary)
+        let groupLabel = DevTypeTheme.makeLabel(item.groupName, font: DevTypeTheme.font(10.5), color: DevTypeTheme.textTertiary)
+
+        let statusPill: PillBadgeView
+        switch item.status {
+        case .isNew:
+            statusPill = PillBadgeView(text: "New", tint: DevTypeTheme.statusGreen)
+        case .isUpdate:
+            statusPill = PillBadgeView(text: "Update", tint: DevTypeTheme.statusBlue)
+        case .isConflict:
+            statusPill = PillBadgeView(text: "Conflict", tint: DevTypeTheme.statusOrange)
+        }
+
+        let leftStack = NSStackView(views: [pill, titleLabel, groupLabel])
+        leftStack.orientation = .horizontal
+        leftStack.spacing = 8
+        leftStack.alignment = .centerY
+        leftStack.translatesAutoresizingMaskIntoConstraints = false
+
+        statusPill.translatesAutoresizingMaskIntoConstraints = false
+
+        cell.addSubview(leftStack)
+        cell.addSubview(statusPill)
+
+        NSLayoutConstraint.activate([
+            leftStack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            leftStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            leftStack.trailingAnchor.constraint(lessThanOrEqualTo: statusPill.leadingAnchor, constant: -10),
+
+            statusPill.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            statusPill.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+
+        return cell
+    }
+}

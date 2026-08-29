@@ -21,6 +21,7 @@ import ServiceManagement
 
 /// Sections, in sidebar order.
 enum PreferencesTab: Int, CaseIterable {
+    case home
     case general
     case snippets
     case hotkeys
@@ -30,6 +31,7 @@ enum PreferencesTab: Int, CaseIterable {
 
     var title: String {
         switch self {
+        case .home: return LocalizationManager.shared.s("prefs.tab.home")
         case .general: return LocalizationManager.shared.s("prefs.tab.general")
         case .snippets: return LocalizationManager.shared.s("prefs.tab.snippets")
         case .hotkeys: return LocalizationManager.shared.s("prefs.tab.hotkeys")
@@ -41,6 +43,7 @@ enum PreferencesTab: Int, CaseIterable {
 
     var symbol: String {
         switch self {
+        case .home: return "house"
         case .general: return "gearshape"
         case .snippets: return "square.stack.3d.up"
         case .hotkeys: return "keyboard"
@@ -52,6 +55,7 @@ enum PreferencesTab: Int, CaseIterable {
 
     var subtitle: String {
         switch self {
+        case .home: return LocalizationManager.shared.s("prefs.tab.home.subtitle")
         case .general: return LocalizationManager.shared.s("prefs.tab.general.subtitle")
         case .snippets: return LocalizationManager.shared.s("prefs.tab.snippets.subtitle")
         case .hotkeys: return LocalizationManager.shared.s("prefs.tab.hotkeys.subtitle")
@@ -228,15 +232,16 @@ final class PreferencesViewController: NSViewController,
     private weak var hotkeyManager: HotkeyManager?
 
     private var navRows: [SidebarNavRow] = []
-    private var selectedTab: PreferencesTab = .general
+    private var selectedTab: PreferencesTab = .home
     private var panes: [PreferencesTab: NSView] = [:]
     private var paneTitleLabel: NSTextField?
     private var paneSubtitleLabel: NSTextField?
     private var paneIconBadge: IconBadgeView?
-    private var tabsShownAtLeastOnce: Set<PreferencesTab> = [.general]
+    private var tabsShownAtLeastOnce: Set<PreferencesTab> = [.home]
     private var removalButtons: [ObjectIdentifier: CapsuleButton] = [:]
     /// Glanceable engine state pinned to the bottom of the sidebar.
     private var engineStatusPill: PillBadgeView?
+    private var homeViewController: HomeViewController?
 
     // General
     private let openAtLoginSwitch = NSSwitch()
@@ -371,6 +376,7 @@ final class PreferencesViewController: NSViewController,
     /// on the manager (or absence of one) it was created with.
     func refreshHotkeyManager(_ manager: HotkeyManager?) {
         hotkeyManager = manager
+        homeViewController?.refreshHotkeyManager(manager)
     }
 
     @available(*, unavailable)
@@ -652,6 +658,7 @@ final class PreferencesViewController: NSViewController,
     /// Re-pulls every value from its source of truth.
     func reloadAll() {
         guard isViewLoaded else { return }
+        homeViewController?.refresh()
         reloadGeneral()
         reloadSnippets()
         reloadHotkeys()
@@ -664,6 +671,12 @@ final class PreferencesViewController: NSViewController,
     // MARK: Pane construction
 
     private func makeScrollingPane(for tab: PreferencesTab) -> NSView {
+        if tab == .home {
+            let homeVC = HomeViewController(store: store, hotkeyManager: hotkeyManager)
+            homeViewController = homeVC
+            return homeVC.view
+        }
+
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
@@ -683,6 +696,7 @@ final class PreferencesViewController: NSViewController,
         document.addSubview(stack)
 
         switch tab {
+        case .home: break
         case .general: buildGeneral(into: stack)
         case .snippets: buildSnippets(into: stack)
         case .hotkeys: buildHotkeys(into: stack)
@@ -1557,13 +1571,13 @@ final class PreferencesViewController: NSViewController,
         // 5. AI Voice Triggers & Rewrites Card
         let triggersCard = makeCard(title: loc.s("prefs.voice.triggers.card"), symbol: "wand.and.stars")
 
-        let disclaimerPill = PillBadgeView(text: "macOS 27 Required", tint: DevTypeTheme.statusOrange, showsDot: true)
+        let disclaimerPill = PillBadgeView(text: "Apple Intelligence", tint: DevTypeTheme.accent, showsDot: true)
         disclaimerPill.translatesAutoresizingMaskIntoConstraints = false
 
         let disclaimerText = DevTypeTheme.makeLabel(
-            "Disclaimer: AI rewrite and developer-type tools require macOS 27 to function properly (tested on macOS 26 where AI features are not operational).",
+            loc.s("ai.availability.requirement"),
             font: DevTypeTheme.font(10.5, .medium),
-            color: DevTypeTheme.accentBright,
+            color: DevTypeTheme.textSecondary,
             wrapping: true
         )
         disclaimerText.translatesAutoresizingMaskIntoConstraints = false
@@ -2061,11 +2075,11 @@ final class PreferencesViewController: NSViewController,
 
         if !featureAvailable {
             let unsupportedCard = makeCard(title: loc.s("prefs.tab.ai"), symbol: "sparkles")
-            let disclaimerPill = PillBadgeView(text: "macOS 27 Required", tint: DevTypeTheme.statusOrange, showsDot: true)
+            let disclaimerPill = PillBadgeView(text: "Apple Intelligence", tint: DevTypeTheme.statusOrange, showsDot: true)
             disclaimerPill.translatesAutoresizingMaskIntoConstraints = false
 
             let note = DevTypeTheme.makeLabel(
-                "Disclaimer: On-device Apple Intelligence and Foundation Models require macOS 27 to function properly (tested on macOS 26 where AI features are not operational).",
+                loc.s("ai.availability.requirement"),
                 font: DevTypeTheme.font(11.5),
                 color: DevTypeTheme.textSecondary,
                 wrapping: true
@@ -2079,7 +2093,7 @@ final class PreferencesViewController: NSViewController,
 
         // Enable + availability
         let enableCard = makeCard(title: loc.s("prefs.ai.enable.card"), symbol: "sparkles")
-        let disclaimerPill = PillBadgeView(text: "macOS 27 Intelligence", tint: DevTypeTheme.accent, showsDot: true)
+        let disclaimerPill = PillBadgeView(text: "Apple Intelligence", tint: DevTypeTheme.accent, showsDot: true)
         disclaimerPill.translatesAutoresizingMaskIntoConstraints = false
 
         let enableRow = makeToggleRow(

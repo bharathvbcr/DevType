@@ -770,4 +770,22 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(preferences.contains("voiceTriggerAction"))
     }
 
+    func testImportPreviewCancellationReleasesTheInProgressGuard() throws {
+        let preview = try source("Sources/DevTypeApp/SnippetImportPreviewSheet.swift")
+
+        XCTAssertTrue(
+            preview.contains("onCancel: (() -> Void)? = nil"),
+            "The preview must expose a cancellation callback so the flow can release its guard."
+        )
+        XCTAssertTrue(
+            preview.contains("override func viewWillDisappear()")
+                && preview.contains("finishCancelledIfNeeded()"),
+            "Closing the title-bar window must release the import guard just like Cancel."
+        )
+        XCTAssertTrue(
+            preview.contains("case 1: mode = .skipConflicts"),
+            "Skip Conflicting must use the non-destructive store mode."
+        )
+    }
+
 }

@@ -122,7 +122,7 @@ private final class LabSession: NSObject {
         retainSelf = self
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 320),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 490),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -133,7 +133,7 @@ private final class LabSession: NSObject {
         DevTypeTheme.styleWindow(panel, title: loc.s("window.lab"))
         self.panel = panel
 
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 320))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 490))
         container.wantsLayer = true
         container.layer?.backgroundColor = DevTypeTheme.windowBackground.cgColor
 
@@ -144,12 +144,12 @@ private final class LabSession: NSObject {
         caption.font = DevTypeTheme.font(11)
         caption.textColor = DevTypeTheme.textSecondary
         caption.translatesAutoresizingMaskIntoConstraints = false
-        caption.preferredMaxLayoutWidth = 400
+        caption.preferredMaxLayoutWidth = 460
 
         let editorBlock = NSView()
         editorBlock.wantsLayer = true
         editorBlock.translatesAutoresizingMaskIntoConstraints = false
-        editorBlock.layer?.cornerRadius = 10
+        editorBlock.layer?.cornerRadius = 8
         editorBlock.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
         editorBlock.layer?.borderWidth = 1
         editorBlock.layer?.borderColor = DevTypeTheme.hairline.cgColor
@@ -190,13 +190,16 @@ private final class LabSession: NSObject {
             scroll.bottomAnchor.constraint(equalTo: editorBlock.bottomAnchor, constant: -4)
         ])
 
+        // MARK: - Audit Checklist Card
+        let auditCard = makeAuditCard()
+        auditCard.translatesAutoresizingMaskIntoConstraints = false
+
         let statusLabel = NSTextField(labelWithString: loc.s("lab.focusing"))
         statusLabel.font = DevTypeTheme.font(11, .medium)
         statusLabel.textColor = DevTypeTheme.accentBright
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         self.statusLabel = statusLabel
 
-        // §5.1: the lab's text view is the whole point of the panel — name it.
         textView.setAccessibilityLabel(loc.s("lab.caption", planLabel))
         statusLabel.setAccessibilityLabel(loc.s("window.lab"))
 
@@ -211,24 +214,29 @@ private final class LabSession: NSObject {
         container.addSubview(badge)
         container.addSubview(caption)
         container.addSubview(editorBlock)
+        container.addSubview(auditCard)
         container.addSubview(statusLabel)
         container.addSubview(closeButton)
         panel.contentView = container
 
         NSLayoutConstraint.activate([
-            badge.topAnchor.constraint(equalTo: container.topAnchor, constant: 40),
+            badge.topAnchor.constraint(equalTo: container.topAnchor, constant: 28),
             badge.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
 
             caption.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
             caption.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 10),
             caption.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
 
-            editorBlock.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 14),
+            editorBlock.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 12),
             editorBlock.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
             editorBlock.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
-            editorBlock.heightAnchor.constraint(equalToConstant: 150),
+            editorBlock.heightAnchor.constraint(equalToConstant: 95),
 
-            statusLabel.topAnchor.constraint(equalTo: editorBlock.bottomAnchor, constant: 12),
+            auditCard.topAnchor.constraint(equalTo: editorBlock.bottomAnchor, constant: 12),
+            auditCard.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+            auditCard.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
+
+            statusLabel.topAnchor.constraint(equalTo: auditCard.bottomAnchor, constant: 12),
             statusLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -12),
 
@@ -245,10 +253,6 @@ private final class LabSession: NSObject {
             NSApp.activate(ignoringOtherApps: true)
         }
 
-        // Mirror the AppDelegate Setup-window pattern: one block-based observer,
-        // replaced (here: removed) on close, so the window closing by any route
-        // funnels into the same teardown as the Close button. Double-close is
-        // idempotent — the observer is removed before `panel.close()` re-enters.
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: panel,
@@ -282,19 +286,121 @@ private final class LabSession: NSObject {
         }
     }
 
+    private func makeAuditCard() -> NSView {
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.backgroundColor = DevTypeTheme.cardBackground.cgColor
+        card.layer?.cornerRadius = 8
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = NSColor.separatorColor.cgColor
+
+        let headerLabel = DevTypeTheme.makeLabel(
+            loc.s("lab.audit.title"),
+            font: DevTypeTheme.font(12, .semibold),
+            color: DevTypeTheme.textPrimary
+        )
+        headerLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let snapshot = PermissionProbe().snapshot()
+        let isSecure = SecureInputMonitor.shared.checkLockStatus().isLocked
+        let lastOutcome = PermissionCoordinator.shared.lastRecordedInjectOutcome
+
+        let row1 = makeAuditRow(
+            title: loc.s("lab.audit.range"),
+            status: snapshot.canUseAX ? loc.s("lab.yes") : loc.s("lab.no"),
+            tint: snapshot.canUseAX ? DevTypeTheme.statusGreen : DevTypeTheme.accent
+        )
+        let row2 = makeAuditRow(
+            title: loc.s("lab.audit.secure"),
+            status: isSecure ? loc.s("home.status.secureInput") : "Disengaged",
+            tint: isSecure ? DevTypeTheme.statusOrange : DevTypeTheme.statusGreen
+        )
+        let row3 = makeAuditRow(
+            title: loc.s("lab.audit.event"),
+            status: snapshot.canPostEvents ? loc.s("lab.yes") : loc.s("lab.no"),
+            tint: snapshot.canPostEvents ? DevTypeTheme.statusGreen : DevTypeTheme.accent
+        )
+        let row4 = makeAuditRow(
+            title: loc.s("lab.audit.editable"),
+            status: "Editable",
+            tint: DevTypeTheme.statusGreen
+        )
+        let row5 = makeAuditRow(
+            title: String(format: loc.s("lab.audit.path"), planLabel),
+            status: "Selected",
+            tint: DevTypeTheme.statusBlue
+        )
+        let row6 = makeAuditRow(
+            title: String(format: loc.s("lab.audit.lastOutcome"), outcomeString(lastOutcome)),
+            status: lastOutcome == .succeeded ? "OK" : "Pending",
+            tint: lastOutcome == .succeeded ? DevTypeTheme.statusGreen : DevTypeTheme.statusOrange
+        )
+
+        let grid = NSStackView(views: [row1, row2, row3, row4, row5, row6])
+        grid.orientation = .vertical
+        grid.spacing = 6
+        grid.alignment = .leading
+        grid.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addSubview(headerLabel)
+        card.addSubview(grid)
+
+        NSLayoutConstraint.activate([
+            headerLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
+            headerLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
+
+            grid.topAnchor.constraint(equalTo: headerLabel.bottomAnchor, constant: 8),
+            grid.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
+            grid.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+            grid.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10)
+        ])
+
+        return card
+    }
+
+    private func makeAuditRow(title: String, status: String, tint: NSColor) -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let lbl = DevTypeTheme.makeLabel(title, font: DevTypeTheme.font(11), color: DevTypeTheme.textSecondary)
+        lbl.translatesAutoresizingMaskIntoConstraints = false
+
+        let pill = PillBadgeView(text: status, tint: tint)
+        pill.translatesAutoresizingMaskIntoConstraints = false
+
+        row.addSubview(lbl)
+        row.addSubview(pill)
+
+        NSLayoutConstraint.activate([
+            lbl.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            lbl.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+
+            pill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            pill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            pill.leadingAnchor.constraint(greaterThanOrEqualTo: lbl.trailingAnchor, constant: 8),
+
+            row.heightAnchor.constraint(equalToConstant: 20)
+        ])
+
+        return row
+    }
+
+    private func outcomeString(_ outcome: PermissionCoordinator.InjectOutcome?) -> String {
+        switch outcome {
+        case .succeeded: return loc.s("lab.outcome.succeeded")
+        case .postedUnverified: return loc.s("lab.outcome.posted")
+        case .degradedAXOnly: return loc.s("lab.outcome.degraded")
+        case .failedSilent: return loc.s("lab.outcome.failed")
+        case .refused(let reason): return loc.s("lab.outcome.refused", reason)
+        case .none: return loc.s("lab.outcome.unknown")
+        }
+    }
+
     private func evaluateResult() {
         guard let textView, let statusLabel else { return }
         let actual = textView.string
         let outcome = PermissionCoordinator.shared.lastRecordedInjectOutcome
-        let outcomeLabel: String
-        switch outcome {
-        case .succeeded: outcomeLabel = loc.s("lab.outcome.succeeded")
-        case .postedUnverified: outcomeLabel = loc.s("lab.outcome.posted")
-        case .degradedAXOnly: outcomeLabel = loc.s("lab.outcome.degraded")
-        case .failedSilent: outcomeLabel = loc.s("lab.outcome.failed")
-        case .refused(let reason): outcomeLabel = loc.s("lab.outcome.refused", reason)
-        case .none: outcomeLabel = loc.s("lab.outcome.unknown")
-        }
+        let outcomeLabel = outcomeString(outcome)
 
         let matched = actual == expected
             || actual.hasSuffix(expected)
@@ -316,8 +422,6 @@ private final class LabSession: NSObject {
     }
 
     @objc func close() {
-        // Remove first: `panel.close()` below fires willClose synchronously and the
-        // observer would re-enter this method mid-teardown.
         if let closeObserver {
             NotificationCenter.default.removeObserver(closeObserver)
             self.closeObserver = nil

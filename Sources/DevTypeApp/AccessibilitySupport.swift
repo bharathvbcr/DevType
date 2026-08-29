@@ -53,6 +53,24 @@ enum DevTypeAccessibility {
         ) { _ in handler() }
     }
 
+    // MARK: Dynamic VoiceOver Announcements (§5.1 / §16)
+
+    /// Posts an accessibility announcement for VoiceOver users.
+    static func announce(_ message: String) {
+        guard !message.isEmpty else { return }
+        DispatchQueue.main.async {
+            guard let app = NSApp else { return }
+            NSAccessibility.post(
+                element: app,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: message,
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue
+                ]
+            )
+        }
+    }
+
     // MARK: Symbol descriptions (§5.1)
 
     /// Human-readable description for an SF Symbol name.

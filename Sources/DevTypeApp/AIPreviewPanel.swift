@@ -84,9 +84,8 @@ enum AIPreviewPanel {
             Task { await AITextTransformer.shared.prewarm(kind: kind, customInstructions: customInstructions) }
         }
         #endif
-
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -106,6 +105,7 @@ enum AIPreviewPanel {
                 pendingRestoreOnCancel = nil
                 pendingRestoreSourceApp = nil
                 AIUndoStore.stash(input)
+                ToastPanel.show(loc.s("ai.preview.undoToast"), symbol: "arrow.uturn.backward.circle")
                 close(discard: false, resumeMatching: true)
                 onReplace(text, app)
             },
@@ -120,25 +120,23 @@ enum AIPreviewPanel {
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         animateIn(panel)
+        controller.startGeneration()
 
         self.panel = panel
         self.controller = controller
         installDismissWatchers(for: panel)
-        controller.startGeneration()
     }
 
     /// Cancel / outside-dismiss: reinject the erased typed trigger via `erasePlan: .empty`.
     private static func restoreErasedTriggerAndClose() {
-        let restore = pendingRestoreOnCancel
+        let trigger = pendingRestoreOnCancel
         let app = pendingRestoreSourceApp
         pendingRestoreOnCancel = nil
         pendingRestoreSourceApp = nil
         close(discard: true, resumeMatching: true)
-        if let restore, !restore.isEmpty {
-            // Authored text (the erased typed trigger) — exempt from the prompt-leak
-            // guard by declaration, not by accident.
+        if let trigger, !trigger.isEmpty {
             EventTapEngine.shared.injectAITransformResult(
-                text: restore,
+                text: trigger,
                 sourceApp: app,
                 origin: .authoredText,
                 completion: nil
@@ -237,11 +235,16 @@ private final class AIPreviewController: NSViewController {
     private let waitingLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(12), color: DevTypeTheme.textTertiary)
     private let textView = NSTextView()
     private var scrollView = NSScrollView()
+    private let wordsDeltaPill = PillBadgeView(text: "", tint: DevTypeTheme.statusBlue)
+    private let charsDeltaPill = PillBadgeView(text: "", tint: DevTypeTheme.textTertiary)
+
     private var replaceButton: CapsuleButton!
+    private var replaceAndCopyButton: CapsuleButton!
     private var copyButton: CapsuleButton!
     private var retryButton: CapsuleButton!
     private var diffButton: CapsuleButton!
     private var kindPopup: NSPopUpButton!
+    private var tonePopup: NSPopUpButton!
     private var titleLabel: NSTextField!
     private var errorLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11), color: DevTypeTheme.statusOrange)
 
@@ -287,7 +290,7 @@ private final class AIPreviewController: NSViewController {
             tint: DevTypeTheme.accent.withAlphaComponent(0.10),
             material: .popover
         )
-        glass.frame = NSRect(x: 0, y: 0, width: 520, height: 420)
+        glass.frame = NSRect(x: 0, y: 0, width: 560, height: 460)
         let root = glass.contentView
 
         let badge = IconBadgeView(symbol: "sparkles", tint: DevTypeTheme.accent, size: 32, pointSize: 14)
@@ -297,12 +300,41 @@ private final class AIPreviewController: NSViewController {
             color: DevTypeTheme.textPrimary
         )
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        wordsDeltaPill.translatesAutoresizingMaskIntoConstraints = false
+        wordsDeltaPill.isHidden = true
+        charsDeltaPill.translatesAutoresizingMaskIntoConstraints = false
+        charsDeltaPill.isHidden = true
+
+        let titleRow = NSStackView(views: [titleLabel, wordsDeltaPill, charsDeltaPill])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 6
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+
         let subtitleLabel = DevTypeTheme.makeLabel(
             loc.s("ai.preview.subtitle"),
             font: DevTypeTheme.font(10.5),
             color: DevTypeTheme.textTertiary
         )
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let headerText = NSStackView(views: [titleRow, subtitleLabel])
+        headerText.orientation = .vertical
+        headerText.alignment = .leading
+        headerText.spacing = 1
+        headerText.translatesAutoresizingMaskIntoConstraints = false
+
+        // Tone popup
+        tonePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        tonePopup.translatesAutoresizingMaskIntoConstraints = false
+        tonePopup.font = DevTypeTheme.font(11, .medium)
+        tonePopup.addItem(withTitle: loc.s("ai.preview.tone.default"))
+        tonePopup.addItem(withTitle: loc.s("ai.preview.tone.professional"))
+        tonePopup.addItem(withTitle: loc.s("ai.preview.tone.casual"))
+        tonePopup.addItem(withTitle: loc.s("ai.preview.tone.concise"))
+        tonePopup.target = self
+        tonePopup.action = #selector(toneChanged)
 
         kindPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         kindPopup.translatesAutoresizingMaskIntoConstraints = false
@@ -319,15 +351,14 @@ private final class AIPreviewController: NSViewController {
         kindPopup.target = self
         kindPopup.action = #selector(kindChanged)
 
-        let headerText = NSStackView(views: [titleLabel, subtitleLabel])
-        headerText.orientation = .vertical
-        headerText.alignment = .leading
-        headerText.spacing = 1
-        headerText.translatesAutoresizingMaskIntoConstraints = false
+        let popupsStack = NSStackView(views: [tonePopup, kindPopup])
+        popupsStack.orientation = .horizontal
+        popupsStack.spacing = 6
+        popupsStack.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(badge)
         root.addSubview(headerText)
-        root.addSubview(kindPopup)
+        root.addSubview(popupsStack)
 
         spinner.style = .spinning
         spinner.controlSize = .regular
@@ -366,7 +397,7 @@ private final class AIPreviewController: NSViewController {
         root.addSubview(hairline)
 
         let cancel = CapsuleButton(
-            title: loc.s("common.cancel"),
+            title: loc.s("common.cancel") + "  ⎋",
             style: .secondary,
             target: self,
             action: #selector(cancelTapped)
@@ -374,7 +405,7 @@ private final class AIPreviewController: NSViewController {
         cancel.keyEquivalent = "\u{1b}"
 
         retryButton = CapsuleButton(
-            title: loc.s("common.retry"),
+            title: loc.s("common.retry") + "  ⌘R",
             style: .secondary,
             target: self,
             action: #selector(retryTapped)
@@ -391,15 +422,23 @@ private final class AIPreviewController: NSViewController {
         diffButton.isHidden = kind != .proofread
 
         copyButton = CapsuleButton(
-            title: loc.s("ai.preview.copy"),
+            title: loc.s("ai.preview.copy") + "  ⌘C",
             style: .secondary,
             target: self,
             action: #selector(copyTapped)
         )
         copyButton.isEnabled = false
 
+        replaceAndCopyButton = CapsuleButton(
+            title: loc.s("ai.preview.replaceAndCopy") + "  ⌥↩",
+            style: .secondary,
+            target: self,
+            action: #selector(replaceAndCopyTapped)
+        )
+        replaceAndCopyButton.isEnabled = false
+
         replaceButton = CapsuleButton(
-            title: loc.s("ai.preview.replace"),
+            title: loc.s("ai.preview.replace") + "  ↩",
             symbol: "checkmark",
             style: .primary,
             target: self,
@@ -412,6 +451,7 @@ private final class AIPreviewController: NSViewController {
         root.addSubview(diffButton)
         root.addSubview(retryButton)
         root.addSubview(copyButton)
+        root.addSubview(replaceAndCopyButton)
         root.addSubview(replaceButton)
 
         NSLayoutConstraint.activate([
@@ -419,10 +459,9 @@ private final class AIPreviewController: NSViewController {
             badge.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
             headerText.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 10),
             headerText.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
-            kindPopup.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
-            kindPopup.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
-            kindPopup.widthAnchor.constraint(lessThanOrEqualToConstant: 160),
-            headerText.trailingAnchor.constraint(lessThanOrEqualTo: kindPopup.leadingAnchor, constant: -8),
+            popupsStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            popupsStack.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            headerText.trailingAnchor.constraint(lessThanOrEqualTo: popupsStack.leadingAnchor, constant: -8),
 
             spinner.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 28),
             spinner.centerXAnchor.constraint(equalTo: root.centerXAnchor),
@@ -447,7 +486,9 @@ private final class AIPreviewController: NSViewController {
 
             replaceButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             replaceButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
-            copyButton.trailingAnchor.constraint(equalTo: replaceButton.leadingAnchor, constant: -8),
+            replaceAndCopyButton.trailingAnchor.constraint(equalTo: replaceButton.leadingAnchor, constant: -8),
+            replaceAndCopyButton.bottomAnchor.constraint(equalTo: replaceButton.bottomAnchor),
+            copyButton.trailingAnchor.constraint(equalTo: replaceAndCopyButton.leadingAnchor, constant: -8),
             copyButton.bottomAnchor.constraint(equalTo: replaceButton.bottomAnchor),
             retryButton.trailingAnchor.constraint(equalTo: copyButton.leadingAnchor, constant: -8),
             retryButton.bottomAnchor.constraint(equalTo: replaceButton.bottomAnchor),
@@ -485,7 +526,10 @@ private final class AIPreviewController: NSViewController {
         spinner.startAnimation(nil)
         errorLabel.isHidden = true
         errorLabel.stringValue = ""
+        wordsDeltaPill.isHidden = true
+        charsDeltaPill.isHidden = true
         replaceButton.isEnabled = false
+        replaceAndCopyButton.isEnabled = false
         copyButton.isEnabled = false
         retryButton.isEnabled = false
         diffButton.isEnabled = false
@@ -529,9 +573,7 @@ private final class AIPreviewController: NSViewController {
         showingDiff = false
         textView.string = partial
         textView.scrollToEndOfDocument(nil)
-        // Replace / Copy stay disabled until the stream finishes: Return is bound to
-        // Replace, and a fast Return over a half-streamed snapshot injects truncated
-        // text. The failure path below re-enables them for a partial worth keeping.
+        updateDeltas(for: partial)
     }
 
     private func applyCompletion(_ result: Result<String, AITransformError>) {
@@ -548,9 +590,11 @@ private final class AIPreviewController: NSViewController {
             scrollView.isHidden = false
             textView.string = text
             replaceButton.isEnabled = !text.isEmpty
+            replaceAndCopyButton.isEnabled = !text.isEmpty
             copyButton.isEnabled = !text.isEmpty
             diffButton.isEnabled = kind == .proofread && text != input && !text.isEmpty
             errorLabel.isHidden = true
+            updateDeltas(for: text)
         case .failure(let error):
             if case .discarded = error { return }
             errorLabel.stringValue = AITransformFlow.localizedError(error, loc: loc)
@@ -559,24 +603,71 @@ private final class AIPreviewController: NSViewController {
                 scrollView.isHidden = true
             }
             replaceButton.isEnabled = !resultText.isEmpty
+            replaceAndCopyButton.isEnabled = !resultText.isEmpty
             copyButton.isEnabled = !resultText.isEmpty
             diffButton.isEnabled = kind == .proofread && !resultText.isEmpty && resultText != input
         }
     }
 
+    private func updateDeltas(for text: String) {
+        let inWords = input.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+        let outWords = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+        let wordDelta = outWords - inWords
+
+        let inChars = input.count
+        let outChars = text.count
+        let charDelta = outChars - inChars
+
+        wordsDeltaPill.isHidden = false
+        wordsDeltaPill.update(
+            text: loc.s("ai.preview.delta.words", wordDelta),
+            tint: wordDelta >= 0 ? DevTypeTheme.statusBlue : DevTypeTheme.statusOrange
+        )
+
+        charsDeltaPill.isHidden = false
+        charsDeltaPill.update(
+            text: loc.s("ai.preview.delta.chars", charDelta),
+            tint: DevTypeTheme.textTertiary
+        )
+    }
+
     private func installKeyMonitor() {
-        // Same guard as MacroPalettePanel: overwriting a live monitor leaks it —
-        // teardown removes only the last one, and the orphan keeps eating keys.
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+            // ⌘R -> Retry
+            if flags == .command && event.charactersIgnoringModifiers == "r" {
+                if self.retryButton.isEnabled {
+                    self.retryTapped()
+                    return nil
+                }
+            }
+
+            // ⌘C -> Copy
+            if flags == .command && event.charactersIgnoringModifiers == "c" {
+                if self.copyButton.isEnabled {
+                    self.copyTapped()
+                    return nil
+                }
+            }
+
+            // ⌥↩ -> Replace & Copy
+            if flags.contains(.option) && (event.keyCode == UInt16(kVK_Return) || event.keyCode == UInt16(kVK_ANSI_KeypadEnter)) {
+                if self.replaceAndCopyButton.isEnabled {
+                    self.replaceAndCopyTapped()
+                    return nil
+                }
+            }
+
             switch Int(event.keyCode) {
             case kVK_Escape:
                 self.cancelTapped()
                 return nil
             case kVK_Return, kVK_ANSI_KeypadEnter:
-                if self.replaceButton.isEnabled,
-                   event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+                if self.replaceButton.isEnabled, flags.isEmpty {
                     self.replaceTapped()
                     return nil
                 }
@@ -592,7 +683,16 @@ private final class AIPreviewController: NSViewController {
               let next = AITransformKind.named(raw),
               next != kind else { return }
         kind = next
-        customInstructions = nil
+        beginTransform()
+    }
+
+    @objc private func toneChanged() {
+        switch tonePopup.indexOfSelectedItem {
+        case 1: customInstructions = "Maintain a formal, authoritative, and professional tone."
+        case 2: customInstructions = "Maintain a friendly, conversational, and casual tone."
+        case 3: customInstructions = "Be highly concise, punchy, and to the point."
+        default: customInstructions = nil
+        }
         beginTransform()
     }
 
@@ -601,9 +701,16 @@ private final class AIPreviewController: NSViewController {
         onReplace(resultText, sourceApp)
     }
 
+    @objc private func replaceAndCopyTapped() {
+        guard !resultText.isEmpty else { return }
+        PasteboardBroker.shared.writeUserClipboardString(resultText)
+        onReplace(resultText, sourceApp)
+    }
+
     @objc private func copyTapped() {
         guard !resultText.isEmpty else { return }
         PasteboardBroker.shared.writeUserClipboardString(resultText)
+        ToastPanel.show(loc.s("ai.preview.copy"), symbol: "doc.on.doc.fill")
     }
 
     @objc private func retryTapped() {
@@ -657,4 +764,3 @@ private final class AIPreviewController: NSViewController {
         return out
     }
 }
-

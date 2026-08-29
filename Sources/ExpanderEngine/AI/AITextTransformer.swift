@@ -1521,20 +1521,18 @@ public enum AITextTransformerUnavailable {
 
 /// Process-wide availability that compiles on every deployment target.
 public enum AITextTransformSupport {
-    /// Platform disclaimer: On-device Apple Intelligence & Foundation Models
-    /// require macOS 27 to function properly. On macOS 26 and earlier, on-device AI
-    /// features are inoperable or not supported.
-    public static let macOSRequirementDisclaimer = "On-device AI tools and Foundation Models require macOS 27 to function properly (tested on macOS 26 where AI features are not operational)."
+    /// Platform requirement: On-device Apple Intelligence & Foundation Models require macOS 26 or later.
+    public static let macOSRequirementDisclaimer = "On-device AI transforms require macOS 26 or later with Apple Intelligence."
 
-    /// Returns whether the host OS is macOS 27 or higher.
+    /// Returns whether the host OS is macOS 26 or higher.
     public static var isRunningOnCompatibleOS: Bool {
         let version = ProcessInfo.processInfo.operatingSystemVersion
-        return version.majorVersion >= 27
+        return version.majorVersion >= 26
     }
 
     public static var availability: AIModelAvailability {
         #if canImport(FoundationModels)
-        if #available(macOS 27.0, *) {
+        if #available(macOS 26.0, *) {
             return AITextTransformer.probeAvailability()
         }
         return .unavailable(.unsupportedOS)

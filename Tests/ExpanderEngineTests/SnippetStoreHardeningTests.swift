@@ -209,3 +209,32 @@ final class SnippetStoreExternalReloadTests: XCTestCase {
         )
     }
 }
+
+final class SnippetStoreImportModeTests: XCTestCase {
+
+    func testSkipConflictsPreservesExistingMatchAndAddsOnlyNewSnippets() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DevTypeImportMode-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = SnippetStore(fileURL: directory.appendingPathComponent("snippets.json"))
+        let existing = SnippetModel(title: "Local", triggerKeyword: ";same", replacementText: "keep me")
+        XCTAssertTrue(store.saveGroups([SnippetGroup(name: "General", snippets: [existing])]).didSave)
+
+        let incoming = [
+            SnippetGroup(name: "General", snippets: [
+                SnippetModel(title: "Imported", triggerKeyword: ";same", replacementText: "do not overwrite"),
+                SnippetModel(title: "New", triggerKeyword: ";new", replacementText: "append me")
+            ])
+        ]
+
+        let summary = store.importGroups(incoming, mode: .skipConflicts)
+        XCTAssertTrue(summary.outcome.didSave)
+        XCTAssertEqual(summary.snippetsAdded, 1)
+        XCTAssertEqual(summary.snippetsUnchanged, 1)
+        let snippets = store.loadGroups().flatMap(\.snippets)
+        XCTAssertEqual(snippets.first(where: { $0.triggerKeyword == ";same" })?.replacementText, "keep me")
+        XCTAssertEqual(snippets.first(where: { $0.triggerKeyword == ";new" })?.replacementText, "append me")
+    }
+}

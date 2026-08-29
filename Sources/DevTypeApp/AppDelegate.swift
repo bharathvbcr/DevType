@@ -1191,6 +1191,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 openPermissionRecovery(nil)
             case .voicePreferences:
                 openPreferences(nil, tab: .voice)
+            case .createSnippet:
+                openSnippetManager(nil)
+                (snippetWindowController?.contentViewController as? SnippetManagerViewController)?.addSnippet()
+            case .toggleExpansion:
+                toggleEngine(NSMenuItem())
+            case .importLibrary:
+                openSnippetManager(nil)
+                SnippetImportFlow.present(from: snippetWindowController?.window)
+            case .exportLibrary:
+                openSnippetManager(nil)
+                LibraryExporter.present(from: snippetWindowController?.window)
+            case .testExpansionLab:
+                TestExpansionLab.run(from: snippetWindowController?.window)
+            case .keyboardShortcuts:
+                ShortcutReferenceWindowController.show()
+            case .recentActivity:
+                ActivityCenterViewController.show()
             }
         }
     }
@@ -1791,7 +1808,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         openAtLoginMenuItem?.state = enabled ? .on : .off
     }
 
-    @objc private func openSnippetManager(_ sender: Any?) {
+    @objc func openSnippetManager(_ sender: Any?) {
         if snippetWindowController == nil || snippetWindowController?.window == nil {
             let viewController = SnippetManagerViewController()
             let window = NSWindow(contentViewController: viewController)

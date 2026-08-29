@@ -141,6 +141,11 @@ enum DevTypeTheme {
         light: NSColor(calibratedRed: 0.06, green: 0.38, blue: 0.80, alpha: 1.0),
         dark: NSColor(calibratedRed: 0.35, green: 0.65, blue: 1.0, alpha: 1.0)
     )
+    static let statusPurple = dynamic(
+        "statusPurple",
+        light: NSColor(calibratedRed: 0.55, green: 0.20, blue: 0.85, alpha: 1.0),
+        dark: NSColor(calibratedRed: 0.75, green: 0.35, blue: 0.95, alpha: 1.0)
+    )
 
     // MARK: Legacy aliases (kept so older call sites compile)
 
@@ -803,12 +808,17 @@ final class CapsuleButton: NSButton {
         didSet { needsDisplay = true }
     }
 
+    var style: Style {
+        get { buttonStyle }
+        set { buttonStyle = newValue; needsDisplay = true }
+    }
+
     init(
         title: String,
         symbol: String? = nil,
         style: Style = .secondary,
-        target: AnyObject?,
-        action: Selector?
+        target: AnyObject? = nil,
+        action: Selector? = nil
     ) {
         super.init(frame: .zero)
         self.title = title
@@ -1657,6 +1667,15 @@ final class KeyCapView: NSView {
         // §5.1: key caps are decorative hints — the enclosing row speaks for them.
         dtApplyAccessibility(isElement: false)
         label.setAccessibilityElement(false)
+    }
+
+    var text: String {
+        get { label.stringValue }
+        set { label.stringValue = newValue }
+    }
+
+    func update(text: String) {
+        label.stringValue = text
     }
 
     @available(*, unavailable)

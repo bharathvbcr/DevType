@@ -97,8 +97,8 @@ final class VoiceAITriggerParserTests: XCTestCase {
         XCTAssertNil(cmd)
     }
 
-    func testMacOS27RequirementConstants() {
-        XCTAssertTrue(AITextTransformSupport.macOSRequirementDisclaimer.contains("macOS 27"))
+    func testMacOS26RequirementConstants() {
         XCTAssertTrue(AITextTransformSupport.macOSRequirementDisclaimer.contains("macOS 26"))
+        XCTAssertTrue(AITextTransformSupport.macOSRequirementDisclaimer.contains("Apple Intelligence"))
     }
 }

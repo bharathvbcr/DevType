@@ -67,7 +67,7 @@ enum AIActionPanel {
         #endif
 
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -95,7 +95,7 @@ enum AIActionPanel {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
-        controller.focusTable()
+        controller.focusSearch()
         animateIn(panel)
 
         self.panel = panel
@@ -173,16 +173,20 @@ enum AIActionPanel {
 
 // MARK: - Controller
 
-private final class AIActionController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+private final class AIActionController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSTextFieldDelegate {
     private let inputPreview: String
+    private let rawInput: String
     private let source: SelectionReader.Source
     private let loc: LocalizationManager
     private let onPick: (AITransformKind) -> Void
     private let onCancel: () -> Void
-    private let actions = AITransformKind.builtInPalette
+    private let allActions = AITransformKind.builtInPalette
+    private var filteredActions: [AITransformKind] = []
     private var selection = 0
     private var keyMonitor: Any?
 
+    private let searchField = NSSearchField()
+    private let customField = NSTextField()
     private let tableView = NSTableView()
     private var scrollView = NSScrollView()
 
@@ -193,6 +197,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         onPick: @escaping (AITransformKind) -> Void,
         onCancel: @escaping () -> Void
     ) {
+        self.rawInput = input
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let preview = trimmed
             .replacingOccurrences(of: "\n", with: " ")
@@ -203,6 +208,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         self.loc = loc
         self.onPick = onPick
         self.onCancel = onCancel
+        self.filteredActions = allActions
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -219,7 +225,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
             tint: DevTypeTheme.accent.withAlphaComponent(0.10),
             material: .popover
         )
-        glass.frame = NSRect(x: 0, y: 0, width: 420, height: 420)
+        glass.frame = NSRect(x: 0, y: 0, width: 460, height: 520)
         let root = glass.contentView
 
         let badge = IconBadgeView(symbol: "sparkles", tint: DevTypeTheme.accent, size: 32, pointSize: 14)
@@ -249,17 +255,40 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         root.addSubview(headerText)
         root.addSubview(escCap)
 
+        // Preview box
+        let previewBox = NSView()
+        previewBox.wantsLayer = true
+        previewBox.layer?.backgroundColor = DevTypeTheme.cardBackground.cgColor
+        previewBox.layer?.cornerRadius = 6
+        previewBox.layer?.borderWidth = 1
+        previewBox.layer?.borderColor = NSColor.separatorColor.cgColor
+        previewBox.translatesAutoresizingMaskIntoConstraints = false
+
+        let previewText: String
+        if inputPreview.isEmpty {
+            previewText = loc.s(source == .clipboard ? "ai.palette.clipboardPreview" : "ai.palette.selectionPreview")
+        } else if source == .clipboard {
+            previewText = "\(loc.s("ai.palette.clipboardPreview")): \(inputPreview)"
+        } else {
+            previewText = inputPreview
+        }
         let previewLabel = DevTypeTheme.makeLabel(
-            inputPreview,
+            previewText,
             font: DevTypeTheme.font(11),
             color: DevTypeTheme.textSecondary
         )
         previewLabel.translatesAutoresizingMaskIntoConstraints = false
         previewLabel.lineBreakMode = .byTruncatingTail
-        previewLabel.setAccessibilityLabel(loc.s(source == .clipboard
-            ? "ai.palette.clipboardPreview"
-            : "ai.palette.selectionPreview"))
-        root.addSubview(previewLabel)
+        previewBox.addSubview(previewLabel)
+        root.addSubview(previewBox)
+
+        // Search Field
+        searchField.placeholderString = loc.s("manager.filter") + "…"
+        searchField.font = DevTypeTheme.font(12)
+        searchField.focusRingType = .none
+        searchField.delegate = self
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(searchField)
 
         let divider = DevTypeTheme.makeHairline()
         root.addSubview(divider)
@@ -272,7 +301,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         scrollView.drawsBackground = false
 
         tableView.headerView = nil
-        tableView.rowHeight = 40
+        tableView.rowHeight = 44
         tableView.intercellSpacing = NSSize(width: 0, height: 2)
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .regular
@@ -285,9 +314,23 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         scrollView.documentView = tableView
         root.addSubview(scrollView)
 
+        // Custom Instruction Field
+        customField.placeholderString = loc.s("ai.palette.hint.pick") + " / Custom instruction…"
+        customField.font = DevTypeTheme.font(12)
+        customField.focusRingType = .none
+        customField.delegate = self
+        customField.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(customField)
+
         let footerDivider = DevTypeTheme.makeHairline()
         root.addSubview(footerDivider)
 
+        let quickCap = KeyCapView("1-9")
+        let quickLabel = DevTypeTheme.makeLabel(
+            "Quick",
+            font: DevTypeTheme.font(10.5, .medium),
+            color: DevTypeTheme.textTertiary
+        )
         let navigateCap = KeyCapView("↑↓")
         let navigateLabel = DevTypeTheme.makeLabel(
             loc.s("search.hint.navigate"),
@@ -300,7 +343,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
             font: DevTypeTheme.font(10.5, .medium),
             color: DevTypeTheme.textTertiary
         )
-        let footerStack = NSStackView(views: [navigateCap, navigateLabel, pickCap, pickLabel])
+        let footerStack = NSStackView(views: [quickCap, quickLabel, navigateCap, navigateLabel, pickCap, pickLabel])
         footerStack.orientation = .horizontal
         footerStack.alignment = .centerY
         footerStack.spacing = 6
@@ -316,18 +359,33 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
             escCap.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
             escCap.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
 
-            previewLabel.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 12),
-            previewLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
-            previewLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            previewBox.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 10),
+            previewBox.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            previewBox.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            previewBox.heightAnchor.constraint(equalToConstant: 28),
 
-            divider.topAnchor.constraint(equalTo: previewLabel.bottomAnchor, constant: 10),
+            previewLabel.leadingAnchor.constraint(equalTo: previewBox.leadingAnchor, constant: 8),
+            previewLabel.trailingAnchor.constraint(equalTo: previewBox.trailingAnchor, constant: -8),
+            previewLabel.centerYAnchor.constraint(equalTo: previewBox.centerYAnchor),
+
+            searchField.topAnchor.constraint(equalTo: previewBox.bottomAnchor, constant: 8),
+            searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            searchField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            searchField.heightAnchor.constraint(equalToConstant: 24),
+
+            divider.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
             divider.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             divider.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
 
             scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 4),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: footerDivider.topAnchor, constant: -4),
+            scrollView.bottomAnchor.constraint(equalTo: customField.topAnchor, constant: -6),
+
+            customField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            customField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            customField.heightAnchor.constraint(equalToConstant: 24),
+            customField.bottomAnchor.constraint(equalTo: footerDivider.topAnchor, constant: -6),
 
             footerDivider.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             footerDivider.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
@@ -343,7 +401,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
     override func viewDidAppear() {
         super.viewDidAppear()
         tableView.reloadData()
-        if !actions.isEmpty {
+        if !filteredActions.isEmpty {
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
         installKeyMonitor()
@@ -354,16 +412,29 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
     }
 
+    func focusSearch() {
+        view.window?.makeFirstResponder(searchField)
+    }
+
     func focusTable() {
         view.window?.makeFirstResponder(tableView)
     }
 
     private func installKeyMonitor() {
-        // Re-appear without disappear would otherwise stack monitors; every extra
-        // one keeps consuming keys after teardown removed only the last.
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+
+            // Check direct number shortcut 1..9 if search field is not focused or modifier is Cmd/Ctrl
+            let chars = event.charactersIgnoringModifiers ?? ""
+            if let num = Int(chars), num >= 1 && num <= 9, (self.view.window?.firstResponder !== self.searchField || event.modifierFlags.contains(.command)) {
+                let idx = num - 1
+                if idx < self.filteredActions.count {
+                    self.onPick(self.filteredActions[idx])
+                    return nil
+                }
+            }
+
             switch Int(event.keyCode) {
             case kVK_UpArrow:
                 self.moveSelection(-1)
@@ -376,6 +447,14 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
                 return nil
             case kVK_Return, kVK_ANSI_KeypadEnter:
                 if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+                    if self.view.window?.firstResponder === self.customField {
+                        let text = self.customField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !text.isEmpty {
+                            // Run custom prompt
+                            self.onPick(.custom)
+                            return nil
+                        }
+                    }
                     self.confirmSelection()
                     return nil
                 }
@@ -386,42 +465,61 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         }
     }
 
+    func controlTextDidChange(_ obj: Notification) {
+        if (obj.object as? NSSearchField) === searchField {
+            let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if query.isEmpty {
+                filteredActions = allActions
+            } else {
+                filteredActions = allActions.filter { kind in
+                    let title = loc.s(kind.localizationKey).lowercased()
+                    let desc = description(for: kind).lowercased()
+                    let tag = behaviorTag(for: kind).lowercased()
+                    return title.contains(query) || desc.contains(query) || tag.contains(query)
+                }
+            }
+            selection = 0
+            tableView.reloadData()
+            if !filteredActions.isEmpty {
+                tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            }
+        }
+    }
+
     private func moveSelection(_ delta: Int) {
-        guard !actions.isEmpty else { return }
-        selection = min(max(0, selection + delta), actions.count - 1)
+        guard !filteredActions.isEmpty else { return }
+        selection = min(max(0, selection + delta), filteredActions.count - 1)
         tableView.selectRowIndexes(IndexSet(integer: selection), byExtendingSelection: false)
         tableView.scrollRowToVisible(selection)
     }
 
     @objc private func confirmSelection() {
-        guard actions.indices.contains(selection) else { return }
-        onPick(actions[selection])
+        guard filteredActions.indices.contains(selection) else { return }
+        onPick(filteredActions[selection])
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { actions.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { filteredActions.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard actions.indices.contains(row) else { return nil }
-        let kind = actions[row]
+        guard filteredActions.indices.contains(row) else { return nil }
+        let kind = filteredActions[row]
         let identifier = NSUserInterfaceItemIdentifier("aiActionCell")
-        let cell: NSTableCellView
-        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
+        let cell: AIActionRowView
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? AIActionRowView {
             cell = reused
         } else {
-            cell = NSTableCellView()
+            cell = AIActionRowView()
             cell.identifier = identifier
-            let label = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(13, .medium), color: DevTypeTheme.textPrimary)
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.lineBreakMode = .byTruncatingTail
-            cell.addSubview(label)
-            cell.textField = label
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 16),
-                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -16),
-                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-            ])
         }
-        cell.textField?.stringValue = loc.s(kind.localizationKey)
+
+        let numStr = row < 9 ? "\(row + 1)" : nil
+        cell.configure(
+            shortcut: numStr,
+            title: loc.s(kind.localizationKey),
+            detail: description(for: kind),
+            tag: behaviorTag(for: kind),
+            tagTint: behaviorTint(for: kind)
+        )
         return cell
     }
 
@@ -433,5 +531,117 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         if tableView.selectedRow >= 0 {
             selection = tableView.selectedRow
         }
+    }
+
+    private func description(for kind: AITransformKind) -> String {
+        switch kind {
+        case .proofread: return "Fix grammar, spelling, and typos"
+        case .rewrite: return "Improve clarity, flow, and tone"
+        case .paraphrase: return "Rephrase with alternative words"
+        case .expand: return "Flesh out thoughts and add detail"
+        case .condense: return "Make concise and remove fluff"
+        case .formal: return "Professional and polished tone"
+        case .friendly: return "Warm and approachable tone"
+        case .bulletize: return "Convert into structured bullets"
+        case .promptEnhance: return "Structure into an effective prompt"
+        case .explainCode: return "Explain code logic line by line"
+        case .generateDocstring: return "Generate documentation docstrings"
+        case .fixCode: return "Identify and repair code bugs"
+        case .toJson: return "Convert unstructured text to JSON"
+        case .generateUnitTests: return "Write test cases for code"
+        case .gitCommitMessage: return "Write conventional commit message"
+        case .explainRegex: return "Break down regular expressions"
+        case .sqlQuery: return "Generate SQL from plain English"
+        case .translate: return "Translate text into English"
+        case .translateTelugu: return "Translate into Romanized Telugu"
+        case .translateHindi: return "Translate into Romanized Hindi"
+        case .custom: return "Apply custom instructions"
+        }
+    }
+
+    private func behaviorTag(for kind: AITransformKind) -> String {
+        switch kind {
+        case .proofread, .translate, .translateTelugu, .translateHindi:
+            return "Preserves length"
+        case .condense, .gitCommitMessage:
+            return "Shortens"
+        case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
+            return "Expands"
+        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance, .toJson, .sqlQuery, .fixCode, .custom:
+            return "Rewrites"
+        }
+    }
+
+    private func behaviorTint(for kind: AITransformKind) -> NSColor {
+        switch kind {
+        case .proofread, .translate, .translateTelugu, .translateHindi:
+            return DevTypeTheme.statusGreen
+        case .condense, .gitCommitMessage:
+            return DevTypeTheme.statusOrange
+        case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
+            return DevTypeTheme.statusBlue
+        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance, .toJson, .sqlQuery, .fixCode, .custom:
+            return DevTypeTheme.accent
+        }
+    }
+}
+
+// MARK: - Row View
+
+private final class AIActionRowView: NSTableCellView {
+    private let shortcutCap = KeyCapView("1")
+    private let titleLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(13, .semibold), color: DevTypeTheme.textPrimary)
+    private let detailLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10.5), color: DevTypeTheme.textSecondary)
+    private let tagPill = PillBadgeView(text: "", tint: DevTypeTheme.accent)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        shortcutCap.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        detailLabel.translatesAutoresizingMaskIntoConstraints = false
+        tagPill.translatesAutoresizingMaskIntoConstraints = false
+
+        let textStack = NSStackView(views: [titleLabel, detailLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 1
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(shortcutCap)
+        addSubview(textStack)
+        addSubview(tagPill)
+
+        NSLayoutConstraint.activate([
+            shortcutCap.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            shortcutCap.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            textStack.leadingAnchor.constraint(equalTo: shortcutCap.trailingAnchor, constant: 8),
+            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: tagPill.leadingAnchor, constant: -8),
+
+            tagPill.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            tagPill.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    func configure(shortcut: String?, title: String, detail: String, tag: String, tagTint: NSColor) {
+        if let shortcut {
+            shortcutCap.isHidden = false
+            shortcutCap.text = shortcut
+        } else {
+            shortcutCap.isHidden = true
+        }
+        titleLabel.stringValue = title
+        detailLabel.stringValue = detail
+        tagPill.update(text: tag, tint: tagTint)
     }
 }

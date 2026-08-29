@@ -447,9 +447,9 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
             replaceLiveDraft(eraseCount: previousInjectedCount, newText: "")
         }
 
-        // Disclaimer and compatibility check for macOS 27
+        // Disclaimer and compatibility check for macOS AI support
         guard AITextTransformSupport.isRunningOnCompatibleOS else {
-            VoiceHUDPanel.shared.updateState(.error(message: "AI tools require macOS 27 (tested on macOS 26: unsupported)"))
+            VoiceHUDPanel.shared.updateState(.error(message: LocalizationManager.shared.s("ai.availability.unsupportedOS")))
             return
         }
 
@@ -472,7 +472,7 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
         VoiceHUDPanel.shared.updateState(.transcribing(modelName: "AI (\(command.kind.rawValue))"))
 
         #if canImport(FoundationModels)
-        if #available(macOS 27.0, *) {
+        if #available(macOS 26.0, *) {
             _ = AITextTransformer.shared.transform(
                 kind: command.kind,
                 input: textToTransform,
@@ -498,7 +498,7 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
         }
         #endif
 
-        VoiceHUDPanel.shared.updateState(.error(message: "AI Foundation Models require macOS 27"))
+        VoiceHUDPanel.shared.updateState(.error(message: LocalizationManager.shared.s("ai.availability.unsupportedOS")))
     }
 
     // MARK: - Cancel

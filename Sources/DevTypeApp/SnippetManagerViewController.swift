@@ -215,11 +215,12 @@ private final class SnippetRowView: NSView {
 
     /// §4.5: `usageCount` is passed in rather than read from `snippet.usageCount`
     /// — usage now lives in a coalesced sidecar and the model field is legacy.
-    func configure(with snippet: SnippetModel, usageCount: Int) {
+    func configure(with snippet: SnippetModel, usageCount: Int, isCompact: Bool = false) {
         let loc = LocalizationManager.shared
         enableSwitch.state = snippet.enabled ? .on : .off
         titleLabel.stringValue = snippet.displayTitle
         titleLabel.textColor = snippet.enabled ? DevTypeTheme.textPrimary : DevTypeTheme.textTertiary
+        titleLabel.font = isCompact ? DevTypeTheme.font(12, .semibold) : DevTypeTheme.font(13, .semibold)
         // A secret has no `replacementText` to show — by construction, not by redaction here.
         // The mask is so the row does not read as an empty snippet the user should go fix.
         let preview: String
@@ -232,9 +233,10 @@ private final class SnippetRowView: NSView {
         }
         previewLabel.stringValue = preview
         previewLabel.textColor = snippet.enabled ? DevTypeTheme.textSecondary : DevTypeTheme.textTertiary
+        previewLabel.isHidden = isCompact
         // Recycled cells inherit whatever the pointer is doing to *this* row now,
         // not what it was doing to the snippet that used to live here.
-        previewLabel.isScrolling = isHovered
+        previewLabel.isScrolling = isHovered && !isCompact
 
         // A replacement long enough to truncate is the common case for address,
         // degree, and paragraph snippets — surface the whole thing on hover
@@ -448,6 +450,30 @@ private final class EmptyStateView: NSView {
     }
 }
 
+enum SnippetFilterChip: Int, CaseIterable {
+    case all = 0
+    case enabled = 1
+    case disabled = 2
+    case secrets = 3
+    case images = 4
+    case macros = 5
+    case conflicts = 6
+    case unused = 7
+
+    var localizationKey: String {
+        switch self {
+        case .all: return "manager.filter.all"
+        case .enabled: return "manager.filter.enabled"
+        case .disabled: return "manager.filter.disabled"
+        case .secrets: return "manager.filter.secrets"
+        case .images: return "manager.filter.images"
+        case .macros: return "manager.filter.macros"
+        case .conflicts: return "manager.filter.conflicts"
+        case .unused: return "manager.filter.unused"
+        }
+    }
+}
+
 // MARK: - Snippet Manager (Crimson Glass)
 
 final class SnippetManagerViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
@@ -462,6 +488,19 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     private var statsPill = PillBadgeView(text: "", tint: DevTypeTheme.accent)
     private let emptyState = EmptyStateView()
     private let loc = LocalizationManager.shared
+
+    // Density & Filter Chips
+    private var activeFilterChip: SnippetFilterChip = .all
+    private var isCompactDensity: Bool = false
+    private let densityControl = NSSegmentedControl()
+    private let filterChipsStack = NSStackView()
+    private var filterChipButtons: [SnippetFilterChip: CapsuleButton] = [:]
+
+    // Bulk Operations Bar
+    private let bulkBar = GlassCardView(tint: DevTypeTheme.accent.withAlphaComponent(0.12))
+    private let selectedCountLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(12, .bold), color: DevTypeTheme.textPrimary)
+    private var primaryActionBar: NSStackView?
+    private var utilityActionBar: NSStackView?
 
     // §4.6: sorting + undo.
     private var sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -534,9 +573,17 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         filterField.controlSize = .regular
         filterField.setAccessibilityLabel(loc.s("manager.filter"))
 
-        // §4.6: sort control. The list column is view-based with no header, so
-        // the descriptor is driven from here and mirrored onto
-        // `tableView.sortDescriptors`.
+        // Density control
+        densityControl.segmentCount = 2
+        densityControl.setLabel(loc.s("manager.density.comfortable"), forSegment: 0)
+        densityControl.setLabel(loc.s("manager.density.compact"), forSegment: 1)
+        densityControl.selectedSegment = 0
+        densityControl.target = self
+        densityControl.action = #selector(densityChanged)
+        densityControl.controlSize = .small
+        densityControl.translatesAutoresizingMaskIntoConstraints = false
+
+        // §4.6: sort control.
         sortPopup.translatesAutoresizingMaskIntoConstraints = false
         sortPopup.removeAllItems()
         for mode in SnippetSortMode.allCases {
@@ -550,8 +597,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         sortPopup.toolTip = loc.s("manager.sort.hint")
         sortPopup.setAccessibilityLabel(loc.s("manager.sort"))
 
-        // Preferences were reachable only from the menu-bar item, which is easy to
-        // miss once the manager window is the thing you are looking at.
         let settingsButton = GlassIconButton(
             symbol: "gearshape",
             accessibilityLabel: loc.s("manager.settings"),
@@ -563,6 +608,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         mainView.addSubview(logo)
         mainView.addSubview(titleLabel)
         mainView.addSubview(statsPill)
+        mainView.addSubview(densityControl)
         mainView.addSubview(sortPopup)
         mainView.addSubview(filterField)
         mainView.addSubview(settingsButton)
@@ -581,7 +627,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         groupsCaption.translatesAutoresizingMaskIntoConstraints = false
         sidebarContent.addSubview(groupsCaption)
 
-        // Quick "add group" affordance next to the caption.
         let addGroupCaptionButton = NSButton()
         addGroupCaptionButton.isBordered = false
         addGroupCaptionButton.wantsLayer = true
@@ -613,7 +658,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         groupOutline.registerForDraggedTypes([.string])
         groupOutline.menu = groupContextMenu
         groupOutline.setAccessibilityLabel(loc.s("ax.groupsTable"))
-        // §5.4: Return edits the group, Delete removes it.
         groupOutline.onKeyDown = { [weak self] event in
             self?.handleGroupKeyDown(event) ?? false
         }
@@ -624,7 +668,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         groupScroll.documentView = groupOutline
         sidebarContent.addSubview(groupScroll)
 
-        // Bottom "New Group" bar — the always-visible way to organise groups.
         let newGroupBar = NSView()
         newGroupBar.translatesAutoresizingMaskIntoConstraints = false
         let barHairline = DevTypeTheme.makeHairline()
@@ -671,6 +714,24 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         listCard.translatesAutoresizingMaskIntoConstraints = false
         let listContent = listCard.contentView
 
+        // Filter Chips Bar
+        filterChipsStack.orientation = .horizontal
+        filterChipsStack.spacing = 6
+        filterChipsStack.translatesAutoresizingMaskIntoConstraints = false
+        for chip in SnippetFilterChip.allCases {
+            let btn = CapsuleButton(
+                title: loc.s(chip.localizationKey),
+                style: chip == activeFilterChip ? .primary : .secondary,
+                target: self,
+                action: #selector(filterChipTapped(_:))
+            )
+            btn.tag = chip.rawValue
+            btn.controlSize = .small
+            filterChipButtons[chip] = btn
+            filterChipsStack.addArrangedSubview(btn)
+        }
+        listContent.addSubview(filterChipsStack)
+
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
@@ -685,7 +746,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         tableView.intercellSpacing = NSSize(width: 0, height: 2)
         tableView.selectionHighlightStyle = .regular
         tableView.allowsEmptySelection = true
-        tableView.allowsMultipleSelection = false
+        tableView.allowsMultipleSelection = true
         tableView.doubleAction = #selector(editSelectedSnippet)
         tableView.target = self
         tableView.menu = snippetContextMenu
@@ -693,17 +754,14 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         tableView.dataSource = self
         tableView.delegate = self
         tableView.setAccessibilityLabel(loc.s("ax.snippetsTable"))
-        // §4.6: drag-to-reorder inside the selected group (manual sort only).
         tableView.registerForDraggedTypes([.string])
         tableView.draggingDestinationFeedbackStyle = .gap
-        // §5.4: Delete deletes, Return edits, ⌘D duplicates.
         tableView.onKeyDown = { [weak self] event in
             self?.handleSnippetKeyDown(event) ?? false
         }
         scrollView.documentView = tableView
         listContent.addSubview(scrollView)
 
-        // §0.3: banner sits above the list, pushing it down only when unhealthy.
         healthBanner.isHidden = true
         listContent.addSubview(healthBanner)
 
@@ -712,11 +770,15 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         mainView.addSubview(listCard)
 
         NSLayoutConstraint.activate([
-            healthBanner.topAnchor.constraint(equalTo: listContent.topAnchor, constant: 6),
+            filterChipsStack.topAnchor.constraint(equalTo: listContent.topAnchor, constant: 8),
+            filterChipsStack.leadingAnchor.constraint(equalTo: listContent.leadingAnchor, constant: 10),
+            filterChipsStack.trailingAnchor.constraint(lessThanOrEqualTo: listContent.trailingAnchor, constant: -10),
+
+            healthBanner.topAnchor.constraint(equalTo: filterChipsStack.bottomAnchor, constant: 4),
             healthBanner.leadingAnchor.constraint(equalTo: listContent.leadingAnchor, constant: 8),
             healthBanner.trailingAnchor.constraint(equalTo: listContent.trailingAnchor, constant: -8),
 
-            scrollView.topAnchor.constraint(equalTo: healthBanner.bottomAnchor, constant: 6),
+            scrollView.topAnchor.constraint(equalTo: healthBanner.bottomAnchor, constant: 4),
             scrollView.leadingAnchor.constraint(equalTo: listContent.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: listContent.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: listContent.bottomAnchor, constant: -6),
@@ -727,7 +789,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             emptyState.trailingAnchor.constraint(lessThanOrEqualTo: listContent.trailingAnchor, constant: -24)
         ])
 
-        // MARK: Action bar
+        // MARK: Standard Action Bar
         let addButton = SplitCapsuleButton(
             title: loc.s("manager.add"),
             symbol: "plus",
@@ -757,7 +819,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             target: self,
             action: #selector(importSnippets)
         )
-        // §0.4: export sits next to import.
         let exportButton = CapsuleButton(
             title: loc.s("manager.export"),
             symbol: "square.and.arrow.up",
@@ -765,7 +826,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             target: self,
             action: #selector(exportSnippets)
         )
-        // §4.5: the only presentation of usage was a `×N` label on each row.
         let statsButton = CapsuleButton(
             title: loc.s("manager.stats.button"),
             symbol: "chart.bar",
@@ -785,22 +845,56 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         primaryStack.orientation = .horizontal
         primaryStack.spacing = 10
         primaryStack.translatesAutoresizingMaskIntoConstraints = false
-        // Keep the stack at button height — the glass cards absorb the window's
-        // extra vertical space (equal hugging would stretch the stack instead).
         primaryStack.setContentHuggingPriority(.required, for: .vertical)
+        primaryActionBar = primaryStack
 
         let utilityStack = NSStackView(views: [statsButton, importButton, exportButton, resetButton])
         utilityStack.orientation = .horizontal
         utilityStack.spacing = 10
         utilityStack.translatesAutoresizingMaskIntoConstraints = false
         utilityStack.setContentHuggingPriority(.required, for: .vertical)
+        utilityActionBar = utilityStack
+
+        // MARK: Bulk Actions Bar
+        bulkBar.translatesAutoresizingMaskIntoConstraints = false
+        bulkBar.isHidden = true
+        let bulkContent = bulkBar.contentView
+
+        let bulkEnableBtn = CapsuleButton(title: loc.s("manager.bulk.enable"), style: .secondary, target: self, action: #selector(bulkEnableSelected))
+        let bulkDisableBtn = CapsuleButton(title: loc.s("manager.bulk.disable"), style: .secondary, target: self, action: #selector(bulkDisableSelected))
+        let bulkMoveBtn = CapsuleButton(title: loc.s("manager.bulk.moveToGroup"), style: .secondary, target: self, action: #selector(bulkMoveSelected(_:)))
+        let bulkDuplicateBtn = CapsuleButton(title: loc.s("manager.bulk.duplicate"), style: .secondary, target: self, action: #selector(bulkDuplicateSelected))
+        let bulkPrefixSuffixBtn = CapsuleButton(title: loc.s("manager.bulk.prefixSuffix"), style: .secondary, target: self, action: #selector(bulkPrefixSuffixSelected))
+        let bulkDeleteBtn = CapsuleButton(title: loc.s("manager.bulk.delete"), style: .destructive, target: self, action: #selector(bulkDeleteSelected))
+        let bulkSelectAllBtn = CapsuleButton(title: loc.s("manager.bulk.selectAll"), style: .secondary, target: self, action: #selector(selectAllSnippets))
+
+        let bulkLeftStack = NSStackView(views: [selectedCountLabel, bulkEnableBtn, bulkDisableBtn, bulkMoveBtn, bulkDuplicateBtn, bulkPrefixSuffixBtn])
+        bulkLeftStack.orientation = .horizontal
+        bulkLeftStack.spacing = 8
+        bulkLeftStack.alignment = .centerY
+        bulkLeftStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let bulkRightStack = NSStackView(views: [bulkSelectAllBtn, bulkDeleteBtn])
+        bulkRightStack.orientation = .horizontal
+        bulkRightStack.spacing = 8
+        bulkRightStack.alignment = .centerY
+        bulkRightStack.translatesAutoresizingMaskIntoConstraints = false
+
+        bulkContent.addSubview(bulkLeftStack)
+        bulkContent.addSubview(bulkRightStack)
+
+        NSLayoutConstraint.activate([
+            bulkLeftStack.leadingAnchor.constraint(equalTo: bulkContent.leadingAnchor, constant: 12),
+            bulkLeftStack.centerYAnchor.constraint(equalTo: bulkContent.centerYAnchor),
+
+            bulkRightStack.trailingAnchor.constraint(equalTo: bulkContent.trailingAnchor, constant: -12),
+            bulkRightStack.centerYAnchor.constraint(equalTo: bulkContent.centerYAnchor)
+        ])
 
         mainView.addSubview(primaryStack)
         mainView.addSubview(utilityStack)
+        mainView.addSubview(bulkBar)
 
-        // The gear takes 36pt out of the header's trailing run, so the filter is
-        // no longer a hard 200pt — it keeps that width when there is room and
-        // gives way to the sort popup and the title before anything overlaps.
         let preferredFilterWidth = filterField.widthAnchor.constraint(equalToConstant: 200)
         preferredFilterWidth.priority = .defaultHigh
 
@@ -824,9 +918,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             filterField.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
             preferredFilterWidth,
 
-            sortPopup.trailingAnchor.constraint(equalTo: filterField.leadingAnchor, constant: -10),
+            sortPopup.trailingAnchor.constraint(equalTo: filterField.leadingAnchor, constant: -8),
             sortPopup.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
-            sortPopup.leadingAnchor.constraint(greaterThanOrEqualTo: statsPill.trailingAnchor, constant: 10),
+
+            densityControl.trailingAnchor.constraint(equalTo: sortPopup.leadingAnchor, constant: -8),
+            densityControl.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
+            densityControl.leadingAnchor.constraint(greaterThanOrEqualTo: statsPill.trailingAnchor, constant: 10),
 
             sidebarCard.topAnchor.constraint(equalTo: logo.bottomAnchor, constant: 14),
             sidebarCard.leadingAnchor.constraint(equalTo: mainView.leadingAnchor, constant: 16),
@@ -842,7 +939,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             primaryStack.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -16),
 
             utilityStack.trailingAnchor.constraint(equalTo: mainView.trailingAnchor, constant: -20),
-            utilityStack.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -16)
+            utilityStack.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -16),
+
+            bulkBar.leadingAnchor.constraint(equalTo: mainView.leadingAnchor, constant: 16),
+            bulkBar.trailingAnchor.constraint(equalTo: mainView.trailingAnchor, constant: -16),
+            bulkBar.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -12),
+            bulkBar.heightAnchor.constraint(equalToConstant: 44)
         ])
 
         self.view = mainView
@@ -897,7 +999,35 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         )
     }
 
+    @objc private func densityChanged() {
+        isCompactDensity = densityControl.selectedSegment == 1
+        tableView.rowHeight = isCompactDensity ? 38 : 52
+        tableView.reloadData()
+    }
+
+    @objc private func filterChipTapped(_ sender: NSButton) {
+        guard let chip = SnippetFilterChip(rawValue: sender.tag) else { return }
+        activeFilterChip = chip
+        for (c, btn) in filterChipButtons {
+            btn.style = (c == chip ? .primary : .secondary)
+        }
+        applyFilterAndReloadTable()
+    }
+
     @objc private func filterChanged() {
+        applyFilterAndReloadTable()
+    }
+
+    @objc private func clearFilter() {
+        filterField.stringValue = ""
+        applyFilterAndReloadTable()
+    }
+
+    @objc private func resetFilterChip() {
+        activeFilterChip = .all
+        for (c, btn) in filterChipButtons {
+            btn.style = (c == .all ? .primary : .secondary)
+        }
         applyFilterAndReloadTable()
     }
 
@@ -930,16 +1060,36 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         } else {
             pool = groups.flatMap(\.snippets)
         }
-        if filter.isEmpty {
-            snippets = pool
-        } else {
-            snippets = pool.filter {
+
+        var filtered = pool
+        switch activeFilterChip {
+        case .all:
+            break
+        case .enabled:
+            filtered = filtered.filter(\.enabled)
+        case .disabled:
+            filtered = filtered.filter { !$0.enabled }
+        case .secrets:
+            filtered = filtered.filter(\.isSecret)
+        case .images:
+            filtered = filtered.filter(\.isImageSnippet)
+        case .macros:
+            filtered = filtered.filter { $0.replacementText.contains("%") || $0.replacementText.contains("{{") }
+        case .conflicts:
+            let conflictIDs = Set(SnippetStore.shared.triggerConflicts().flatMap(\.snippetIDs))
+            filtered = filtered.filter { conflictIDs.contains($0.id) }
+        case .unused:
+            filtered = filtered.filter { SnippetStore.shared.usageCount(for: $0) == 0 }
+        }
+
+        if !filter.isEmpty {
+            filtered = filtered.filter {
                 $0.triggerKeyword.lowercased().contains(filter)
                     || $0.displayTitle.lowercased().contains(filter)
                     || $0.replacementText.lowercased().contains(filter)
             }
         }
-        snippets = sorted(snippets)
+        snippets = sorted(filtered)
         tableView.sortDescriptors = sortMode.sortDescriptor.map { [$0] } ?? []
         let all = groups.flatMap(\.snippets)
         let active = all.filter(\.enabled).count
@@ -947,17 +1097,52 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
         emptyState.isHidden = !snippets.isEmpty
         if snippets.isEmpty {
+            let title: String
+            let subtitle: String
+            let cta: String?
+            let action: Selector?
+
+            if !filter.isEmpty {
+                title = loc.s("snippets.empty.noMatch", filterField.stringValue)
+                subtitle = ""
+                cta = loc.s("common.clear")
+                action = #selector(clearFilter)
+            } else if activeFilterChip != .all {
+                title = loc.s(activeFilterChip.localizationKey)
+                subtitle = loc.s("snippets.empty.noMatch", "")
+                cta = loc.s("manager.filter.all")
+                action = #selector(resetFilterChip)
+            } else {
+                title = loc.s("manager.empty.title")
+                subtitle = loc.s("manager.empty.subtitle")
+                cta = loc.s("manager.add")
+                action = #selector(addSnippet)
+            }
+
             emptyState.configure(
-                title: filter.isEmpty
-                    ? loc.s("manager.empty.title")
-                    : loc.s("snippets.empty.noMatch", filterField.stringValue),
-                subtitle: filter.isEmpty ? loc.s("manager.empty.subtitle") : "",
-                ctaTitle: filter.isEmpty ? loc.s("manager.add") : nil,
+                title: title,
+                subtitle: subtitle,
+                ctaTitle: cta,
                 target: self,
-                action: #selector(addSnippet)
+                action: action
             )
         }
         tableView.reloadData()
+        updateBulkBar()
+    }
+
+    private func updateBulkBar() {
+        let count = tableView.selectedRowIndexes.count
+        if count > 1 {
+            bulkBar.isHidden = false
+            primaryActionBar?.isHidden = true
+            utilityActionBar?.isHidden = true
+            selectedCountLabel.stringValue = loc.s("manager.bulk.selected", count)
+        } else {
+            bulkBar.isHidden = true
+            primaryActionBar?.isHidden = false
+            utilityActionBar?.isHidden = false
+        }
     }
 
     /// §4.6: applies the active sort. `manual` preserves storage order, which is
@@ -1039,7 +1224,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
     // MARK: - Snippet actions
 
-    @objc private func addSnippet() {
+    @objc func addSnippet() {
         presentEditor(for: nil, draft: nil)
     }
 
@@ -1458,16 +1643,28 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         let code = Int(event.keyCode)
         let hasSelection = tableView.selectedRow >= 0 && tableView.selectedRow < snippets.count
 
+        if modifiers == .command, code == kVK_ANSI_A {
+            selectAllSnippets()
+            return true
+        }
         if modifiers == .command, code == kVK_ANSI_D {
             guard hasSelection else { return true }
-            duplicateSelectedSnippet()
+            if tableView.selectedRowIndexes.count > 1 {
+                bulkDuplicateSelected()
+            } else {
+                duplicateSelectedSnippet()
+            }
             return true
         }
         guard modifiers.isEmpty else { return false }
         switch code {
         case kVK_Delete, kVK_ForwardDelete:
             guard hasSelection else { return true }
-            deleteSnippet()
+            if tableView.selectedRowIndexes.count > 1 {
+                bulkDeleteSelected()
+            } else {
+                deleteSnippet()
+            }
             return true
         case kVK_Return, kVK_ANSI_KeypadEnter:
             guard hasSelection else { return true }
@@ -1475,7 +1672,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             return true
         case kVK_Space:
             guard hasSelection else { return true }
-            toggleSelectedSnippetEnabled()
+            if tableView.selectedRowIndexes.count > 1 {
+                let anyDisabled = tableView.selectedRowIndexes.contains { $0 < snippets.count && !snippets[$0].enabled }
+                if anyDisabled { bulkEnableSelected() } else { bulkDisableSelected() }
+            } else {
+                toggleSelectedSnippetEnabled()
+            }
             return true
         default:
             return false
@@ -1751,13 +1953,18 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         // §4.5: usage read from the store, not the legacy model field.
         cell.configure(
             with: snippets[row],
-            usageCount: SnippetStore.shared.usageCount(for: snippets[row])
+            usageCount: SnippetStore.shared.usageCount(for: snippets[row]),
+            isCompact: isCompactDensity
         )
         return cell
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         RoundedSelectionRowView()
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateBulkBar()
     }
 
     @objc private func toggleSnippetEnabled(_ sender: NSSwitch) {
@@ -1770,6 +1977,173 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
                 if let si = groups[gi].snippets.firstIndex(where: { $0.id == id }) {
                     groups[gi].snippets[si].enabled = isOn
                     break
+                }
+            }
+        }
+    }
+
+    // MARK: - Bulk Operations
+
+    @objc private func selectAllSnippets() {
+        tableView.selectAll(nil)
+    }
+
+    @objc private func bulkEnableSelected() {
+        let selectedRows = tableView.selectedRowIndexes
+        guard !selectedRows.isEmpty else { return }
+        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+        mutate(loc.s("manager.bulk.enable")) { groups in
+            for gi in groups.indices {
+                for si in groups[gi].snippets.indices {
+                    if selectedIDs.contains(groups[gi].snippets[si].id) {
+                        groups[gi].snippets[si].enabled = true
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func bulkDisableSelected() {
+        let selectedRows = tableView.selectedRowIndexes
+        guard !selectedRows.isEmpty else { return }
+        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+        mutate(loc.s("manager.bulk.disable")) { groups in
+            for gi in groups.indices {
+                for si in groups[gi].snippets.indices {
+                    if selectedIDs.contains(groups[gi].snippets[si].id) {
+                        groups[gi].snippets[si].enabled = false
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func bulkMoveSelected(_ sender: NSButton) {
+        let selectedRows = tableView.selectedRowIndexes
+        guard !selectedRows.isEmpty else { return }
+        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+
+        let menu = NSMenu()
+        for group in groups {
+            let item = NSMenuItem(title: group.name, action: #selector(confirmBulkMove(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = group.id
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
+    }
+
+    @objc private func confirmBulkMove(_ sender: NSMenuItem) {
+        guard let destID = sender.representedObject as? UUID else { return }
+        let selectedRows = tableView.selectedRowIndexes
+        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+
+        mutate(loc.s("manager.bulk.moveToGroup")) { groups in
+            guard let destGI = groups.firstIndex(where: { $0.id == destID }) else { return }
+            var movedSnippets: [SnippetModel] = []
+            for gi in groups.indices {
+                if groups[gi].id == destID { continue }
+                movedSnippets.append(contentsOf: groups[gi].snippets.filter { selectedIDs.contains($0.id) })
+                groups[gi].snippets.removeAll(where: { selectedIDs.contains($0.id) })
+            }
+            groups[destGI].snippets.append(contentsOf: movedSnippets)
+        }
+    }
+
+    @objc private func bulkDuplicateSelected() {
+        let selectedRows = tableView.selectedRowIndexes
+        guard !selectedRows.isEmpty else { return }
+        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+
+        mutate(loc.s("manager.bulk.duplicate")) { groups in
+            for gi in groups.indices {
+                var duplicates: [SnippetModel] = []
+                for snippet in groups[gi].snippets where selectedIDs.contains(snippet.id) {
+                    let dup = SnippetModel(
+                        id: UUID(),
+                        title: snippet.displayTitle + " (Copy)",
+                        triggerKeyword: snippet.triggerKeyword + "copy",
+                        replacementText: snippet.replacementText,
+                        isCaseSensitive: snippet.isCaseSensitive,
+                        requireWordBoundary: snippet.requireWordBoundary,
+                        enabled: snippet.enabled,
+                        imagePath: snippet.imagePath,
+                        isSecret: snippet.isSecret
+                    )
+                    duplicates.append(dup)
+                }
+                groups[gi].snippets.append(contentsOf: duplicates)
+            }
+        }
+    }
+
+    @objc private func bulkDeleteSelected() {
+        let selectedRows = tableView.selectedRowIndexes
+        guard !selectedRows.isEmpty else { return }
+        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = loc.s("manager.delete")
+        alert.informativeText = loc.s("manager.bulk.selected", selectedIDs.count)
+        alert.addButton(withTitle: loc.s("common.delete"))
+        alert.addButton(withTitle: loc.s("common.cancel"))
+
+        if let window = view.window {
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard let self, response == .alertFirstButtonReturn else { return }
+                self.mutate(self.loc.s("manager.bulk.delete")) { groups in
+                    for gi in groups.indices {
+                        groups[gi].snippets.removeAll(where: { selectedIDs.contains($0.id) })
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func bulkExportSelected() {
+        LibraryExporter.present(from: view.window)
+    }
+
+    @objc private func bulkPrefixSuffixSelected() {
+        let selectedRows = tableView.selectedRowIndexes
+        guard !selectedRows.isEmpty else { return }
+        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+
+        let alert = NSAlert()
+        alert.messageText = loc.s("manager.bulk.prefixSuffix.title")
+        alert.addButton(withTitle: loc.s("manager.bulk.prefixSuffix.apply", selectedIDs.count))
+        alert.addButton(withTitle: loc.s("common.cancel"))
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.frame = NSRect(x: 0, y: 0, width: 260, height: 60)
+
+        let prefixField = NSTextField()
+        prefixField.placeholderString = loc.s("manager.bulk.prefixSuffix.prefix")
+        let suffixField = NSTextField()
+        suffixField.placeholderString = loc.s("manager.bulk.prefixSuffix.suffix")
+
+        stack.addArrangedSubview(prefixField)
+        stack.addArrangedSubview(suffixField)
+        alert.accessoryView = stack
+
+        if let window = view.window {
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard let self, response == .alertFirstButtonReturn else { return }
+                let prefix = prefixField.stringValue
+                let suffix = suffixField.stringValue
+                guard !prefix.isEmpty || !suffix.isEmpty else { return }
+
+                self.mutate(self.loc.s("manager.bulk.prefixSuffix")) { groups in
+                    for gi in groups.indices {
+                        for si in groups[gi].snippets.indices {
+                            if selectedIDs.contains(groups[gi].snippets[si].id) {
+                                groups[gi].snippets[si].triggerKeyword = prefix + groups[gi].snippets[si].triggerKeyword + suffix
+                            }
+                        }
+                    }
                 }
             }
         }

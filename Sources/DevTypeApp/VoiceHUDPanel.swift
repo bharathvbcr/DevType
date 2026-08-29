@@ -25,6 +25,7 @@ public final class VoiceHUDPanel: NSPanel {
     private let fluidWaveView = FluidWaveVisualizerView()
     private let micImageView: NSImageView
     private let stateLabel: NSTextField
+    private let timerLabel: NSTextField
     private let transcriptLabel: NSTextField
     private var dismissWorkItem: DispatchWorkItem?
     private var currentModelName: String = "Apple Speech"
@@ -32,9 +33,19 @@ public final class VoiceHUDPanel: NSPanel {
     private var isResizeScheduled = false
     private var usesRealGlass = false
 
-    private static let baseWidth: CGFloat = 304
+    private var isPinned = false
+    private var isCompactMode = false
+    private var recordingTimer: DispatchSourceTimer?
+    private var elapsedSeconds = 0
+
+    private var pinBtn: NSButton!
+    private var compactBtn: NSButton!
+    private var copyBtn: NSButton!
+    private var cancelBtn: NSButton!
+
+    private static let baseWidth: CGFloat = 340
     private static let baseHeight: CGFloat = 68
-    private static let maxWidth: CGFloat = 500
+    private static let maxWidth: CGFloat = 520
     private static let maxHeight: CGFloat = 188
 
     public init() {
@@ -46,6 +57,13 @@ public final class VoiceHUDPanel: NSPanel {
         )
         self.stateLabel.maximumNumberOfLines = 1
         self.stateLabel.cell?.lineBreakMode = .byTruncatingTail
+
+        self.timerLabel = DevTypeTheme.makeLabel(
+            "0:00",
+            font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .medium),
+            color: DevTypeTheme.textTertiary
+        )
+        self.timerLabel.isHidden = true
 
         self.transcriptLabel = DevTypeTheme.makeLabel(
             loc.s("voice.hud.placeholder"),
@@ -111,36 +129,119 @@ public final class VoiceHUDPanel: NSPanel {
         spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
+        // Action Buttons
+        pinBtn = makeHeaderButton(symbol: "pin", action: #selector(togglePin))
+        pinBtn.toolTip = "Pin HUD"
+
+        compactBtn = makeHeaderButton(symbol: "rectangle.compress.vertical", action: #selector(toggleCompact))
+        compactBtn.toolTip = "Toggle Compact Mode"
+
+        copyBtn = makeHeaderButton(symbol: "doc.on.doc", action: #selector(copyTranscript))
+        copyBtn.toolTip = "Copy Transcript"
+
+        cancelBtn = makeHeaderButton(symbol: "xmark", action: #selector(cancelRecording))
+        cancelBtn.toolTip = "Cancel Dictation"
+
         headerStack.addArrangedSubview(micImageView)
         headerStack.addArrangedSubview(stateLabel)
+        headerStack.addArrangedSubview(timerLabel)
         headerStack.addArrangedSubview(spacer)
         headerStack.addArrangedSubview(fluidWaveView)
+        headerStack.addArrangedSubview(copyBtn)
+        headerStack.addArrangedSubview(compactBtn)
+        headerStack.addArrangedSubview(pinBtn)
+        headerStack.addArrangedSubview(cancelBtn)
 
         transcriptLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         transcriptLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         fluidWaveView.translatesAutoresizingMaskIntoConstraints = false
-        fluidWaveView.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        fluidWaveView.widthAnchor.constraint(equalToConstant: 38).isActive = true
         fluidWaveView.heightAnchor.constraint(equalToConstant: 14).isActive = true
 
         rootStack.addArrangedSubview(headerStack)
         rootStack.addArrangedSubview(transcriptLabel)
 
         NSLayoutConstraint.activate([
-            rootStack.topAnchor.constraint(equalTo: blobContainer.contentHost.topAnchor, constant: 11),
-            rootStack.leadingAnchor.constraint(equalTo: blobContainer.contentHost.leadingAnchor, constant: 18),
-            rootStack.trailingAnchor.constraint(equalTo: blobContainer.contentHost.trailingAnchor, constant: -18),
+            rootStack.topAnchor.constraint(equalTo: blobContainer.contentHost.topAnchor, constant: 10),
+            rootStack.leadingAnchor.constraint(equalTo: blobContainer.contentHost.leadingAnchor, constant: 16),
+            rootStack.trailingAnchor.constraint(equalTo: blobContainer.contentHost.trailingAnchor, constant: -16),
             rootStack.bottomAnchor.constraint(equalTo: blobContainer.contentHost.bottomAnchor, constant: -10),
             headerStack.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
             transcriptLabel.widthAnchor.constraint(equalTo: rootStack.widthAnchor)
         ])
     }
 
+    private func makeHeaderButton(symbol: String, action: Selector) -> NSButton {
+        let btn = NSButton(image: DevTypeTheme.tintedSymbol(symbol, size: 10.5, weight: .medium, color: DevTypeTheme.textSecondary) ?? NSImage(), target: self, action: action)
+        btn.isBordered = false
+        btn.bezelStyle = .regularSquare
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        btn.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        return btn
+    }
+
+    // MARK: - Actions
+
+    @objc private func togglePin() {
+        isPinned.toggle()
+        let iconName = isPinned ? "pin.fill" : "pin"
+        let tint = isPinned ? DevTypeTheme.accent : DevTypeTheme.textSecondary
+        pinBtn.image = DevTypeTheme.tintedSymbol(iconName, size: 10.5, weight: .medium, color: tint)
+        if !isPinned {
+            scheduleAutoDismiss(after: VoiceHUDPresentationTiming.successHoldDuration)
+        }
+        DevTypeAccessibility.announce(isPinned ? "HUD Pinned" : "HUD Unpinned")
+    }
+
+    @objc private func toggleCompact() {
+        isCompactMode.toggle()
+        transcriptLabel.isHidden = isCompactMode
+        compactBtn.image = DevTypeTheme.tintedSymbol(isCompactMode ? "rectangle.expand.vertical" : "rectangle.compress.vertical", size: 10.5, weight: .medium, color: DevTypeTheme.textSecondary)
+        scheduleSize(forText: isCompactMode ? "" : transcriptLabel.stringValue)
+    }
+
+    @objc private func copyTranscript() {
+        let text = transcriptLabel.stringValue
+        guard !text.isEmpty && text != LocalizationManager.shared.s("voice.hud.placeholder") else { return }
+        PasteboardBroker.shared.writeUserClipboardString(text)
+        ToastPanel.show("Copied transcript", symbol: "doc.on.doc.fill")
+    }
+
+    @objc private func cancelRecording() {
+        stopTimer()
+        VoiceDictationCoordinator.shared.cancelDictation()
+        hide()
+    }
+
+    private func startTimer() {
+        stopTimer()
+        elapsedSeconds = 0
+        timerLabel.isHidden = false
+        timerLabel.stringValue = "0:00"
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.elapsedSeconds += 1
+            self.timerLabel.stringValue = String(format: "%d:%02d", self.elapsedSeconds / 60, self.elapsedSeconds % 60)
+        }
+        recordingTimer = timer
+        timer.resume()
+    }
+
+    private func stopTimer() {
+        recordingTimer?.cancel()
+        recordingTimer = nil
+        timerLabel.isHidden = true
+    }
+
     // MARK: - Public State Controls
 
     /// Updates the HUD state and positions it on screen.
     public func updateState(_ state: VoiceHUDState) {
-        dismissWorkItem?.cancel()
+        if !isPinned { dismissWorkItem?.cancel() }
         let loc = LocalizationManager.shared
 
         switch state {
@@ -151,7 +252,8 @@ public final class VoiceHUDPanel: NSPanel {
             transcriptLabel.textColor = DevTypeTheme.textSecondary
             fluidWaveView.isTranscribing = false
             blobContainer.setActive(true)
-            scheduleSize(forText: "")
+            startTimer()
+            scheduleSize(forText: isCompactMode ? "" : "")
             updateAccessibility(status: stateLabel.stringValue, transcript: transcriptLabel.stringValue)
             showOnScreen()
 
@@ -163,7 +265,7 @@ public final class VoiceHUDPanel: NSPanel {
             transcriptLabel.textColor = DevTypeTheme.textPrimary
             fluidWaveView.isTranscribing = false
             blobContainer.setActive(true)
-            scheduleSize(forText: transcript)
+            scheduleSize(forText: isCompactMode ? "" : transcript)
             updateAccessibility(status: stateLabel.stringValue, transcript: transcriptLabel.stringValue)
             showOnScreen()
 
@@ -171,12 +273,14 @@ public final class VoiceHUDPanel: NSPanel {
             currentModelName = modelName
             updateStatus(loc.s("voice.hud.status.polishing"), color: DevTypeTheme.accent)
             fluidWaveView.isTranscribing = true
+            stopTimer()
             updateAudioLevel(0)
             blobContainer.setActive(true)
             updateAccessibility(status: stateLabel.stringValue, transcript: transcriptLabel.stringValue)
             showOnScreen()
 
         case .success(let text, let diffSegments):
+            stopTimer()
             updateStatus(loc.s("voice.hud.status.inserted"), color: DevTypeTheme.statusGreen)
             if let diffSegments, diffSegments.contains(where: { $0.isCut }) {
                 let attrStr = NSMutableAttributedString()
@@ -206,22 +310,27 @@ public final class VoiceHUDPanel: NSPanel {
             fluidWaveView.isTranscribing = false
             updateAudioLevel(0)
             blobContainer.setActive(false)
-            scheduleSize(forText: text)
+            scheduleSize(forText: isCompactMode ? "" : text)
             updateAccessibility(status: stateLabel.stringValue, transcript: text)
             showOnScreen()
-            scheduleAutoDismiss(after: VoiceHUDPresentationTiming.successHoldDuration)
+            if !isPinned {
+                scheduleAutoDismiss(after: VoiceHUDPresentationTiming.successHoldDuration)
+            }
 
         case .error(let message):
+            stopTimer()
             updateStatus(loc.s("voice.hud.status.failed"), color: DevTypeTheme.statusOrange)
             transcriptLabel.stringValue = message
             transcriptLabel.textColor = DevTypeTheme.textPrimary
             fluidWaveView.isTranscribing = false
             updateAudioLevel(0)
             blobContainer.setActive(false)
-            scheduleSize(forText: message)
+            scheduleSize(forText: isCompactMode ? "" : message)
             updateAccessibility(status: stateLabel.stringValue, transcript: message)
             showOnScreen()
-            scheduleAutoDismiss(after: VoiceHUDPresentationTiming.errorHoldDuration)
+            if !isPinned {
+                scheduleAutoDismiss(after: VoiceHUDPresentationTiming.errorHoldDuration)
+            }
         }
     }
 

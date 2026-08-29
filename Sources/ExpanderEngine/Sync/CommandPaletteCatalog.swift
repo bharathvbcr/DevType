@@ -24,6 +24,13 @@ public enum PaletteNavigateAction: String, Sendable, Equatable {
     case manageSnippets
     case permissionRecovery
     case voicePreferences
+    case createSnippet
+    case toggleExpansion
+    case importLibrary
+    case exportLibrary
+    case testExpansionLab
+    case keyboardShortcuts
+    case recentActivity
 }
 
 /// Date/time insert tools resolved through `DateFormatLibrary`.
@@ -253,6 +260,69 @@ public enum CommandPaletteCatalog {
                 subtitleKey: "palette.nav.voice.detail",
                 aliases: ["voice preferences", "dictation preferences", "voice settings", "dictation settings", "model download"],
                 action: .navigate(.voicePreferences)
+            ),
+            PaletteCommand(
+                id: "nav.createSnippet",
+                section: .commands,
+                trigger: "newsnippet",
+                titleKey: "palette.command.createSnippet",
+                subtitleKey: "home.quickActions.title",
+                aliases: ["new snippet", "create snippet", "add snippet", "make snippet"],
+                action: .navigate(.createSnippet)
+            ),
+            PaletteCommand(
+                id: "nav.toggleExpansion",
+                section: .commands,
+                trigger: "pause",
+                titleKey: "palette.command.toggleExpansion",
+                subtitleKey: "home.status.title",
+                aliases: ["toggle expansion", "pause expansion", "resume expansion", "mute expansion", "stop engine"],
+                action: .navigate(.toggleExpansion)
+            ),
+            PaletteCommand(
+                id: "nav.import",
+                section: .commands,
+                trigger: "import",
+                titleKey: "palette.command.importLibrary",
+                subtitleKey: "menu.import",
+                aliases: ["import library", "import snippets", "import espanso", "import json", "import csv"],
+                action: .navigate(.importLibrary)
+            ),
+            PaletteCommand(
+                id: "nav.export",
+                section: .commands,
+                trigger: "export",
+                titleKey: "palette.command.exportLibrary",
+                subtitleKey: "menu.export",
+                aliases: ["export library", "export snippets", "export json", "backup library"],
+                action: .navigate(.exportLibrary)
+            ),
+            PaletteCommand(
+                id: "nav.lab",
+                section: .commands,
+                trigger: "lab",
+                titleKey: "palette.command.openLab",
+                subtitleKey: "lab.title",
+                aliases: ["test expansion lab", "lab", "test injection", "diagnostics lab"],
+                action: .navigate(.testExpansionLab)
+            ),
+            PaletteCommand(
+                id: "nav.shortcuts",
+                section: .commands,
+                trigger: "shortcuts",
+                titleKey: "palette.command.shortcuts",
+                subtitleKey: "shortcuts.window.title",
+                aliases: ["shortcuts", "hotkeys", "keyboard shortcuts", "cheatsheet", "keybindings"],
+                action: .navigate(.keyboardShortcuts)
+            ),
+            PaletteCommand(
+                id: "nav.activity",
+                section: .commands,
+                trigger: "activity",
+                titleKey: "activity.title",
+                subtitleKey: "activity.title",
+                aliases: ["activity", "recent activity", "history", "notifications", "event log"],
+                action: .navigate(.recentActivity)
             )
         ])
 
@@ -595,18 +665,25 @@ public enum CommandPaletteCatalog {
         }
         paletteCacheLock.unlock()
 
+        let isExplicitCommandQuery = trimmed.hasPrefix(">")
+        let cmdQuery = isExplicitCommandQuery
+            ? String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+            : trimmed
+
         let commandHits = matchCommands(
-            query: trimmed,
+            query: cmdQuery,
             loc: loc,
             clipboardPreview: clipboardPreview,
             semanticBoostIDs: semanticBoostIDs,
             commandUsageBoost: commandUsageBoost,
             aiDisabledReason: aiDisabledReason,
-            limit: commandLimit
+            limit: isExplicitCommandQuery ? max(commandLimit, 50) : commandLimit
         )
 
         let snippetHits: [SearchHit]
-        if trimmed.isEmpty {
+        if isExplicitCommandQuery {
+            snippetHits = []
+        } else if trimmed.isEmpty {
             snippetHits = groups
                 .filter(\.enabled)
                 .flatMap { group in

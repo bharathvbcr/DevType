@@ -150,6 +150,8 @@ public final class SnippetStore {
         case merge
         /// Legacy behaviour: same-named groups are replaced wholesale. Destructive.
         case replaceGroup
+        /// Keep local matches unchanged and append only incoming snippets that do not conflict.
+        case skipConflicts
         /// Always land in a freshly named group, leaving existing groups untouched.
         case intoNewGroup
     }
@@ -769,6 +771,25 @@ public final class SnippetStore {
                     current.append(group)
                     created.append(group.name)
                 }
+
+            case .skipConflicts:
+                if let idx = current.firstIndex(where: { $0.name == group.name }) {
+                    let result = Self.mergeSnippets(
+                        incoming: group.snippets,
+                        into: current[idx].snippets,
+                        updateMatches: false
+                    )
+                    current[idx].snippets = result.snippets
+                    added += result.added
+                    unchanged += result.unchanged
+                    if result.added > 0 {
+                        updatedGroups.append(group.name)
+                    }
+                } else {
+                    added += group.snippets.count
+                    current.append(group)
+                    created.append(group.name)
+                }
             }
         }
 
@@ -793,7 +814,11 @@ public final class SnippetStore {
         var unchanged: Int
     }
 
-    private static func mergeSnippets(incoming: [SnippetModel], into local: [SnippetModel]) -> MergeResult {
+    private static func mergeSnippets(
+        incoming: [SnippetModel],
+        into local: [SnippetModel],
+        updateMatches: Bool = true
+    ) -> MergeResult {
         var result = local
         var exactIndex: [String: Int] = [:]
         var foldedIndex: [String: Int] = [:]
@@ -828,6 +853,10 @@ public final class SnippetStore {
             }
 
             let localSnippet = result[idx]
+            if !updateMatches {
+                unchanged += 1
+                continue
+            }
             var mergedTags = localSnippet.tags
             for tag in candidate.tags where !mergedTags.contains(tag) {
                 mergedTags.append(tag)

@@ -1,33 +1,35 @@
 import AppKit
 import ExpanderEngine
 
-// MARK: - §4.5 — usage statistics finally have somewhere to go
-//
-// The store has counted every expansion since day one, and the *only*
-// presentation was a `×N` label on the manager row
-// (`SnippetManagerViewController.swift:76`). No characters-saved, no time-saved,
-// no top-snippets — TextExpander's headline retention feature, collected and
-// thrown away.
-//
-// Counts are read through `SnippetStore.usageCount(for:)` / `topUsedSnippets` /
-// `recentlyUsedSnippets` rather than `snippet.usageCount`, because usage now
-// lives in a coalesced sidecar. **`incrementUsage` no longer fires store
-// listeners**, so this pane pulls on `refresh()` (view appearance, the Refresh
-// button, and whenever the host re-shows it) instead of waiting for a push.
-
+/// §2: Actionable Insights & Statistics Dashboard.
+///
+/// Features time-period filtering (All Time, Today, 7D, 30D),
+/// visual activity sparkline/bar, actionable insight cards (single-use cleanup,
+/// trigger conflict resolver, most valuable snippet), and auto-refresh.
 final class StatsViewController: NSViewController {
-
-    /// Rough typing speed used to turn characters into minutes.
     private static let charactersPerMinute = 200.0
+
+    private enum TimePeriod: Int, CaseIterable {
+        case all = 0
+        case today = 1
+        case sevenDays = 2
+        case thirtyDays = 3
+    }
 
     private let store: SnippetStore
     private let loc = LocalizationManager.shared
 
+    private var selectedPeriod: TimePeriod = .all
+    private var refreshTimer: Timer?
+
+    private let periodControl = NSSegmentedControl()
     private let expansionsValue = StatsViewController.makeValueLabel()
     private let charactersValue = StatsViewController.makeValueLabel()
     private let timeValue = StatsViewController.makeValueLabel()
     private let keystrokesValue = StatsViewController.makeValueLabel()
 
+    private let sparklineView = StatsSparklineView()
+    private let insightsStack = NSStackView()
     private let topStack = NSStackView()
     private let recentStack = NSStackView()
     private let emptyLabel = DevTypeTheme.makeLabel(
@@ -45,7 +47,9 @@ final class StatsViewController: NSViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    // MARK: Layout
+    deinit {
+        refreshTimer?.invalidate()
+    }
 
     override func loadView() {
         let root = NSView()
@@ -57,12 +61,25 @@ final class StatsViewController: NSViewController {
             color: DevTypeTheme.textPrimary
         )
         title.translatesAutoresizingMaskIntoConstraints = false
+
         let subtitle = DevTypeTheme.makeLabel(
             loc.s("stats.subtitle"),
             font: DevTypeTheme.font(11.5),
             color: DevTypeTheme.textSecondary
         )
         subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        // Time Period Selector
+        periodControl.segmentCount = 4
+        periodControl.setLabel(loc.s("stats.period.all"), forSegment: 0)
+        periodControl.setLabel(loc.s("stats.period.today"), forSegment: 1)
+        periodControl.setLabel(loc.s("stats.period.sevenDays"), forSegment: 2)
+        periodControl.setLabel(loc.s("stats.period.thirtyDays"), forSegment: 3)
+        periodControl.selectedSegment = 0
+        periodControl.target = self
+        periodControl.action = #selector(periodChanged)
+        periodControl.translatesAutoresizingMaskIntoConstraints = false
+        periodControl.controlSize = .small
 
         let refresh = CapsuleButton(
             title: loc.s("stats.refresh"),
@@ -71,6 +88,12 @@ final class StatsViewController: NSViewController {
             target: self,
             action: #selector(refreshTapped)
         )
+
+        let topHeaderRow = NSStackView(views: [title, periodControl, refresh])
+        topHeaderRow.orientation = .horizontal
+        topHeaderRow.alignment = .centerY
+        topHeaderRow.spacing = 10
+        topHeaderRow.translatesAutoresizingMaskIntoConstraints = false
 
         let metrics = NSStackView(views: [
             makeMetricCard(loc.s("stats.totalExpansions"), value: expansionsValue, symbol: "bolt.fill"),
@@ -83,12 +106,14 @@ final class StatsViewController: NSViewController {
         metrics.spacing = 10
         metrics.translatesAutoresizingMaskIntoConstraints = false
 
-        let timeHint = DevTypeTheme.makeLabel(
-            loc.s("stats.timeSaved.hint"),
-            font: DevTypeTheme.font(10.5),
-            color: DevTypeTheme.textTertiary
-        )
-        timeHint.translatesAutoresizingMaskIntoConstraints = false
+        // Sparkline View
+        sparklineView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Actionable Insights Stack
+        insightsStack.orientation = .vertical
+        insightsStack.alignment = .leading
+        insightsStack.spacing = 8
+        insightsStack.translatesAutoresizingMaskIntoConstraints = false
 
         configureListStack(topStack)
         configureListStack(recentStack)
@@ -105,39 +130,42 @@ final class StatsViewController: NSViewController {
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         emptyLabel.isHidden = true
 
-        root.addSubview(title)
+        root.addSubview(topHeaderRow)
         root.addSubview(subtitle)
-        root.addSubview(refresh)
         root.addSubview(metrics)
-        root.addSubview(timeHint)
+        root.addSubview(sparklineView)
+        root.addSubview(insightsStack)
         root.addSubview(lists)
         root.addSubview(emptyLabel)
 
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: root.topAnchor),
-            title.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+            topHeaderRow.topAnchor.constraint(equalTo: root.topAnchor),
+            topHeaderRow.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            topHeaderRow.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+
+            subtitle.topAnchor.constraint(equalTo: topHeaderRow.bottomAnchor, constant: 2),
             subtitle.leadingAnchor.constraint(equalTo: root.leadingAnchor),
 
-            refresh.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            refresh.centerYAnchor.constraint(equalTo: title.centerYAnchor),
-
-            metrics.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 14),
+            metrics.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 12),
             metrics.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             metrics.trailingAnchor.constraint(equalTo: root.trailingAnchor),
 
-            timeHint.topAnchor.constraint(equalTo: metrics.bottomAnchor, constant: 6),
-            timeHint.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sparklineView.topAnchor.constraint(equalTo: metrics.bottomAnchor, constant: 10),
+            sparklineView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sparklineView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            sparklineView.heightAnchor.constraint(equalToConstant: 44),
 
-            emptyLabel.topAnchor.constraint(equalTo: timeHint.bottomAnchor, constant: 14),
+            insightsStack.topAnchor.constraint(equalTo: sparklineView.bottomAnchor, constant: 10),
+            insightsStack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            insightsStack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+
+            emptyLabel.topAnchor.constraint(equalTo: insightsStack.bottomAnchor, constant: 10),
             emptyLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             emptyLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor),
 
-            lists.topAnchor.constraint(equalTo: emptyLabel.bottomAnchor, constant: 10),
+            lists.topAnchor.constraint(equalTo: emptyLabel.bottomAnchor, constant: 8),
             lists.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             lists.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            // `equalTo` (not `lessThanOrEqualTo`) so the controller's view has a
-            // determinate height when it is an arranged subview of a stack.
             lists.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
 
@@ -147,13 +175,29 @@ final class StatsViewController: NSViewController {
     override func viewWillAppear() {
         super.viewWillAppear()
         refresh()
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
     }
 
-    // MARK: Data
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
 
-    @objc private func refreshTapped() { refresh() }
+    @objc private func periodChanged() {
+        selectedPeriod = TimePeriod(rawValue: periodControl.selectedSegment) ?? .all
+        refresh()
+    }
 
-    /// Re-reads every number from the store. Safe to call as often as you like.
+    @objc private func refreshTapped() {
+        refresh()
+    }
+
+    // MARK: Data & Calculations
+
     func refresh() {
         let groups = store.loadGroups()
         let snippets = groups.flatMap(\.snippets)
@@ -161,16 +205,45 @@ final class StatsViewController: NSViewController {
         var totalUses = 0
         var charactersTyped = 0
         var keystrokesSaved = 0
+        var singleUseCount = 0
+        var mostValuableSnippet: SnippetModel?
+        var maxKeystrokesForSnippet = 0
+
+        let calendar = Calendar.current
+        let now = Date()
+
         for snippet in snippets {
-            // §4.5: read through the store, not `snippet.usageCount` — the model
-            // field is legacy and no longer authoritative.
             let uses = store.usageCount(for: snippet)
             guard uses > 0 else { continue }
+
+            if uses == 1 { singleUseCount += 1 }
+
+            if let lastDate = store.lastUsedAt(forSnippetID: snippet.id) {
+                switch selectedPeriod {
+                case .all:
+                    break
+                case .today:
+                    if !calendar.isDateInToday(lastDate) { continue }
+                case .sevenDays:
+                    if let d = calendar.date(byAdding: .day, value: -7, to: now), lastDate < d { continue }
+                case .thirtyDays:
+                    if let d = calendar.date(byAdding: .day, value: -30, to: now), lastDate < d { continue }
+                }
+            }
+
             totalUses += uses
             let produced = snippet.isImageSnippet ? 0 : snippet.replacementText.count
             let typed = snippet.triggerKeyword.count
+            let savedPerUse = max(0, produced - typed)
+            let snippetSaved = uses * savedPerUse
+
             charactersTyped += uses * produced
-            keystrokesSaved += uses * max(0, produced - typed)
+            keystrokesSaved += snippetSaved
+
+            if snippetSaved > maxKeystrokesForSnippet {
+                maxKeystrokesForSnippet = snippetSaved
+                mostValuableSnippet = snippet
+            }
         }
 
         expansionsValue.stringValue = format(totalUses)
@@ -180,7 +253,14 @@ final class StatsViewController: NSViewController {
             minutes: Double(keystrokesSaved) / Self.charactersPerMinute
         )
 
+        // Sparkline sample points
         let top = store.topUsedSnippets(limit: 8)
+        let sparkCounts = top.map { store.usageCount(for: $0) }
+        sparklineView.setPoints(sparkCounts)
+
+        // Populate Actionable Insights
+        populateInsights(singleUseCount: singleUseCount, mostValuable: mostValuableSnippet, maxSaved: maxKeystrokesForSnippet)
+
         let recent = store.recentlyUsedSnippets(limit: 8)
         fill(topStack, with: top, showsRelativeDate: false)
         fill(recentStack, with: recent, showsRelativeDate: true)
@@ -188,6 +268,98 @@ final class StatsViewController: NSViewController {
         let hasData = totalUses > 0
         emptyLabel.stringValue = hasData ? "" : loc.s("stats.empty")
         emptyLabel.isHidden = hasData
+    }
+
+    private func populateInsights(singleUseCount: Int, mostValuable: SnippetModel?, maxSaved: Int) {
+        insightsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        let conflicts = store.triggerConflicts()
+        if !conflicts.isEmpty {
+            let conflictCard = makeInsightCard(
+                title: loc.s("stats.insight.conflicts.title"),
+                desc: loc.s("stats.insight.conflicts.desc", conflicts.count),
+                actionTitle: loc.s("stats.insight.conflicts.action"),
+                tint: DevTypeTheme.statusOrange,
+                action: #selector(resolveConflictsTapped)
+            )
+            insightsStack.addArrangedSubview(conflictCard)
+            conflictCard.widthAnchor.constraint(equalTo: insightsStack.widthAnchor).isActive = true
+        }
+
+        if let mostValuable {
+            let timeSavedStr = formatDuration(minutes: Double(maxSaved) / Self.charactersPerMinute)
+            let valCard = makeInsightCard(
+                title: loc.s("stats.insight.valuable.title"),
+                desc: loc.s("stats.insight.valuable.desc", mostValuable.triggerKeyword, timeSavedStr),
+                actionTitle: nil,
+                tint: DevTypeTheme.statusGreen,
+                action: nil
+            )
+            insightsStack.addArrangedSubview(valCard)
+            valCard.widthAnchor.constraint(equalTo: insightsStack.widthAnchor).isActive = true
+        }
+
+        if singleUseCount > 2 {
+            let singleCard = makeInsightCard(
+                title: loc.s("stats.insight.singleUse.title"),
+                desc: loc.s("stats.insight.singleUse.desc", singleUseCount),
+                actionTitle: loc.s("stats.insight.singleUse.action"),
+                tint: DevTypeTheme.accent,
+                action: #selector(reviewUnusedTapped)
+            )
+            insightsStack.addArrangedSubview(singleCard)
+            singleCard.widthAnchor.constraint(equalTo: insightsStack.widthAnchor).isActive = true
+        }
+    }
+
+    private func makeInsightCard(title: String, desc: String, actionTitle: String?, tint: NSColor, action: Selector?) -> NSView {
+        let card = GlassCardView(tint: tint.withAlphaComponent(0.06))
+        card.translatesAutoresizingMaskIntoConstraints = false
+        let content = card.contentView
+
+        let titleLabel = DevTypeTheme.makeLabel(title, font: DevTypeTheme.font(11.5, .bold), color: DevTypeTheme.textPrimary)
+        let descLabel = DevTypeTheme.makeLabel(desc, font: DevTypeTheme.font(11), color: DevTypeTheme.textSecondary)
+
+        let textStack = NSStackView(views: [titleLabel, descLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        content.addSubview(textStack)
+        var trailingAnchorRef = content.trailingAnchor
+
+        if let actionTitle, let action {
+            let btn = CapsuleButton(title: actionTitle, style: .secondary, target: self, action: action)
+            btn.controlSize = .small
+            btn.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(btn)
+
+            NSLayoutConstraint.activate([
+                btn.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+                btn.centerYAnchor.constraint(equalTo: content.centerYAnchor)
+            ])
+            trailingAnchorRef = btn.leadingAnchor
+        }
+
+        NSLayoutConstraint.activate([
+            textStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            textStack.topAnchor.constraint(equalTo: content.topAnchor, constant: 6),
+            textStack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchorRef, constant: -8)
+        ])
+
+        return card
+    }
+
+    @objc private func resolveConflictsTapped() {
+        SnippetConflictResolverSheet.present(from: view.window, store: store) { [weak self] in
+            self?.refresh()
+        }
+    }
+
+    @objc private func reviewUnusedTapped() {
+        (NSApp.delegate as? AppDelegate)?.openSnippetManager(nil)
     }
 
     private func fill(_ stack: NSStackView, with snippets: [SnippetModel], showsRelativeDate: Bool) {
@@ -242,7 +414,6 @@ final class StatsViewController: NSViewController {
             detailLabel.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             detailLabel.centerYAnchor.constraint(equalTo: trigger.centerYAnchor)
         ])
-        // §5.1: one utterance per row instead of two orphaned static texts.
         row.dtApplyAccessibility(
             role: NSAccessibility.Role.staticText,
             label: "\(snippet.displayTitle), \(detail)"
@@ -251,8 +422,6 @@ final class StatsViewController: NSViewController {
         detailLabel.setAccessibilityElement(false)
         return row
     }
-
-    // MARK: Building blocks
 
     private static func makeValueLabel() -> NSTextField {
         let label = DevTypeTheme.makeLabel(
@@ -338,8 +507,6 @@ final class StatsViewController: NSViewController {
         return card
     }
 
-    // MARK: Formatting
-
     private func format(_ value: Int) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -353,5 +520,45 @@ final class StatsViewController: NSViewController {
         formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute, .second]
         formatter.maximumUnitCount = 2
         return formatter.string(from: seconds) ?? "0"
+    }
+}
+
+/// Custom lightweight activity sparkline visualizer.
+private final class StatsSparklineView: NSView {
+    private var points: [Int] = []
+
+    func setPoints(_ points: [Int]) {
+        self.points = points
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard points.count > 1 else { return }
+
+        let card = GlassCardView(tint: DevTypeTheme.accent.withAlphaComponent(0.04))
+        card.frame = bounds
+
+        let maxVal = CGFloat(points.max() ?? 1)
+        guard maxVal > 0 else { return }
+
+        let path = NSBezierPath()
+        let stepX = bounds.width / CGFloat(points.count - 1)
+        let padding: CGFloat = 8
+
+        for (i, p) in points.enumerated() {
+            let x = CGFloat(i) * stepX
+            let normalized = CGFloat(p) / maxVal
+            let y = padding + normalized * (bounds.height - (padding * 2))
+            if i == 0 {
+                path.move(to: NSPoint(x: x, y: y))
+            } else {
+                path.line(to: NSPoint(x: x, y: y))
+            }
+        }
+
+        DevTypeTheme.accent.withAlphaComponent(0.6).setStroke()
+        path.lineWidth = 2.0
+        path.stroke()
     }
 }
