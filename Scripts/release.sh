@@ -47,27 +47,12 @@ fi
 
 # --- 1. Identity check ------------------------------------------------------
 if [[ "${SKIP_NOTARIZE}" != "1" ]]; then
-  HAS_DEV_ID=0
-  if [[ -n "${DEVTYPE_SIGN_IDENTITY:-}" ]]; then
-    case "${DEVTYPE_SIGN_IDENTITY}" in
-      "Developer ID Application"*) HAS_DEV_ID=1 ;;
-      *) echo "warning: DEVTYPE_SIGN_IDENTITY is not 'Developer ID Application...'; falling back to local signing" ;;
-    esac
-  else
-    if security find-identity -p codesigning -v 2>/dev/null | grep -q "Developer ID Application"; then
-      HAS_DEV_ID=1
-      DEVTYPE_SIGN_IDENTITY="$(security find-identity -p codesigning -v 2>/dev/null | grep "Developer ID Application" | head -n 1 | sed 's/.*"\(.*\)".*/\1/')"
-      export DEVTYPE_SIGN_IDENTITY
-    fi
-  fi
-
-  if [[ "${HAS_DEV_ID}" -eq 1 ]]; then
-    xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1 \
-      || die "notarytool profile '${NOTARY_PROFILE}' not found. Run: xcrun notarytool store-credentials ${NOTARY_PROFILE} --apple-id <id> --team-id <team> --password <app-specific-pw>"
-  else
-    echo "==> No Developer ID Application identity available; proceeding with local signing (DEVTYPE_SKIP_NOTARIZE=1)"
-    SKIP_NOTARIZE="1"
-  fi
+  # Fail closed. A missing distribution identity must never quietly turn a requested
+  # notarized release into an artifact Gatekeeper blocks on every other machine.
+  DEVTYPE_SIGN_IDENTITY="$("${ROOT}/Scripts/release-signing-preflight.sh")"
+  export DEVTYPE_SIGN_IDENTITY
+  xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1 \
+    || die "notarytool profile '${NOTARY_PROFILE}' not found. Run: xcrun notarytool store-credentials ${NOTARY_PROFILE} --apple-id <id> --team-id <team> --password <app-specific-pw>"
 fi
 
 # --- 2. Build release + package with hardened runtime -----------------------

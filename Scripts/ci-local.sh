@@ -59,6 +59,8 @@ plutil -lint Resources/DevType.entitlements
 
 echo "  - Checking signing identity resolution..."
 "${ROOT}/Scripts/test-signing-identity.sh"
+echo "  - Checking distribution signing gate..."
+"${ROOT}/Scripts/test-release-signing-preflight.sh"
 
 echo "  - Checking release DMG selection..."
 "${ROOT}/Scripts/test-release-dmg-select.sh"
