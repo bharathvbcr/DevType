@@ -139,6 +139,35 @@ final class LocalizationParityTests: XCTestCase {
         )
     }
 
+    /// The AI preview passes signed `Int` deltas to these keys. `%@` asks CFString to interpret
+    /// that integer as an Objective-C object pointer, which caused the EXC_BAD_ACCESS seen in
+    /// the v0.1.1 crash reports. Keep the contract explicit and exercise the real formatter.
+    func testAIPreviewDeltaFormatsAcceptIntegerArguments() {
+        let deltaKeys = [
+            ("ai.preview.delta.words", 3),
+            ("ai.preview.delta.chars", -2)
+        ]
+        let expectedSignature = [1: Character("d")]
+
+        for (language, table) in concrete {
+            for (key, value) in deltaKeys {
+                let format = table[key] ?? ""
+                let signature = Self.formatSignature(format)
+                XCTAssertEqual(
+                    signature,
+                    expectedSignature,
+                    "\(language.rawValue) \(key) must format an Int with %d, not an object placeholder."
+                )
+                guard signature == expectedSignature else { continue }
+
+                let manager = LocalizationManager()
+                manager.language = language
+                let rendered = manager.s(key, value)
+                XCTAssertTrue(rendered.contains(String(value)), "\(language.rawValue) \(key) lost its delta")
+            }
+        }
+    }
+
     /// Mixing `%1$d` with a bare `%d` in one format string is undefined behaviour in CFString.
     func testAStringIsEitherFullyPositionalOrFullySequential() {
         for (language, table) in concrete {
