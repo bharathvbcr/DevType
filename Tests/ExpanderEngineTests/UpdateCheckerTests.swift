@@ -134,6 +134,20 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertEqual(url?.path, "/bharathvbcr/DevType/releases/tag/v1.3.0")
     }
 
+    func testRejectsDotSegmentEscapeFromConfiguredRepository() {
+        for hostile in [
+            "https://github.com/bharathvbcr/DevType/releases/tag/../../attacker/repo",
+            "https://github.com/bharathvbcr/DevType/releases/tag/%2e%2e/%2e%2e/attacker/repo"
+        ] {
+            let url = UpdateChecker.sanitizedReleaseURL(from: hostile, tagName: "v1.3.0")
+            XCTAssertEqual(
+                url?.absoluteString,
+                "https://github.com/bharathvbcr/DevType/releases/tag/v1.3.0",
+                "dot segments must not escape the configured release path: \(hostile)"
+            )
+        }
+    }
+
     func testAcceptsLegitimateGitHubURL() {
         let legit = "https://github.com/bharathvbcr/DevType/releases/tag/v9.9.9"
         let url = UpdateChecker.sanitizedReleaseURL(from: legit, tagName: "v9.9.9")
@@ -144,6 +158,13 @@ final class UpdateCheckerTests: XCTestCase {
         let url = UpdateChecker.sanitizedReleaseURL(from: nil, tagName: "v2.0.0")
         XCTAssertEqual(url?.absoluteString,
                        "https://github.com/bharathvbcr/DevType/releases/tag/v2.0.0")
+    }
+
+    func testRejectsTagsOutsideTheReleaseWorkflowContract() {
+        for tag in ["1.3.0", "v1.3", "v1.3.0-rc.1", "v1.3.0/../../attacker"] {
+            XCTAssertThrowsError(try UpdateChecker.parseRelease(from: payload(tag: tag)), tag)
+            XCTAssertNil(UpdateChecker.sanitizedReleaseURL(from: nil, tagName: tag), tag)
+        }
     }
 
     // MARK: - Skip policy

@@ -290,6 +290,9 @@ public actor UpdateChecker {
               !tagName.isEmpty else {
             throw UpdateCheckError.malformedResponse(reason: "missing tag_name")
         }
+        guard isStrictReleaseTag(tagName) else {
+            throw UpdateCheckError.malformedResponse(reason: "unparseable tag_name")
+        }
         guard let version = AppVersion(tagName) else {
             throw UpdateCheckError.malformedResponse(reason: "unparseable tag_name")
         }
@@ -321,25 +324,34 @@ public actor UpdateChecker {
         )
     }
 
-    /// Accepts `html_url` only when it is an `https://github.com` URL under the configured
-    /// repository; otherwise falls back to the canonical tag URL built locally.
+    /// Accepts `html_url` only when it exactly matches the canonical release URL built locally;
+    /// otherwise returns that canonical URL.
     ///
     /// The value ends up in `NSWorkspace.open`, so it is treated as untrusted input: a payload
     /// that returned a `javascript:` or `file://` URL, or pointed at another host entirely,
     /// must not become something DevType hands to the system to open.
     static func sanitizedReleaseURL(from candidate: String?, tagName: String) -> URL? {
-        if let candidate,
-           let url = URL(string: candidate),
-           url.scheme?.lowercased() == "https",
-           url.host?.lowercased() == "github.com",
-           url.path.hasPrefix("/\(repositoryOwner)/\(repositoryName)/") {
-            return url
-        }
+        guard isStrictReleaseTag(tagName),
+              let canonical = URL(
+                string: "https://github.com/\(repositoryOwner)/\(repositoryName)/releases/tag/\(tagName)"
+              ) else { return nil }
 
-        // Fall back to the canonical page for the tag, built from a validated component.
-        guard let encodedTag = tagName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
-            return nil
+        // Returning the locally built URL even for an exact match means untrusted URL parsing
+        // never supplies the value handed to NSWorkspace. Exact-string comparison rejects
+        // dot-segment and percent-encoded path traversal without relying on URL normalization.
+        guard candidate == canonical.absoluteString else { return canonical }
+        return canonical
+    }
+
+    /// Matches the same stable-release contract as `Scripts/release-preflight.sh`.
+    /// GitHub's `releases/latest` excludes prereleases, so accepting development or shortened
+    /// tags here would only broaden the navigation surface and make version ordering ambiguous.
+    private static func isStrictReleaseTag(_ tagName: String) -> Bool {
+        guard tagName.first == "v" else { return false }
+        let components = tagName.dropFirst().split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 3 else { return false }
+        return components.allSatisfy { component in
+            !component.isEmpty && component.allSatisfy { $0.isASCII && $0.isNumber }
         }
-        return URL(string: "https://github.com/\(repositoryOwner)/\(repositoryName)/releases/tag/\(encodedTag)")
     }
 }
