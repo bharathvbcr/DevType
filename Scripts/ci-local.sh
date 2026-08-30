@@ -64,6 +64,8 @@ echo "  - Checking distribution signing gate..."
 
 echo "  - Checking release DMG selection..."
 "${ROOT}/Scripts/test-release-dmg-select.sh"
+echo "  - Checking published release asset inventory..."
+"${ROOT}/Scripts/test-release-asset-list.sh"
 echo "  - Checking release preflight..."
 "${ROOT}/Scripts/test-release-preflight.sh"
 

@@ -101,6 +101,11 @@ jobs:
 
           VERIFY_DIR="$(mktemp -d "${RUNNER_TEMP}/devtype-release-verify.XXXXXX")"
           trap 'rm -rf "${VERIFY_DIR}"' EXIT
+          gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' \
+            > "${VERIFY_DIR}/asset-names.txt"
+          Scripts/verify-release-asset-list.sh "${EXPECTED_DMG}" \
+            < "${VERIFY_DIR}/asset-names.txt"
+
           DOWNLOADED=0
           for attempt in 1 2 3 4 5; do
             if gh release download "${RELEASE_TAG}" \
