@@ -61,7 +61,7 @@ Looking for a **privacy-first TextExpander alternative** or a **native Espanso G
 ---
 
 - ⚡ **Instant Expand-on-Match**: Low-latency swallowing ring buffer that instantly replaces typed triggers using Accessibility range replacement (with fallback to HID clipboard paste).
-- 🎙️ **On-Device Smart Dictation**: Push-to-talk speech-to-text powered by **Mistral Voxtral Realtime (Mini 4B)** and **Fun-ASR-Nano** with thought-revision / self-correction resolution, filler stripping, and custom vocabulary (inspired by [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)). See [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
+- 🎙️ **Smart Dictation**: Push-to-talk speech-to-text with thought-revision / self-correction resolution, filler stripping, and custom vocabulary (inspired by [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)). Pick the recognizer in **Preferences → Voice**: Apple Speech, an on-device local model, or a local `whisper.cpp` server — all offline. A cloud engine is available but stays off unless you supply your own API key. See [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
 - 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize, prompt enhance, translate) using Apple Foundation Models (macOS 26+). 100% private, zero API keys required.
 - 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy search for snippets and AI tools, inline math (`= 45 * 12.5`), custom one-shot AI prompts (`> …`), date offsets (`tomorrow`, `+3w`, `next friday`), instant text operations (case, sort, dedupe, Base64/URL/JSON, SHA-256/MD5), generators (UUID, lorem, password), and quick app navigation — ranked by your own usage.
 - 🧩 **Dual Macro Engine**: Full support for both Mustache (`{{date:iso:+1d}}`, `{{clipboard}}`, `{{calc: 1+2}}`, `{{uuid}}`, `{{cursor}}`) and TextExpander (`%filltext:name=X%`, `%@+1D%`, `%snippet:x%`, `%|`, `%key:enter%`) template syntaxes.
@@ -79,7 +79,7 @@ Looking for a **privacy-first TextExpander alternative** or a **native Espanso G
 |---|---|---|
 | **`⌘/`** | **Command Palette** | Global fuzzy search across all snippets, math evaluation, and date tools |
 | **`⌘⌥A`** | **AI Action Palette** | Highlight text and trigger on-device AI proofreading, rewriting, translation, or custom prompts |
-| **`⌘⌥V`** | **Smart Dictation** | Push-to-talk or hands-free voice dictation with on-device Voxtral / Fun-ASR |
+| **`⌘⌥V`** | **Smart Dictation** | Push-to-talk or hands-free voice dictation with the recognizer you pick in Preferences → Voice |
 | **`:trigger`** | **Typed Expansion** | Type any snippet abbreviation to instantly expand the template in place |
 | **`⌘⇧P`** | **Permission Recovery** | Open the status/diagnostics window to fix Accessibility & Input Monitoring grants |
 | **`Esc`** | **Dismiss / Cancel** | Close active panels, search palettes, or AI previews |
@@ -226,4 +226,4 @@ DevType is licensed under the [MIT License](LICENSE). See [NOTICE](NOTICE) for t
 
 ### Acknowledgements & Tributes
 - **[Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)**: Special thanks to the Google Gemini team for pioneering intelligent thought-revision processing and crash-resilient speech journaling.
-- **[Mistral AI](https://mistral.ai)** & **[Tongyi Lab / FunASR](https://github.com/alibaba-damo-academy/FunASR)**: For state-of-the-art open-weight real-time speech models.
+- **[whisper.cpp](https://github.com/ggerganov/whisper.cpp)**: For the fast, fully local speech recognition server that DevType's Local Whisper engine detects, fetches models for, and runs on loopback.

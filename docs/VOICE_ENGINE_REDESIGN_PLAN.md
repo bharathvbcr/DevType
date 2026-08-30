@@ -1,6 +1,24 @@
 # DevType Speech Engine and Correction System Redesign
 
-Status: second-pass audited implementation plan
+> **Historical record — superseded by the shipping implementation.**
+>
+> This document is the audit and plan that led to the current voice pipeline. It is kept
+> because it is the only record of *why* the Voxtral and Fun-ASR engine selections were
+> removed: they never executed those models, both delegating to Apple Speech behind a
+> file-size readiness check (see §2, "Verified current-state baseline").
+>
+> The engine work described here has landed. DevType now ships four engines — Apple Speech,
+> Local AI (on-device), Local Whisper (whisper.cpp), and opt-in cloud Gemini — with a
+> per-session immutable snapshot, enforced privacy routes, durable CAF capture, and
+> recognition separated from correction. Every "current state" description below refers to
+> the pre-redesign baseline `4e3e488`, **not** to the code as it stands; individual line
+> references and file paths in it are stale.
+>
+> For how dictation actually behaves today, read [VOICE_DICTATION.md](VOICE_DICTATION.md)
+> and the Smart Dictation section of [ARCHITECTURE.md](ARCHITECTURE.md). Do not use this
+> plan as a description of current behavior.
+
+Status: second-pass audited implementation plan (historical)
 
 Prepared: 2026-08-28
 

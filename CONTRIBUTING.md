@@ -81,7 +81,7 @@ DevType/
 │   │   ├── Matching/                      # Prefix tree, abbreviation matching, fuzzy search
 │   │   ├── Macros/                        # Mustache & TextExpander parser, math evaluation
 │   │   ├── AI/                            # Apple Foundation Models, selection gates
-│   │   ├── Voice/                         # Voxtral & Fun-ASR Smart Dictation, crash journaling
+│   │   ├── Voice/                         # Smart Dictation engines, correction pipeline, crash journaling
 │   │   ├── Models/                        # Snippet models, SecretStore, usage stats
 │   │   ├── Permissions/                   # TCC checks, AX verification, recovery
 │   │   └── Sync/                          # Import/export (TextExpander bundles, Espanso YAML), search, palette catalog
