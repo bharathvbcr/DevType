@@ -307,4 +307,4 @@ DevType is licensed under the [MIT License](LICENSE). See [NOTICE](NOTICE) for t
 
 ### Acknowledgements & Tributes
 - **[Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)**: Special thanks to the Google Gemini team for pioneering intelligent thought-revision processing and crash-resilient speech journaling.
-- **[Mistral AI](https://mistral.ai)** & **[Tongyi Lab / FunASR](https://github.com/alibaba-damo-academy/FunASR)**: For state-of-the-art open-weight real-time speech models.
+- **[whisper.cpp](https://github.com/ggerganov/whisper.cpp)**: For the fast, fully local speech recognition server that DevType's Local Whisper engine detects, fetches models for, and runs on loopback.

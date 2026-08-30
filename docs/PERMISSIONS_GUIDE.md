@@ -13,7 +13,7 @@ This guide explains why each permission is needed, how to grant and maintain the
 | **Input Monitoring** | `kTCCServiceListenEvent` | `CGPreflightListenEventAccess()` | **Required** to intercept typed keystrokes and swallow trigger abbreviations before they render on screen. |
 | **Accessibility** | `kTCCServiceAccessibility` | `AXIsProcessTrustedWithOptions()` | **Required** to perform atomic text range replacement directly inside focused text fields via macOS Accessibility APIs (`AXUIElement`). |
 | **Post Events** | `kTCCServicePostEvent` | `CGPreflightPostEventAccess()` | *Optional / Fallback* to synthesize backspaces (`kVK_Delete`), `⌘V` paste events, and arrow navigation when Accessibility APIs are blocked. |
-| **Microphone** | `kTCCServiceMicrophone` | `AVCaptureDevice.authorizationStatus(for: .audio)` | **Required for Voice Dictation** to capture audio via 16kHz PCM streaming for on-device transcription models (Voxtral / Fun-ASR). Zero audio leaves your Mac. |
+| **Microphone** | `kTCCServiceMicrophone` | `AVCaptureDevice.authorizationStatus(for: .audio)` | **Required for Voice Dictation** to capture audio via 16kHz PCM streaming. With Apple Speech, Local AI, or Local Whisper selected, no audio leaves your Mac; the opt-in Gemini cloud engine uploads audio only once you supply your own API key. |
 | **Speech Recognition** | `kTCCServiceSpeechRecognition` | `SFSpeechRecognizer.authorizationStatus()` | *Optional Fallback* for on-device speech transcription via Apple Speech Framework. |
 
 The capabilities are deliberately partitioned:

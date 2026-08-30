@@ -1,20 +1,28 @@
 # Voice Smart Dictation in DevType
 
-DevType integrates local, on-device Smart Speech-to-Text and Dictation powered by **Mistral Voxtral Realtime (Mini 4B)** and **Fun-ASR-Nano**, paired with Google Gemini **Jot**-inspired thought revision and disfluency resolution, rendered in a floating dictation HUD that adopts Apple **Liquid Glass** on macOS 26+ (`NSGlassEffectView`) with a material fallback below.
+DevType integrates Smart Speech-to-Text and Dictation across four selectable engines — three of them fully local — paired with Google Gemini **Jot**-inspired thought revision and disfluency resolution, rendered in a floating dictation HUD that adopts Apple **Liquid Glass** on macOS 26+ (`NSGlassEffectView`) with a material fallback below.
 
 ---
 
 ## 🎙️ Architecture & Features
 
-### 1. Dual High-Accuracy Models
-* **Mistral Voxtral Realtime (Mini 4B)**:
-  - 4.2B parameter multimodal audio-LLM providing rich semantic understanding, high punctuation accuracy, and contextual disambiguation.
-  - Formatted as `voxtral-mini-4b-realtime.q4_k_m.gguf` (~2.2 GB).
-* **Fun-ASR-Nano (0.8B)**:
-  - Ultra-fast edge speech recognition model optimized for Apple Silicon Neural Engine with extreme low latency and robust multi-dialect support.
-  - Formatted as `funasr-nano-q8_0.gguf` (~820 MB).
-* **Apple Speech Framework (Fallback / Offline Zero-Download)**:
-  - Native system-level speech analyzer ensuring 100% immediate availability before weights are downloaded.
+### 1. Four Selectable Speech Engines
+
+Pick the recognizer in **Preferences $\to$ Voice**. Each engine reports its own readiness, so what is actually installed and reachable is visible before you hold the key.
+
+* **Apple Speech (Rule-based)**:
+  - On-device `SFSpeechRecognizer` recognition followed by DevType's deterministic cleanup rules.
+  - Nothing to download, nothing to configure, no API key. This is where dictation lands when nothing else is set up.
+* **Local AI (On-Device)**:
+  - The same on-device Apple Speech recognition, with the transcript polished by a local language model.
+  - Apple Intelligence Foundation Models on macOS 26+; otherwise a loopback endpoint — Ollama at `http://localhost:11434/v1/chat/completions` by default, or any OpenAI-compatible local server you point it at.
+  - Audio never leaves the Mac; only the recognized text is handed to the local model.
+* **Local Whisper (whisper.cpp)**:
+  - A `whisper-server` on loopback (`http://127.0.0.1:8080/inference` by default), noticeably stronger than Apple Speech on technical vocabulary and fully offline.
+  - DevType detects an installed binary, can fetch the default `ggml-base.en.bin` (~148 MB) into `~/.cache/whisper.cpp`, and can start the server for you — or defer to one you already have running and leave it under your control.
+* **Gemini 3.5 Transcribe (Cloud, opt-in)**:
+  - Cloud transcription that handles disfluency removal, self-correction collapse, punctuation, and formatting natively in a single pass.
+  - Requires a Google API key that you supply; it is held in the login keychain. With no key stored the engine cannot run and dictation resolves to Apple Speech instead.
 
 ### 2. Jot Inspirations & Thought-Revision Polish
 Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS), DevType runs post-processing speech intelligence:
@@ -33,8 +41,8 @@ Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-tr
 
 ### 3. Hardened Audio Pipeline & Crash Journaling
 * **Audio Interruption Resilience**: Listens to `AVAudioEngineConfigurationChange` to handle headphones / AirPods switching without dropped taps or leaks.
-* **Millisecond-1 Audio Journaling**: 16kHz mono 16-bit PCM streaming audio capture with continuous disk journaling (`active_session_*.pcm`) in `~/Library/Application Support/DevType/VoiceCache/`.
-* **Single-Shot Watchdog Transcription**: Guaranteed non-blocking transcription execution with a 12-second watchdog guard preventing system stalls.
+* **Millisecond-1 Audio Journaling**: 16kHz mono 16-bit PCM capture written continuously to `capture.caf` in a per-session directory under `~/Library/Application Support/DevType/VoiceSessions/`, so a crash mid-sentence leaves a recoverable recording rather than nothing.
+* **Single-Shot Watchdog Transcription**: Each session is armed with a watchdog sized from the snapshot it started with (the configured local-model timeout plus headroom, never under 5 seconds), so a wedged recognizer or corrector ends the session instead of stalling dictation.
 
 ### 4. Voice Dictation HUD (`VoiceHUDPanel`)
 * Floating non-activating AppKit HUD that never steals key focus from the target field:
@@ -58,8 +66,9 @@ Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-tr
 
 ## 🔒 Privacy & Security
 
-* **100% Local / On-Device**: All speech capture and transcription happens on your Apple Silicon Mac. Zero audio or transcripts leave your machine.
-* **Zero Cloud Network Telemetry**: Models are downloaded directly from open-weight repositories into your local Application Support directory and verified via SHA-256 checksums.
+* **Local by default**: With **Apple Speech**, **Local AI**, or **Local Whisper** selected, no audio leaves your Mac — Apple Speech and Local AI recognize on-device, and Local Whisper talks only to a `whisper.cpp` server on loopback. Local AI additionally sends the *recognized text* (never the audio) to your local model endpoint.
+* **Cloud is opt-in and inert without your key**: **Gemini 3.5 Transcribe** is the one engine that uploads audio, to Google, and only after you store your own API key in the login keychain. Until then the engine cannot run and dictation resolves to Apple Speech.
+* **Routes are enforced, not merely documented**: every session is stamped with the privacy route its engine implies (`onDeviceOnly`, `localNetworkOnly`, `cloudPermitted`), and the speech provider registry will not hand back a provider whose own route that session does not permit.
 
 ---
 
