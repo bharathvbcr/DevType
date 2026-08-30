@@ -1250,15 +1250,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             return
         }
-        switch AITextTransformSupport.availability {
-        case .available:
-            break
-        case .unavailable(let reason):
-            DevTypeAlert.info(
-                title: loc.s("ai.alert.unavailable.title"),
-                message: AITransformFlow.localizedAvailability(reason, loc: loc)
-            )
-            return
+        // A local kind needs no model, so the availability gate does not apply to it.
+        // The master AI switch above still does: this action lives on the AI surface, and
+        // a user who turned that surface off should not find one of its rows still firing.
+        if kind.requiresModel {
+            switch AITextTransformSupport.availability {
+            case .available:
+                break
+            case .unavailable(let reason):
+                DevTypeAlert.info(
+                    title: loc.s("ai.alert.unavailable.title"),
+                    message: AITransformFlow.localizedAvailability(reason, loc: loc)
+                )
+                return
+            }
         }
 
         switch selection {

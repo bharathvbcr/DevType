@@ -545,6 +545,11 @@ private final class AIPreviewController: NSViewController {
         diffButton.title = loc.s("ai.preview.diff")
         titleLabel.stringValue = loc.s(kind.localizationKey)
 
+        if let local = AILocalTransform.run(kind: kind, input: input) {
+            applyCompletion(local)
+            return
+        }
+
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
             discardHandle = AITextTransformer.shared.transformStreaming(

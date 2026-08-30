@@ -985,24 +985,39 @@ public actor AITextTransformer {
         onPartial: @escaping @Sendable (String?) -> Void,
         once: AITransformOnceCompletion
     ) async {
-        guard !inFlight else {
-            once.complete(.failure(.busy))
-            return
-        }
-
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             once.complete(.failure(.emptyInput))
             return
         }
 
-        // Every transform — one-shot, streaming, chunked, retried — funnels through here, so
-        // this is the one place that can promise a `.custom` run is actually steered by
-        // something. Callers refuse earlier where they can do better (the typed path keeps the
-        // user's trigger instead of erasing it); this backstop is what makes "no instructions"
-        // impossible to reach rather than merely unlikely.
+        // Local kinds answer before anything model-shaped happens — before the
+        // single-flight latch (there is no session to serialise), before the availability
+        // probe (there is no model to be unavailable), and before the budget maths. A
+        // deterministic transform must not fail because an unrelated one is in flight.
+        if let local = AILocalTransform.run(kind: kind, input: input) {
+            if case .success(let text) = local {
+                AIDiagnosticsStore.shared.recordSuccess(kind: kind.rawValue)
+                onPartial(text)
+            }
+            once.complete(local)
+            return
+        }
+
+        // Every model transform — one-shot, streaming, chunked, retried — funnels through
+        // here, so this is the one place that can promise a `.custom` run is actually steered
+        // by something. Callers refuse earlier where they can do better (the typed path keeps
+        // the user's trigger instead of erasing it); this backstop is what makes "no
+        // instructions" impossible to reach rather than merely unlikely. Ahead of the latch
+        // and the availability probe on purpose: a request that can never succeed should say
+        // so, not report `.busy` and invite a retry.
         if kind == .custom, AIActionSelection.normalized(customInstructions ?? "") == nil {
             once.complete(.failure(.missingInstructions))
+            return
+        }
+
+        guard !inFlight else {
+            once.complete(.failure(.busy))
             return
         }
 

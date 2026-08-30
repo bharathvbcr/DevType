@@ -175,7 +175,7 @@ public enum CommandPaletteCatalog {
                 section: .ai,
                 trigger: kind.rawValue,
                 titleKey: kind.localizationKey,
-                subtitleKey: "palette.ai.subtitle",
+                subtitleKey: kind.requiresModel ? "palette.ai.subtitle" : "palette.ai.local.subtitle",
                 aliases: Self.aiAliases(for: kind),
                 action: .ai(kind)
             ))
@@ -947,6 +947,15 @@ public enum CommandPaletteCatalog {
         case .undoAI:
             let preview = AIUndoStore.preview ?? loc.s("palette.ai.undo.detail")
             return PaletteCommandHit(command: command, score: score, insertText: "", preview: preview)
+        case .ai(let kind) where !kind.requiresModel:
+            // Runs locally (`AILocalTransform`), so the model's availability — and the
+            // locale gate that goes with it — has nothing to say about this row.
+            return PaletteCommandHit(
+                command: command,
+                score: score,
+                insertText: "",
+                preview: loc.s("palette.ai.local.subtitle")
+            )
         case .ai, .aiCustom:
             return PaletteCommandHit(
                 command: command,
@@ -1355,6 +1364,20 @@ public enum CommandPaletteCatalog {
             return [
                 "hindi", "to hindi", "in hindi", "english to hindi",
                 "translate to hindi", "say in hindi", "hinglish", "romanized hindi"
+            ]
+        case .toMarkdown:
+            return [
+                "to markdown", "format as markdown", "convert to markdown", "make markdown",
+                "markdownify", "markdown", "md", "add formatting", "format text",
+                "markdown format", "md format", "structure as markdown", "prettify",
+                "add headings", "add bullets"
+            ]
+        case .removeMarkdown:
+            return [
+                "remove markdown", "markdown removal", "strip markdown", "markdown",
+                "md", "unmarkdown", "plain text", "to plain text", "plaintext",
+                "remove formatting", "strip formatting", "remove bold", "remove asterisks",
+                "clean markdown", "demarkdown", "unformat"
             ]
         case .custom:
             return ["custom"]

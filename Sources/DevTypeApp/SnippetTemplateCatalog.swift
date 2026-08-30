@@ -60,6 +60,8 @@ enum SnippetTemplateCatalog {
         case .translate: return ":tr"
         case .translateTelugu: return ":tte"
         case .translateHindi: return ":thi"
+        case .removeMarkdown: return ":md"
+        case .toMarkdown: return ":tomd"
         case .custom: return ":ai"
         }
     }
@@ -87,6 +89,8 @@ enum SnippetTemplateCatalog {
         case .translate: label = "Translate to English"
         case .translateTelugu: label = "Translate to Telugu"
         case .translateHindi: label = "Translate to Hindi"
+        case .removeMarkdown: label = "Remove Markdown"
+        case .toMarkdown: label = "Format as Markdown"
         case .custom: label = "Custom"
         }
         return "Select text, then type this trigger. DevType applies “\(label)” on-device (Preferences → AI)."
