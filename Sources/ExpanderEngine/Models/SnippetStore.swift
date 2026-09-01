@@ -599,7 +599,11 @@ public final class SnippetStore {
         return SnippetDocument(snippets: legacySnippets)
     }
 
-    public func saveSnippets(_ snippets: [SnippetModel]) {
+    /// `@discardableResult` because most callers genuinely cannot act on a failed save, but the
+    /// outcome is now *available*: `saveGroups` and `importGroups` both report theirs, and this
+    /// one silently dropped it, so a caller that wanted to check had no way to.
+    @discardableResult
+    public func saveSnippets(_ snippets: [SnippetModel]) -> SaveOutcome {
         // Same RMW serialization as `importGroups`: read baseline, merge, save.
         rmwLock.lock()
         defer { rmwLock.unlock() }
@@ -641,7 +645,7 @@ public final class SnippetStore {
 
         // `rmwLock` is already held for this whole read-modify-write; the public
         // `saveGroups` would try to re-acquire it and deadlock.
-        saveGroupsSerialized(updated)
+        return saveGroupsSerialized(updated)
     }
 
     /// Commits `groups` as the whole library. The sanitize → write → cache-commit
@@ -1609,8 +1613,10 @@ public final class SnippetStore {
         lock.unlock()
 
         let flat = loaded.groups.flatMap(\.snippets)
+        // `self` is only needed to prove the store is still alive — both listener tables were
+        // already copied out above, so nothing here reads through it.
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard self != nil else { return }
             for listener in snippetListeners.values { listener(flat) }
             for listener in groupListenersCopy.values { listener(loaded.groups) }
         }
