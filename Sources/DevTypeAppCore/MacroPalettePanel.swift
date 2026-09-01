@@ -486,24 +486,15 @@ private final class MacroPaletteController: NSViewController,
     }
 
     private func rebuild() {
-        let query = searchField.stringValue
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let terms = query.split(separator: " ").map(String.init)
-
+        let sections = MacroPaletteRanking.rank(query: searchField.stringValue, loc: loc)
         var newRows: [MacroPaletteRow] = []
         var matchCount = 0
-        for category in MacroCategory.allCases {
-            let categoryTitle = loc.s(category.titleKey)
-            let matches = MacroCatalog.descriptors(in: category).filter {
-                Self.matches($0, terms: terms, categoryTitle: categoryTitle, loc: loc)
+        for section in sections {
+            newRows.append(.header(section.category))
+            for match in section.matches {
+                newRows.append(.macro(match.descriptor))
             }
-            guard !matches.isEmpty else { continue }
-            newRows.append(.header(category))
-            for descriptor in matches {
-                newRows.append(.macro(descriptor))
-            }
-            matchCount += matches.count
+            matchCount += section.matches.count
         }
 
         rows = newRows
@@ -512,28 +503,6 @@ private final class MacroPaletteController: NSViewController,
         applySelection(scroll: true)
         emptyState.isHidden = matchCount > 0
         countLabel.stringValue = loc.s("macro.palette.count", matchCount, MacroCatalog.all.count)
-    }
-
-    /// Matches on name, description, raw token, engine keywords and the category
-    /// title, so "tomorrow", "%uuid%", "fill" and "Dynamic" all find something.
-    private static func matches(
-        _ descriptor: MacroDescriptor,
-        terms: [String],
-        categoryTitle: String,
-        loc: LocalizationManager
-    ) -> Bool {
-        guard !terms.isEmpty else { return true }
-        let haystack = [
-            descriptor.name(using: loc),
-            descriptor.detail(using: loc),
-            descriptor.token,
-            descriptor.keywords,
-            categoryTitle
-        ].joined(separator: " ").lowercased()
-        for term in terms where !haystack.contains(term) {
-            return false
-        }
-        return true
     }
 
     // MARK: Selection
@@ -602,6 +571,7 @@ private final class MacroPaletteController: NSViewController,
 
     @objc private func insertSelected() {
         guard let descriptor = selectedDescriptor else { return }
+        CommandUsageStatsStore.shared.recordUsage(for: MacroPaletteRanking.usageID(descriptor))
         onPick(descriptor)
     }
 

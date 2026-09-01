@@ -314,6 +314,7 @@ final class PreferencesViewController: NSViewController,
     private let aiEnabledSwitch = NSSwitch()
     private let aiRemoveMarkdownSwitch = NSSwitch()
     private let aiTagSuggestionsSwitch = NSSwitch()
+    private let aiSemanticRoutingSwitch = NSSwitch()
     private let repetitionSwitch = NSSwitch()
     private let requireBiometrySwitch = NSSwitch()
     private let aiAvailabilityLabel = DevTypeTheme.makeLabel(
@@ -2408,6 +2409,18 @@ final class PreferencesViewController: NSViewController,
             wrapping: true
         )
         markdownHint.translatesAutoresizingMaskIntoConstraints = false
+        let routingRow = makeToggleRow(
+            title: loc.s("prefs.ai.semanticRouting"),
+            toggle: aiSemanticRoutingSwitch,
+            action: #selector(aiSemanticRoutingChanged)
+        )
+        let routingHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.semanticRouting.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        routingHint.translatesAutoresizingMaskIntoConstraints = false
         let tagRow = makeToggleRow(
             title: loc.s("prefs.ai.tagSuggestions"),
             toggle: aiTagSuggestionsSwitch,
@@ -2440,7 +2453,7 @@ final class PreferencesViewController: NSViewController,
         forgetButton.translatesAutoresizingMaskIntoConstraints = false
         forgetButton.bezelStyle = .rounded
         var modeRows: [NSView] = [
-            modesHint, markdownRow, markdownHint, tagRow, tagHint,
+            modesHint, markdownRow, markdownHint, routingRow, routingHint, tagRow, tagHint,
             repetitionRow, repetitionHint, forgetButton,
         ]
         aiOutputModePopups.removeAll()
@@ -2538,6 +2551,7 @@ final class PreferencesViewController: NSViewController,
         aiEnabledSwitch.state = AIPreferences.isEnabled ? .on : .off
         aiRemoveMarkdownSwitch.state = AIPreferences.removesMarkdown ? .on : .off
         aiTagSuggestionsSwitch.state = SnippetTagSuggester.isEnabled ? .on : .off
+        aiSemanticRoutingSwitch.state = AIPreferences.isSemanticRoutingEnabled ? .on : .off
         repetitionSwitch.state = TypedRepetitionPreferences.isActive ? .on : .off
         aiAvailabilityLabel.stringValue = loc.s(
             "prefs.ai.availability",
@@ -2575,6 +2589,10 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func aiTagSuggestionsChanged() {
         SnippetTagSuggester.isEnabled = aiTagSuggestionsSwitch.state == .on
+    }
+
+    @objc private func aiSemanticRoutingChanged() {
+        AIPreferences.isSemanticRoutingEnabled = aiSemanticRoutingSwitch.state == .on
     }
 
     /// Turning this on is a consent decision, not a preference toggle, so the switch does not

@@ -242,6 +242,8 @@ public final class LocalizationManager: ObservableObject {
             "palette.tool.count": "Count Selection",
             "palette.tool.count.detail": "Characters, words, and lines",
             "palette.tool.count.empty": "Nothing to count — select text or copy first",
+            "palette.routed.title": "Best guess",
+            "palette.routed.detail": "Resolved on device from what you typed",
             "palette.math.title": "Calculate",
             "palette.math.detail": "Evaluate an expression",
             "palette.math.invalid": "Invalid expression",
@@ -992,6 +994,9 @@ public final class LocalizationManager: ObservableObject {
             "repetition.offer.body": "You have typed this %d times:\n\n%@",
             "repetition.offer.confirm": "Create Snippet",
             "repetition.offer.dismiss": "No Thanks",
+            "prefs.ai.semanticRouting": "Answer palette questions on device",
+            "prefs.ai.semanticRouting.hint":
+                "Lets the palette hand a phrase it cannot match — \"the date three weeks from now\", \"uppercase what I copied\" — to the on-device model, which answers by running one of DevType's own tools rather than from its own knowledge. The answer appears as one extra row you can ignore; the ordinary offline results are unchanged. Off by default because it spends model time on your typing.",
             "prefs.ai.tagSuggestions": "Suggest tags for new snippets",
             "prefs.ai.tagSuggestions.hint":
                 "When you write a new snippet, the on-device model proposes a few tags and the group it seems to belong to. They appear as chips beside the other options and are applied only if you switch them on — a suggestion you ignore changes nothing. Secrets are never sent. Off by default because it spends model time on every new snippet.",
@@ -1741,6 +1746,8 @@ public final class LocalizationManager: ObservableObject {
             "palette.tool.count": "선택 개수",
             "palette.tool.count.detail": "문자·단어·줄 수",
             "palette.tool.count.empty": "셀 내용이 없습니다 — 텍스트를 선택하거나 복사하세요",
+            "palette.routed.title": "추천 결과",
+            "palette.routed.detail": "입력한 내용을 기기에서 해석한 결과",
             "palette.math.title": "계산",
             "palette.math.detail": "수식 계산",
             "palette.math.invalid": "잘못된 수식",
@@ -2462,6 +2469,9 @@ public final class LocalizationManager: ObservableObject {
             "repetition.offer.body": "이 문구를 %d번 입력했습니다:\n\n%@",
             "repetition.offer.confirm": "스니펫 만들기",
             "repetition.offer.dismiss": "괜찮습니다",
+            "prefs.ai.semanticRouting": "팔레트 질문을 기기에서 처리",
+            "prefs.ai.semanticRouting.hint":
+                "팔레트가 일치시키지 못한 문구를 온디바이스 모델에 넘깁니다. 모델은 자체 지식이 아니라 DevType의 도구를 실행해 답합니다. 결과는 무시할 수 있는 행 하나로 표시되며 기존 오프라인 결과는 그대로입니다. 입력할 때마다 모델 시간을 사용하므로 기본값은 꺼짐입니다.",
             "prefs.ai.tagSuggestions": "새 스니펫에 태그 제안",
             "prefs.ai.tagSuggestions.hint":
                 "새 스니펫을 작성하면 온디바이스 모델이 태그 몇 개와 어울리는 그룹을 제안합니다. 제안은 다른 옵션 옆에 칩으로 표시되며, 켠 경우에만 적용됩니다. 무시한 제안은 아무것도 바꾸지 않습니다. 비밀은 전송되지 않습니다. 새 스니펫마다 모델 시간을 사용하므로 기본값은 꺼짐입니다.",
@@ -3196,6 +3206,8 @@ public final class LocalizationManager: ObservableObject {
             "palette.tool.count": "選択をカウント",
             "palette.tool.count.detail": "文字・単語・行数",
             "palette.tool.count.empty": "カウント対象がありません — 選択するかコピーしてください",
+            "palette.routed.title": "推定結果",
+            "palette.routed.detail": "入力内容からデバイス上で解決",
             "palette.math.title": "計算",
             "palette.math.detail": "式を評価",
             "palette.math.invalid": "無効な式",
@@ -3921,6 +3933,9 @@ public final class LocalizationManager: ObservableObject {
             "repetition.offer.body": "この語句を %d 回入力しています:\n\n%@",
             "repetition.offer.confirm": "スニペットを作成",
             "repetition.offer.dismiss": "結構です",
+            "prefs.ai.semanticRouting": "パレットの質問をデバイス上で解決",
+            "prefs.ai.semanticRouting.hint":
+                "パレットが一致させられなかった語句をオンデバイスモデルに渡します。モデルは自身の知識ではなく DevType のツールを実行して答えます。結果は無視できる 1 行として表示され、通常のオフライン結果は変わりません。入力のたびにモデルの時間を使うため、既定ではオフです。",
             "prefs.ai.tagSuggestions": "新しいスニペットにタグを提案",
             "prefs.ai.tagSuggestions.hint":
                 "新しいスニペットを書くと、オンデバイスモデルがタグと合いそうなグループを提案します。提案は他のオプションの隣にチップとして表示され、オンにした場合のみ適用されます。無視した提案は何も変更しません。シークレットは送信されません。新しいスニペットごとにモデルの時間を使うため、既定ではオフです。",

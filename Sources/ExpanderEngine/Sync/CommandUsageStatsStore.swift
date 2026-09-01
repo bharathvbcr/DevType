@@ -158,6 +158,15 @@ public final class CommandUsageStatsStore {
         scheduleFlush()
     }
 
+    /// Personalization weight, log-scaled in usage count with a recency kicker.
+    ///
+    /// The ceiling used to be 12 against a semantic boost of up to 80, so how often you
+    /// actually ran a command was the weakest signal in the palette by a factor of six.
+    /// Doubling the per-doubling step and the recency kicker lifts the ceiling to 24 —
+    /// comparable to `CommandPaletteCatalog.semanticBoostWeight` (40), so habit competes with
+    /// similarity, while still far too small to unseat an exact trigger match (~1000).
+    public static let maximumRankBoost = 24
+
     public func rankBoost(for commandID: String) -> Int {
         lock.lock()
         let stat = stats[commandID]
@@ -165,14 +174,14 @@ public final class CommandUsageStatsStore {
         guard let stat, stat.usageCount > 0 else { return 0 }
         var boost = 0
         var remaining = stat.usageCount
-        while remaining > 0 && boost < 10 {
-            boost += 1
+        while remaining > 0 && boost < 20 {
+            boost += 2
             remaining /= 2
         }
         if let last = stat.lastUsedAt, Date().timeIntervalSince(last) < 60 * 60 * 24 * 7 {
-            boost += 2
+            boost += 4
         }
-        return min(boost, 12)
+        return min(boost, Self.maximumRankBoost)
     }
 
     /// Most-used command IDs, highest first. Ties broken by recency.

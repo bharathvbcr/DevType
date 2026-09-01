@@ -418,7 +418,13 @@ final class CommandPaletteMatchingTests: XCTestCase {
         CommandPaletteCatalog.invalidateCache()
     }
 
+    /// Proves the cache is *consulted*, not merely that two identical computations agree.
+    ///
+    /// The previous version asserted `rows1 == rows2` and `rows1 == rows3`, which holds
+    /// whether or not a cache exists — it tested determinism and would have passed against a
+    /// build with caching ripped out entirely.
     func testPaletteQueryCachingAndInvalidation() {
+        CommandUsageStatsStore.shared.resetAll()
         CommandPaletteCatalog.invalidateCache()
 
         let group = SnippetGroup(
@@ -429,13 +435,67 @@ final class CommandPaletteMatchingTests: XCTestCase {
         )
 
         let rows1 = CommandPaletteCatalog.buildRows(query: "cached", groups: [group], loc: .shared)
+        XCTAssertEqual(CommandPaletteCatalog.rowCacheHitCount, 0, "First build must compute.")
+
         let rows2 = CommandPaletteCatalog.buildRows(query: "cached", groups: [group], loc: .shared)
         XCTAssertEqual(rows1, rows2)
+        XCTAssertEqual(CommandPaletteCatalog.rowCacheHitCount, 1, "Second build must be served from cache.")
 
-        // Invalidate and verify freshness
+        // After invalidation the same query must be recomputed, not served.
         CommandPaletteCatalog.invalidateCache()
         let rows3 = CommandPaletteCatalog.buildRows(query: "cached", groups: [group], loc: .shared)
         XCTAssertEqual(rows1, rows3)
+        XCTAssertEqual(CommandPaletteCatalog.rowCacheHitCount, 0, "Invalidation must force a recompute.")
+
+        CommandUsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+    }
+
+    /// Recording usage must not be served a stale ranking: the stats revision is part of the
+    /// cache key precisely so weights take effect on the next keystroke.
+    func testUsageChangeBypassesTheRowCache() {
+        CommandUsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+
+        let group = SnippetGroup(name: "Work", snippets: [])
+        _ = CommandPaletteCatalog.buildRows(query: "upper", groups: [group], loc: .shared)
+        _ = CommandPaletteCatalog.buildRows(query: "upper", groups: [group], loc: .shared)
+        XCTAssertEqual(CommandPaletteCatalog.rowCacheHitCount, 1, "Precondition: the cache is warm.")
+
+        for _ in 0..<10 { CommandUsageStatsStore.shared.recordUsage(for: "tool.upper") }
+        _ = CommandPaletteCatalog.buildRows(query: "upper", groups: [group], loc: .shared)
+        XCTAssertEqual(
+            CommandPaletteCatalog.rowCacheHitCount, 1,
+            "A usage change must miss the cache rather than replay the old ranking."
+        )
+
+        CommandUsageStatsStore.shared.resetAll()
+        CommandPaletteCatalog.invalidateCache()
+    }
+
+    /// A caller whose boost closure reads its own store, not the shared singleton, must still
+    /// invalidate. Without `boostRevision` in the key the shared revision never moves and the
+    /// cache replays rankings built from counts that have already changed.
+    func testInjectedBoostRevisionInvalidatesTheRowCache() {
+        CommandPaletteCatalog.invalidateCache()
+        let group = SnippetGroup(name: "Work", snippets: [])
+
+        _ = CommandPaletteCatalog.buildRows(
+            query: "upper", groups: [group], loc: .shared, boostRevision: 1
+        )
+        _ = CommandPaletteCatalog.buildRows(
+            query: "upper", groups: [group], loc: .shared, boostRevision: 1
+        )
+        XCTAssertEqual(CommandPaletteCatalog.rowCacheHitCount, 1, "Same revision should hit.")
+
+        _ = CommandPaletteCatalog.buildRows(
+            query: "upper", groups: [group], loc: .shared, boostRevision: 2
+        )
+        XCTAssertEqual(
+            CommandPaletteCatalog.rowCacheHitCount, 1,
+            "A moved boost revision must miss the cache."
+        )
+        CommandPaletteCatalog.invalidateCache()
     }
 
     func testCommandUsageStatsStoreMethodsAndRevisions() {

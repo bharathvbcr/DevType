@@ -187,6 +187,11 @@ public enum SnippetSearch {
         let fingerprint: UInt64
         let limit: Int?
         let statsRevision: UInt64
+        /// Revision of whatever store the caller's `boost` closure actually reads. The shared
+        /// revision above cannot stand in for it: a caller boosting from its own
+        /// `UsageStatsStore` would mutate that store without moving `shared.revision`, and the
+        /// cache would keep serving rankings computed from counts that had already changed.
+        let boostRevision: UInt64
     }
 
     private static var queryCache: [QueryCacheKey: [SearchHit]] = [:]
@@ -311,9 +316,16 @@ public enum SnippetSearch {
         in groups: [SnippetGroup],
         includeDisabled: Bool = true,
         limit: Int? = nil,
-        boost: ((UUID) -> Int)?
+        boost: ((UUID) -> Int)?,
+        boostRevision: UInt64? = nil
     ) -> [SearchHit] {
-        run(query: query, index: index(for: groups, includeDisabled: includeDisabled), limit: limit, boost: boost)
+        run(
+            query: query,
+            index: index(for: groups, includeDisabled: includeDisabled),
+            limit: limit,
+            boost: boost,
+            boostRevision: boostRevision
+        )
     }
 
     /// Searches a caller-owned index.
@@ -321,7 +333,8 @@ public enum SnippetSearch {
         query: String,
         index: SnippetSearchIndex,
         limit: Int? = nil,
-        boost: ((UUID) -> Int)? = nil
+        boost: ((UUID) -> Int)? = nil,
+        boostRevision: UInt64? = nil
     ) -> [SearchHit] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
@@ -331,7 +344,8 @@ public enum SnippetSearch {
             query: trimmed,
             fingerprint: index.fingerprint,
             limit: limit,
-            statsRevision: boost != nil ? statsRev : 0
+            statsRevision: boost != nil ? statsRev : 0,
+            boostRevision: boost != nil ? (boostRevision ?? 0) : 0
         )
 
         cacheLock.lock()

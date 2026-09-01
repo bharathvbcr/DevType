@@ -817,7 +817,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 // gesture. Anything else (AI, navigation) has no clipboard meaning — ignore it
                 // rather than half-perform it.
                 guard !insertText.isEmpty else { return }
-                CommandUsageStatsStore.shared.recordUsage(for: command.id)
+                if !command.isEphemeral {
+                    CommandUsageStatsStore.shared.recordUsage(for: command.id)
+                }
                 _ = SecretClipboard.shared.copy(insertText)
                 ToastPanel.show(self.loc.s("snippet.copied.toast", self.loc.s(command.titleKey)))
             }
@@ -1210,7 +1212,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         sourceApp: NSRunningApplication?,
         selection: SelectionReader.Outcome
     ) {
-        CommandUsageStatsStore.shared.recordUsage(for: command.id)
+        // Ephemeral rows are built from the query text, so their ids are unique per keystroke
+        // and resolve to nothing in the catalogue. Recording them grew the stats file forever.
+        if !command.isEphemeral {
+            CommandUsageStatsStore.shared.recordUsage(for: command.id)
+        }
 
         switch command.action {
         case .ai(let kind):

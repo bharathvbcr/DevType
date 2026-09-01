@@ -504,6 +504,8 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     private var cachedClipboard: String?
     private var cachedClipboardChangeCount: Int = -1
     private var semanticBoostIDs: [String] = []
+    private var routedResult: PaletteToolRouter.Routed?
+    private var routingTask: Task<Void, Never>?
     private var semanticWorkItem: DispatchWorkItem?
     private var aiDisabledReason: String?
 
@@ -715,6 +717,12 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     override func viewWillDisappear() {
         super.viewWillDisappear()
         semanticWorkItem?.cancel()
+        // Same reason the semantic work item is cancelled here: a routing round trip
+        // outliving the panel would resolve against a search field that is no longer on
+        // screen, and hold the single-flight latch against the next time it opens.
+        routingTask?.cancel()
+        routingTask = nil
+        routedResult = nil
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
         // Remove here, not just in deinit: every re-appear registered a fresh group
         // listener while the old one stayed live until deallocation — a panel that
@@ -730,6 +738,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         selection = 0
         refreshHits()
         scheduleSemanticBoost()
+        scheduleRouting()
     }
 
     private func refreshClipboardCache(force: Bool = false) {
@@ -739,12 +748,46 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         cachedClipboard = NSPasteboard.general.string(forType: .string)
     }
 
+    /// Hands a phrase the offline ranking could not match to the on-device model, which
+    /// answers by running one of DevType's own tools.
+    ///
+    /// Off unless the user turned it on. The result arrives as one extra row; every offline
+    /// row is computed and shown without waiting for it, so routing can only ever add.
+    private func scheduleRouting() {
+        routingTask?.cancel()
+        routingTask = nil
+        let query = searchField.stringValue
+        guard PaletteToolRouter.shouldAttemptRouting(query: query) else { return }
+
+        routingTask = Task { [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(PaletteToolRouter.debounceMilliseconds) * 1_000_000
+            )
+            guard !Task.isCancelled else { return }
+
+            var engine: PaletteToolRouter.RoutingEngine?
+            #if canImport(FoundationModels)
+            if #available(macOS 26.0, *) {
+                engine = PaletteToolRouter.foundationModelsEngine()
+            }
+            #endif
+            guard let routed = await PaletteToolRouter.route(query: query, engine: engine),
+                  !Task.isCancelled else { return }
+
+            DispatchQueue.main.async {
+                guard let self, self.searchField.stringValue == routed.query else { return }
+                self.routedResult = routed
+                self.refreshHits()
+            }
+        }
+    }
+
     private func scheduleSemanticBoost() {
         semanticWorkItem?.cancel()
         let query = searchField.stringValue
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            let ids = CommandPaletteCatalog.semanticBoostIDs(for: query)
+            let ids = CommandPaletteCatalog.semanticBoostIDs(for: query, loc: self.loc)
             DispatchQueue.main.async {
                 guard self.searchField.stringValue == query else { return }
                 self.semanticBoostIDs = ids
@@ -782,7 +825,11 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             commandUsageBoost: { CommandUsageStatsStore.shared.rankBoost(for: $0) },
             aiDisabledReason: aiDisabledReason,
             commandLimit: mode.showsCommands ? 20 : 0,
-            snippetLimit: 40
+            snippetLimit: 40,
+            // The boost closures below read this panel's own store, not the shared singleton,
+            // so the cache has to key on that store's revision or it serves stale rankings.
+            boostRevision: store.usageStatsStore.revision,
+            routedResult: routedResult
         )
 
         if selection < 0 || !rows.indices.contains(selection) || !rows[selection].isSelectable {

@@ -81,6 +81,15 @@ public struct PaletteCommand: Equatable, Identifiable, Sendable {
     /// Precomputed lowercased search blob (trigger + aliases + title key tokens).
     public let searchBlob: String
 
+    /// Built from the query itself rather than drawn from the catalogue (`=2+2`, `+3w`, a
+    /// routed answer), so its id is unique per keystroke.
+    ///
+    /// Usage must not be recorded against these. Their ids can never be resolved back to a
+    /// catalogue entry, so the entries are dead weight the moment they are written — and one
+    /// per distinct expression typed means a stats file that grows without bound and a
+    /// `totalUsage()` that counts rows nothing can ever rank.
+    public let isEphemeral: Bool
+
     public init(
         id: String,
         section: PaletteSection,
@@ -89,7 +98,8 @@ public struct PaletteCommand: Equatable, Identifiable, Sendable {
         subtitleKey: String,
         aliases: [String],
         action: PaletteCommandAction,
-        searchBlob: String? = nil
+        searchBlob: String? = nil,
+        isEphemeral: Bool = false
     ) {
         self.id = id
         self.section = section
@@ -99,6 +109,7 @@ public struct PaletteCommand: Equatable, Identifiable, Sendable {
         let loweredAliases = aliases.map { $0.lowercased() }
         self.aliases = loweredAliases
         self.action = action
+        self.isEphemeral = isEphemeral
         if let searchBlob {
             self.searchBlob = searchBlob
         } else {
@@ -446,7 +457,19 @@ public enum CommandPaletteCatalog {
         let clipboardHash: Int
         let aiDisabledReason: String?
         let semanticBoostIDs: [String]
+        let routedText: String?
+        /// Revision of whatever stores the caller's boost closures actually read. The two
+        /// shared revisions above cannot stand in for them: a caller boosting from its own
+        /// store would mutate that store without moving `shared.revision`, leaving the cache
+        /// serving rankings computed from counts that had already changed.
+        let boostRevision: UInt64
     }
+
+    /// Test seam: number of `buildRows` calls served from the cache.
+    ///
+    /// Without it a caching test can only compare two identical computations, which is true
+    /// whether or not a cache exists — it proves determinism, not caching.
+    private(set) static var rowCacheHitCount = 0
 
     private static var rowQueryCache: [PaletteQueryCacheKey: [PaletteListRow]] = [:]
     private static var rowQueryCacheKeys: [PaletteQueryCacheKey] = []
@@ -502,8 +525,50 @@ public enum CommandPaletteCatalog {
         rowQueryCache.removeAll(keepingCapacity: false)
         rowQueryCacheKeys.removeAll(keepingCapacity: false)
         cachedCommandIndex = nil
+        cachedCommandsByID = nil
+        rowCacheHitCount = 0
         paletteCacheLock.unlock()
         PaletteSemanticIndex.invalidateCache()
+    }
+
+    // MARK: - Ranking weights
+
+    /// Boost applied to the top semantic neighbour, decaying by rank.
+    ///
+    /// Deliberately smaller than it was (80, decaying by 5). The semantic index is an averaged
+    /// static word embedding, not a model: it ranks `explainRegex` first for "tidy up my
+    /// writing". At 80 a wrong neighbour outscored the personalization ceiling six times over
+    /// and could unseat a confident lexical match. At 40 it breaks ties and reorders near-equal
+    /// candidates, which is all a signal this noisy has earned.
+    static let semanticBoostWeight = 40
+    static let semanticBoostDecay = 3
+
+    /// Score for a command surfaced *only* by semantic similarity. Below the weakest possible
+    /// lexical hit (`minimumPartialTermScore * partialCoverageFloor` = 385), so a rescued row
+    /// can never outrank a command the user actually spelled.
+    static let semanticRescueBaseScore = 300
+    static let semanticRescueDecay = 10
+
+    /// Lexical hit count below which the rescue pass runs. Above it the lexical pass already
+    /// filled the list and rescued rows would only crowd the tail.
+    static let semanticRescueThreshold = 5
+
+    private static var cachedCommandsByID: [String: PaletteCommand]?
+
+    /// Catalogue keyed by id. Cached because the rescue pass runs per keystroke and the
+    /// catalogue is a `let` constant.
+    static func commandsByID() -> [String: PaletteCommand] {
+        paletteCacheLock.lock()
+        if let cached = cachedCommandsByID {
+            paletteCacheLock.unlock()
+            return cached
+        }
+        paletteCacheLock.unlock()
+        let fresh = Dictionary(uniqueKeysWithValues: commands.map { ($0.id, $0) })
+        paletteCacheLock.lock()
+        cachedCommandsByID = fresh
+        paletteCacheLock.unlock()
+        return fresh
     }
 
     // MARK: - Search
@@ -595,22 +660,49 @@ public enum CommandPaletteCatalog {
         guard !terms.isEmpty else { return Array(hits.prefix(limit)) }
 
         let boostIndex = Dictionary(
-            uniqueKeysWithValues: semanticBoostIDs.enumerated().map { ($0.element, 80 - $0.offset * 5) }
+            uniqueKeysWithValues: semanticBoostIDs.enumerated().map {
+                ($0.element, semanticBoostWeight - $0.offset * semanticBoostDecay)
+            }
         )
 
+        let lexicalStart = hits.count
+        var admitted = Set<String>()
         let index = commandIndex(loc: loc)
+        let scoredTerms = contentTerms(terms)
+
+        // Score every command against every term first. Admission depends on which terms the
+        // catalogue as a whole understands, so no command can be judged until all of them have
+        // been measured.
+        var perCommand: [(entry: CommandIndexEntry, scores: [Int?])] = []
+        perCommand.reserveCapacity(index.entries.count)
+        var scoresByID: [String: [Int?]] = [:]
+        var discriminating = [Bool](repeating: false, count: scoredTerms.count)
         for entry in index.entries {
+            if case .undoAI = entry.command.action, !AIUndoStore.hasUndo { continue }
+            let scores = termScores(entry: entry, terms: scoredTerms)
+            for (i, value) in scores.enumerated() where (value ?? 0) >= minimumPartialTermScore {
+                discriminating[i] = true
+            }
+            scoresByID[entry.command.id] = scores
+            perCommand.append((entry, scores))
+        }
+
+        for (entry, scores) in perCommand {
             let command = entry.command
-            if case .undoAI = command.action, !AIUndoStore.hasUndo { continue }
-            guard let score = score(entry: entry, terms: terms) else { continue }
+            guard let score = combinedScore(
+                termScores: scores, discriminating: discriminating
+            ) else { continue }
             var adjusted = score
             if let boost = boostIndex[command.id] {
                 adjusted += max(0, boost)
             }
-            if let usage = commandUsageBoost?(command.id) {
-                adjusted += usage
-            }
+            // Falls back to the shared store rather than silently dropping personalization.
+            // The empty-query branch above has always done this; the typed branch did not, so
+            // any caller that forgot the closure lost usage weighting with no symptom.
+            adjusted += commandUsageBoost?(command.id)
+                ?? CommandUsageStatsStore.shared.rankBoost(for: command.id)
             adjusted += conversationalBoost(query: trimmed, command: command)
+            admitted.insert(command.id)
             hits.append(makeHit(
                 command,
                 score: adjusted,
@@ -621,6 +713,42 @@ public enum CommandPaletteCatalog {
                 clipboardPreview: clipboardPreview,
                 aiDisabledReason: aiDisabledReason
             ))
+        }
+
+        // Semantic rescue. The boost above can only reorder commands the lexical pass already
+        // admitted, so a semantically obvious command that shares no token with the query
+        // ("shorten this a bit" → condense) could never be surfaced by it. When the lexical
+        // pass comes back thin, add the nearest commands it missed — scored below every real
+        // lexical hit, so they fill the tail rather than displacing a command the user spelled.
+        if hits.count - lexicalStart < semanticRescueThreshold, !semanticBoostIDs.isEmpty {
+            let byID = commandsByID()
+            for (offset, id) in semanticBoostIDs.enumerated() {
+                guard !admitted.contains(id), let command = byID[id] else { continue }
+                if case .undoAI = command.action, !AIUndoStore.hasUndo { continue }
+                // Same veto the lexical pass applies: a command that misses a term the
+                // catalogue understands is not a candidate, however close it looks in
+                // embedding space. Without this, "fix telugu" could reach proofread through
+                // the back door the lexical pass just closed.
+                if let scores = scoresByID[id],
+                   scores.indices.contains(where: { discriminating[$0] && scores[$0] == nil }) {
+                    continue
+                }
+                var adjusted = max(1, semanticRescueBaseScore - offset * semanticRescueDecay)
+                adjusted += commandUsageBoost?(command.id)
+                    ?? CommandUsageStatsStore.shared.rankBoost(for: command.id)
+                adjusted += conversationalBoost(query: trimmed, command: command)
+                admitted.insert(id)
+                hits.append(makeHit(
+                    command,
+                    score: adjusted,
+                    loc: loc,
+                    now: now,
+                    locale: locale,
+                    timeZone: timeZone,
+                    clipboardPreview: clipboardPreview,
+                    aiDisabledReason: aiDisabledReason
+                ))
+            }
         }
 
         hits.sort { a, b in
@@ -647,7 +775,9 @@ public enum CommandPaletteCatalog {
         commandUsageBoost: ((String) -> Int)? = nil,
         aiDisabledReason: String? = nil,
         commandLimit: Int = 20,
-        snippetLimit: Int = 40
+        snippetLimit: Int = 40,
+        boostRevision: UInt64? = nil,
+        routedResult: PaletteToolRouter.Routed? = nil
     ) -> [PaletteListRow] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let libStamp = SnippetSearch.fingerprint(of: groups, includeDisabled: false)
@@ -665,11 +795,14 @@ public enum CommandPaletteCatalog {
             hasUndo: AIUndoStore.hasUndo,
             clipboardHash: clipHash,
             aiDisabledReason: aiDisabledReason,
-            semanticBoostIDs: semanticBoostIDs
+            semanticBoostIDs: semanticBoostIDs,
+            routedText: routedResult.flatMap { $0.query == trimmed ? $0.text : nil },
+            boostRevision: boostRevision ?? 0
         )
 
         paletteCacheLock.lock()
         if let cached = rowQueryCache[cacheKey] {
+            rowCacheHitCount &+= 1
             paletteCacheLock.unlock()
             return cached
         }
@@ -724,13 +857,21 @@ public enum CommandPaletteCatalog {
                 in: groups,
                 includeDisabled: false,
                 limit: snippetLimit,
-                boost: usageBoost
+                boost: usageBoost,
+                boostRevision: boostRevision
             )
         }
 
         var rows: [PaletteListRow] = []
 
-        let commandSection = commandHits.filter { $0.command.section == .commands }
+        var commandSection = commandHits.filter { $0.command.section == .commands }
+
+        // A routed answer leads the command section when it is still answering the query on
+        // screen. Routing is debounced and asynchronous, so an answer to an older query is
+        // dropped rather than shown against text the user has already moved past.
+        if let routed = routedResult, routed.query == trimmed, !isExplicitCommandQuery {
+            commandSection.insert(routedHit(routed, loc: loc), at: 0)
+        }
         let aiSection = commandHits.filter { $0.command.section == .ai }
 
         if !commandSection.isEmpty {
@@ -796,14 +937,41 @@ public enum CommandPaletteCatalog {
 
     // MARK: - Scoring
 
-    private static func score(
-        entry: CommandIndexEntry,
-        terms: [String]
-    ) -> Int? {
-        guard !terms.isEmpty else { return nil }
-        var total = 0
-        for term in terms {
-            guard let best = bestTermScore(
+    /// A partial match must land at least one term on a trigger, alias or title. Without
+    /// this floor a single stray substring hit inside a search blob would admit the whole
+    /// catalogue on any multi-word query.
+    public static let minimumPartialTermScore = 700
+
+    /// Share of the score a partial match keeps as coverage approaches zero. Full coverage
+    /// keeps 100%, so a command matching every term always outranks one matching some.
+    public static let partialCoverageFloor = 0.55
+
+    /// Query words that carry no command meaning. Excluded from the coverage denominator so
+    /// "make this sound polite" is judged on `make/sound/polite` rather than being punished
+    /// for a `this` that no command will ever list as an alias.
+    ///
+    /// Direction words like `to` stay in: `conversationalBoost` reads the raw phrase for
+    /// "to english" / "to telugu", but the tokens still have to reach a translate command.
+    public static let queryStopwords: Set<String> = [
+        "a", "an", "the", "this", "that", "these", "those", "it", "its",
+        "my", "me", "i", "you", "your", "is", "are", "was", "be", "am",
+        "do", "does", "did", "please", "can", "could", "would", "should",
+        "and", "or", "as", "so", "just", "very", "really", "bit", "some",
+        "up", "out", "here", "there", "thing", "stuff", "kinda", "pls"
+    ]
+
+    /// Terms that should drive scoring: content words, or every word when the query is
+    /// nothing but stopwords (`"do it"`), so such a query still searches rather than
+    /// silently matching nothing.
+    public static func contentTerms(_ terms: [String]) -> [String] {
+        let content = terms.filter { !queryStopwords.contains($0) }
+        return content.isEmpty ? terms : content
+    }
+
+    /// Per-term match scores for one command; `nil` where the term did not match at all.
+    private static func termScores(entry: CommandIndexEntry, terms: [String]) -> [Int?] {
+        terms.map { term in
+            bestTermScore(
                 term: term,
                 trigger: entry.foldedTrigger,
                 title: entry.foldedTitle,
@@ -811,21 +979,93 @@ public enum CommandPaletteCatalog {
                 aliases: entry.foldedAliases,
                 aliasBlob: entry.foldedAliasBlob,
                 searchBlob: entry.searchBlob
-            ) else { return nil }
-            total += best
+            )
         }
-        return total / terms.count
+    }
+
+    /// Term-coverage scoring.
+    ///
+    /// The previous rule was conjunctive — one unmatched term vetoed the command outright — so
+    /// every conversational query ("make this sound polite", "tidy up my writing") returned an
+    /// empty palette. That also made `conversationalBoost` and the semantic index unreachable
+    /// for exactly those queries, because both are applied only to commands that already
+    /// scored.
+    ///
+    /// An unmatched term now costs coverage instead of vetoing — but only when it is a word no
+    /// command in the catalogue understands. `discriminating` carries the terms that *some*
+    /// command matches strongly, and missing one of those is still fatal. That distinction is
+    /// what keeps "fix telugu" away from proofread: `telugu` names a capability proofread does
+    /// not have, whereas `polite` is a word nothing claims and so is safely ignored.
+    ///
+    /// A fully covered query scores exactly what it scored before — the coverage factor is 1.0
+    /// at full coverage — so existing rankings are untouched and only new, strictly
+    /// lower-scored partial hits appear.
+    public static func combinedScore(
+        termScores scores: [Int?],
+        discriminating: [Bool]
+    ) -> Int? {
+        guard !scores.isEmpty else { return nil }
+        var total = 0
+        var matched = 0
+        var strongest = 0
+        for (index, value) in scores.enumerated() {
+            guard let value else {
+                if discriminating[index] { return nil }
+                continue
+            }
+            total += value
+            matched += 1
+            strongest = Swift.max(strongest, value)
+        }
+        guard matched > 0 else { return nil }
+        let base = total / matched
+        guard matched < scores.count else { return base }
+        guard strongest >= minimumPartialTermScore else { return nil }
+        let coverage = Double(matched) / Double(scores.count)
+        return Int(Double(base) * (partialCoverageFloor + (1 - partialCoverageFloor) * coverage))
     }
 
     /// Offline NLEmbedding semantic boost IDs (Stage 1). Returns empty on OOV / failure.
     public static func semanticBoostIDs(
         for query: String,
+        loc: LocalizationManager = .shared,
         limit: Int = 8
     ) -> [String] {
-        PaletteSemanticIndex.boostIDs(for: query, commands: commands, limit: limit)
+        PaletteSemanticIndex.boostIDs(for: query, commands: commands, loc: loc, limit: limit)
     }
 
     // MARK: - Private builders
+
+    /// A palette row for a routed answer.
+    ///
+    /// Modelled on the `=` math row: a synthetic command carrying pre-resolved text through
+    /// the existing `.insert` action, so a routed answer needs no new commit path and cannot
+    /// reach anything a math result could not.
+    static func routedHit(
+        _ routed: PaletteToolRouter.Routed,
+        loc: LocalizationManager
+    ) -> PaletteCommandHit {
+        let command = PaletteCommand(
+            id: "routed.\(routed.query)",
+            section: .commands,
+            trigger: routed.query,
+            titleKey: "palette.routed.title",
+            subtitleKey: "palette.routed.detail",
+            aliases: [],
+            action: .insert,
+            isEphemeral: true
+        )
+        return PaletteCommandHit(
+            command: command,
+            score: routedLeadScore,
+            insertText: routed.text,
+            preview: routed.text
+        )
+    }
+
+    /// Above any lexical match, because a routed row is a direct answer to the phrase on
+    /// screen rather than a command that resembles it.
+    static let routedLeadScore = 1500
 
     private static func hitsForTypedQuery(
         _ typed: TypedPaletteQuery,
@@ -847,7 +1087,8 @@ public enum CommandPaletteCatalog {
                 titleKey: "palette.math.title",
                 subtitleKey: "palette.math.detail",
                 aliases: [],
-                action: .insert
+                action: .insert,
+                isEphemeral: true
             )
             return [PaletteCommandHit(
                 command: command,
@@ -884,7 +1125,8 @@ public enum CommandPaletteCatalog {
                 titleKey: "palette.date.relative",
                 subtitleKey: "palette.date.relative.detail",
                 aliases: [],
-                action: .date(tool)
+                action: .date(tool),
+                isEphemeral: true
             )
             return [PaletteCommandHit(
                 command: command,
@@ -903,7 +1145,8 @@ public enum CommandPaletteCatalog {
                 titleKey: "palette.date.relative",
                 subtitleKey: "palette.date.relative.detail",
                 aliases: [],
-                action: .date(tool)
+                action: .date(tool),
+                isEphemeral: true
             )
             return [PaletteCommandHit(
                 command: command,
@@ -1396,29 +1639,59 @@ public enum CommandPaletteCatalog {
 
 enum PaletteSemanticIndex {
     private static let lock = NSLock()
-    private static var cachedVectors: [String: [Double]]?
+    /// Vectors are only comparable inside the embedding space that produced them, so the
+    /// cache is keyed by language. Comparing a Japanese query vector against English command
+    /// vectors is not a weak signal — it is a meaningless number.
+    private static var cachedVectors: [String: [String: [Double]]] = [:]
+    private static var cachedLanguage: AppLanguage?
+
+    /// Cosine floor for a neighbour to count. Raised from 0.35: at that threshold an averaged
+    /// word embedding returned `ai.explainregex` as the nearest command for "tidy up my
+    /// writing", "shorten this a bit" and "make this sound polite" alike.
+    static let minimumSimilarity = 0.45
 
     static func invalidateCache() {
         lock.lock()
-        cachedVectors = nil
+        cachedVectors.removeAll(keepingCapacity: false)
+        cachedLanguage = nil
         lock.unlock()
     }
 
-    static func boostIDs(for query: String, commands: [PaletteCommand], limit: Int) -> [String] {
+    /// The embedding space to use for this query, or `nil` when there is none.
+    ///
+    /// Apple ships word embeddings for a fixed set of languages. Asking for one that does not
+    /// exist returns `nil`, which is the honest answer — the caller then falls back to lexical
+    /// matching rather than scoring against a space the query does not live in.
+    static func embedding(for query: String) -> (NLEmbedding, String)? {
+        let detected = NLLanguageRecognizer.dominantLanguage(for: query)
+        // Short queries give the recognizer too little to go on and it guesses wildly, so a
+        // pure-ASCII query is treated as English rather than whatever it reported.
+        let isASCII = query.allSatisfy { $0.isASCII }
+        let language: NLLanguage = isASCII ? .english : (detected ?? .english)
+        guard let embedding = NLEmbedding.wordEmbedding(for: language) else { return nil }
+        return (embedding, language.rawValue)
+    }
+
+    static func boostIDs(
+        for query: String,
+        commands: [PaletteCommand],
+        loc: LocalizationManager,
+        limit: Int
+    ) -> [String] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmed.isEmpty, limit > 0 else { return [] }
-        guard let queryVector = averageEmbedding(for: trimmed) else { return [] }
+        guard let (embedding, languageKey) = embedding(for: trimmed) else { return [] }
+        guard let queryVector = averageEmbedding(for: trimmed, embedding: embedding) else { return [] }
 
-        ensureCommandVectors(commands)
-        lock.lock()
-        let vectors = cachedVectors ?? [:]
-        lock.unlock()
+        let vectors = commandVectors(
+            commands, loc: loc, embedding: embedding, languageKey: languageKey
+        )
 
         var scored: [(String, Double)] = []
         for command in commands {
             guard let vector = vectors[command.id] else { continue }
             let sim = cosineSimilarity(queryVector, vector)
-            if sim > 0.35 {
+            if sim > minimumSimilarity {
                 scored.append((command.id, sim))
             }
         }
@@ -1426,38 +1699,62 @@ enum PaletteSemanticIndex {
         return scored.prefix(limit).map(\.0)
     }
 
-    private static func ensureCommandVectors(_ commands: [PaletteCommand]) {
+    /// Command vectors for one embedding space. Built from the *localized* title and subtitle
+    /// as well as the English trigger and aliases: in a non-English space the English tokens
+    /// are simply out of vocabulary and drop out, leaving the localized text to carry the
+    /// meaning. That is what makes a Japanese or Korean query able to match at all.
+    private static func commandVectors(
+        _ commands: [PaletteCommand],
+        loc: LocalizationManager,
+        embedding: NLEmbedding,
+        languageKey: String
+    ) -> [String: [Double]] {
         lock.lock()
-        if cachedVectors != nil {
+        if cachedLanguage != loc.language {
+            cachedVectors.removeAll(keepingCapacity: false)
+            cachedLanguage = loc.language
+        }
+        if let cached = cachedVectors[languageKey] {
             lock.unlock()
-            return
+            return cached
         }
         lock.unlock()
 
         var map: [String: [Double]] = [:]
         for command in commands {
-            let blob = ([command.trigger] + command.aliases).joined(separator: " ")
-            if let vector = averageEmbedding(for: blob) {
+            let blob = ([command.trigger]
+                + command.aliases
+                + [loc.s(command.titleKey), loc.s(command.subtitleKey)]
+            ).joined(separator: " ")
+            if let vector = averageEmbedding(for: blob, embedding: embedding) {
                 map[command.id] = vector
             }
         }
         lock.lock()
-        cachedVectors = map
+        cachedVectors[languageKey] = map
+        cachedLanguage = loc.language
         lock.unlock()
+        return map
     }
 
-    private static func averageEmbedding(for text: String) -> [Double]? {
-        guard let embedding = NLEmbedding.wordEmbedding(for: .english) else { return nil }
+    /// Mean of the in-vocabulary word vectors, with stopwords removed first.
+    ///
+    /// Averaging over `this`, `it`, `up` and `a` pulls every query toward the centroid of the
+    /// language and flattens the differences the cosine is supposed to measure — which is how
+    /// unrelated queries all came back with the same nearest neighbour.
+    private static func averageEmbedding(for text: String, embedding: NLEmbedding) -> [Double]? {
         let tokens = text
             .lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
             .filter { !$0.isEmpty }
-        guard !tokens.isEmpty else { return nil }
+        let content = tokens.filter { !CommandPaletteCatalog.queryStopwords.contains($0) }
+        let effective = content.isEmpty ? tokens : content
+        guard !effective.isEmpty else { return nil }
 
         var sum: [Double] = []
         var count = 0
-        for token in tokens {
+        for token in effective {
             guard let vector = embedding.vector(for: token) else { continue }
             if sum.isEmpty {
                 sum = vector
