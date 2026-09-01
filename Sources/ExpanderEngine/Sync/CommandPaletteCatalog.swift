@@ -375,6 +375,17 @@ public enum CommandPaletteCatalog {
     }
 
     /// Parses `date+1`, `date-2`, `date+3d`, `+1d` (bare), returning day offset + preferred format.
+    /// Compiled once. These used to be built inside `parseRelativeDayQuery`, which
+    /// `parseTypedQuery` calls from `matchCommands` — the palette's per-keystroke entry point —
+    /// so every character typed compiled two regular expressions and threw them away.
+    ///
+    /// `try!` is safe here and was safe before: the patterns are literals, so a failure is a
+    /// malformed pattern in this file, not anything a user can type.
+    static let relativeDayPatterns: [NSRegularExpression] = [
+        try! NSRegularExpression(pattern: #"^date\s*([+-])\s*(\d{1,3})\s*d?$"#),
+        try! NSRegularExpression(pattern: #"^([+-])\s*(\d{1,3})\s*d$"#)
+    ]
+
     public static func parseRelativeDayQuery(_ raw: String) -> (days: Int, format: String, trigger: String, exactQuery: Bool)? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !text.isEmpty else { return nil }
@@ -393,12 +404,8 @@ public enum CommandPaletteCatalog {
         }
 
         // date+N / date-N / date+Nd
-        let patterns: [NSRegularExpression] = [
-            try! NSRegularExpression(pattern: #"^date\s*([+-])\s*(\d{1,3})\s*d?$"#),
-            try! NSRegularExpression(pattern: #"^([+-])\s*(\d{1,3})\s*d$"#)
-        ]
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        for regex in patterns {
+        for regex in relativeDayPatterns {
             guard let match = regex.firstMatch(in: text, range: range),
                   match.numberOfRanges >= 3,
                   let signRange = Range(match.range(at: 1), in: text),
