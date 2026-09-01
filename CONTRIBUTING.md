@@ -80,7 +80,7 @@ DevType/
 │   │   ├── Engine/                        # CGEventTap, text injection, type-ahead buffer
 │   │   ├── Matching/                      # Prefix tree, abbreviation matching, fuzzy search
 │   │   ├── Macros/                        # Mustache & TextExpander parser, math evaluation
-│   │   ├── AI/                            # Apple Foundation Models, selection gates
+│   │   ├── AI/                            # Apple Foundation Models, selection gates, offline Markdown transforms
 │   │   ├── Voice/                         # Smart Dictation engines, correction pipeline, crash journaling
 │   │   ├── Models/                        # Snippet models, SecretStore, usage stats
 │   │   ├── Permissions/                   # TCC checks, AX verification, recovery

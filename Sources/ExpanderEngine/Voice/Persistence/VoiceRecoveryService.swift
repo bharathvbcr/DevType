@@ -38,7 +38,8 @@ public final class VoiceRecoveryService: Sendable {
     }
 
     public func scanRecoverableSessions(baseDirectory: URL? = nil) -> [RecoverableVoiceSession] {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         let baseDir = baseDirectory ?? appSupport.appendingPathComponent("DevType/VoiceSessions", isDirectory: true)
 
         guard let contents = try? FileManager.default.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
@@ -131,8 +132,9 @@ public final class VoiceRecoveryService: Sendable {
         }
 
         // `scanRecoverableSessions` returns newest first, so anything past the cap is oldest.
-        if survivors.count > limit {
-            for session in survivors[limit...] where discard(session) {
+        let boundedLimit = max(0, limit)
+        if survivors.count > boundedLimit {
+            for session in survivors[boundedLimit...] where discard(session) {
                 removed += 1
             }
         }

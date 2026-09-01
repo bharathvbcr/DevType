@@ -328,6 +328,33 @@ final class AIPlumbingTests: XCTestCase {
         XCTAssertEqual(segments.map(\.separator), [""])
     }
 
+    func testOversizedChunkSplitPreservesWhitespaceAndSeparators() {
+        let original = AITransformText.Segment(
+            body: "a very long paragraph with enough words to split safely",
+            separator: "\n\n"
+        )
+        guard let split = AITransformText.splitForChunking(original) else {
+            return XCTFail("A multi-word segment must be splittable")
+        }
+        XCTAssertEqual(
+            AITransformText.joined([split.first, split.second], bodies: [split.first.body, split.second.body]),
+            original.body + original.separator
+        )
+        XCTAssertEqual(split.second.separator, original.separator)
+        XCTAssertFalse(split.first.body.last?.isWhitespace == true)
+        XCTAssertFalse(split.second.body.first?.isWhitespace == true)
+    }
+
+    func testUnbrokenOversizedChunkSplitsAtGraphemeBoundary() {
+        let body = String(repeating: "界", count: 101)
+        let original = AITransformText.Segment(body: body, separator: "")
+        guard let split = AITransformText.splitForChunking(original) else {
+            return XCTFail("An unbroken multi-grapheme segment must be splittable")
+        }
+        XCTAssertEqual(split.first.body + split.second.body, body)
+        XCTAssertEqual(split.first.body.count + split.second.body.count, body.count)
+    }
+
     func testChunkingHandlesWindowsLineEndings() {
         let text = "First.\r\n\r\nSecond."
         let segments = AITransformText.segments(text)

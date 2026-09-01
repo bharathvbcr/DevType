@@ -384,7 +384,7 @@ public final class VoiceHUDPanel: NSPanel {
     }
 
     private func applyFrame(size: CGSize, animated: Bool) {
-        let screen = screenForPlacement()
+        guard let screen = screenForPlacement() else { return }
         let screenRect = screen.visibleFrame
 
         let currentFrame = frame
@@ -419,12 +419,12 @@ public final class VoiceHUDPanel: NSPanel {
         }
     }
 
-    private func screenForPlacement() -> NSScreen {
+    private func screenForPlacement() -> NSScreen? {
         let mouse = NSEvent.mouseLocation
         if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) {
             return screen
         }
-        return NSScreen.main ?? NSScreen.screens[0]
+        return NSScreen.main ?? NSScreen.screens.first
     }
 
     private func showOnScreen() {

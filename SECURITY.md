@@ -8,8 +8,10 @@ DevType is engineered from the ground up as a **privacy-first, offline-only** ap
 
 ### 1. 100% On-Device & Zero Telemetry
 - DevType contains **zero** cloud telemetry, analytics trackers, or network reporting endpoints.
-- AI transformations run locally on-device using Apple Foundation Models (on supported macOS versions). No text or prompts are transmitted over the network.
-- Your snippet database, usage statistics, and keystrokes never leave your Mac.
+- AI transformations run locally on-device using Apple Foundation Models (on supported macOS versions) alongside deterministic offline local text transformations (e.g. Remove Markdown). No text or prompts are transmitted over the network.
+- Speech dictation is local-first (Apple Speech, on-device Local AI, loopback Local Whisper) with an opt-in cloud engine (Gemini) that remains inactive until you supply your own API key.
+- Update checks are off by default, opt-in only, run at most once a day, and transmit zero telemetry, device identifiers, or usage data.
+- Your snippet database, usage statistics, audio recordings, and keystrokes never leave your Mac.
 
 ### 2. Keystroke Protection & Fail-Closed Safety
 - **Volatile Ring Buffer**: Intercepted keystrokes are temporarily held in an in-memory ring buffer solely for abbreviation prefix matching. Keystrokes are never logged, written to disk, or retained.
@@ -26,10 +28,12 @@ For sensitive text (e.g. passwords, API tokens), DevType provides dedicated **Se
 For full architectural details, see [SECRETS.md](SECRETS.md).
 
 ### 4. TCC Permissions & Code Identity
-DevType strictly requests only the macOS permissions required for core expansion:
+DevType strictly requests only the macOS permissions required for core expansion and voice features:
 - `Input Monitoring` (`ListenEvent`): Required to intercept and swallow typed trigger keystrokes.
 - `Accessibility` (`AXIsProcessTrusted`): Required for atomic range replacement via macOS Accessibility APIs.
 - `Post Events` (`PostEvent`): Used for fallback keystroke injection.
+- `Microphone` (`AVCaptureDevice`): On-demand permission required exclusively for Smart Voice Dictation (`⌘⌥V`).
+- `Speech Recognition` (`SFSpeechRecognizer`): On-demand permission used for on-device Apple Speech transcription.
 
 All official releases are signed and notarized with a stable Apple Developer ID or local self-signed certificate, ensuring permissions persist safely across updates.
 

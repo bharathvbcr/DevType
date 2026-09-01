@@ -15,6 +15,7 @@ public actor SessionWatchdog {
     /// Floor on the deadline. A zero or negative budget would fire immediately and turn
     /// every session into a timeout.
     public static let minimumSeconds: Double = 1.0
+    private static let maximumSeconds = Double(UInt64.max - 1) / 1_000_000_000
 
     private var task: Task<Void, Never>?
     private var armedGeneration: SessionGeneration?
@@ -39,12 +40,28 @@ public actor SessionWatchdog {
         task?.cancel()
         armedGeneration = generation
 
-        let budget = max(Self.minimumSeconds, seconds)
+        let budget = Self.normalizedSeconds(seconds)
         task = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+            let nanoseconds = UInt64(budget * 1_000_000_000)
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
             guard !Task.isCancelled else { return }
             await self?.fire(generation: generation, onExpiry: onExpiry)
         }
+    }
+
+    /// Converts untrusted preference/configuration input into a representable sleep duration.
+    /// NaN and negative infinity must not reach `UInt64(Double)`, which traps; positive infinity
+    /// is bounded so a malformed setting cannot overflow the nanosecond conversion.
+    static func normalizedSeconds(_ seconds: Double) -> Double {
+        guard !seconds.isNaN else { return minimumSeconds }
+        guard seconds.isFinite else {
+            return seconds > 0 ? maximumSeconds : minimumSeconds
+        }
+        return min(max(minimumSeconds, seconds), maximumSeconds)
     }
 
     /// Cancels the pending deadline. Safe to call when nothing is armed.

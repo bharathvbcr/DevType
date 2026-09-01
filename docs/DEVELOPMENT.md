@@ -29,14 +29,18 @@ All common workflows are automated via shell scripts in the `Scripts/` directory
 | **Reset Permissions** | `./Scripts/reset-tcc.sh` | Resets the macOS TCC database for `com.devtype.app` to test fresh onboarding flows. |
 | **Release & Notarize** | `./Scripts/release.sh` | Build → Developer ID sign → notarize → staple → DMG. Takes no positional arguments; see configuration below. |
 | **DMG Selection** | `./Scripts/select-release-dmg.sh` | Picks exactly one `DevType-<version>.dmg`; zero or multiple candidates is fatal. Has a stubbed self-test (`test-release-dmg-select.sh`). |
+| **Release Preflight** | `./Scripts/release-preflight.sh` | Validates git cleanliness, tags, and local CI before tagging/publishing releases. |
+| **Signing Preflight** | `./Scripts/release-signing-preflight.sh` | Validates that the active signing identity meets distribution requirements. |
+| **Asset Verification** | `./Scripts/verify-release-asset-list.sh` | Verifies published GitHub release asset inventories to prevent missing or mismatched assets. |
+| **Seed Issues** | `./Scripts/seed-good-first-issues.sh` | Seeds curated, self-contained `good first issue` candidates for open-source contributors. |
 
-The two resolver scripts have self-tests (`test-signing-identity.sh`, `test-release-dmg-select.sh`) that run inside local CI with stubbed `security`/`codesign`.
+The resolver and verification scripts have dedicated self-tests (`test-signing-identity.sh`, `test-release-dmg-select.sh`, `test-release-signing-preflight.sh`, `test-release-preflight.sh`, `test-release-asset-list.sh`) that run inside local CI with stubbed environments.
 
 ---
 
 ## 🧪 Testing Guidelines
 
-DevType maintains **1,200+ unit, fuzz, and stress tests** across 83 suites in `Tests/ExpanderEngineTests/`.
+DevType maintains **1,600+ unit, fuzz, and stress tests** across 120 suites in `Tests/ExpanderEngineTests/`.
 
 ### Running Tests
 ```bash

@@ -8,7 +8,8 @@ Welcome to the DevType support guide. Whether you are encountering an issue, hav
 
 Before submitting an issue, please check our documentation resources:
 
-- **[User Guide](docs/USER_GUIDE.md)**: Complete guide to using DevType, creating snippets, using AI features, and managing shortcuts.
+- **[User Guide](docs/USER_GUIDE.md)**: Complete guide to using DevType, creating snippets, using AI features, Smart Dictation, and managing shortcuts.
+- **[Voice Dictation Guide](docs/VOICE_DICTATION.md)**: Details on Smart Voice Dictation, speech engines, and thought-revision processing.
 - **[Macro Reference](docs/MACRO_REFERENCE.md)**: Syntax reference for Mustache tags (`{{date}}`, `{{calc}}`, `{{clipboard}}`) and TextExpander tokens (`%filltext%`, `%|`, `%date%`).
 - **[Permissions Guide](docs/PERMISSIONS_GUIDE.md)**: Resolving macOS Input Monitoring and Accessibility permission issues.
 - **[Secret Snippets Guide](SECRETS.md)**: Details on Touch ID protected secret snippets and password storage.
@@ -26,10 +27,13 @@ Before submitting an issue, please check our documentation resources:
 5. If permissions appear granted in macOS System Settings but expansion still fails, see our [Permissions Guide](docs/PERMISSIONS_GUIDE.md) for steps on resetting the TCC cache.
 
 ### 2. How do I trigger On-Device AI text transforms?
-Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A). You can also type assigned trigger abbreviations (e.g. `:fix`, `:rw`) when configured in **Preferences → AI**. Note that on-device AI requires macOS 26+ with Apple Foundation Models.
+Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A). You can also type assigned trigger abbreviations (e.g. `:fix`, `:rw`) when configured in **Preferences → AI**. Note that on-device Apple Foundation Models require macOS 26+, while **Remove Markdown** runs offline locally on all supported macOS versions (macOS 14+).
 
-### 3. How do I migrate my snippets from TextExpander or Espanso?
-Open the DevType menu bar icon and choose **Import Snippets…**, then select your TextExpander settings bundle (`.textexpandersettings` / `.textexpanderbackup`) or an Espanso config folder / match YAML file. Your library can be exported again as DevType JSON, Espanso YAML, or CSV via **Export…**.
+### 3. How do I use Smart Voice Dictation?
+Press or hold **`⌘⌥V`** to activate push-to-talk or toggle dictation. You can configure your speech recognition engine (Apple Speech, Local AI, Local Whisper, or Gemini) and custom vocabulary under **Preferences → Voice**.
+
+### 4. How do I migrate my snippets from TextExpander or Espanso?
+Open the DevType menu bar icon and choose **Import Snippets…** (or go to Preferences → Snippets), then select your TextExpander settings bundle (`.textexpandersettings` / `.textexpanderbackup`) or an Espanso config folder / match YAML file. Your library can be exported again as DevType JSON, Espanso YAML, or CSV via **Export…**.
 
 ---
 

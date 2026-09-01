@@ -150,6 +150,5 @@ jobs:
         # mismatched format specifier crashes String(format:). The real assertion
         # lives in the test target; this is the fast fail.
         run: |
-          swift build 2>/dev/null || true
+          swift build
           grep -c 'case ko' Sources/ExpanderEngine/Localization/LocalizationManager.swift >/dev/null
-

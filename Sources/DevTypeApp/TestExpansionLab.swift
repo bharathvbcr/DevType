@@ -93,6 +93,9 @@ private final class LabSession: NSObject {
     private var panel: NSPanel?
     private var textView: NSTextView?
     private var statusLabel: NSTextField?
+    private weak var auditOutcomeRow: NSView?
+    private weak var auditOutcomeTitleLabel: NSTextField?
+    private weak var auditOutcomePill: PillBadgeView?
     /// Self-retain until Close.
     private var retainSelf: LabSession?
     /// Fires `close()` for every dismissal of the panel — including the red
@@ -191,7 +194,7 @@ private final class LabSession: NSObject {
         ])
 
         // MARK: - Audit Checklist Card
-        let auditCard = makeAuditCard()
+        let auditCard = makeAuditCard(editable: textView.isEditable)
         auditCard.translatesAutoresizingMaskIntoConstraints = false
 
         let statusLabel = NSTextField(labelWithString: loc.s("lab.focusing"))
@@ -276,9 +279,9 @@ private final class LabSession: NSObject {
                     swallowedFinalKey: false,
                     lastEventCharacterCount: 0,
                     plan: self.plan,
-                    completion: { [weak self] in
+                    completion: { [weak self] outcome in
                         DispatchQueue.main.async {
-                            self?.evaluateResult()
+                            self?.evaluateResult(outcome: outcome)
                         }
                     }
                 )
@@ -286,7 +289,7 @@ private final class LabSession: NSObject {
         }
     }
 
-    private func makeAuditCard() -> NSView {
+    private func makeAuditCard(editable: Bool) -> NSView {
         let card = NSView()
         card.wantsLayer = true
         card.layer?.backgroundColor = DevTypeTheme.cardBackground.cgColor
@@ -312,7 +315,7 @@ private final class LabSession: NSObject {
         )
         let row2 = makeAuditRow(
             title: loc.s("lab.audit.secure"),
-            status: isSecure ? loc.s("home.status.secureInput") : "Disengaged",
+            status: isSecure ? loc.s("home.status.secureInput") : loc.s("lab.secure.inactive"),
             tint: isSecure ? DevTypeTheme.statusOrange : DevTypeTheme.statusGreen
         )
         let row3 = makeAuditRow(
@@ -322,18 +325,25 @@ private final class LabSession: NSObject {
         )
         let row4 = makeAuditRow(
             title: loc.s("lab.audit.editable"),
-            status: "Editable",
-            tint: DevTypeTheme.statusGreen
+            status: editable ? loc.s("lab.status.editable") : loc.s("lab.no"),
+            tint: editable ? DevTypeTheme.statusGreen : DevTypeTheme.accent
         )
         let row5 = makeAuditRow(
             title: String(format: loc.s("lab.audit.path"), planLabel),
-            status: "Selected",
+            status: loc.s("lab.status.selected"),
             tint: DevTypeTheme.statusBlue
         )
         let row6 = makeAuditRow(
             title: String(format: loc.s("lab.audit.lastOutcome"), outcomeString(lastOutcome)),
-            status: lastOutcome == .succeeded ? "OK" : "Pending",
-            tint: lastOutcome == .succeeded ? DevTypeTheme.statusGreen : DevTypeTheme.statusOrange
+            status: outcomeString(lastOutcome),
+            tint: lastOutcome?.isConfirmedSuccess == true
+                ? DevTypeTheme.statusGreen
+                : DevTypeTheme.statusOrange,
+            capture: { [weak self] row, label, pill in
+                self?.auditOutcomeRow = row
+                self?.auditOutcomeTitleLabel = label
+                self?.auditOutcomePill = pill
+            }
         )
 
         let grid = NSStackView(views: [row1, row2, row3, row4, row5, row6])
@@ -358,7 +368,12 @@ private final class LabSession: NSObject {
         return card
     }
 
-    private func makeAuditRow(title: String, status: String, tint: NSColor) -> NSView {
+    private func makeAuditRow(
+        title: String,
+        status: String,
+        tint: NSColor,
+        capture: ((NSView, NSTextField, PillBadgeView) -> Void)? = nil
+    ) -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
@@ -382,6 +397,10 @@ private final class LabSession: NSObject {
             row.heightAnchor.constraint(equalToConstant: 20)
         ])
 
+        row.dtHideSubviewsFromAccessibility()
+        row.dtApplyAccessibility(role: NSAccessibility.Role.row, label: title, value: status)
+        capture?(row, lbl, pill)
+
         return row
     }
 
@@ -396,15 +415,16 @@ private final class LabSession: NSObject {
         }
     }
 
-    private func evaluateResult() {
+    private func evaluateResult(outcome: PermissionCoordinator.InjectOutcome) {
         guard let textView, let statusLabel else { return }
         let actual = textView.string
-        let outcome = PermissionCoordinator.shared.lastRecordedInjectOutcome
         let outcomeLabel = outcomeString(outcome)
+        refreshAuditOutcome(outcome)
 
-        let matched = actual == expected
-            || actual.hasSuffix(expected)
-            || (!expected.isEmpty && actual.contains(expected))
+        // The lab controls the whole field, so accepting a suffix or substring could report a
+        // false positive after a partial or duplicated delivery. Require both exact text and a
+        // confirmed terminal outcome; posted-but-unverified is evidence, not proof.
+        let matched = actual == expected && outcome.isConfirmedSuccess
 
         if matched {
             statusLabel.stringValue = loc.s("lab.ok", outcomeLabel)
@@ -419,6 +439,17 @@ private final class LabSession: NSObject {
                 "[Inject] Test Expansion lab MISMATCH plan=\(self.planLabel, privacy: .public) outcome=\(outcomeLabel, privacy: .public) actualLen=\(actual.count, privacy: .public)"
             )
         }
+    }
+
+    private func refreshAuditOutcome(_ outcome: PermissionCoordinator.InjectOutcome) {
+        let label = outcomeString(outcome)
+        auditOutcomeTitleLabel?.stringValue = loc.s("lab.audit.lastOutcome", label)
+        auditOutcomePill?.update(
+            text: label,
+            tint: outcome.isConfirmedSuccess ? DevTypeTheme.statusGreen : DevTypeTheme.statusOrange
+        )
+        auditOutcomeRow?.setAccessibilityLabel(loc.s("lab.audit.lastOutcome", label))
+        auditOutcomeRow?.setAccessibilityValue(label)
     }
 
     @objc func close() {

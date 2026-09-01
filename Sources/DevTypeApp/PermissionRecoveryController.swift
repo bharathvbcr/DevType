@@ -55,10 +55,17 @@ final class PermissionRecoveryController: NSViewController {
     /// stacked alerts from nothing worse than an impatient double-click.
     private var pendingRequestSettle: DispatchWorkItem?
     private var requestInFlight = false
+    /// Invalidates a settle that was already dequeued when the window disappears. Cancelling a
+    /// DispatchWorkItem is best-effort; the generation check prevents a late callback from
+    /// clearing a newer request or presenting stale recovery state.
+    private var requestGeneration: UInt64 = 0
 
-    // §6.1: 1,028 lines with zero `loc.s` calls — one of the two screens a
-    // Korean or Japanese user hits *before* the app works at all.
+    // Permission-facing labels are localized through LocalizationManager so recovery guidance
+    // remains consistent with the selected app language.
     private let loc = LocalizationManager.shared
+    private var permissionCopy: PermissionCopy.Localized {
+        PermissionCopy.localized(using: loc)
+    }
 
     init(onStatusChanged: @escaping () -> Void = {}) {
         self.onStatusChanged = onStatusChanged
@@ -214,9 +221,9 @@ final class PermissionRecoveryController: NSViewController {
         let accessCard = createPermissionRow(
             symbol: "accessibility",
             title: loc.s("recovery.cap.accessibility"),
-            description: PermissionCopy.unlockDescription(for: .accessibility),
+            description: permissionCopy.unlockDescription(for: .accessibility),
             statusLabel: accessibilityStatusLabel,
-            openTitle: PermissionCopy.openSettingsButtonTitle(for: .accessibility),
+            openTitle: permissionCopy.openSettingsButtonTitle(for: .accessibility),
             openAction: #selector(openAccessibilitySettings),
             requestAction: #selector(requestAccessibility),
             requestButtonOut: &accessRequest
@@ -227,9 +234,9 @@ final class PermissionRecoveryController: NSViewController {
         let inputCard = createPermissionRow(
             symbol: "keyboard",
             title: loc.s("recovery.cap.inputMonitoring"),
-            description: PermissionCopy.unlockDescription(for: .inputMonitoring),
+            description: permissionCopy.unlockDescription(for: .inputMonitoring),
             statusLabel: inputMonitoringStatusLabel,
-            openTitle: PermissionCopy.openSettingsButtonTitle(for: .inputMonitoring),
+            openTitle: permissionCopy.openSettingsButtonTitle(for: .inputMonitoring),
             openAction: #selector(openInputMonitoringSettings),
             requestAction: #selector(requestInputMonitoring),
             requestButtonOut: &inputRequest
@@ -240,9 +247,9 @@ final class PermissionRecoveryController: NSViewController {
         let postCard = createPermissionRow(
             symbol: "cursorarrow.rays",
             title: loc.s("recovery.cap.postEvents"),
-            description: PermissionCopy.unlockDescription(for: .postEvent),
+            description: permissionCopy.unlockDescription(for: .postEvent),
             statusLabel: postEventStatusLabel,
-            openTitle: PermissionCopy.openSettingsButtonTitle(for: .postEvent),
+            openTitle: permissionCopy.openSettingsButtonTitle(for: .postEvent),
             openAction: #selector(openPostEventSettings),
             requestAction: #selector(requestPostEvent),
             requestButtonOut: &postRequest
@@ -338,6 +345,10 @@ final class PermissionRecoveryController: NSViewController {
     override func viewDidDisappear() {
         super.viewDidDisappear()
         SettingsDeepLinker.shared.cancelPendingOpen()
+        requestGeneration &+= 1
+        pendingRequestSettle?.cancel()
+        pendingRequestSettle = nil
+        requestInFlight = false
     }
 
     /// Called from AppDelegate when returning from System Settings.
@@ -497,7 +508,7 @@ final class PermissionRecoveryController: NSViewController {
             snapshotBefore.canListenTap && !EventTapEngine.shared.isTapRunning
         PermissionCoordinator.shared.refresh(presentTapFailureAlert: shouldAlertTap)
         let snapshot = PermissionProbe().snapshot()
-        livePreflightLabel.stringValue = PermissionCopy.livePreflightSummary(snapshot: snapshot)
+        livePreflightLabel.stringValue = permissionCopy.livePreflightSummary(snapshot: snapshot)
         livePreflightLabel.textColor = snapshot.isFullyCapable
             ? DevTypeTheme.statusGreen : DevTypeTheme.accentBright
         ProcessIdentity.rememberAccessibilityGranted(
@@ -639,18 +650,18 @@ final class PermissionRecoveryController: NSViewController {
         } else if snapshot.canListenTap && tapRunning && snapshot.isDegradedInject {
             summaryLabel.stringValue = loc.s("recovery.summary.degraded", engineLabel)
             summaryLabel.textColor = DevTypeTheme.statusOrange
-            guidanceLabel.stringValue = PermissionCopy.degradedInjectTooltip(snapshot: snapshot)
+            guidanceLabel.stringValue = permissionCopy.degradedInjectTooltip(snapshot: snapshot)
             guidanceLabel.textColor = DevTypeTheme.statusOrange
         } else if snapshot.canListenTap && snapshot.canUseAX && !tapRunning {
             // Distinct from "permissions denied": Listen+AX OK but tapCreate failed.
             summaryLabel.stringValue = loc.s("recovery.summary.tapCreateFailed", engineLabel)
             summaryLabel.textColor = DevTypeTheme.statusOrange
-            guidanceLabel.stringValue = PermissionCopy.tapCreateFailedDespiteListenGuidance
+            guidanceLabel.stringValue = permissionCopy.tapCreateFailedDespiteListenGuidance
             guidanceLabel.textColor = DevTypeTheme.statusOrange
         } else {
             var summary = loc.s(
                 "recovery.summary.missing",
-                snapshot.missingCapabilitiesSummary,
+                permissionCopy.missingCapabilitiesSummary(snapshot),
                 tapWord,
                 engineLabel
             )
@@ -667,7 +678,7 @@ final class PermissionRecoveryController: NSViewController {
             summaryLabel.textColor = DevTypeTheme.accentBright
 
             if identityChanged || accessibilityReset {
-                guidanceLabel.stringValue = PermissionCopy.binaryChangedGuidance(
+                guidanceLabel.stringValue = permissionCopy.binaryChangedGuidance(
                     appPath: appPath,
                     cdHash: cdHash
                 )
@@ -681,13 +692,13 @@ final class PermissionRecoveryController: NSViewController {
                 guidanceLabel.textColor = DevTypeTheme.statusOrange
                 if PermissionCoordinator.shared.recommendsRelaunch || !snapshot.isFullyCapable {
                     extended.append(
-                        PermissionCopy.relaunchAfterSettingsGuidance(
-                            missingNames: snapshot.missingCapabilityNames
+                        permissionCopy.relaunchAfterSettingsGuidance(
+                            missingNames: permissionCopy.missingCapabilityNames(snapshot)
                         )
                     )
                 }
-                extended.append(PermissionCopy.staleLegacyBundleIdGuidance)
-                extended.append(PermissionCopy.staleTCCRecordGuidance)
+                extended.append(permissionCopy.staleLegacyBundleIdGuidance)
+                extended.append(permissionCopy.staleTCCRecordGuidance)
             } else {
                 guidanceLabel.stringValue = loc.s("recovery.guidance.finishGranting")
                 guidanceLabel.textColor = DevTypeTheme.textSecondary
@@ -755,7 +766,7 @@ final class PermissionRecoveryController: NSViewController {
             parts.append(loc.s("recovery.health.tapExpected"))
         }
         if snapshot.isDegradedInject {
-            parts.append(PermissionCopy.degradedInjectTooltip(snapshot: snapshot))
+            parts.append(permissionCopy.degradedInjectTooltip(snapshot: snapshot))
         }
         if snapshot.canListenTap && snapshot.canUseAX && snapshot.canPostEvents && tapRunning {
             parts.append(loc.s("recovery.health.full"))
@@ -851,9 +862,9 @@ final class PermissionRecoveryController: NSViewController {
             DevTypeLog.permission.error(
                 "[Permission] UI Recovery Settings open failed kind=\(DevTypeLog.kindName(kind), privacy: .public)"
             )
-            settingsFallbackLabel.stringValue = PermissionCopy.settingsOpenFailureMessage(for: kind)
+            settingsFallbackLabel.stringValue = permissionCopy.settingsOpenFailureMessage(for: kind)
                 + "\n"
-                + PermissionCopy.notListedInSettingsGuidance(
+                + permissionCopy.notListedInSettingsGuidance(
                     for: kind,
                     bundleID: identity.bundleIdentifier,
                     appPath: identity.bundlePath,
@@ -868,7 +879,7 @@ final class PermissionRecoveryController: NSViewController {
             "[Permission] UI Recovery Settings opened kind=\(DevTypeLog.kindName(kind), privacy: .public) afterRequest=\(didRequest, privacy: .public)"
         )
         if didRequest {
-            settingsFallbackLabel.stringValue = PermissionCopy.notListedInSettingsGuidance(
+            settingsFallbackLabel.stringValue = permissionCopy.notListedInSettingsGuidance(
                 for: kind,
                 bundleID: identity.bundleIdentifier,
                 appPath: identity.bundlePath,
@@ -876,7 +887,7 @@ final class PermissionRecoveryController: NSViewController {
                 binaryPath: identity.executablePath
             )
         } else {
-            settingsFallbackLabel.stringValue = PermissionCopy.openSettingsWithoutRequestHint(
+            settingsFallbackLabel.stringValue = permissionCopy.openSettingsWithoutRequestHint(
                 for: kind,
                 bundleID: identity.bundleIdentifier
             )
@@ -926,10 +937,12 @@ final class PermissionRecoveryController: NSViewController {
         }
         DevTypeLog.permission.info("[Permission] UI Recovery Request \(logLabel, privacy: .public)")
         requestInFlight = true
+        requestGeneration &+= 1
+        let generation = requestGeneration
         pendingRequestSettle?.cancel()
 
         let identity = ProcessIdentity.shared
-        settingsFallbackLabel.stringValue = PermissionCopy.notListedInSettingsGuidance(
+        settingsFallbackLabel.stringValue = permissionCopy.notListedInSettingsGuidance(
             for: kind,
             bundleID: identity.bundleIdentifier,
             appPath: identity.bundlePath,
@@ -941,6 +954,7 @@ final class PermissionRecoveryController: NSViewController {
         // Do NOT auto-open Settings. Offer Open if still denied after settle.
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            guard self.requestGeneration == generation else { return }
             self.pendingRequestSettle = nil
             self.requestInFlight = false
             if stillMissing() {

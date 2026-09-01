@@ -199,6 +199,56 @@ public enum AITransformText {
         return out
     }
 
+    /// Splits one segment at a safe `Character` boundary while preserving every source character.
+    /// A whitespace run near the midpoint becomes the separator between the two new segments; an
+    /// unbroken token is split at the nearest grapheme boundary instead. The original trailing
+    /// separator remains owned by the second segment, so `joined` is byte-identical when both
+    /// bodies are unchanged.
+    public static func splitForChunking(_ segment: Segment) -> (first: Segment, second: Segment)? {
+        let characters = Array(segment.body)
+        guard characters.count > 1 else { return nil }
+
+        let midpoint = characters.count / 2
+        var whitespaceStart: Int?
+        var whitespaceEnd: Int?
+        let searchRadius = max(1, characters.count / 4)
+        let lowerBound = max(0, midpoint - searchRadius)
+        let upperBound = min(characters.count - 1, midpoint + searchRadius)
+
+        for index in lowerBound...upperBound where characters[index].isWhitespace {
+            var start = index
+            while start > 0, characters[start - 1].isWhitespace { start -= 1 }
+            var end = index + 1
+            while end < characters.count, characters[end].isWhitespace { end += 1 }
+            if start > 0, end < characters.count {
+                whitespaceStart = start
+                whitespaceEnd = end
+                break
+            }
+        }
+
+        let splitAt: Int
+        let separator: String
+        if let whitespaceStart, let whitespaceEnd {
+            splitAt = whitespaceStart
+            separator = String(characters[whitespaceStart..<whitespaceEnd])
+        } else {
+            splitAt = midpoint
+            separator = ""
+        }
+        guard splitAt > 0, splitAt < characters.count else { return nil }
+
+        let firstBody = String(characters[..<splitAt])
+        let secondStart = whitespaceEnd ?? splitAt
+        let secondBody = String(characters[secondStart...])
+        guard !firstBody.isEmpty, !secondBody.isEmpty else { return nil }
+
+        return (
+            Segment(body: firstBody, separator: separator),
+            Segment(body: secondBody, separator: segment.separator)
+        )
+    }
+
     private static func split(_ text: String, minimumNewlines: Int) -> [Segment] {
         var result: [Segment] = []
         var body = ""
@@ -1096,9 +1146,14 @@ public actor AITextTransformer {
 
         // B′4: paragraph chunking for chunk-safe kinds, serialized on this actor latch.
         do {
-            let chunks = AITransformText.segments(trimmed, granularity: chunkGranularity)
+            let chunks = try await budgetedChunks(
+                AITransformText.segments(trimmed, granularity: chunkGranularity),
+                kind: kind,
+                instructions: instructions
+            )
             guard chunks.count > 1 else {
-                // Still too large as one paragraph — refuse.
+                // A single grapheme can still be too large once the prompt framing and minimum
+                // response reserve are included. There is no safe smaller input to produce.
                 let budgetErr: AITransformError
                 do {
                     _ = try await evaluateBudget(
@@ -1167,6 +1222,39 @@ public actor AITextTransformer {
         } catch {
             once.complete(.failure(Self.mapGenerationError(error, kind: kind, input: trimmed)))
         }
+    }
+
+    /// Evaluates every chunk against the same budget used for generation. Paragraph and line
+    /// splitting alone is insufficient for a single huge paragraph or an unbroken identifier;
+    /// recursively divide only the segment that does not fit, preserving its exact separator.
+    private func budgetedChunks(
+        _ initial: [AITransformText.Segment],
+        kind: AITransformKind,
+        instructions: String
+    ) async throws -> [AITransformText.Segment] {
+        var pending = initial
+        var result: [AITransformText.Segment] = []
+        result.reserveCapacity(initial.count)
+
+        while !pending.isEmpty {
+            let segment = pending.removeFirst()
+            do {
+                _ = try await evaluateBudget(
+                    kind: kind,
+                    instructions: instructions,
+                    input: segment.body
+                )
+                result.append(segment)
+            } catch let error as AITransformError {
+                guard case .inputTooLarge = error,
+                      let split = AITransformText.splitForChunking(segment) else {
+                    throw error
+                }
+                pending.insert(split.second, at: 0)
+                pending.insert(split.first, at: 0)
+            }
+        }
+        return result
     }
 
     /// Generates, then enforces the kind's script and length policies. A violation is

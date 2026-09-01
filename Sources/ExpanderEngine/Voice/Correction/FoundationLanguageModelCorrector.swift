@@ -45,7 +45,7 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
             displayName: "Apple Intelligence (On-Device)",
             modelVersion: "system-language-model",
             privacyRoute: .onDeviceOnly,
-            supportsStructuredOutput: true
+            supportsStructuredOutput: false
         )
     }
 
@@ -122,31 +122,37 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
     /// boundaries so a chunk is never cut mid-clause — the model needs a whole sentence to
     /// punctuate it correctly.
     static func chunk(_ text: String, budgetTokens: Int) -> [String] {
-        guard estimatedTokens(text) > budgetTokens else { return [text] }
+        let safeBudgetTokens = max(1, budgetTokens)
+        guard estimatedTokens(text) > safeBudgetTokens else { return [text] }
 
-        let budgetCharacters = budgetTokens * charactersPerToken
+        let budgetCharacters = max(1, safeBudgetTokens * charactersPerToken)
         var chunks: [String] = []
         var current = ""
 
         for sentence in sentences(in: text) {
-            if current.isEmpty {
-                current = sentence
-            } else if current.count + 1 + sentence.count <= budgetCharacters {
-                current += " " + sentence
-            } else {
-                chunks.append(current)
-                current = sentence
-            }
-
             // A single sentence longer than the budget (dictation without punctuation is
-            // exactly this) is split on word boundaries rather than dropped.
-            while current.count > budgetCharacters {
-                let head = String(current.prefix(budgetCharacters))
-                let cut = head.lastIndex(of: " ") ?? head.endIndex
-                let piece = String(head[head.startIndex..<cut]).trimmingCharacters(in: .whitespaces)
-                if piece.isEmpty { break }
-                chunks.append(piece)
-                current = String(current[current.index(cut, offsetBy: cut == head.endIndex ? 0 : 1)...])
+            // exactly this) is split on word or grapheme boundaries rather than dropped. The
+            // helper uses Character offsets throughout; String.Index values from a temporary
+            // prefix must never be reused against the original String.
+            let sentencePieces = splitOversized(sentence, maxCharacters: budgetCharacters)
+            for (index, piece) in sentencePieces.enumerated() {
+                if index < sentencePieces.count - 1 {
+                    if !current.isEmpty {
+                        chunks.append(current)
+                        current = ""
+                    }
+                    chunks.append(piece)
+                    continue
+                }
+
+                if current.isEmpty {
+                    current = piece
+                } else if current.count + 1 + piece.count <= budgetCharacters {
+                    current += " " + piece
+                } else {
+                    chunks.append(current)
+                    current = piece
+                }
             }
         }
 
@@ -154,6 +160,43 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
             chunks.append(current)
         }
         return chunks.isEmpty ? [text] : chunks
+    }
+
+    /// Splits an oversized sentence without ever returning an empty piece or dropping a
+    /// grapheme. Whitespace at a cut is consumed as a separator because the caller rejoins
+    /// corrected chunks with a single space, matching the existing sentence normalisation.
+    private static func splitOversized(_ text: String, maxCharacters: Int) -> [String] {
+        let characters = Array(text)
+        guard characters.count > maxCharacters else { return [text] }
+
+        var pieces: [String] = []
+        var start = 0
+        while start < characters.count {
+            let hardEnd = min(start + maxCharacters, characters.count)
+            var end = hardEnd
+
+            if hardEnd < characters.count {
+                var candidate = hardEnd
+                while candidate > start, !characters[candidate - 1].isWhitespace {
+                    candidate -= 1
+                }
+                if candidate > start {
+                    end = candidate
+                }
+            }
+
+            // A positive maxCharacters guarantees progress even when the window has no
+            // whitespace. Include no trailing separator in the piece; consume it below.
+            if end == start {
+                end = hardEnd
+            }
+            pieces.append(String(characters[start..<end]))
+            start = end
+            while start < characters.count, characters[start].isWhitespace {
+                start += 1
+            }
+        }
+        return pieces
     }
 
     private static func sentences(in text: String) -> [String] {
@@ -182,7 +225,8 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
     private func correctWithinContextWindow(_ request: CorrectionRequest) async -> String? {
         let instructions = CorrectionPromptBuilder.systemPrompt(
             policy: request.policy,
-            protectedSpans: request.protectedSpans
+            protectedSpans: request.protectedSpans,
+            locale: request.locale
         )
         let budget = Self.inputTokenBudget(instructions: instructions)
         let chunks = Self.chunk(request.rawTranscript, budgetTokens: budget)
@@ -217,7 +261,8 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
         await respond(
             instructions: CorrectionPromptBuilder.systemPrompt(
                 policy: request.policy,
-                protectedSpans: request.protectedSpans
+                protectedSpans: request.protectedSpans,
+                locale: request.locale
             ),
             transcript: request.rawTranscript,
             deadline: request.deadline

@@ -30,8 +30,9 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
     // MARK: - Location
 
     public static var traceURL: URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let base = (FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first ?? FileManager.default.temporaryDirectory)
             .appendingPathComponent("DevType", isDirectory: true)
         return base.appendingPathComponent("voice-trace.jsonl")
     }

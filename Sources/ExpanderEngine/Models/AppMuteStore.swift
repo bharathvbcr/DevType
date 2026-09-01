@@ -26,7 +26,9 @@ public final class AppMuteStore {
             try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
             self.fileURL = fileURL
         } else {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let appSupport = FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+                .first ?? FileManager.default.temporaryDirectory
             let dir = appSupport.appendingPathComponent("DevType", isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             self.fileURL = dir.appendingPathComponent("muted-apps.json")

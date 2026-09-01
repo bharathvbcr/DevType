@@ -899,4 +899,131 @@ final class SourceContractTests: XCTestCase {
         )
     }
 
+    func testVoiceCancellationReachesTheReducerBeforeInvalidatingGeneration() throws {
+        let coordinator = try source("Sources/ExpanderEngine/Voice/Session/VoiceSessionCoordinator.swift")
+        guard let start = coordinator.range(of: "public func cancelSession() async"),
+              let end = coordinator.range(of: "\n    private func processEvent", range: start.upperBound..<coordinator.endIndex)
+        else {
+            return XCTFail("Could not locate the voice cancellation method.")
+        }
+        let body = String(coordinator[start.upperBound..<end.lowerBound])
+
+        guard let cancel = body.range(of: "processEvent(.cancel, generation: generation)") else {
+            return XCTFail("Voice cancellation must pass through the reducer.")
+        }
+        XCTAssertTrue(
+            body.contains("let generation = state.snapshot.generation"),
+            "Cancellation must use the state generation before invalidating the task bag."
+        )
+        XCTAssertFalse(
+            body[..<cancel.lowerBound].contains("advanceGenerationAndCancelAll"),
+            "Advancing the task bag before `.cancel` makes the reducer reject its own event as stale."
+        )
+    }
+
+    func testVoiceCleanupCancelsLiveRecognitionBeforeDroppingItsHandle() throws {
+        let coordinator = try source("Sources/ExpanderEngine/Voice/Session/VoiceSessionCoordinator.swift")
+        guard let cleanup = coordinator.range(of: "case .cleanupResources:"),
+              let next = coordinator.range(of: "\n            case .deliverTranscript", range: cleanup.upperBound..<coordinator.endIndex)
+        else {
+            return XCTFail("Could not locate the voice cleanup command.")
+        }
+        let body = String(coordinator[cleanup.upperBound..<next.lowerBound])
+        guard let cancel = body.range(of: "liveStream?.cancel()"),
+              let drop = body.range(of: "liveStream = nil") else {
+            return XCTFail("Cleanup must explicitly cancel and then release live recognition.")
+        }
+        XCTAssertLessThan(
+            body.distance(from: body.startIndex, to: cancel.lowerBound),
+            body.distance(from: body.startIndex, to: drop.lowerBound),
+            "Live recognition must be cancelled before its last strong handle is dropped."
+        )
+    }
+
+    func testVoiceProtocolFailureUsesTheTerminalCleanupCommandPath() throws {
+        let coordinator = try source("Sources/ExpanderEngine/Voice/Session/VoiceSessionCoordinator.swift")
+        guard let failure = coordinator.range(of: "case .failure(let error):"),
+              let next = coordinator.range(
+                  of: "\n    private func armWatchdog",
+                  range: failure.upperBound..<coordinator.endIndex
+              ) else {
+            return XCTFail("Could not locate the voice reducer failure branch.")
+        }
+        let body = String(coordinator[failure.upperBound..<next.lowerBound])
+
+        XCTAssertTrue(body.contains("state.failure = fail"))
+        XCTAssertTrue(body.contains(".persistManifest(phase: .failed(fail))"))
+        XCTAssertTrue(body.contains(".cleanupResources"))
+    }
+
+    func testVoiceDiagnosticsPathDoesNotAssumeApplicationSupportURLExists() throws {
+        let recorder = try source("Sources/ExpanderEngine/Voice/VoiceDiagnosticsRecorder.swift")
+        XCTAssertTrue(recorder.contains(".first ?? FileManager.default.temporaryDirectory"))
+    }
+
+    func testAudioBufferPoolBoundsExternalConfigurationBeforeAllocating() throws {
+        let pool = try source("Sources/ExpanderEngine/Voice/Audio/AudioBufferPool.swift")
+        XCTAssertTrue(pool.contains("let requestedCapacity = min(max(Self.minimumCapacity, capacity), Self.maximumCapacity)"))
+        XCTAssertTrue(pool.contains("multipliedReportingOverflow"))
+        XCTAssertTrue(pool.contains("Self.maximumChunkByteSize"))
+    }
+
+    func testDefaultSupportPathsDoNotIndexAnEmptyApplicationSupportResult() throws {
+        let muteStore = try source("Sources/ExpanderEngine/Models/AppMuteStore.swift")
+        let snippetStore = try source("Sources/ExpanderEngine/Models/SnippetStore.swift")
+
+        XCTAssertTrue(muteStore.contains(".first ?? FileManager.default.temporaryDirectory"))
+        XCTAssertTrue(snippetStore.contains(".first ?? FileManager.default.temporaryDirectory"))
+    }
+
+    func testVoiceHUDPlacementSurvivesAHeadlessDisplayState() throws {
+        let hud = try source("Sources/DevTypeApp/VoiceHUDPanel.swift")
+
+        XCTAssertTrue(hud.contains("private func screenForPlacement() -> NSScreen?"))
+        XCTAssertTrue(hud.contains("NSScreen.main ?? NSScreen.screens.first"))
+        XCTAssertFalse(hud.contains("NSScreen.screens[0]"))
+    }
+
+    func testVoiceAsyncCaptureTasksRejectCancellationAndStaleGenerations() throws {
+        let coordinator = try source("Sources/ExpanderEngine/Voice/Session/VoiceSessionCoordinator.swift")
+        guard let start = coordinator.range(of: "case .startAudioCapture:"),
+              let finalize = coordinator.range(
+                  of: "\n            case .finalizeAudioCapture:",
+                  range: start.upperBound..<coordinator.endIndex
+              ),
+              let transcribe = coordinator.range(
+                  of: "\n            case .transcribeAudio",
+                  range: finalize.upperBound..<coordinator.endIndex
+              ) else {
+            return XCTFail("Could not locate the voice capture command tasks.")
+        }
+
+        let startBody = String(coordinator[start.upperBound..<finalize.lowerBound])
+        let finalizeBody = String(coordinator[finalize.upperBound..<transcribe.lowerBound])
+
+        XCTAssertGreaterThanOrEqual(
+            startBody.components(separatedBy: "isCurrentGeneration(generation)").count - 1,
+            2,
+            "Capture start must check the generation both before and after an awaited setup/start."
+        )
+        XCTAssertGreaterThanOrEqual(
+            startBody.components(separatedBy: "try Task.checkCancellation()").count - 1,
+            2,
+            "Capture start must not turn cooperative cancellation into a new capture."
+        )
+        XCTAssertTrue(
+            startBody.contains("await self.capture.cancelCapture()"),
+            "A stale task that completed setup must explicitly tear down capture resources."
+        )
+        XCTAssertTrue(
+            startBody.contains("catch is CancellationError"),
+            "Cancellation must not be reported as a microphone failure."
+        )
+        XCTAssertTrue(
+            finalizeBody.contains("try Task.checkCancellation()")
+                && finalizeBody.contains("catch is CancellationError"),
+            "Finalization must stop cooperatively without reporting a stale failure."
+        )
+    }
+
 }

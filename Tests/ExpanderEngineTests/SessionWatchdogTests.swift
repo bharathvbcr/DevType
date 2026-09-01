@@ -31,6 +31,25 @@ final class SessionWatchdogTests: XCTestCase {
         SessionGeneration(rawValue: value)
     }
 
+    func testMalformedDurationsAreClampedBeforeNanosecondConversion() {
+        XCTAssertEqual(
+            SessionWatchdog.normalizedSeconds(.nan),
+            SessionWatchdog.minimumSeconds
+        )
+        XCTAssertEqual(
+            SessionWatchdog.normalizedSeconds(-Double.infinity),
+            SessionWatchdog.minimumSeconds
+        )
+        XCTAssertEqual(
+            SessionWatchdog.normalizedSeconds(Double.infinity),
+            Double(UInt64.max - 1) / 1_000_000_000
+        )
+        XCTAssertEqual(
+            SessionWatchdog.normalizedSeconds(0),
+            SessionWatchdog.minimumSeconds
+        )
+    }
+
     // MARK: - Firing
 
     func testFiresAfterTheDeadline() async throws {

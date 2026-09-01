@@ -84,7 +84,7 @@ It expands typed triggers in place, renders Mustache and TextExpander macros, ru
 
 - ⚡ **Instant Expand-on-Match**: Low-latency swallowing ring buffer that instantly replaces typed triggers using Accessibility range replacement (with fallback to HID clipboard paste).
 - 🎙️ **Smart Dictation**: Push-to-talk speech-to-text with thought-revision / self-correction resolution, filler stripping, and custom vocabulary (inspired by [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)). Pick the recognizer in **Preferences → Voice**: Apple Speech, an on-device local model, or a local `whisper.cpp` server — all offline. A cloud engine is available but stays off unless you supply your own API key. See [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
-- 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize, prompt enhance, translate) using Apple Foundation Models (macOS 26+). 100% private, zero API keys required.
+- 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize, prompt enhance, code explain/fix/test, git commit message, translate, convert to Markdown) using Apple Foundation Models (macOS 26+), plus a first-class offline **Remove Markdown** action running locally without an AI model on all supported macOS versions (macOS 14+). 100% private, zero API keys required.
 - 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy search for snippets and AI tools, inline math (`= 45 * 12.5`), custom one-shot AI prompts (`> …`), date offsets (`tomorrow`, `+3w`, `next friday`), instant text operations (case, sort, dedupe, Base64/URL/JSON, SHA-256/MD5), generators (UUID, lorem, password), and quick app navigation — ranked by your own usage.
 - 🧩 **Dual Macro Engine**: Full support for both Mustache (`{{date:iso:+1d}}`, `{{clipboard}}`, `{{calc: 1+2}}`, `{{uuid}}`, `{{cursor}}`) and TextExpander (`%filltext:name=X%`, `%@+1D%`, `%snippet:x%`, `%|`, `%key:enter%`) template syntaxes.
 - 🖼️ **Rich Image Snippets**: Paste images directly from snippet triggers with full Espanso `image_path` import support.
@@ -92,7 +92,7 @@ It expands typed triggers in place, renders Mustache and TextExpander macros, ru
 - 🛡️ **Privacy & Fail-Closed Security**: Automatic expansion pause during password entry (`NSSecureTextField`), Secure Event Input locks, IME composition, or in muted apps.
 - 🔒 **Secret Snippets**: Store passwords AES-GCM-encrypted, gated behind Touch ID, copied from the menu bar with an auto-clearing concealed clipboard — never in the library file, exports, or diagnostics. See [SECRETS.md](SECRETS.md).
 - 🔑 **Stable Identity TCC**: Packaged `.app` bundle with dedicated code identity (`com.devtype.app`) so macOS Accessibility & Input Monitoring permissions persist cleanly across updates.
-- 🔔 **Opt-In Update Checks**: DevType can tell you when a new release ships — **off by default**, at most once a day, and it never downloads or installs anything on its own. The request carries no version, machine, or usage data; you get a notice with the release notes and a button to the release page. "Check for Updates…" in the menu bar always works regardless of the setting.
+- 🔔 **Opt-In Update Checks**: DevType can tell you when a new release ships — **off by default**, at most once a day, and it never downloads or installs anything on its own. The request carries no version, machine, or usage data; you get a notice with the release notes and a button to the release page. "Check for Updates…" in the menu bar and Preferences always works regardless of the setting.
 
 ---
 
@@ -100,9 +100,11 @@ It expands typed triggers in place, renders Mustache and TextExpander macros, ru
 
 | Shortcut | Action | Description |
 |---|---|---|
-| **`⌘/`** | **Command Palette** | Global fuzzy search across all snippets, math evaluation, and date tools |
-| **`⌘⌥A`** | **AI Action Palette** | Highlight text and trigger on-device AI proofreading, rewriting, translation, or custom prompts |
+| **`⌘/`** | **Command Palette** | Global fuzzy search across all snippets, math evaluation, date tools, and text utilities |
+| **`⌘⌥A`** | **AI Action Palette** | Highlight text and trigger on-device AI transforms, code tools, translations, or custom prompts |
 | **`⌘⌥V`** | **Smart Dictation** | Push-to-talk or hands-free voice dictation with the recognizer you pick in Preferences → Voice |
+| **`⌘⇧M`** | **Snippet Manager** | Open the full snippet library and editor window |
+| **`⌘,`** | **Preferences** | Open the 7-tab Preferences window (Home, General, Snippets, Hotkeys, Voice, AI, Advanced) |
 | **`:trigger`** | **Typed Expansion** | Type any snippet abbreviation to instantly expand the template in place |
 | **`⌘⇧P`** | **Permission Recovery** | Open the status/diagnostics window to fix Accessibility & Input Monitoring grants |
 | **`Esc`** | **Dismiss / Cancel** | Close active panels, search palettes, or AI previews |
@@ -151,18 +153,18 @@ open /Applications/DevType.app
 
 Explore our complete documentation in the [`docs/`](docs/) directory:
 
-- 📖 **[User Guide](docs/USER_GUIDE.md)**: End-user manual for creating snippets, organizing groups, fill-in forms, and preferences.
+- 📖 **[User Guide](docs/USER_GUIDE.md)**: End-user manual for creating snippets, organizing groups, fill-in forms, Smart Dictation, and preferences.
 - 🏛️ **[Technical Architecture](docs/ARCHITECTURE.md)**: Deep dive into event taps, text injection pipelines, threading models, and exception safety.
 - 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
-- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,200+ headless unit tests, debugging, and release automation.
+- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,600+ headless unit tests across 120 suites, debugging, and release automation.
 - 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---
 
 ## 🤖 On-Device AI Transforms (macOS 26+)
 
-Run Apple Foundation Models text transformations on-device with zero cloud telemetry.
+Run Apple Foundation Models text transformations on-device with zero cloud telemetry, plus offline local Markdown tools that run on all macOS versions (macOS 14+).
 
 <p align="center">
   <img src="docs/assets/screenshots/preferences-ai.png" alt="DevType Preferences — AI tab with the on-device transform toggle, palette hotkey, and per-action output modes" width="85%">
@@ -171,8 +173,9 @@ Run Apple Foundation Models text transformations on-device with zero cloud telem
 - **Enable**: Go to **Preferences → AI** and turn on `Enable on-device AI transforms`.
 - **Action Palette** (`⌘⌥A`): Highlight text in any application and press `⌘⌥A` to bring up the AI action menu.
 - **Typed Triggers**: Assign AI actions directly to triggers (e.g. typing `:fix` or `:rw` over selected text automatically replaces or previews the transformed text).
-- **Available Actions**: Proofread (direct replace), Rewrite, Paraphrase, Expand, Condense, Tone Shift (Formal/Friendly), Bulletize, Prompt Enhance, Translate (→ English, or → romanized Telugu/Hindi), and Freeform Prompting (`> custom prompt` from the Command Palette).
-- **Preview or Direct**: Proofread replaces in place by default; every other action streams into a diff preview (Replace / Copy / Retry / Cancel). Per-action delivery is switchable in **Preferences → AI**, and **Undo last AI** in the palette reverts a transform.
+- **Available Actions**: Proofread (direct replace), Rewrite, Paraphrase, Expand, Condense, Tone Shift (Formal/Friendly), Bulletize, Prompt Enhance, Code tools (Explain Code, Docstring, Fix Code, Unit Tests, Regex Explain, SQL Query), Git Commit Message, JSON conversion, Translation (English ⇄ romanized Telugu/Hindi), Convert to Markdown, and Freeform Prompting (`> custom prompt` from the Command Palette).
+- **Offline Local Transform**: **Remove Markdown** strips Markdown formatting and leaves clean prose locally on all supported macOS versions (macOS 14+) without an AI model.
+- **Preview or Direct**: Proofread and Remove Markdown replace in place by default; every other action streams into a diff preview (Replace / Copy / Retry / Cancel). Per-action delivery is switchable in **Preferences → AI**, and **Undo last AI** in the palette reverts a transform.
 
 ---
 

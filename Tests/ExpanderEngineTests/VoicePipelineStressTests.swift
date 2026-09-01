@@ -130,6 +130,38 @@ final class VoicePipelineStressTests: XCTestCase {
     // MARK: - 3. Correction pipeline never returns worse than raw
     // ═══════════════════════════════════════════════════════════════
 
+    func testCorrectionPipelinePropagatesTranscriptLocaleToProvider() async {
+        let corrector = StubCorrector(behavior: .transform { $0 })
+        let raw = RawTranscript(
+            text: "こんにちは 世界",
+            localeIdentifier: "ja_JP",
+            providerID: "test",
+            modelVersion: "1"
+        )
+
+        _ = await CorrectionPipeline.execute(
+            rawTranscript: raw,
+            corrector: corrector,
+            policy: CorrectionPolicy(),
+            vocabulary: VocabularySnapshot(),
+            deadline: Date().addingTimeInterval(5),
+            privacyRoute: .onDeviceOnly,
+            sessionID: VoiceSessionID(),
+            generation: SessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertEqual(corrector.lastRequest?.locale.identifier, "ja_JP")
+
+        let prompt = CorrectionPromptBuilder.systemPrompt(
+            policy: CorrectionPolicy(),
+            locale: corrector.lastRequest?.locale
+        )
+        XCTAssertTrue(
+            prompt.contains("ja_JP"),
+            "The provider request and the prompt must carry the same locale"
+        )
+    }
+
     /// Whatever a model does — refuse, hallucinate, wrap, empty, echo the prompt — the
     /// pipeline must deliver either a validated improvement or the raw transcript. It must
     /// never deliver the model's misbehaviour.
@@ -529,6 +561,28 @@ final class VoicePipelineStressTests: XCTestCase {
 
         XCTAssertEqual(service.scanRecoverableSessions(baseDirectory: base).count, 10,
             "Even undelivered sessions are bounded")
+    }
+
+    func testPruneClampsNegativeHardCapWithoutCrashing() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceRecoveryNegativeCap_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let now = Date()
+        try writeSession(in: base, age: 60, delivered: false, now: now)
+        try writeSession(in: base, age: 120, delivered: false, now: now)
+
+        let service = VoiceRecoveryService()
+        let removed = service.prune(
+            olderThan: 365 * 86400,
+            keepingAtMost: -1,
+            baseDirectory: base,
+            now: now
+        )
+
+        XCTAssertEqual(removed, 2)
+        XCTAssertTrue(service.scanRecoverableSessions(baseDirectory: base).isEmpty)
     }
 
     func testRecoverableUndeliveredIgnoresEmptyAndDeliveredSessions() throws {

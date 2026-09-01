@@ -17,6 +17,7 @@ public enum CorrectionPipeline {
             sessionID: sessionID,
             generation: generation,
             rawTranscript: rawTranscript.text,
+            locale: Locale(identifier: rawTranscript.localeIdentifier),
             policy: policy,
             protectedSpans: spans,
             deadline: deadline,

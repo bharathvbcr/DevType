@@ -11,6 +11,232 @@ public enum PermissionCopy {
     public static let manualPrivacySecurityPath =
         "System Settings → Privacy & Security"
 
+    /// Localized presentation copy for the permission surfaces. The parameterless methods below
+    /// remain the stable English diagnostic vocabulary used by engine logs and existing clients;
+    /// AppKit surfaces use this value type so a language change cannot leave the recovery wizard
+    /// half-translated.
+    public struct Localized {
+        private let loc: LocalizationManager
+
+        fileprivate init(localization: LocalizationManager) {
+            self.loc = localization
+        }
+
+        public func unlockDescription(for kind: PermissionKind) -> String {
+            loc.s("permission.description.\(kindKey(kind))")
+        }
+
+        public func settingsToggleDisplayName(for kind: PermissionKind) -> String {
+            switch kind {
+            case .accessibility, .postEvent:
+                return loc.s("recovery.cap.accessibility")
+            case .inputMonitoring:
+                return loc.s("recovery.cap.inputMonitoring")
+            case .microphone:
+                return loc.s("permission.cap.microphone")
+            case .speechRecognition:
+                return loc.s("permission.cap.speechRecognition")
+            }
+        }
+
+        public func openSettingsButtonTitle(for kind: PermissionKind) -> String {
+            switch kind {
+            case .accessibility, .inputMonitoring:
+                return loc.s("permission.button.openSettings")
+            case .postEvent:
+                return loc.s("permission.button.openAccessibility")
+            case .microphone:
+                return loc.s("permission.button.openMicrophone")
+            case .speechRecognition:
+                return loc.s("permission.button.openSpeech")
+            }
+        }
+
+        public func openSettingsWithoutRequestHint(for kind: PermissionKind, bundleID: String) -> String {
+            switch kind {
+            case .postEvent:
+                return loc.s("permission.hint.postEvent", bundleID)
+            case .inputMonitoring:
+                return loc.s("permission.hint.inputMonitoring")
+            case .accessibility:
+                return loc.s("permission.hint.accessibility", bundleID)
+            case .microphone:
+                return loc.s("permission.hint.microphone")
+            case .speechRecognition:
+                return loc.s("permission.hint.speechRecognition", bundleID)
+            }
+        }
+
+        public func notListedInSettingsGuidance(
+            for kind: PermissionKind,
+            bundleID: String,
+            appPath: String,
+            siblingPaths: [String],
+            binaryPath: String? = nil
+        ) -> String {
+            var lines: [String] = []
+            switch kind {
+            case .postEvent:
+                lines.append(loc.s("permission.notListed.postEvent", bundleID))
+            case .inputMonitoring:
+                lines.append(loc.s("permission.notListed.inputMonitoring"))
+                lines.append(loc.s("permission.notListed.inputLookFor", bundleID))
+            case .accessibility:
+                lines.append(loc.s("permission.notListed.accessibility", bundleID))
+            case .microphone:
+                lines.append(loc.s("permission.notListed.microphone"))
+            case .speechRecognition:
+                lines.append(loc.s("permission.notListed.speechRecognition"))
+            }
+
+            let resolvedBinary = binaryPath ?? ProcessIdentity.executablePath(forAppBundlePath: appPath)
+            lines.append(loc.s("permission.notListed.appPath", appPath))
+            lines.append(loc.s("permission.notListed.binary", resolvedBinary))
+
+            // These two diagnostics are produced by the identity subsystem and intentionally keep
+            // their technical wording; the surrounding recovery instructions are localized here.
+            if let unpackaged = ProcessIdentity.unpackagedBinaryWarning(bundlePath: appPath) {
+                lines.append(unpackaged)
+            }
+            if let duplicate = ProcessIdentity.duplicateProcessWarning(siblingPaths: siblingPaths) {
+                lines.append(duplicate)
+            } else {
+                lines.append(
+                    loc.s(
+                        "permission.notListed.quitCopies",
+                        ProcessIdentity.preferredInstalledAppPath,
+                        ProcessIdentity.developmentAppPathHint
+                    )
+                )
+            }
+
+            return lines.joined(separator: "\n")
+        }
+
+        public func settingsOpenFailureMessage(for kind: PermissionKind?) -> String {
+            let pane: String
+            switch kind {
+            case .accessibility:
+                pane = settingsToggleDisplayName(for: .accessibility)
+            case .inputMonitoring:
+                pane = settingsToggleDisplayName(for: .inputMonitoring)
+            case .postEvent:
+                pane = loc.s("permission.pane.postEvent")
+            case .microphone:
+                pane = settingsToggleDisplayName(for: .microphone)
+            case .speechRecognition:
+                pane = settingsToggleDisplayName(for: .speechRecognition)
+            case .none:
+                pane = loc.s("permission.pane.privacySecurity")
+            }
+            return loc.s(
+                "permission.settings.failure",
+                manualPrivacySecurityPath,
+                pane,
+                expectedBundleIdentifier
+            )
+        }
+
+        public func binaryChangedGuidance(appPath: String, cdHash: String?) -> String {
+            var lines = [
+                loc.s("permission.identity.changed"),
+                loc.s(
+                    "permission.identity.preferPath",
+                    ProcessIdentity.preferredInstalledAppPath,
+                    ProcessIdentity.developmentAppPathHint
+                ),
+                loc.s("permission.identity.appPath", appPath)
+            ]
+            if let cdHash, !cdHash.isEmpty {
+                lines.append(loc.s("permission.identity.cdHash", cdHash))
+            }
+            return lines.joined(separator: " ")
+        }
+
+        public func degradedInjectTooltip(snapshot: PermissionSnapshot) -> String {
+            var parts: [String] = []
+            if !snapshot.canUseAX {
+                parts.append(loc.s("permission.degraded.accessibility"))
+            }
+            if !snapshot.canPostEvents {
+                parts.append(loc.s("permission.degraded.postEvents"))
+            }
+            return parts.joined(separator: ". ")
+        }
+
+        public func livePreflightSummary(snapshot: PermissionSnapshot) -> String {
+            loc.s(
+                "permission.livePreflight",
+                snapshot.canListenTap ? loc.s("permission.granted") : loc.s("permission.denied"),
+                snapshot.canUseAX ? loc.s("permission.granted") : loc.s("permission.denied"),
+                snapshot.canPostEvents ? loc.s("permission.granted") : loc.s("permission.denied")
+            )
+        }
+
+        public var tapCreateFailedDespiteListenGuidance: String {
+            loc.s("permission.tapCreateFailed")
+        }
+
+        public func relaunchAfterSettingsGuidance(missingNames: [String]) -> String {
+            let what = missingNames.isEmpty
+                ? loc.s("permission.capabilities")
+                : missingNames.joined(separator: ", ")
+            return loc.s("permission.relaunch", what)
+        }
+
+        public var staleTCCRecordGuidance: String {
+            loc.s("permission.staleTCC", ProcessIdentity.preferredInstalledAppPath)
+        }
+
+        public var staleLegacyBundleIdGuidance: String {
+            loc.s(
+                "permission.staleLegacy",
+                ProcessIdentity.legacyStaleBundleIdentifier,
+                ProcessIdentity.expectedBundleIdentifier,
+                ProcessIdentity.preferredInstalledAppPath
+            )
+        }
+
+        public func missingCapabilityNames(_ snapshot: PermissionSnapshot) -> [String] {
+            snapshot.missingCapabilityNames.map { name in
+                switch name {
+                case "Accessibility": return loc.s("recovery.cap.accessibility")
+                case "Input Monitoring": return loc.s("recovery.cap.inputMonitoring")
+                case "Post Events": return loc.s("recovery.cap.postEvents")
+                default: return name
+                }
+            }
+        }
+
+        public func missingCapabilitiesSummary(_ snapshot: PermissionSnapshot) -> String {
+            let names = missingCapabilityNames(snapshot)
+            switch names.count {
+            case 0:
+                return loc.s("permission.summary.all")
+            case 1:
+                return loc.s("permission.summary.single", names[0])
+            case 2:
+                return loc.s("permission.summary.two", names[0], names[1])
+            default:
+                return loc.s("permission.summary.many", names.dropLast().joined(separator: ", "), names.last ?? "")
+            }
+        }
+
+        private func kindKey(_ kind: PermissionKind) -> String {
+            switch kind {
+            case .accessibility: return "accessibility"
+            case .inputMonitoring: return "inputMonitoring"
+            case .postEvent: return "postEvent"
+            case .microphone: return "microphone"
+            case .speechRecognition: return "speechRecognition"
+            }
+        }
+    }
+
+    public static func localized(using localization: LocalizationManager = .shared) -> Localized {
+        Localized(localization: localization)
+    }
+
     public static func unlockDescription(for kind: PermissionKind) -> String {
         switch kind {
         case .accessibility:

@@ -218,6 +218,79 @@ final class LocalizationParityTests: XCTestCase {
         }
     }
 
+    /// These keys are consumed by the executable target, so a missing entry does not fail
+    /// compilation; `LocalizationManager` would quietly display the key itself instead.
+    /// Keep the high-traffic cross-screen vocabulary covered at the engine boundary.
+    func testExecutableUIKeysDoNotFallBackToRawKeyNames() {
+        let keys = [
+            "menu.muteFrontmost",
+            "manager.snippet.new",
+            "manager.context.duplicate",
+            "manager.context.delete",
+            "manager.disable",
+            "manager.enable",
+            "common.copy",
+            "common.delete",
+            "common.edit",
+            "ai.preview.action.replace",
+            "editor.macroGuide",
+            "import.preview.mode",
+            "library.health.conflictsNone",
+            "snippets.filter.empty",
+            "lab.secure.inactive",
+            "lab.status.editable",
+            "lab.status.selected"
+        ]
+
+        for (language, table) in concrete {
+            for key in keys {
+                XCTAssertNotEqual(
+                    table[key],
+                    key,
+                    "\(language.rawValue) \(key) must have a localized value"
+                )
+                XCTAssertNotNil(table[key], "\(language.rawValue) is missing \(key)")
+            }
+        }
+    }
+
+    func testPermissionCopyGuidanceResolvesInEveryLanguage() {
+        let snapshot = PermissionSnapshot(canListenTap: true, canUseAX: false, canPostEvents: false)
+        for language in AppLanguage.concreteCases {
+            let manager = LocalizationManager()
+            manager.language = language
+            let copy = PermissionCopy.localized(using: manager)
+            let values = [
+                copy.unlockDescription(for: .inputMonitoring),
+                copy.openSettingsWithoutRequestHint(
+                    for: .accessibility,
+                    bundleID: PermissionCopy.expectedBundleIdentifier
+                ),
+                copy.notListedInSettingsGuidance(
+                    for: .inputMonitoring,
+                    bundleID: PermissionCopy.expectedBundleIdentifier,
+                    appPath: "/Applications/DevType.app",
+                    siblingPaths: [],
+                    binaryPath: "/Applications/DevType.app/Contents/MacOS/DevType"
+                ),
+                copy.settingsOpenFailureMessage(for: .postEvent),
+                copy.livePreflightSummary(snapshot: snapshot),
+                copy.missingCapabilitiesSummary(snapshot)
+            ]
+
+            for value in values {
+                XCTAssertFalse(
+                    value.contains("permission."),
+                    "\(language.rawValue) exposed a raw permission localization key: \(value)"
+                )
+            }
+            XCTAssertTrue(
+                values[2].contains("/Applications/DevType.app"),
+                "\(language.rawValue) dropped the diagnostic app path"
+            )
+        }
+    }
+
     // MARK: - Lookup behaviour
 
     func testUnknownKeyFallsBackToTheKeyItself() {

@@ -82,6 +82,39 @@ final class VoiceSessionRedesignTests: XCTestCase {
         }
     }
 
+    func testReducerDeliversRawFallbackWithoutInventingCandidate() {
+        let snapshot = VoiceSessionSnapshot(
+            speechProvider: SpeechProviderDescriptor(id: "test", displayName: "Test", modelVersion: "1", privacyRoute: .onDeviceOnly),
+            correctionProvider: CorrectionProviderDescriptor(id: "unavailable", displayName: "Unavailable", modelVersion: "1", privacyRoute: .onDeviceOnly),
+            privacyRoute: .onDeviceOnly,
+            targetLease: TargetLease(bundleIdentifier: nil, processIdentifier: 0)
+        )
+        let raw = RawTranscript(text: "raw transcript", localeIdentifier: "en_US", providerID: "test", modelVersion: "1")
+        let final = FinalTranscript(
+            text: raw.text,
+            rawTranscript: raw,
+            correctionCandidate: nil,
+            validationOutcome: .fallbackToRaw(reason: .correctionTimeout)
+        )
+        var state = VoiceSessionState(
+            snapshot: snapshot,
+            phase: .correcting,
+            rawTranscript: raw
+        )
+
+        let result = VoiceSessionReducer.reduce(
+            state: &state,
+            event: .correctionValidationPassed(final),
+            eventGeneration: snapshot.generation
+        )
+
+        XCTAssertTrue(try! result.get().contains(.deliverTranscript(
+            finalTranscript: final,
+            lease: snapshot.targetLease
+        )))
+        XCTAssertEqual(state.phase, .readyForDelivery)
+    }
+
     func testReducerTerminalStateCannotReopen() {
         let snapshot = VoiceSessionSnapshot(
             speechProvider: SpeechProviderDescriptor(id: "test", displayName: "Test", modelVersion: "1", privacyRoute: .onDeviceOnly),
@@ -219,6 +252,19 @@ final class VoiceSessionRedesignTests: XCTestCase {
         XCTAssertEqual(chunks.first?.sampleTime, 100.0)
     }
 
+    func testAudioBufferPoolClampsZeroCapacityBeforeModulo() {
+        let pool = AudioBufferPool(capacity: 0, maxChunkFrames: 1024, bytesPerFrame: 4)
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: true),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1) else {
+            XCTFail("Failed to create test buffer")
+            return
+        }
+        buffer.frameLength = 1
+
+        XCTAssertTrue(pool.enqueue(buffer: buffer, sampleTime: 0))
+        XCTAssertEqual(pool.dequeueAll().count, 1)
+    }
+
     // MARK: - Recovery Service Tests
 
     func testRecoveryServiceScansDirectory() throws {
@@ -244,6 +290,42 @@ final class VoiceSessionRedesignTests: XCTestCase {
         XCTAssertEqual(recovered.count, 1)
         XCTAssertEqual(recovered.first?.rawTranscript?.text, "recovered speech")
         XCTAssertFalse(recovered.first?.isDelivered ?? true)
+    }
+
+    func testSessionStorePersistsAudioArtifactMetadata() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TestVoiceArtifact-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let sessionStore = VoiceSessionStore(baseDirectory: tempDir)
+        let snapshot = VoiceSessionSnapshot(
+            speechProvider: SpeechProviderDescriptor(
+                id: "test", displayName: "Test", modelVersion: "1", privacyRoute: .onDeviceOnly
+            ),
+            correctionProvider: CorrectionProviderDescriptor(
+                id: "test", displayName: "Test", modelVersion: "1", privacyRoute: .onDeviceOnly
+            ),
+            privacyRoute: .onDeviceOnly,
+            targetLease: TargetLease(bundleIdentifier: nil, processIdentifier: 0)
+        )
+        _ = try sessionStore.createSession(snapshot: snapshot)
+
+        let artifact = AudioArtifact(
+            fileURL: tempDir.appendingPathComponent("capture.caf"),
+            frameCount: 16_000,
+            durationSeconds: 1,
+            byteCount: 32_000,
+            sha256Hex: String(repeating: "a", count: 64),
+            gapCount: 2
+        )
+        try sessionStore.saveAudioArtifact(artifact, for: snapshot.sessionID)
+
+        let metadataURL = tempDir
+            .appendingPathComponent(snapshot.sessionID.description)
+            .appendingPathComponent("audio-artifact.json")
+        let decoded = try JSONDecoder().decode(AudioArtifact.self, from: Data(contentsOf: metadataURL))
+        XCTAssertEqual(decoded, artifact)
     }
 
     // MARK: - Voice Insertion Service Tests

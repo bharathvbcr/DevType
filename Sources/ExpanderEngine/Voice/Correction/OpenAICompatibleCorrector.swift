@@ -51,7 +51,8 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
 
         let systemInstruction = CorrectionPromptBuilder.systemPrompt(
             policy: request.policy,
-            protectedSpans: request.protectedSpans
+            protectedSpans: request.protectedSpans,
+            locale: request.locale
         )
 
         let body: [String: Any] = [

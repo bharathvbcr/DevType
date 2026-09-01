@@ -104,7 +104,8 @@ public final class AITransformCorrector: TranscriptCorrector, @unchecked Sendabl
             budgetTokens: FoundationLanguageModelCorrector.inputTokenBudget(
                 instructions: CorrectionPromptBuilder.systemPrompt(
                     policy: request.policy,
-                    protectedSpans: request.protectedSpans
+                    protectedSpans: request.protectedSpans,
+                    locale: request.locale
                 )
             )
         )
@@ -116,7 +117,15 @@ public final class AITransformCorrector: TranscriptCorrector, @unchecked Sendabl
                 break
             }
 
-            let result = await AITextTransformer.shared.transform(kind: kind, input: chunk)
+            let result = await AITextTransformer.shared.transform(
+                kind: kind,
+                input: chunk,
+                customInstructions: CorrectionPromptBuilder.systemPrompt(
+                    policy: request.policy,
+                    protectedSpans: request.protectedSpans,
+                    locale: request.locale
+                )
+            )
             switch result {
             case .success(let output):
                 // `.preserve`, deliberately: this output came from `AITextTransformer`,

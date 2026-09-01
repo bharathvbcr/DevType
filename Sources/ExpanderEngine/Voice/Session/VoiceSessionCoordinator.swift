@@ -29,6 +29,9 @@ public actor VoiceSessionCoordinator {
 
     /// Bounds every phase after capture ends. See `SessionWatchdog`.
     private let watchdog = SessionWatchdog()
+    /// Prevents a failed persistence report from recursively trying to persist its own failed
+    /// manifest forever. The actor makes this a serialized state bit, not a racy global flag.
+    private var handlingPersistenceFailure = false
 
     private init() {}
 
@@ -82,8 +85,23 @@ public actor VoiceSessionCoordinator {
         let state = VoiceSessionState(snapshot: snapshot, phase: .preparing)
         self.activeState = state
 
-        // Create session directory & manifest
-        _ = try store.createSession(snapshot: snapshot)
+        // Create session directory & manifest before capture starts. If this gate fails, do not
+        // leave the insertion service armed or a half-live session behind for a later toggle.
+        do {
+            _ = try store.createSession(snapshot: snapshot)
+        } catch {
+            activeState = nil
+            taskBag = nil
+            _ = await MainActor.run { VoiceInsertionService.shared.rollback() }
+            throw VoiceFailure(
+                stage: .persistence,
+                code: .manifestWriteFailed,
+                retryClass: .afterUserAction,
+                artifactState: .absent,
+                userAction: .freeDiskSpace,
+                redactedDetail: "Could not create the voice session manifest: \(error.localizedDescription)"
+            )
+        }
 
         // Reduce start event
         _ = processEvent(.startCapture(mode: mode), generation: generation)
@@ -96,14 +114,17 @@ public actor VoiceSessionCoordinator {
     }
 
     public func cancelSession() async {
-        guard activeState != nil, let bag = taskBag else { return }
-        let generation = bag.advanceGenerationAndCancelAll()
+        guard let state = activeState, taskBag != nil else { return }
+        // Reduce cancellation while the session generation is still current. Advancing the bag
+        // first makes the reducer reject its own `.cancel` event as stale, which skips the
+        // terminal HUD/manifest transition and leaves cancellation invisible to observers.
+        let generation = state.snapshot.generation
         disarmWatchdog()
         liveStream?.cancel()
         liveStream = nil
-        await capture.cancelCapture()
         _ = await MainActor.run { VoiceInsertionService.shared.rollback() }
         _ = processEvent(.cancel, generation: generation)
+        await capture.cancelCapture()
         self.activeState = nil
         self.taskBag = nil
     }
@@ -125,8 +146,20 @@ public actor VoiceSessionCoordinator {
                 redactedDetail: "Reducer error: \(error)"
             )
             state.phase = .failed(fail)
+            state.failure = fail
             self.activeState = state
-            onPhaseChange?(.failed(fail))
+            // A protocol violation is terminal too. Route it through the same command path as
+            // provider and persistence failures so an invalid event cannot strand the microphone,
+            // live recognizer, watchdog, or insertion lease.
+            executeCommands(
+                [
+                    .notifyHUD(phase: .failed(fail)),
+                    .persistManifest(phase: .failed(fail)),
+                    .cleanupResources
+                ],
+                for: state.snapshot,
+                generation: generation
+            )
             return false
         }
     }
@@ -230,6 +263,11 @@ public actor VoiceSessionCoordinator {
 
     private func executeCommands(_ commands: [VoiceSessionCommand], for snapshot: VoiceSessionSnapshot, generation: SessionGeneration) {
         for command in commands {
+            // A command can synchronously expose a persistence failure, which transitions the
+            // reducer to a terminal state and cancels/removes the task bag. Do not continue the
+            // stale command list afterward (for example, do not publish a completed HUD state or
+            // attempt the remaining manifest write after a receipt write already failed).
+            guard taskBag?.isCurrentGeneration(generation) == true else { return }
             switch command {
             case .notifyHUD(let phase):
                 VoiceDiagnosticsRecorder.shared.record(
@@ -332,7 +370,10 @@ public actor VoiceSessionCoordinator {
                     )
 
                     guard let corrector else {
-                        // Correction disabled — deliver exactly what was recognized.
+                        // No provider can be used — deliver exactly what was recognized. The
+                        // reducer is still in `.correcting` here, so use the explicit terminal
+                        // correction event rather than pretending validation already happened in
+                        // the `.validatingCorrection` phase.
                         _ = await self.processEvent(
                             .correctionValidationPassed(FinalTranscript(
                                 text: raw.text,
@@ -356,7 +397,22 @@ public actor VoiceSessionCoordinator {
                         generation: generation
                     )
 
-                    _ = await self.processEvent(.correctionValidationPassed(final), generation: generation)
+                    // A successful candidate must cross the reducer's candidate-received edge
+                    // before validation can complete. The old code emitted only
+                    // `correctionValidationPassed` while still in `.correcting`, which turned
+                    // every normal voice correction into a protocol failure and made delivery
+                    // unreachable. A thrown/empty-provider fallback has no candidate and uses the
+                    // reducer's direct raw-result edge above.
+                    if let candidate = final.correctionCandidate {
+                        guard await self.processEvent(
+                            .correctionCandidateReceived(candidate),
+                            generation: generation
+                        ) else { return }
+                    }
+                    _ = await self.processEvent(
+                        .correctionValidationPassed(final),
+                        generation: generation
+                    )
                 }
                 _ = taskBag?.add(task)
 
@@ -379,7 +435,20 @@ public actor VoiceSessionCoordinator {
 
             case .cleanupResources:
                 disarmWatchdog()
+                liveStream?.cancel()
                 liveStream = nil
+                Task { [capture] in
+                    await capture.cancelCapture()
+                }
+                if let phase = activeState?.phase {
+                    switch phase {
+                    case .completed, .failed, .cancelled:
+                        _ = taskBag?.advanceGenerationAndCancelAll()
+                        taskBag = nil
+                    default:
+                        break
+                    }
+                }
 
             case .deliverTranscript(let finalTranscript, let lease):
                 let task = Task { [weak self] in
@@ -413,20 +482,87 @@ public actor VoiceSessionCoordinator {
                 _ = taskBag?.add(task)
 
             case .persistManifest:
-                _ = try? store.createSession(snapshot: snapshot)
+                do {
+                    _ = try store.createSession(snapshot: snapshot)
+                } catch {
+                    handlePersistenceFailure(error, generation: generation, artifactState: .partial)
+                    return
+                }
 
-            case .persistAudio:
-                break
+            case .persistAudio(let artifact):
+                do {
+                    try store.saveAudioArtifact(artifact, for: snapshot.sessionID)
+                } catch {
+                    handlePersistenceFailure(error, generation: generation, artifactState: .partial)
+                    return
+                }
 
             case .persistRaw(let raw):
-                _ = try? store.saveRawTranscript(raw, for: snapshot.sessionID)
+                do {
+                    try store.saveRawTranscript(raw, for: snapshot.sessionID)
+                } catch {
+                    handlePersistenceFailure(error, generation: generation, artifactState: .partial)
+                    return
+                }
 
             case .persistFinal(let final):
-                _ = try? store.saveFinalTranscript(final, for: snapshot.sessionID)
+                do {
+                    try store.saveFinalTranscript(final, for: snapshot.sessionID)
+                } catch {
+                    handlePersistenceFailure(error, generation: generation, artifactState: .partial)
+                    return
+                }
 
             case .persistReceipt(let receipt):
-                _ = try? store.saveDeliveryReceipt(receipt, for: snapshot.sessionID)
+                do {
+                    try store.saveDeliveryReceipt(receipt, for: snapshot.sessionID)
+                } catch {
+                    handlePersistenceFailure(error, generation: generation, artifactState: .partial)
+                    return
+                }
             }
+        }
+    }
+
+    private func handlePersistenceFailure(
+        _ error: Error,
+        generation: SessionGeneration,
+        artifactState: ArtifactState
+    ) {
+        guard !handlingPersistenceFailure else {
+            DevTypeLog.store.error(
+                "[Voice] secondary persistence failure while recording the primary failure: \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
+
+        handlingPersistenceFailure = true
+        defer { handlingPersistenceFailure = false }
+
+        let failure = VoiceFailure(
+            stage: .persistence,
+            code: .manifestWriteFailed,
+            retryClass: .afterUserAction,
+            artifactState: artifactState,
+            userAction: .freeDiskSpace,
+            redactedDetail: "Voice session persistence failed: \(error.localizedDescription)"
+        )
+        guard processEvent(.failureOccurred(failure), generation: generation) else {
+            // A receipt failure can happen after the reducer has already reached `.completed`.
+            // Preserve that truthful delivery state, but still tear down capture/watchdog/task
+            // resources and leave a structured OSLog record instead of silently leaking them.
+            DevTypeLog.store.error(
+                "[Voice] could not transition after persistence failure because the session was terminal"
+            )
+            disarmWatchdog()
+            liveStream?.cancel()
+            liveStream = nil
+            Task { [capture] in
+                await capture.cancelCapture()
+            }
+            _ = taskBag?.advanceGenerationAndCancelAll()
+            taskBag = nil
+            return
         }
     }
 }

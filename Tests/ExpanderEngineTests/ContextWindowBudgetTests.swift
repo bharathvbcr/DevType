@@ -106,6 +106,25 @@ final class ContextWindowBudgetTests: XCTestCase {
         XCTAssertEqual(rejoined, text.split(whereSeparator: \.isWhitespace).map(String.init))
     }
 
+    func testUnbrokenUnicodeTranscriptSplitsWithoutLosingGraphemes() {
+        let text = String(repeating: "界", count: 300)
+        let chunks = Corrector.chunk(text, budgetTokens: 16)
+
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertEqual(chunks.joined(), text)
+        for chunk in chunks {
+            XCTAssertLessThanOrEqual(Corrector.estimatedTokens(chunk), 16)
+        }
+    }
+
+    func testNonPositiveChunkBudgetIsClampedAndTerminates() {
+        let text = "abcdefghij"
+        let chunks = Corrector.chunk(text, budgetTokens: 0)
+
+        XCTAssertEqual(chunks.joined(), text)
+        XCTAssertTrue(chunks.allSatisfy { !$0.isEmpty })
+    }
+
     /// Chunks should land on sentence boundaries where they exist — the model needs a whole
     /// sentence to punctuate it correctly.
     func testChunksPreferSentenceBoundaries() {

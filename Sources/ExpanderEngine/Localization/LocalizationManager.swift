@@ -199,6 +199,9 @@ public final class LocalizationManager: ObservableObject {
             "common.remove": "Remove",
             "common.add": "Add",
             "common.done": "Done",
+            "common.copy": "Copy",
+            "common.delete": "Delete",
+            "common.edit": "Edit",
             "common.revealInFinder": "Reveal in Finder",
             "fillin.title": "Fill In Fields",
             "fillin.subtitle": "Complete the fields below, then insert.",
@@ -862,6 +865,13 @@ public final class LocalizationManager: ObservableObject {
                 "Expansions never fire in these apps. Select one and click Remove to unmute.",
             "prefs.general.mutedApps.empty": "No apps are muted.",
             "prefs.general.muteFrontmost": "Mute Frontmost App",
+            "menu.muteFrontmost": "Mute Frontmost App",
+            "manager.snippet.new": "New Snippet",
+            "manager.context.duplicate": "Duplicate",
+            "manager.context.delete": "Delete",
+            "manager.disable": "Disable",
+            "manager.enable": "Enable",
+            "editor.macroGuide": "Macro Guide",
             "prefs.snippets.libraryPath": "Library: %@",
             "prefs.snippets.conflicts": "Trigger Conflicts",
             "prefs.snippets.conflicts.none": "No conflicting triggers.",
@@ -980,6 +990,7 @@ public final class LocalizationManager: ObservableObject {
             "ai.preview.replace": "Replace",
             "ai.preview.diff": "Diff",
             "ai.preview.kind": "Transform kind",
+            "ai.preview.action.replace": "Replace",
 
             "ai.kind.proofread": "Proofread",
             "ai.kind.rewrite": "Rewrite",
@@ -1175,6 +1186,80 @@ public final class LocalizationManager: ObservableObject {
                 "After enabling Input Monitoring, click Open Settings again for Accessibility.",
             "onboarding.hint.postNoList":
                 "Post Events has no Settings list — use Request if the macOS prompt is still needed.",
+
+            // Permission explanations and recovery diagnostics.
+            "permission.description.accessibility":
+                "Focused-element context and Accessibility-based text injection. Expansions refuse without it (fail-closed).",
+            "permission.description.inputMonitoring":
+                "Required for the keyboard event tap — without it, DevType cannot read keystrokes.",
+            "permission.description.postEvent":
+                "Synthetic backspace, paste, and arrow cursor moves. Separate TCC service (may appear under Accessibility). No dedicated Privacy_PostEvent pane.",
+            "permission.description.microphone":
+                "Required for Smart Speech-to-Text and Dictation. Audio stays strictly local on your Mac.",
+            "permission.description.speechRecognition":
+                "Required for on-device fallback speech recognition using Apple Speech framework.",
+            "permission.cap.microphone": "Microphone",
+            "permission.cap.speechRecognition": "Speech Recognition",
+            "permission.button.openSettings": "Open Settings",
+            "permission.button.openAccessibility": "Open Accessibility",
+            "permission.button.openMicrophone": "Open Microphone Settings",
+            "permission.button.openSpeech": "Open Speech Settings",
+            "permission.hint.postEvent":
+                "Post Events has no Privacy list. Click Request for the CG prompt; Open Accessibility only deep-links. Enable %@ under Accessibility if listed.",
+            "permission.hint.inputMonitoring":
+                "Open Settings only deep-links — it does not register DevType under Input Monitoring. Click Request first, wait for the macOS prompt, then look for “DevType” (scroll or use + if needed).",
+            "permission.hint.accessibility":
+                "Open Settings only deep-links — it does not register the app. If Accessibility does not list %@ yet, click Request first, then enable that exact entry.",
+            "permission.hint.microphone":
+                "Open Settings only deep-links. Click Request Access or trigger Smart Dictation (⌘⌥V) to prompt macOS for Microphone permission.",
+            "permission.hint.speechRecognition":
+                "Open Settings only deep-links. Enable %@ under Speech Recognition if listed.",
+            "permission.notListed.postEvent":
+                "Post Events is not a Settings list — use Request for the CG prompt, then enable Accessibility for %@.",
+            "permission.notListed.inputMonitoring":
+                "If Input Monitoring opens but DevType is absent: click Request in DevType, wait for the macOS prompt (Allow or dismiss), then look for “DevType” under Input Monitoring — scroll the list if needed. On some macOS versions use the + button and choose this app.",
+            "permission.notListed.inputLookFor": "Look for %@ or the name “DevType”.",
+            "permission.notListed.accessibility":
+                "If Accessibility is empty or missing DevType: click Request first (registers this process), look for %@, enable it, then return here. Newly granted Accessibility may require Relaunch.",
+            "permission.notListed.microphone":
+                "If Microphone is empty or missing DevType: click Request Access or use ⌘⌥V to register this process with macOS TCC.",
+            "permission.notListed.speechRecognition":
+                "If Speech Recognition is empty: trigger smart dictation once to register this process.",
+            "permission.notListed.appPath": "App path: %@",
+            "permission.notListed.binary": "Binary: %@",
+            "permission.notListed.quitCopies":
+                "Quit duplicate DevType copies, then re-open %@ (or %@ while developing) if the list still looks wrong.",
+            "permission.pane.postEvent": "Accessibility (Post Events has no dedicated pane)",
+            "permission.pane.privacySecurity": "Privacy & Security",
+            "permission.settings.failure":
+                "Could not open System Settings automatically. Open %@ → %@ manually, then enable DevType (%@).",
+            "permission.identity.changed":
+                "Binary identity changed (re-signed or different path) — re-enable permissions for this copy.",
+            "permission.identity.preferPath":
+                "Prefer %@; use %@ only while developing. Avoid re-packaging unless the binary changed.",
+            "permission.identity.appPath": "App path: %@",
+            "permission.identity.cdHash": "CDHash: %@",
+            "permission.degraded.accessibility":
+                "Accessibility missing — expansions refused (fail-closed)",
+            "permission.degraded.postEvents":
+                "Post Events missing — terminal paste / HID cursor disabled",
+            "permission.livePreflight":
+                "LIVE preflight — Listen: %@ · AX: %@ · Post: %@",
+            "permission.granted": "Granted",
+            "permission.denied": "Denied",
+            "permission.tapCreateFailed":
+                "Tap Failed: Input Monitoring and Accessibility look granted but the event tap did not start. Quit any other DevType copies, re-open the packaged app, then use Permission Recovery (⌘⇧P).",
+            "permission.capabilities": "permissions",
+            "permission.relaunch":
+                "Settings toggles may have changed but LIVE preflight still denies %@. Click Relaunch DevType — macOS often requires a relaunch after flipping Privacy toggles.",
+            "permission.staleTCC":
+                "LIVE preflight still denies this capability while a Settings toggle may look ON. That usually means the stored TCC row authorizes an older code identity. Quit DevType, run Scripts/reset-tcc.sh, reopen %@, then click Request again (and remove any stale DevType row with the minus button if it remains).",
+            "permission.staleLegacy":
+                "Privacy lists may still show %@ (old identity). That entry does not grant %@. Remove the stale row, Request again for %@, enable that entry, then Relaunch.",
+            "permission.summary.all": "All capabilities granted",
+            "permission.summary.single": "Missing: %@",
+            "permission.summary.two": "Missing: %@ and %@",
+            "permission.summary.many": "Missing: %@, and %@",
 
             // §6.1: permission recovery.
             "recovery.title": "Permission Recovery",
@@ -1506,6 +1591,7 @@ public final class LocalizationManager: ObservableObject {
             // Import Preview
             "import.preview.title": "Import Snippets Preview",
             "import.preview.count": "%d snippets in %d groups found.",
+            "import.preview.mode": "Import Mode",
             "import.preview.mode.merge": "Merge (Update matching)",
             "import.preview.mode.skip": "Skip Conflicting",
             "import.preview.mode.duplicate": "Import as Copies",
@@ -1534,6 +1620,11 @@ public final class LocalizationManager: ObservableObject {
             "lab.audit.editable": "Focused Field Editability",
             "lab.audit.path": "Resolved Delivery Path: %@",
             "lab.audit.lastOutcome": "Last Expansion Result: %@",
+            "lab.secure.inactive": "Inactive",
+            "lab.status.editable": "Editable",
+            "lab.status.selected": "Selected",
+            "library.health.conflictsNone": "No trigger conflicts.",
+            "snippets.filter.empty": "No snippets match this filter.",
             "ai.availability.requirement": "On-device AI transforms require macOS 26 or later with Apple Intelligence."
         ]
     }
@@ -1549,6 +1640,9 @@ public final class LocalizationManager: ObservableObject {
             "common.remove": "제거",
             "common.add": "추가",
             "common.done": "완료",
+            "common.copy": "복사",
+            "common.delete": "삭제",
+            "common.edit": "편집",
             "common.revealInFinder": "Finder에서 보기",
             "fillin.title": "입력 필드",
             "fillin.subtitle": "아래 필드를 입력한 후 삽입하세요.",
@@ -2189,6 +2283,13 @@ public final class LocalizationManager: ObservableObject {
             "prefs.general.mutedApps.hint": "이 앱에서는 확장이 실행되지 않습니다. 항목을 선택하고 제거를 누르세요.",
             "prefs.general.mutedApps.empty": "음소거된 앱이 없습니다.",
             "prefs.general.muteFrontmost": "최상위 앱 음소거",
+            "menu.muteFrontmost": "전면 앱 음소거",
+            "manager.snippet.new": "새 스니펫",
+            "manager.context.duplicate": "복제",
+            "manager.context.delete": "삭제",
+            "manager.disable": "비활성화",
+            "manager.enable": "활성화",
+            "editor.macroGuide": "매크로 가이드",
             "prefs.snippets.libraryPath": "라이브러리: %@",
             "prefs.snippets.conflicts": "트리거 충돌",
             "prefs.snippets.conflicts.none": "충돌하는 트리거가 없습니다.",
@@ -2305,6 +2406,7 @@ public final class LocalizationManager: ObservableObject {
             "ai.preview.replace": "바꾸기",
             "ai.preview.diff": "차이",
             "ai.preview.kind": "변환 종류",
+            "ai.preview.action.replace": "바꾸기",
 
             "ai.kind.proofread": "교정",
             "ai.kind.rewrite": "다시 쓰기",
@@ -2494,6 +2596,79 @@ public final class LocalizationManager: ObservableObject {
             "onboarding.hint.imThenAX": "입력 모니터링을 활성화한 뒤 설정 열기를 다시 눌러 손쉬운 사용을 설정하세요.",
             "onboarding.hint.postNoList":
                 "이벤트 전송은 설정 목록이 없습니다 — macOS 프롬프트가 필요하면 요청을 사용하세요.",
+
+            // 권한 설명 및 복구 진단.
+            "permission.description.accessibility":
+                "포커스된 요소의 문맥과 손쉬운 사용 기반 텍스트 삽입에 필요합니다. 권한이 없으면 확장을 거부합니다(안전 실패).",
+            "permission.description.inputMonitoring":
+                "키보드 이벤트 탭에 필요합니다 — 없으면 DevType가 키 입력을 읽을 수 없습니다.",
+            "permission.description.postEvent":
+                "백스페이스, 붙여넣기, 커서 이동을 위한 합성 이벤트입니다. 별도의 TCC 서비스이며 손쉬운 사용에 표시될 수 있습니다. 전용 Privacy_PostEvent 패널은 없습니다.",
+            "permission.description.microphone":
+                "스마트 음성 텍스트 변환 및 받아쓰기에 필요합니다. 오디오는 Mac에서만 처리됩니다.",
+            "permission.description.speechRecognition":
+                "Apple Speech 프레임워크의 기기 내 음성 인식 대체 경로에 필요합니다.",
+            "permission.cap.microphone": "마이크",
+            "permission.cap.speechRecognition": "음성 인식",
+            "permission.button.openSettings": "설정 열기",
+            "permission.button.openAccessibility": "손쉬운 사용 열기",
+            "permission.button.openMicrophone": "마이크 설정 열기",
+            "permission.button.openSpeech": "음성 설정 열기",
+            "permission.hint.postEvent":
+                "이벤트 전송에는 개인정보 보호 목록이 없습니다. CG 프롬프트는 요청을 누르세요. 설정 열기는 해당 위치로만 이동합니다. 목록에 있으면 손쉬운 사용에서 %@를 활성화하세요.",
+            "permission.hint.inputMonitoring":
+                "설정 열기는 위치만 이동하며 입력 모니터링에 DevType를 등록하지 않습니다. 먼저 요청을 누르고 macOS 프롬프트를 기다린 다음 입력 모니터링에서 “DevType”를 찾으세요(필요하면 스크롤하거나 +를 사용).",
+            "permission.hint.accessibility":
+                "설정 열기는 위치만 이동하며 앱을 등록하지 않습니다. 손쉬운 사용에 %@가 아직 없으면 먼저 요청을 누른 뒤 정확한 항목을 활성화하세요.",
+            "permission.hint.microphone":
+                "설정 열기는 위치만 이동합니다. 액세스 요청을 누르거나 스마트 받아쓰기(⌘⌥V)를 실행해 macOS 마이크 권한을 요청하세요.",
+            "permission.hint.speechRecognition":
+                "설정 열기는 위치만 이동합니다. 목록에 있으면 음성 인식에서 %@를 활성화하세요.",
+            "permission.notListed.postEvent":
+                "이벤트 전송은 설정 목록이 없습니다 — CG 프롬프트는 요청을 누른 뒤 손쉬운 사용에서 %@를 활성화하세요.",
+            "permission.notListed.inputMonitoring":
+                "입력 모니터링이 열렸지만 DevType가 없으면 DevType에서 요청을 누르고 macOS 프롬프트를 기다린 뒤 입력 모니터링에서 “DevType”를 찾으세요 — 필요하면 목록을 스크롤하세요. 일부 macOS 버전에서는 + 버튼으로 이 앱을 선택하세요.",
+            "permission.notListed.inputLookFor": "%@ 또는 “DevType”라는 이름을 찾으세요.",
+            "permission.notListed.accessibility":
+                "손쉬운 사용이 비어 있거나 DevType가 없으면 먼저 요청을 눌러 이 프로세스를 등록하고 %@를 찾아 활성화한 뒤 돌아오세요. 새 손쉬운 사용 권한은 다시 실행이 필요할 수 있습니다.",
+            "permission.notListed.microphone":
+                "마이크가 비어 있거나 DevType가 없으면 액세스 요청을 누르거나 ⌘⌥V로 스마트 받아쓰기를 실행해 이 프로세스를 macOS TCC에 등록하세요.",
+            "permission.notListed.speechRecognition":
+                "음성 인식이 비어 있으면 스마트 받아쓰기를 한 번 실행해 이 프로세스를 등록하세요.",
+            "permission.notListed.appPath": "앱 경로: %@",
+            "permission.notListed.binary": "바이너리: %@",
+            "permission.notListed.quitCopies":
+                "중복 DevType 사본을 종료한 뒤 목록이 이상하면 %@를 다시 여세요(개발 중에는 %@).",
+            "permission.pane.postEvent": "손쉬운 사용 (이벤트 전송 전용 패널 없음)",
+            "permission.pane.privacySecurity": "개인정보 보호 및 보안",
+            "permission.settings.failure":
+                "시스템 설정을 자동으로 열 수 없습니다. %@ → %@를 직접 열고 DevType(%@)를 활성화하세요.",
+            "permission.identity.changed":
+                "바이너리 식별 정보가 변경되었습니다(재서명 또는 다른 경로) — 이 사본의 권한을 다시 활성화하세요.",
+            "permission.identity.preferPath":
+                "%@를 우선 사용하고, 개발 중에만 %@를 사용하세요. 바이너리가 바뀌지 않았다면 다시 패키징하지 마세요.",
+            "permission.identity.appPath": "앱 경로: %@",
+            "permission.identity.cdHash": "CDHash: %@",
+            "permission.degraded.accessibility":
+                "손쉬운 사용 없음 — 확장 거부됨(안전 실패)",
+            "permission.degraded.postEvents":
+                "이벤트 전송 없음 — 터미널 붙여넣기/HID 커서가 비활성화됨",
+            "permission.livePreflight": "실시간 사전 점검 — 수신: %@ · AX: %@ · 전송: %@",
+            "permission.granted": "허용됨",
+            "permission.denied": "거부됨",
+            "permission.tapCreateFailed":
+                "탭 실패: 입력 모니터링과 손쉬운 사용은 허용된 것으로 보이지만 이벤트 탭이 시작되지 않았습니다. 다른 DevType 사본을 종료하고 패키지 앱을 다시 연 다음 권한 복구(⌘⇧P)를 사용하세요.",
+            "permission.capabilities": "권한",
+            "permission.relaunch":
+                "설정 토글이 바뀌었지만 실시간 사전 점검에서 %@이(가) 아직 거부됩니다. 개인정보 보호 토글 변경 후 macOS에서 다시 실행이 필요할 수 있으니 DevType 다시 실행을 누르세요.",
+            "permission.staleTCC":
+                "설정 토글은 켜져 보이지만 실시간 사전 점검에서 이 권한이 거부됩니다. 저장된 TCC 행이 이전 코드 식별 정보를 허용하는 경우가 많습니다. DevType를 종료하고 Scripts/reset-tcc.sh를 실행한 뒤 %@를 다시 열고 요청을 누르세요(남은 이전 DevType 행은 -로 제거).",
+            "permission.staleLegacy":
+                "개인정보 보호 목록에 이전 식별자인 %@가 남아 있을 수 있습니다. 이 항목은 %@를 허용하지 않습니다. 이전 행을 제거하고 %@에 다시 요청한 뒤 활성화하고 다시 실행하세요.",
+            "permission.summary.all": "모든 권한 허용됨",
+            "permission.summary.single": "없음: %@",
+            "permission.summary.two": "없음: %@ 및 %@",
+            "permission.summary.many": "없음: %@, %@",
 
             "recovery.title": "권한 복구",
             "recovery.subtitle": "권한 구분 • 요청 ≠ 설정 열기",
@@ -2817,6 +2992,7 @@ public final class LocalizationManager: ObservableObject {
             // Import Preview
             "import.preview.title": "스니펫 가져오기 미리보기",
             "import.preview.count": "%d개의 스니펫(%d개 그룹)이 발견되었습니다.",
+            "import.preview.mode": "가져오기 모드",
             "import.preview.mode.merge": "병합 (일치하는 항목 업데이트)",
             "import.preview.mode.skip": "충돌 항목 건너뛰기",
             "import.preview.mode.duplicate": "사본으로 가져오기",
@@ -2845,6 +3021,11 @@ public final class LocalizationManager: ObservableObject {
             "lab.audit.editable": "포커스된 필드 편집 가능 여부",
             "lab.audit.path": "선택된 전송 경로: %@",
             "lab.audit.lastOutcome": "마지막 확장 결과: %@",
+            "lab.secure.inactive": "비활성",
+            "lab.status.editable": "편집 가능",
+            "lab.status.selected": "선택됨",
+            "library.health.conflictsNone": "트리거 충돌이 없습니다.",
+            "snippets.filter.empty": "이 필터와 일치하는 스니펫이 없습니다.",
             "ai.availability.requirement": "온디바이스 AI 변환에는 Apple Intelligence가 있는 macOS 26 이상이 필요합니다."
         ]
     }
@@ -2860,6 +3041,9 @@ public final class LocalizationManager: ObservableObject {
             "common.remove": "削除",
             "common.add": "追加",
             "common.done": "完了",
+            "common.copy": "コピー",
+            "common.delete": "削除",
+            "common.edit": "編集",
             "common.revealInFinder": "Finder で表示",
             "fillin.title": "入力フィールド",
             "fillin.subtitle": "以下のフィールドに入力して挿入してください。",
@@ -3504,6 +3688,13 @@ public final class LocalizationManager: ObservableObject {
                 "これらのアプリでは展開が実行されません。項目を選んで削除を押すと解除できます。",
             "prefs.general.mutedApps.empty": "ミュート中のアプリはありません。",
             "prefs.general.muteFrontmost": "最前面のアプリをミュート",
+            "menu.muteFrontmost": "最前面のアプリをミュート",
+            "manager.snippet.new": "新しいスニペット",
+            "manager.context.duplicate": "複製",
+            "manager.context.delete": "削除",
+            "manager.disable": "無効化",
+            "manager.enable": "有効化",
+            "editor.macroGuide": "マクロガイド",
             "prefs.snippets.libraryPath": "ライブラリ: %@",
             "prefs.snippets.conflicts": "トリガーの競合",
             "prefs.snippets.conflicts.none": "競合するトリガーはありません。",
@@ -3620,6 +3811,7 @@ public final class LocalizationManager: ObservableObject {
             "ai.preview.replace": "置換",
             "ai.preview.diff": "差分",
             "ai.preview.kind": "変換の種類",
+            "ai.preview.action.replace": "置換",
 
             "ai.kind.proofread": "校正",
             "ai.kind.rewrite": "書き直し",
@@ -3811,6 +4003,79 @@ public final class LocalizationManager: ObservableObject {
                 "入力監視を有効にしたあと、もう一度設定を開くを押してアクセシビリティを設定してください。",
             "onboarding.hint.postNoList":
                 "イベント送信には設定の一覧がありません — macOS のダイアログが必要な場合はリクエストを使ってください。",
+
+            // 権限の説明と復旧診断。
+            "permission.description.accessibility":
+                "フォーカスされた要素のコンテキストとアクセシビリティによるテキスト挿入に必要です。未許可の場合は展開を拒否します（安全側に失敗）。",
+            "permission.description.inputMonitoring":
+                "キーボードイベントタップに必要です — これがないと DevType はキー入力を読み取れません。",
+            "permission.description.postEvent":
+                "バックスペース、ペースト、カーソル移動の合成イベントです。別の TCC サービスで、アクセシビリティに表示される場合があります。専用の Privacy_PostEvent パネルはありません。",
+            "permission.description.microphone":
+                "スマート音声テキスト変換と音声入力に必要です。音声は Mac 上だけで処理されます。",
+            "permission.description.speechRecognition":
+                "Apple Speech フレームワークによるオンデバイス音声認識のフォールバックに必要です。",
+            "permission.cap.microphone": "マイク",
+            "permission.cap.speechRecognition": "音声認識",
+            "permission.button.openSettings": "設定を開く",
+            "permission.button.openAccessibility": "アクセシビリティを開く",
+            "permission.button.openMicrophone": "マイク設定を開く",
+            "permission.button.openSpeech": "音声設定を開く",
+            "permission.hint.postEvent":
+                "イベント送信にはプライバシー一覧がありません。CG ダイアログにはリクエストを押してください。設定を開くは移動だけを行います。一覧にあればアクセシビリティで %@ を有効にしてください。",
+            "permission.hint.inputMonitoring":
+                "設定を開くは移動だけを行い、入力監視に DevType を登録しません。先にリクエストを押して macOS のダイアログを待ち、入力監視で「DevType」を探してください（必要ならスクロールまたは + を使用）。",
+            "permission.hint.accessibility":
+                "設定を開くは移動だけを行い、アプリを登録しません。アクセシビリティに %@ がまだなければ、先にリクエストを押して正確な項目を有効にしてください。",
+            "permission.hint.microphone":
+                "設定を開くは移動だけを行います。アクセスをリクエストを押すか、スマート音声入力（⌘⌥V）を実行して macOS にマイク許可を求めてください。",
+            "permission.hint.speechRecognition":
+                "設定を開くは移動だけを行います。一覧にあれば音声認識で %@ を有効にしてください。",
+            "permission.notListed.postEvent":
+                "イベント送信は設定一覧ではありません — CG ダイアログにはリクエストを押し、その後アクセシビリティで %@ を有効にしてください。",
+            "permission.notListed.inputMonitoring":
+                "入力監視を開いても DevType がない場合は、DevType でリクエストを押して macOS のダイアログを待ち、入力監視で「DevType」を探してください — 必要なら一覧をスクロールします。一部の macOS では + ボタンでこのアプリを選びます。",
+            "permission.notListed.inputLookFor": "%@ または「DevType」という名前を探してください。",
+            "permission.notListed.accessibility":
+                "アクセシビリティが空、または DevType がない場合は、まずリクエストを押してこのプロセスを登録し、%@ を探して有効にしてから戻ってください。新しいアクセシビリティ許可には再起動が必要な場合があります。",
+            "permission.notListed.microphone":
+                "マイクが空、または DevType がない場合は、アクセスをリクエストを押すか ⌘⌥V でスマート音声入力を実行して、このプロセスを macOS TCC に登録してください。",
+            "permission.notListed.speechRecognition":
+                "音声認識が空の場合は、スマート音声入力を一度実行してこのプロセスを登録してください。",
+            "permission.notListed.appPath": "アプリのパス: %@",
+            "permission.notListed.binary": "バイナリ: %@",
+            "permission.notListed.quitCopies":
+                "重複した DevType のコピーを終了し、一覧がまだ正しく見えなければ %@ を再び開いてください（開発中は %@）。",
+            "permission.pane.postEvent": "アクセシビリティ（イベント送信専用パネルなし）",
+            "permission.pane.privacySecurity": "プライバシーとセキュリティ",
+            "permission.settings.failure":
+                "システム設定を自動で開けませんでした。%@ → %@ を手動で開き、DevType（%@）を有効にしてください。",
+            "permission.identity.changed":
+                "バイナリの識別情報が変わりました（再署名または別のパス）— このコピーの許可をもう一度有効にしてください。",
+            "permission.identity.preferPath":
+                "%@ を優先し、開発中だけ %@ を使用してください。バイナリが変わっていなければ再パッケージしないでください。",
+            "permission.identity.appPath": "アプリのパス: %@",
+            "permission.identity.cdHash": "CDHash: %@",
+            "permission.degraded.accessibility":
+                "アクセシビリティなし — 展開を拒否（安全側に失敗）",
+            "permission.degraded.postEvents":
+                "イベント送信なし — ターミナルのペースト/HID カーソルを無効化",
+            "permission.livePreflight": "ライブ事前確認 — Listen: %@ · AX: %@ · Post: %@",
+            "permission.granted": "許可済み",
+            "permission.denied": "拒否",
+            "permission.tapCreateFailed":
+                "タップ失敗: 入力監視とアクセシビリティは許可済みに見えますが、イベントタップを開始できませんでした。他の DevType のコピーを終了し、パッケージ済みアプリを開き直してから権限の復旧（⌘⇧P）を使用してください。",
+            "permission.capabilities": "権限",
+            "permission.relaunch":
+                "設定のトグルは変わりましたが、ライブ事前確認では %@ がまだ拒否されています。プライバシー設定の変更後は macOS の再起動が必要な場合があるため、DevType を再起動を押してください。",
+            "permission.staleTCC":
+                "設定のトグルがオンでもライブ事前確認でこの権限が拒否されます。保存された TCC 行が古いコード識別情報を許可している可能性があります。DevType を終了し、Scripts/reset-tcc.sh を実行してから %@ を開き直し、もう一度リクエストしてください（残った古い DevType 行は - で削除）。",
+            "permission.staleLegacy":
+                "プライバシー一覧に古い識別子 %@ が残っている可能性があります。この項目は %@ を許可しません。古い行を削除し、%@ にもう一度リクエストして有効化し、再起動してください。",
+            "permission.summary.all": "すべての権限が許可済み",
+            "permission.summary.single": "不足: %@",
+            "permission.summary.two": "不足: %@ と %@",
+            "permission.summary.many": "不足: %@、%@",
 
             "recovery.title": "権限の復旧",
             "recovery.subtitle": "権限の分離 • リクエスト ≠ 設定を開く",
@@ -4139,6 +4404,7 @@ public final class LocalizationManager: ObservableObject {
             // Import Preview
             "import.preview.title": "スニペットインポートのプレビュー",
             "import.preview.count": "%d個のスニペット（%dグループ）が見つかりました。",
+            "import.preview.mode": "インポートモード",
             "import.preview.mode.merge": "マージ（一致する項目を更新）",
             "import.preview.mode.skip": "競合する項目をスキップ",
             "import.preview.mode.duplicate": "コピーとしてインポート",
@@ -4167,6 +4433,11 @@ public final class LocalizationManager: ObservableObject {
             "lab.audit.editable": "フォーカスされたフィールドの編集可否",
             "lab.audit.path": "決定された配信パス: %@",
             "lab.audit.lastOutcome": "前回の展開結果: %@",
+            "lab.secure.inactive": "非アクティブ",
+            "lab.status.editable": "編集可能",
+            "lab.status.selected": "選択済み",
+            "library.health.conflictsNone": "トリガーの競合はありません。",
+            "snippets.filter.empty": "このフィルターに一致するスニペットはありません。",
             "ai.availability.requirement": "オンデバイスAI変換にはApple Intelligence対応のmacOS 26以降が必要です。"
         ]
     }

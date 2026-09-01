@@ -325,7 +325,9 @@ public final class SnippetStore {
     }
 
     public static var defaultLocalSupportDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        (FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first ?? FileManager.default.temporaryDirectory)
             .appendingPathComponent("DevType", isDirectory: true)
     }
 

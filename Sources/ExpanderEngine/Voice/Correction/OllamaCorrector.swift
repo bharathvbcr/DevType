@@ -52,7 +52,8 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
 
         let systemInstruction = CorrectionPromptBuilder.systemPrompt(
             policy: request.policy,
-            protectedSpans: request.protectedSpans
+            protectedSpans: request.protectedSpans,
+            locale: request.locale
         )
 
         let prompt = systemInstruction + "\n\n" + CorrectionPromptBuilder.userPrompt(rawTranscript: request.rawTranscript)

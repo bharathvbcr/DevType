@@ -1385,7 +1385,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 eraseCountOverride: 0,
                 preResolvedText: text,
                 secureClipboardPaste: true,
-                completion: { [weak self] in
+                completion: { [weak self] _ in
                     self?.refreshStatusItemUI()
                 }
             )
@@ -1465,7 +1465,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 erasePlan: .empty,
                 preResolvedText: text,
                 secureClipboardPaste: true,
-                completion: {
+                completion: { _ in
                     suspension.release()
                     self.refreshStatusItemUI()
                 }
@@ -1588,11 +1588,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             preResolvedCursorOffset: resolved.cursorOffset,
             trailingKeys: resolved.trailingKeys,
             secureClipboardPaste: true,
-            completion: {
+            completion: { [weak self] outcome in
                 suspension.release()
-                SnippetStore.shared.incrementUsage(for: snippet.id)
-                self.recordRecent(snippet)
-                self.refreshStatusItemUI()
+                if outcome.isConfirmedSuccess {
+                    SnippetStore.shared.incrementUsage(for: snippet.id)
+                    self?.recordRecent(snippet)
+                }
+                self?.refreshStatusItemUI()
             }
         )
     }

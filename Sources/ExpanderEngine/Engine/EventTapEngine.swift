@@ -2438,7 +2438,7 @@ public final class EventTapEngine {
                     erasePlan: .empty,
                     preResolvedText: text,
                     secureClipboardPaste: true,
-                    completion: {
+                    completion: { _ in
                         suspension.release()
                         completion?()
                     }
@@ -2542,9 +2542,11 @@ public final class EventTapEngine {
             preResolvedCursorOffset: resolved.cursorOffset,
             trailingKeys: resolved.trailingKeys,
             snippetLookup: lookup
-        ) { [weak self] in
-            DispatchQueue.main.async {
-                self?.onExpansionSucceeded?(snippet)
+        ) { [weak self] outcome in
+            if outcome.isConfirmedSuccess {
+                DispatchQueue.main.async {
+                    self?.onExpansionSucceeded?(snippet)
+                }
             }
             self?.endExpansion()
         }
@@ -2747,18 +2749,10 @@ public final class EventTapEngine {
     /// only exit and it must not be conditional on anything that could silently skip it.
     private func replayTypeAhead(_ text: String, reason: String) {
         guard !text.isEmpty else { return }
-        // The tap source runs on the main run loop, so a flush from the tap callback lands here
-        // already on main and posts *inline* — deliberately. That is what puts the replayed
-        // characters ahead of the key that caused the flush, which is the order the user typed
-        // them in. Hopping to main unconditionally would post them after it and reintroduce the
-        // very transposition this type exists to prevent. The hop below is only for completion
-        // callbacks arriving off-main.
-        guard Thread.isMainThread else {
-            DispatchQueue.main.async { [weak self] in
-                self?.replayTypeAhead(text, reason: reason)
-            }
-            return
-        }
+        // `EventTapEngine` normally owns a dedicated tap run-loop thread. Replay must therefore
+        // stay synchronous on whichever thread is ending the expansion: dispatching to main here
+        // lets the triggering key pass through before the held characters and transposes input.
+        // The HID poster is explicitly thread-safe and is already used from the inject queue.
         DevTypeLog.inject.notice(
             """
             [TypeAhead] replaying \(text.count, privacy: .public) held keystroke(s) — \

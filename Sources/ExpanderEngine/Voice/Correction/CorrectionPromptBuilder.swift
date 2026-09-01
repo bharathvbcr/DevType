@@ -23,7 +23,8 @@ public enum CorrectionPromptBuilder {
     /// Instructions for the model.
     public static func systemPrompt(
         policy: CorrectionPolicy,
-        protectedSpans: [ProtectedSpan] = []
+        protectedSpans: [ProtectedSpan] = [],
+        locale: Locale? = nil
     ) -> String {
         var lines: [String] = [
             "You clean up raw speech-to-text transcripts.",
@@ -36,6 +37,10 @@ public enum CorrectionPromptBuilder {
         } else {
             lines.append(contentsOf: permissionLines(policy))
             lines.append(styleLine(for: policy.tone))
+        }
+
+        if let locale, !locale.identifier.isEmpty {
+            lines.append("Preserve the transcript's language and writing system for locale \(locale.identifier). Do not translate it.")
         }
 
         if !protectedSpans.isEmpty {

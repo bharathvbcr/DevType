@@ -7,6 +7,14 @@ import XCTest
 /// reporting.
 final class MenuBarOptionTests: XCTestCase {
 
+    func testOnlyConfirmedInjectionOutcomesCountAsExpansionSuccess() {
+        XCTAssertTrue(PermissionCoordinator.InjectOutcome.succeeded.isConfirmedSuccess)
+        XCTAssertTrue(PermissionCoordinator.InjectOutcome.degradedAXOnly.isConfirmedSuccess)
+        XCTAssertFalse(PermissionCoordinator.InjectOutcome.postedUnverified.isConfirmedSuccess)
+        XCTAssertFalse(PermissionCoordinator.InjectOutcome.refused("blocked").isConfirmedSuccess)
+        XCTAssertFalse(PermissionCoordinator.InjectOutcome.failedSilent.isConfirmedSuccess)
+    }
+
     private func appSource(_ relativePath: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

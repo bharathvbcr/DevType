@@ -24,12 +24,25 @@ public final class PermissionCoordinator {
         }
     }
 
-    public enum InjectOutcome: Equatable {
+    public enum InjectOutcome: Equatable, Sendable {
         case succeeded
         case postedUnverified
         case refused(String)
         case degradedAXOnly
         case failedSilent
+
+        /// Whether delivery was actually confirmed strongly enough for callers to treat the
+        /// expansion as a success. A posted-but-unverified paste is deliberately excluded: it
+        /// may have landed, but usage/recent-history side effects must not claim certainty the
+        /// pipeline does not have.
+        public var isConfirmedSuccess: Bool {
+            switch self {
+            case .succeeded, .degradedAXOnly:
+                return true
+            case .postedUnverified, .refused, .failedSilent:
+                return false
+            }
+        }
     }
 
     /// Provenance captured at refuse time for diagnostics (distinct from a later live gate probe).

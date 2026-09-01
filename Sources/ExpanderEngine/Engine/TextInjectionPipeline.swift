@@ -66,6 +66,11 @@ public struct SwallowedKey {
 public final class TextInjectionPipeline {
     public static let shared = TextInjectionPipeline()
 
+    /// Terminal result delivered to an inject caller after the pipeline has restored or retained
+    /// the pasteboard. Callers must use this result for side effects; completion is not a synonym
+    /// for success because refusals and delivery failures also need to release their state.
+    public typealias InjectionCompletion = (PermissionCoordinator.InjectOutcome) -> Void
+
     // MARK: - Types (re-exported so existing call sites and tests are untouched)
 
     public typealias FocusedTextObservation = DeliveryVerifier.FocusedTextObservation
@@ -299,8 +304,9 @@ public final class TextInjectionPipeline {
 
     // MARK: - Entry points
 
-    /// Async inject on a dedicated queue. Calls `completion` only after clipboard restore settles
-    /// (or immediately when no pasteboard path was used). Never blocks the event-tap run loop.
+    /// Async inject on a dedicated queue. Calls `completion` with the terminal outcome only after
+    /// clipboard restore settles (or immediately when no pasteboard path was used). Never blocks
+    /// the event-tap run loop.
     ///
     /// §8.2: this is the legacy parameter list, kept verbatim because `EventTapEngine`,
     /// `AppDelegate` and `TestExpansionLab` call it. It forwards to the `SwallowedKey` form.
@@ -322,7 +328,7 @@ public final class TextInjectionPipeline {
         trailingKeys: [String] = [],
         snippetLookup: ((String) -> String?)? = nil,
         secureClipboardPaste: Bool = false,
-        completion: (() -> Void)? = nil
+        completion: InjectionCompletion? = nil
     ) {
         inject(
             snippet: snippet,
@@ -364,7 +370,7 @@ public final class TextInjectionPipeline {
         trailingKeys: [String] = [],
         snippetLookup: ((String) -> String?)? = nil,
         secureClipboardPaste: Bool = false,
-        completion: (() -> Void)? = nil
+        completion: InjectionCompletion? = nil
     ) {
         injectQueue.async {
             // Prefer the fully-specified plan. Fall back to count-only planning for callers that
@@ -407,8 +413,8 @@ public final class TextInjectionPipeline {
                     trailingKeys: trailingKeys,
                     snippetLookup: snippetLookup,
                     secureClipboardPaste: secureClipboardPaste
-                ) {
-                    let invocation = completionGuard.markCompleted()
+                ) { outcome in
+                    let invocation = completionGuard.markCompleted(outcome)
                     if invocation == 1 {
                         group.leave()
                     } else {
@@ -438,8 +444,10 @@ public final class TextInjectionPipeline {
                 )
             }
             // Runs on either exit: the caller's completion is what clears `isExpanding`, so it must
-            // not be conditional on the inject having finished.
-            completion?()
+            // not be conditional on the inject having finished. A missing terminal callback is
+            // itself a failure, and the watchdog path remains explicit rather than looking like a
+            // successful completion.
+            completion?(completionGuard.terminalOutcome ?? .failedSilent)
         }
     }
 
@@ -968,7 +976,7 @@ public final class TextInjectionPipeline {
         trailingKeys: [String],
         snippetLookup: ((String) -> String?)?,
         secureClipboardPaste: Bool,
-        completion: @escaping () -> Void
+        completion: @escaping InjectionCompletion
     ) {
         // Re-check Secure Input / IME / focus at inject time (may have changed since match).
         let snapshot = PermissionCoordinator.shared.cachedSnapshot
@@ -1112,7 +1120,7 @@ public final class TextInjectionPipeline {
         }
     }
 
-    private func performInject(context: InjectContext, completion: @escaping () -> Void) {
+    private func performInject(context: InjectContext, completion: @escaping InjectionCompletion) {
         let swallowed = context.swallowed
         let erasePlan = context.erasePlan
         let frontBundle = context.frontBundle
@@ -1168,7 +1176,7 @@ public final class TextInjectionPipeline {
                         refuseContext: nil,
                         path: "imagePaste"
                     )
-                    completion()
+                    completion(outcome)
                 }
             }
             return
@@ -1533,7 +1541,7 @@ public final class TextInjectionPipeline {
         preResolvedText: String?,
         trailingKeys: [String],
         snippetLookup: ((String) -> String?)?,
-        completion: @escaping () -> Void
+        completion: @escaping InjectionCompletion
     ) {
         if snippet.isImageSnippet {
             refuseInject(
@@ -1613,7 +1621,7 @@ public final class TextInjectionPipeline {
                     refuseContext: nil,
                     path: "secureClipboardPaste"
                 )
-                completion()
+                completion(.succeeded)
 
             case .unavailable:
                 // Cmd+V posted; password fields usually cannot confirm via AX.
@@ -1623,9 +1631,10 @@ public final class TextInjectionPipeline {
                     refuseContext: nil,
                     path: "secureClipboardPaste"
                 )
-                completion()
+                completion(.postedUnverified)
 
             case .notPosted, .failed:
+                let completionOutcome: PermissionCoordinator.InjectOutcome
                 if underSecureInput {
                     DevTypeLog.inject.notice(
                         "[Inject] secure clipboard paste \(TextInjectionPipeline.pasteResultLabel(result), privacy: .public) under SI — leaving concealed clipboard for manual ⌘V"
@@ -1636,6 +1645,7 @@ public final class TextInjectionPipeline {
                         refuseContext: nil,
                         path: "secureClipboardPaste"
                     )
+                    completionOutcome = .postedUnverified
                 } else {
                     DevTypeLog.inject.error(
                         "[Inject] secure clipboard paste \(TextInjectionPipeline.pasteResultLabel(result), privacy: .public)"
@@ -1645,8 +1655,9 @@ public final class TextInjectionPipeline {
                         refuseContext: nil,
                         path: "secureClipboardPaste"
                     )
+                    completionOutcome = .failedSilent
                 }
-                completion()
+                completion(completionOutcome)
             }
         }
     }
@@ -1675,7 +1686,7 @@ public final class TextInjectionPipeline {
         cursorOffset: Int?,
         totalUTF16Length: Int,
         trailingKeys: [String] = [],
-        completion: @escaping () -> Void
+        completion: @escaping InjectionCompletion
     ) {
         // §8.4 defense-in-depth: a `.failed` verdict may only drive the trigger restore when this
         // `(bundle, role)` is a proven truthful witness. The hold loop applies the same gate
@@ -1821,7 +1832,7 @@ public final class TextInjectionPipeline {
                 refuseContext: nil,
                 path: path
             )
-            completion()
+            completion(.failedSilent)
         }
     }
 
@@ -1874,7 +1885,7 @@ public final class TextInjectionPipeline {
         path: String,
         swallowed: SwallowedKey,
         refuseContext: PermissionCoordinator.InjectRefuseProvenance? = nil,
-        completion: @escaping () -> Void
+        completion: @escaping InjectionCompletion
     ) {
         if swallowed.mustReinjectOnRefuse {
             _ = reinjectSwallowedKey(swallowed)
@@ -1884,7 +1895,7 @@ public final class TextInjectionPipeline {
             refuseContext: refuseContext,
             path: path
         )
-        completion()
+        completion(.refused(reason))
     }
 
     /// §3.1: whether an expansion's end state supports an undo point at all. Every undo erase
@@ -1912,7 +1923,7 @@ public final class TextInjectionPipeline {
         context: InjectContext,
         injectedText: String,
         undoable: Bool,
-        completion: @escaping () -> Void
+        completion: @escaping InjectionCompletion
     ) {
         PermissionCoordinator.shared.recordInjectOutcome(
             outcome,
@@ -1922,7 +1933,7 @@ public final class TextInjectionPipeline {
         if undoable {
             rememberExpansion(context: context, injectedText: injectedText)
         }
-        completion()
+        completion(outcome)
     }
 
     /// §3.1: records the undo point. Only expansions that replaced a real trigger are recorded —
@@ -2140,11 +2151,15 @@ private final class InjectCompletionGuard {
     private let lock = UnfairLock()
     private var invocations = 0
     private var timedOut = false
+    private var outcome: PermissionCoordinator.InjectOutcome?
 
     /// Returns the 1-based invocation index. Only `1` may leave the group.
-    func markCompleted() -> Int {
+    func markCompleted(_ outcome: PermissionCoordinator.InjectOutcome) -> Int {
         lock.lock()
         invocations += 1
+        if self.outcome == nil {
+            self.outcome = outcome
+        }
         let count = invocations
         lock.unlock()
         return count
@@ -2153,10 +2168,17 @@ private final class InjectCompletionGuard {
     func markTimedOut() {
         lock.lock()
         timedOut = true
+        if outcome == nil {
+            outcome = .failedSilent
+        }
         lock.unlock()
     }
 
     var didTimeOut: Bool {
         lock.withLock { timedOut }
+    }
+
+    var terminalOutcome: PermissionCoordinator.InjectOutcome? {
+        lock.withLock { outcome }
     }
 }

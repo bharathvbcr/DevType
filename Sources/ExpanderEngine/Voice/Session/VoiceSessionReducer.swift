@@ -227,6 +227,18 @@ public enum VoiceSessionReducer {
             commands.append(.persistManifest(phase: .validatingCorrection))
 
         // Validating Correction -> Ready for Delivery
+        // A provider can fail before producing a candidate. In that case the correction pipeline
+        // intentionally returns the raw transcript with `correctionCandidate == nil`; allow that
+        // explicit fallback to bypass the candidate-validation subphase while remaining in the
+        // reducer's valid state machine.
+        case (.correcting, .correctionValidationPassed(let final)) where final.correctionCandidate == nil:
+            state.finalTranscript = final
+            state.phase = .readyForDelivery
+            commands.append(.persistFinal(final))
+            commands.append(.deliverTranscript(finalTranscript: final, lease: state.snapshot.targetLease))
+            commands.append(.notifyHUD(phase: .readyForDelivery))
+            commands.append(.persistManifest(phase: .readyForDelivery))
+
         case (.validatingCorrection, .correctionValidationPassed(let final)):
             state.finalTranscript = final
             state.phase = .readyForDelivery

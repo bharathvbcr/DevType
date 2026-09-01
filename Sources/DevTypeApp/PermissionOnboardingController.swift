@@ -35,9 +35,12 @@ final class PermissionOnboardingController: NSViewController {
     private let onFinished: () -> Void
     private var step: Step = .welcome
 
-    // §6.1: 746 lines with zero `loc.s` calls — the very first screen a new user
-    // sees, and it was English-only.
+    // Permission-facing labels are localized through LocalizationManager so the first-run
+    // recovery flow does not fall back to English-only guidance.
     private let loc = LocalizationManager.shared
+    private var permissionCopy: PermissionCopy.Localized {
+        PermissionCopy.localized(using: loc)
+    }
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let bodyLabel = NSTextField(wrappingLabelWithString: "")
@@ -420,7 +423,7 @@ final class PermissionOnboardingController: NSViewController {
             loc.s("onboarding.identity.bundleID", identity.bundleIdentifier),
             loc.s("onboarding.identity.path", identity.bundlePath),
             loc.s("onboarding.identity.cdHash", hashText),
-            PermissionCopy.livePreflightSummary(snapshot: snapshot)
+            permissionCopy.livePreflightSummary(snapshot: snapshot)
         ]
         if let unpackaged = ProcessIdentity.unpackagedBinaryWarning(bundlePath: identity.bundlePath) {
             identityLines.append(unpackaged)
@@ -445,7 +448,7 @@ final class PermissionOnboardingController: NSViewController {
                     cdHash: cdHash
                 )
             )
-            identityLines.append(PermissionCopy.staleLegacyBundleIdGuidance)
+            identityLines.append(permissionCopy.staleLegacyBundleIdGuidance)
         }
         identityLabel.stringValue = identityLines.joined(separator: "\n")
 
@@ -481,7 +484,7 @@ final class PermissionOnboardingController: NSViewController {
         case .inputMonitoring:
             DevTypeLog.permission.debug("[Permission] onboarding step=inputMonitoring")
             titleLabel.stringValue = loc.s("onboarding.im.title")
-            bodyLabel.stringValue = PermissionCopy.unlockDescription(for: .inputMonitoring)
+            bodyLabel.stringValue = permissionCopy.unlockDescription(for: .inputMonitoring)
                 + "\n\n" + loc.s("onboarding.im.body")
             if snapshot.canListenTap {
                 statusLabel.stringValue = loc.s("onboarding.im.granted")
@@ -512,8 +515,8 @@ final class PermissionOnboardingController: NSViewController {
         case .accessibilityAndPost:
             DevTypeLog.permission.debug("[Permission] onboarding step=accessibilityAndPost")
             titleLabel.stringValue = loc.s("onboarding.ax.title")
-            bodyLabel.stringValue = PermissionCopy.unlockDescription(for: .accessibility)
-                + "\n\n" + PermissionCopy.unlockDescription(for: .postEvent)
+            bodyLabel.stringValue = permissionCopy.unlockDescription(for: .accessibility)
+                + "\n\n" + permissionCopy.unlockDescription(for: .postEvent)
                 + "\n\n" + loc.s("onboarding.ax.body")
             var bits: [String] = []
             bits.append(snapshot.canUseAX ? loc.s("onboarding.ax.ok") : loc.s("onboarding.ax.missing"))
@@ -564,7 +567,7 @@ final class PermissionOnboardingController: NSViewController {
                 ? loc.s("onboarding.verify.tap.running")
                 : loc.s("onboarding.verify.tap.stopped"))
             if snapshot.isDegradedInject {
-                lines.append(PermissionCopy.degradedInjectTooltip(snapshot: snapshot))
+                lines.append(permissionCopy.degradedInjectTooltip(snapshot: snapshot))
             }
             if !snapshot.canUseAX {
                 lines.append(loc.s("onboarding.verify.blocked"))
@@ -587,7 +590,7 @@ final class PermissionOnboardingController: NSViewController {
                 canUseAX: snapshot.canUseAX,
                 canPostEvents: snapshot.canPostEvents
             ) {
-                secondaryButton.title = PermissionCopy.openSettingsButtonTitle(for: missing)
+                secondaryButton.title = permissionCopy.openSettingsButtonTitle(for: missing)
                 tertiaryButton.title = loc.s("onboarding.relaunch")
                 tertiaryButton.isHidden = false
             } else {
@@ -617,7 +620,7 @@ final class PermissionOnboardingController: NSViewController {
             } else {
                 bodyLabel.stringValue = loc.s("onboarding.done.body.ready")
             }
-            var doneLines = [snapshot.missingCapabilitiesSummary]
+            var doneLines = [permissionCopy.missingCapabilitiesSummary(snapshot)]
             if !cdHashLoadFinished {
                 doneLines.append(loc.s("onboarding.done.waitingHash"))
             } else if cdHash == nil {
@@ -652,7 +655,7 @@ final class PermissionOnboardingController: NSViewController {
                 canUseAX: snapshot.canUseAX,
                 canPostEvents: snapshot.canPostEvents
             ), missing != .postEvent {
-                tertiaryButton.title = PermissionCopy.openSettingsButtonTitle(for: missing)
+                tertiaryButton.title = permissionCopy.openSettingsButtonTitle(for: missing)
                 tertiaryButton.isHidden = false
             } else {
                 tertiaryButton.isHidden = true
@@ -672,8 +675,11 @@ final class PermissionOnboardingController: NSViewController {
     private func announceStatusIfNeeded() {
         let announcement = "\(titleLabel.stringValue). \(statusLabel.stringValue)"
         guard announcement != lastAnnouncedStatus else { return }
-        lastAnnouncedStatus = announcement
         guard let window = view.window, window.isVisible else { return }
+        // Do not consume the announcement while the controller is still being laid out or is
+        // hidden. `viewDidAppear` renders again; retaining the pending value lets VoiceOver hear
+        // the first visible state instead of permanently losing it.
+        lastAnnouncedStatus = announcement
         NSAccessibility.post(
             element: window,
             notification: .announcementRequested,
@@ -957,9 +963,9 @@ final class PermissionOnboardingController: NSViewController {
                 DevTypeLog.permission.error(
                     "[Permission] onboarding Open Settings failed kind=\(DevTypeLog.kindName(kind), privacy: .public)"
                 )
-                hint = PermissionCopy.settingsOpenFailureMessage(for: kind)
+                hint = self.permissionCopy.settingsOpenFailureMessage(for: kind)
             } else {
-                var text = PermissionCopy.openSettingsWithoutRequestHint(
+                var text = self.permissionCopy.openSettingsWithoutRequestHint(
                     for: kind,
                     bundleID: ProcessIdentity.shared.bundleIdentifier
                 )

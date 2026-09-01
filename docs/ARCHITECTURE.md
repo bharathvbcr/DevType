@@ -46,15 +46,16 @@ graph TD
 ## 📦 Target Breakdown
 
 ### 1. `ExpanderEngine` (Swift Target)
-The headless core library containing all business logic, matching algorithms, injection pipelines, macro evaluators, and storage models.
-- **Independence**: Has zero UI/AppKit window dependencies, enabling fast, headless unit testing in CI.
+The headless core library containing all business logic, matching algorithms, injection pipelines, macro evaluators, voice dictation subsystem, update checkers, and storage models.
+- **Subsystems**: `Engine` (event taps, text injection, type-ahead buffers), `Matching` (prefix search, abbreviation trie), `Macros` (Mustache & TextExpander parsing, safe math, date arithmetic), `AI` (Apple Foundation Models, selection gating, offline Markdown transforms), `Voice` (smart dictation, multi-engine ASR, durable audio capture, thought-revision correction), `Models` (snippets, groups, encrypted secret store, usage stats), `Permissions` (TCC verification, AX capability learning), `Sync` (TextExpander & Espanso importers, JSON/YAML/CSV exporters), and `Updates` (distance-aware version ordering, GitHub Releases update checker).
+- **Independence**: Has zero UI/AppKit window dependencies, enabling fast, headless unit testing in CI (1,600+ tests across 120 suites).
 - **Thread Safety**: Concurrency is managed via `UnfairLock` and dedicated serial run loop threads to guarantee sub-millisecond response times without race conditions.
 
 ### 2. `DevTypeSafety` (Objective-C Target)
 An Objective-C trampoline layer that wraps fragile macOS Accessibility (`AXUIElement`) and Cocoa Pasteboard APIs in `@try / @catch` blocks. Swift cannot natively catch Objective-C runtime exceptions (e.g. `NSGenericException` or corrupted AX pointers); this layer ensures such crashes are contained and degraded to safe fallbacks.
 
 ### 3. `DevTypeApp` (Executable Target)
-The AppKit application layer providing the menu bar status item, snippet editor, inline search palette (`⌘/`), AI action palette (`⌘⌥A`), live diff preview, and onboarding setup wizard.
+The AppKit application layer providing the menu bar status item, snippet editor, inline search palette (`⌘/`), AI action palette (`⌘⌥A`), live diff preview, Smart Dictation Liquid Glass HUD, 7-tab Preferences window (`⌘,`), and onboarding setup wizard.
 - **Main Thread Isolation**: All UI components strictly operate on `@MainActor`.
 
 ---
@@ -144,16 +145,16 @@ Both engines resolve nested snippets in place without disturbing sibling macros,
 
 ---
 
-### 4. On-Device AI Engine (Apple Foundation Models)
+### 4. On-Device AI & Offline Transforms
 
-DevType integrates on-device Apple Foundation Models (macOS 26+) for local AI text operations:
+DevType integrates on-device Apple Foundation Models (macOS 26+) for local AI text operations alongside deterministic local transforms:
 
 ```mermaid
 graph LR
     Highlight[User Selects Text] --> Hotkey[Press ⌘⌥A / Type :fix]
     Hotkey --> SelectionReader[SelectionReader Reads AX Selection]
     SelectionReader --> Gate[SelectionGate Validates Safety]
-    Gate --> Transformer[AITextTransformer / Foundation Model]
+    Gate --> Transformer[AITextTransformer / Local Transform Engine]
     Transformer --> Preview{Preview or Direct Replace?}
     Preview -- Direct Replace --> Pipeline[TextInjectionPipeline]
     Preview -- Preview --> DiffUI[AIPreviewPanel Diff View]
@@ -162,9 +163,10 @@ graph LR
 ```
 
 - **Zero Cloud Privacy**: Models execute strictly on the Apple Neural Engine / GPU via local Apple Intelligence APIs. Zero bytes are sent over the network.
-- **Interactive Actions**: Proofreading, rewriting, paraphrasing, condensing, expanding, tone shifting (friendly/formal), bulletizing, prompt enhancement, and translation (→ English from romanized Telugu/Hindi or native script; English → romanized Telugu/Hindi).
-- **Delivery Modes**: Each kind declares `direct` or `preview` output. Proofread defaults to direct in-place replacement; the rest stream into a diff preview panel (Replace / Copy / Retry / Cancel). Users can override per kind in Preferences → AI.
-- **Layered Output Defense**: `AIPromptLeakGuard` extracts instruction clauses corpus-wide and fails closed on injection-boundary verdicts; a per-generation echo stripper removes prompt framing the model repeats back; post-generation checks enforce script policy (e.g. romanized-only translations) and line-structure preservation for correction-style kinds.
+- **Interactive Actions**: Proofreading, rewriting, paraphrasing, condensing, expanding, tone shifting (friendly/formal), bulletizing, prompt enhancement, code engineering (explain code, docstring generator, fix code, unit tests, regex explanation, SQL queries), conventional git commit messages, JSON conversion, and translation (English ⇄ romanized Telugu/Hindi).
+- **Offline Local Markdown Stripper (`AIMarkdownStripper`)**: A dedicated deterministic transform (`.removeMarkdown`) that strips Markdown formatting in microseconds without an AI model, functioning across all supported macOS versions (macOS 14+).
+- **Delivery Modes**: Each kind declares `direct` or `preview` output. Proofread and Remove Markdown default to direct in-place replacement; the rest stream into a diff preview panel (Replace / Copy / Retry / Cancel). Users can override per kind in Preferences → AI.
+- **Layered Output Defense & Markdown Policies**: `AIPromptLeakGuard` extracts instruction clauses corpus-wide and fails closed on injection-boundary verdicts; a per-generation echo stripper removes prompt framing the model repeats back; post-generation checks enforce script policy (e.g. romanized-only translations), line-structure preservation, and Markdown policies (`.strip`, `.stripPreservingLayout`, `.preserve` for code/JSON/SQL).
 - **Diagnostics Without Content**: `AIDiagnosticsStore` keeps a bounded ring of failure labels and selection-read evidence — bundle IDs, probe summaries, elapsed ms, character *counts* only — feeding the `-- On-device AI --` section of the diagnostic report. No selection text ever reaches logs.
 - **Undo Integration**: Transformed text can be reverted with standard `⌘Z` or DevType's AI Undo Store (**Undo last AI** in the Command Palette).
 
@@ -248,4 +250,15 @@ The Voice Dictation subsystem provides speech-to-text with semantic formatting, 
 - **Audio Capture & Crash Journaling (`DurableVoiceCapture` / `CAFSessionWriter`)**: 16kHz mono 16-bit PCM written continuously to `capture.caf` in a per-session directory under `~/Library/Application Support/DevType/VoiceSessions/`, recoverable by `VoiceRecoveryService` after a crash mid-recording.
 - **Thought-Revision & Smart Polish (`CorrectionPipeline`)**: Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS), resolves spoken self-corrections mid-sentence, strips filler words/hesitations, replaces custom vocabulary jargon, and adapts tone (natural, email, chat, code, verbatim) — with `CorrectionValidator` holding the result to the session's `CorrectionPolicy` so a rewriting model cannot exceed what the user allowed.
 - **Voice Dictation HUD (`VoiceHUDPanel`)**: Floating non-activating AppKit HUD. On macOS 26+ uses runtime `NSGlassEffectView` Liquid Glass with an inset organic blob mask; older systems fall back to `NSVisualEffectView`. Expands with live STT transcript and meters mic RMS. Blob geometry is DevType-owned (`LiquidBlobGeometry`) — Apple does not provide Liquid Glass shader/orb assets for third-party porting.
+
+---
+
+## 🔔 Updates & Release Verification Subsystem
+
+DevType contains a dedicated, privacy-conscious update checking module (`Sources/ExpanderEngine/Updates/`):
+
+- **Zero-Telemetry Version Check (`UpdateChecker`)**: Queries the public GitHub Releases API for `bharathvbcr/DevType`. Carries no device identifiers, cookies, versions, or user analytics.
+- **Strict Distance-Aware Version Parsing (`AppVersion`)**: Distinguishes `git describe` distance suffixes (e.g. `v0.1.2-3-gabc1234` is ahead of `v0.1.2`, not a pre-release).
+- **Navigation Safety**: Release URLs are strictly constructed locally for `https://github.com/bharathvbcr/DevType/releases/tag/v...` using strict alphanumeric and semantic version checks to prevent arbitrary URI scheme or host traversal.
+- **Fail-Closed Outcome Typing (`UpdateCheckOutcome`)**: Distinguishes between `.upToDate`, `.updateAvailable`, `.failed`, and `.undeterminedLocalVersion`, ensuring network outages never report a false "up to date" result.
 

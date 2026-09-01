@@ -20,13 +20,32 @@ public final class AudioBufferPool: @unchecked Sendable {
     private let lock = NSLock()
     private let maxChunkByteSize: Int
 
+    /// Prevent malformed configuration from turning a callback buffer into an allocation or
+    /// modulo trap. The default ring remains unchanged; only hostile values are clamped.
+    private static let minimumCapacity = 2
+    private static let maximumCapacity = 4096
+    private static let maximumChunkByteSize = 4 * 1024 * 1024
+    private static let maximumStoredBytes = 64 * 1024 * 1024
+
     public init(capacity: Int = 128, maxChunkFrames: AVAudioFrameCount = 4096, bytesPerFrame: Int = 4) {
-        self.capacity = capacity
-        self.maxChunkByteSize = Int(maxChunkFrames) * bytesPerFrame
-        self.bufferSlots = Array(repeating: Data(repeating: 0, count: self.maxChunkByteSize), count: capacity)
-        self.sequences = Array(repeating: 0, count: capacity)
-        self.sampleTimes = Array(repeating: 0.0, count: capacity)
-        self.frameCounts = Array(repeating: 0, count: capacity)
+        let requestedCapacity = min(max(Self.minimumCapacity, capacity), Self.maximumCapacity)
+        let requestedFrames = max(1, Int(maxChunkFrames))
+        let requestedBytesPerFrame = max(1, bytesPerFrame)
+        let (requestedChunkByteSize, overflow) = requestedFrames.multipliedReportingOverflow(
+            by: requestedBytesPerFrame
+        )
+        let chunkByteSize = min(
+            overflow ? Self.maximumChunkByteSize : requestedChunkByteSize,
+            Self.maximumChunkByteSize
+        )
+        let memoryLimitedCapacity = max(Self.minimumCapacity, Self.maximumStoredBytes / chunkByteSize)
+
+        self.capacity = min(requestedCapacity, memoryLimitedCapacity)
+        self.maxChunkByteSize = chunkByteSize
+        self.bufferSlots = Array(repeating: Data(repeating: 0, count: self.maxChunkByteSize), count: self.capacity)
+        self.sequences = Array(repeating: 0, count: self.capacity)
+        self.sampleTimes = Array(repeating: 0.0, count: self.capacity)
+        self.frameCounts = Array(repeating: 0, count: self.capacity)
     }
 
     /// Enqueues audio data from callback. Returns true if queued, false if dropped (overflow).

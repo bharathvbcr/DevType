@@ -22,8 +22,11 @@ public final class CAFSessionWriter: @unchecked Sendable {
         let dir = outputURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o700])
 
-        // Remove old file if exists
-        try? FileManager.default.removeItem(at: outputURL)
+        // Remove old file if exists. A stale recording must never be silently replaced by a
+        // writer that is pointed at the wrong path or is unable to create a fresh artifact.
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
 
         // Initialize audio file for writing
         let settings = format.settings
@@ -33,7 +36,14 @@ public final class CAFSessionWriter: @unchecked Sendable {
 
     public func write(buffer: AVAudioPCMBuffer) throws {
         try serialQueue.sync {
-            guard !isClosed, let file = audioFile else { return }
+            guard !isClosed, let file = audioFile else {
+                throw VoiceFailure(
+                    stage: .audioCapture,
+                    code: .audioEncodingFailed,
+                    artifactState: .partial,
+                    redactedDetail: "CAF writer is closed"
+                )
+            }
             try file.write(from: buffer)
             totalFramesWritten += Int64(buffer.frameLength)
 
@@ -57,8 +67,15 @@ public final class CAFSessionWriter: @unchecked Sendable {
             CC_SHA256_Final(&digest, &sha256Context)
             let sha256Hex = digest.map { String(format: "%02x", $0) }.joined()
 
-            let attributes = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)) ?? [:]
-            let byteCount = (attributes[.size] as? Int64) ?? 0
+            let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
+            guard let byteCount = attributes[.size] as? Int64, byteCount > 0 else {
+                throw VoiceFailure(
+                    stage: .audioFinalization,
+                    code: .audioEncodingFailed,
+                    artifactState: .partial,
+                    redactedDetail: "Finalized CAF has no measurable bytes"
+                )
+            }
 
             return (totalFramesWritten, sha256Hex, byteCount)
         }
