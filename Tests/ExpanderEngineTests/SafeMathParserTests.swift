@@ -145,4 +145,80 @@ final class SafeMathParserTests: XCTestCase {
         let result = engine.resolve("{{calc:1+1}} / {{calc:2--}}")
         XCTAssertEqual(result.text, "2 / {{calc:2--}}")
     }
+
+    // MARK: - §Calc regressions
+
+    /// `Double(Int64.max)` rounds *up* to 2^63, one past `Int64.max`, so the old
+    /// `val <= Double(Int64.max)` bound admitted exactly 2^63 — and `Int64(2^63)` traps.
+    /// `{{calc: 2^63}}` crashed the app inside a keystroke interceptor, mid-expansion. If this
+    /// regresses the test process dies rather than failing, which is the point.
+    func testTwoToThe63DoesNotTrap() {
+        let value = SafeMathParser.evaluate("2^63")
+        XCTAssertNotNil(value)
+        let rendered = SafeMathParser.format(value!)
+        XCTAssertFalse(rendered.isEmpty)
+        XCTAssertEqual(DynamicTemplateEngine.shared.resolve("{{calc:2^63}}").text, rendered)
+    }
+
+    /// The boundaries either side must still take the integer path.
+    func testTheIntegerBoundariesStillRenderAsIntegers() {
+        XCTAssertEqual(SafeMathParser.format(SafeMathParser.evaluate("2^62")!), "4611686018427387904")
+        XCTAssertEqual(SafeMathParser.format(SafeMathParser.evaluate("-2^63")!), "-9223372036854775808")
+    }
+
+    /// Unary minus binds looser than `^`, so `-2^2` is -(2^2). The tokenizer used to glue the
+    /// sign onto the literal, making it (-2)^2 = 4 — silently wrong arithmetic, which is the
+    /// worst failure a calculator can have.
+    func testUnaryMinusBindsLooserThanExponent() {
+        XCTAssertEqual(SafeMathParser.evaluate("-2^2"), -4)
+        XCTAssertEqual(SafeMathParser.evaluate("-3^2"), -9)
+        XCTAssertEqual(SafeMathParser.evaluate("(-2)^2"), 4, "explicit parentheses still group")
+    }
+
+    /// A negative exponent still has to work — it is why the sign was glued on in the first place.
+    func testNegativeExponentsStillWork() {
+        XCTAssertEqual(SafeMathParser.evaluate("2^-1"), 0.5)
+        XCTAssertEqual(SafeMathParser.evaluate("2^3^2"), 512, "power stays right-associative")
+    }
+
+    /// Negating a parenthesised expression was rejected outright: the sign had no digits to
+    /// glue to, so `-(3+4)` rendered the raw `{{calc:…}}` tag.
+    func testNegationOfAParenthesisedExpression() {
+        XCTAssertEqual(SafeMathParser.evaluate("-(3+4)"), -7)
+        XCTAssertEqual(SafeMathParser.evaluate("-(3)"), -3)
+        XCTAssertEqual(SafeMathParser.evaluate("- (3+4)"), -7)
+        XCTAssertEqual(SafeMathParser.evaluate("2*-(3)"), -6)
+    }
+
+    func testRepeatedSignsFold() {
+        XCTAssertEqual(SafeMathParser.evaluate("--3"), 3)
+        XCTAssertEqual(SafeMathParser.evaluate("- -3"), 3)
+    }
+
+    /// `String(someDouble)` prints the exact binary value, so `0.1 + 0.2` typed
+    /// `0.30000000000000004` into the user's document.
+    func testFloatingNoiseIsNotTypedIntoTheDocument() {
+        XCTAssertEqual(SafeMathParser.format(SafeMathParser.evaluate("0.1 + 0.2")!), "0.3")
+        XCTAssertEqual(DynamicTemplateEngine.shared.resolve("{{calc:0.1+0.2}}").text, "0.3")
+    }
+
+    func testNonTerminatingDivisionIsTruncatedNotDumped() {
+        let third = SafeMathParser.format(SafeMathParser.evaluate("1/3")!)
+        XCTAssertLessThanOrEqual(third.count, 16, "got \(third)")
+        XCTAssertTrue(third.hasPrefix("0.3333"))
+    }
+
+    /// Exact decimals must not be mangled by the rounding that absorbs the noise.
+    func testExactValuesAreUnchanged() {
+        XCTAssertEqual(SafeMathParser.format(SafeMathParser.evaluate("10/4")!), "2.5")
+        XCTAssertEqual(SafeMathParser.format(SafeMathParser.evaluate("7/2")!), "3.5")
+        XCTAssertEqual(SafeMathParser.format(SafeMathParser.evaluate("2+2")!), "4")
+    }
+
+    /// Removing the sign-gluing must not have opened the door to malformed input.
+    func testMalformedExpressionsAreStillRejected() {
+        for bad in ["3+", "2--", "+", "-", "2(3)", "1.2.3", "1e3", "*", "()", "(", ")"] {
+            XCTAssertNil(SafeMathParser.evaluate(bad), "\"\(bad)\" should not evaluate")
+        }
+    }
 }

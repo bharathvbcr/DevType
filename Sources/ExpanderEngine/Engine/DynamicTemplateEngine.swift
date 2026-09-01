@@ -23,6 +23,29 @@ public final class SafeMathParser {
         return result
     }
 
+    /// Renders a result as the text that gets typed.
+    ///
+    /// **Integers.** `Double(Int64.max)` rounds *up* to 2^63, which is one past `Int64.max`, so
+    /// the old `val <= Double(Int64.max)` bound admitted exactly 2^63 — and `Int64(2^63)` traps.
+    /// `{{calc: 2^63}}` therefore crashed the app, inside a keystroke interceptor, mid-expansion.
+    /// The upper bound is now strict against 2^63; `Int64.min` needs no such care because it is
+    /// -2^63 exactly and survives the round trip.
+    ///
+    /// **Everything else.** `String(someDouble)` prints the shortest round-trippable form, which
+    /// is the *exact* binary value: `0.1 + 0.2` typed `0.30000000000000004` into the user's
+    /// document. Twelve significant digits is past anything a text expander is doing arithmetic
+    /// for and short enough to absorb IEEE-754 noise, and `%g` drops trailing zeros so `2.5`
+    /// stays `2.5`.
+    public static func format(_ value: Double) -> String {
+        let twoToThe63 = 9_223_372_036_854_775_808.0
+        if value.truncatingRemainder(dividingBy: 1) == 0,
+           value >= -twoToThe63,
+           value < twoToThe63 {
+            return String(Int64(value))
+        }
+        return String(format: "%.12g", value)
+    }
+
     private enum Token: Equatable {
         case number(Double)
         case op(Character)
@@ -48,20 +71,12 @@ public final class SafeMathParser {
                 tokens.append(.closeParen)
                 i += 1
             } else if "+-*/%^".contains(c) {
-                if (c == "-" || c == "+") && (tokens.isEmpty || tokens.last == .openParen || isOperatorToken(tokens.last)) {
-                    var numStr = String(c)
-                    i += 1
-                    while i < chars.count && (chars[i].isNumber || chars[i] == ".") {
-                        numStr.append(chars[i])
-                        i += 1
-                    }
-                    // §3.6: a sign with no numeral behind it is malformed, not a no-op.
-                    guard let val = Double(numStr) else { return nil }
-                    tokens.append(.number(val))
-                } else {
-                    tokens.append(.op(c))
-                    i += 1
-                }
+                // A leading `-` used to be glued onto the following digits here, which made
+                // `-2^2` tokenize as `(-2)^2` = 4 instead of -(2^2) = -4, and made `-(3+4)`
+                // unparseable because there were no digits to glue to. Signs are now handled by
+                // `parseUnary`, at the precedence they actually have.
+                tokens.append(.op(c))
+                i += 1
             } else if c.isNumber || c == "." {
                 var numStr = ""
                 while i < chars.count && (chars[i].isNumber || chars[i] == ".") {
@@ -77,11 +92,6 @@ public final class SafeMathParser {
             }
         }
         return tokens
-    }
-
-    private static func isOperatorToken(_ token: Token?) -> Bool {
-        if case .op? = token { return true }
-        return false
     }
 
     private static func parseExpression(tokens: [Token], index: inout Int) -> Double? {
@@ -103,11 +113,11 @@ public final class SafeMathParser {
     }
 
     private static func parseMulDiv(tokens: [Token], index: inout Int) -> Double? {
-        guard var lhs = parsePower(tokens: tokens, index: &index) else { return nil }
+        guard var lhs = parseUnary(tokens: tokens, index: &index) else { return nil }
         while index < tokens.count {
             if case .op(let op) = tokens[index], op == "*" || op == "/" || op == "%" {
                 index += 1
-                guard let rhs = parsePower(tokens: tokens, index: &index) else { return nil }
+                guard let rhs = parseUnary(tokens: tokens, index: &index) else { return nil }
                 if op == "*" {
                     lhs *= rhs
                 } else if op == "/" {
@@ -124,11 +134,24 @@ public final class SafeMathParser {
         return lhs
     }
 
+    /// Prefix `+` / `-`, binding *looser* than `^` — so `-2^2` is -(2^2) = -4, which is what
+    /// every calculator and every reader of the expression expects.
+    private static func parseUnary(tokens: [Token], index: inout Int) -> Double? {
+        if index < tokens.count, case .op(let op) = tokens[index], op == "-" || op == "+" {
+            index += 1
+            guard let value = parseUnary(tokens: tokens, index: &index) else { return nil }
+            return op == "-" ? -value : value
+        }
+        return parsePower(tokens: tokens, index: &index)
+    }
+
     private static func parsePower(tokens: [Token], index: inout Int) -> Double? {
         guard var lhs = parsePrimary(tokens: tokens, index: &index) else { return nil }
         if index < tokens.count, case .op(let op) = tokens[index], op == "^" {
             index += 1
-            guard let rhs = parsePower(tokens: tokens, index: &index) else { return nil }
+            // Right operand goes through `parseUnary` so `2^-1` still works, and right-associative
+            // so `2^3^2` is 2^(3^2).
+            guard let rhs = parseUnary(tokens: tokens, index: &index) else { return nil }
             lhs = pow(lhs, rhs)
         }
         return lhs
@@ -311,12 +334,7 @@ public final class DynamicTemplateEngine {
                 let exprString = nsString.substring(with: exprRange).trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if let val = SafeMathParser.evaluate(exprString) {
-                    let replacement: String
-                    if val.truncatingRemainder(dividingBy: 1) == 0, val >= Double(Int64.min), val <= Double(Int64.max) {
-                        replacement = String(Int64(val))
-                    } else {
-                        replacement = String(val)
-                    }
+                    let replacement = SafeMathParser.format(val)
                     output = (output as NSString).replacingCharacters(in: match.range, with: replacement)
                 }
                 // §3.6: otherwise leave the original tag text in place. Replacing it with an empty
