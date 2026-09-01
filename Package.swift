@@ -37,13 +37,23 @@ let package = Package(
         .target(
             name: "DevTypeSafety"
         ),
-        .executableTarget(
-            name: "DevTypeApp",
+        // Every window, controller and panel. A library rather than part of the
+        // executable so `DevTypeAppTests` can `@testable import` it — an
+        // executableTarget cannot be imported by a test target.
+        .target(
+            name: "DevTypeAppCore",
             dependencies: ["ExpanderEngine", "DevTypeSafety"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ServiceManagement")
             ]
+        ),
+        // Entry point only (main.swift). Keeping the target name `DevTypeApp` and
+        // the product name `DevType` keeps `Scripts/package-app.sh` and the bundle's
+        // CFBundleExecutable unchanged.
+        .executableTarget(
+            name: "DevTypeApp",
+            dependencies: ["DevTypeAppCore"]
         ),
         .testTarget(
             name: "ExpanderEngineTests",
@@ -51,6 +61,10 @@ let package = Package(
             resources: [
                 .copy("Fixtures")
             ]
+        ),
+        .testTarget(
+            name: "DevTypeAppTests",
+            dependencies: ["DevTypeAppCore"]
         )
     ]
 )

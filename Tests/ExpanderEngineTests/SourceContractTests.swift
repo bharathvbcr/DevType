@@ -1,16 +1,20 @@
 import XCTest
 @testable import ExpanderEngine
 
-// MARK: - Source-level contract audits for the DevTypeApp executable target
+// MARK: - Source-level contract audits for the app UI target
 //
-// `DevTypeApp` is an `executableTarget`, so the test target cannot import it — the usual
-// unit-test route is closed. Both bugs guarded here were AppKit threading / focus-ordering
-// defects that a green suite could not see: they compile, they type-check, and they only
-// misbehave at runtime against live AppKit state.
+// Both bugs guarded here were AppKit threading / focus-ordering defects that a green
+// suite could not see: they compile, they type-check, and they only misbehave at runtime
+// against live AppKit state. No import — of `DevTypeAppCore` or anything else — makes a
+// call-ordering rule inside a method body observable, so these tests read the source and
+// assert the invariants that were violated.
 //
-// These tests read the source and assert the invariants that were violated. That is a
-// coarse instrument, so each assertion is anchored to a distinctive token rather than to
-// formatting, and every failure message states the invariant instead of just the diff.
+// (The UI now lives in the `DevTypeAppCore` library, which `DevTypeAppTests` *can*
+// `@testable import`. Anything expressible as a real assertion belongs there instead —
+// this file is for invariants that only exist in the shape of the source.)
+//
+// That is a coarse instrument, so each assertion is anchored to a distinctive token rather
+// than to formatting, and every failure message states the invariant instead of just the diff.
 
 final class SourceContractTests: XCTestCase {
 
@@ -110,7 +114,7 @@ final class SourceContractTests: XCTestCase {
     /// Regression for: ⌘/ palette AI commands always failing with "no text selected" while
     /// ⌘⌥A worked, because `runPaletteAI` read the selection after the panel was already key.
     func testInlineSearchPanelReadsSelectionBeforeActivatingDevType() throws {
-        let text = try source("Sources/DevTypeApp/InlineSearchPanel.swift")
+        let text = try source("Sources/DevTypeAppCore/InlineSearchPanel.swift")
 
         guard let readOffset = offset(of: "SelectionReader.readSelection()", in: text) else {
             return XCTFail(
@@ -135,7 +139,7 @@ final class SourceContractTests: XCTestCase {
     /// DevType's panel is still key. Selection-dependent AI recovery lives in `runPaletteAI`,
     /// after the panel closes and the source app has explicitly been reactivated.
     func testPaletteCommandHandlersDoNotReReadSelectionLive() throws {
-        let text = try source("Sources/DevTypeApp/AppDelegate.swift")
+        let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
 
         guard let start = offset(of: "private func handlePaletteCommand", in: text),
               let end = offset(of: "private func runPaletteAI", in: text)
@@ -180,7 +184,7 @@ final class SourceContractTests: XCTestCase {
     /// user explicitly chooses an AI action, DevType must return focus to the source app and retry
     /// through the same brokered-copy fallback used by the dedicated AI hotkey.
     func testPaletteAIRecoversNoFocusAfterReactivatingTheSourceApp() throws {
-        let text = try source("Sources/DevTypeApp/AppDelegate.swift")
+        let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
 
         guard let start = offset(of: "private func runPaletteAI", in: text),
               let end = offset(of: "private func injectPaletteText", in: text),
@@ -238,7 +242,7 @@ final class SourceContractTests: XCTestCase {
     /// engine makes termination, exhausted budgets, nil frontmost state, and matching pids
     /// directly unit-testable instead of relying on source-shape assertions alone.
     func testPaletteFocusRecoveryUsesTheCanonicalSelectionPolicy() throws {
-        let text = try source("Sources/DevTypeApp/AppDelegate.swift")
+        let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertTrue(
             text.contains("SelectionReader.sourceFocusRetryDecision("),
             "AppDelegate must delegate focus recovery decisions to the tested engine policy."
@@ -260,9 +264,9 @@ final class SourceContractTests: XCTestCase {
         )
 
         for path in [
-            "Sources/DevTypeApp/AITransformFlow.swift",
-            "Sources/DevTypeApp/AppDelegate.swift",
-            "Sources/DevTypeApp/VoiceDictationController.swift",
+            "Sources/DevTypeAppCore/AITransformFlow.swift",
+            "Sources/DevTypeAppCore/AppDelegate.swift",
+            "Sources/DevTypeAppCore/VoiceDictationController.swift",
         ] {
             let text = try source(path)
             XCTAssertTrue(
@@ -279,9 +283,9 @@ final class SourceContractTests: XCTestCase {
         // is incidental, so compare as sets and report the difference either way.
         let authorized: Set<String> = [
             "Sources/ExpanderEngine/AI/SelectionReader.swift",
-            "Sources/DevTypeApp/AITransformFlow.swift",
-            "Sources/DevTypeApp/VoiceDictationController.swift",
-            "Sources/DevTypeApp/AppDelegate.swift",
+            "Sources/DevTypeAppCore/AITransformFlow.swift",
+            "Sources/DevTypeAppCore/VoiceDictationController.swift",
+            "Sources/DevTypeAppCore/AppDelegate.swift",
         ]
         let actual = Set(try sourceFilesContaining("readSelectionForExplicitAIAction("))
         XCTAssertEqual(
@@ -298,8 +302,8 @@ final class SourceContractTests: XCTestCase {
     /// A fallback capture can be a real selection or an editor's copy-current-line behavior.
     /// The action picker must not represent that ambiguous provenance as AX-verified selection.
     func testClipboardFallbackPreviewNamesItsAmbiguousProvenance() throws {
-        let flow = try source("Sources/DevTypeApp/AITransformFlow.swift")
-        let panel = try source("Sources/DevTypeApp/AIActionPanel.swift")
+        let flow = try source("Sources/DevTypeAppCore/AITransformFlow.swift")
+        let panel = try source("Sources/DevTypeAppCore/AIActionPanel.swift")
         XCTAssertTrue(
             flow.contains("source: selection.source"),
             "The hotkey flow must carry selection provenance into the pre-action preview."
@@ -321,8 +325,8 @@ final class SourceContractTests: XCTestCase {
     /// nil`. `.custom`'s prompt is a wrapper that defers to those instructions, so the model
     /// got no direction at all. Both halves of the pairing are asserted here.
     func testHotkeyPathCarriesTypedCustomInstructions() throws {
-        let flow = try source("Sources/DevTypeApp/AITransformFlow.swift")
-        let panel = try source("Sources/DevTypeApp/AIActionPanel.swift")
+        let flow = try source("Sources/DevTypeAppCore/AITransformFlow.swift")
+        let panel = try source("Sources/DevTypeAppCore/AIActionPanel.swift")
 
         XCTAssertTrue(
             panel.contains("AIActionSelection.confirmingReturn"),
@@ -343,7 +347,7 @@ final class SourceContractTests: XCTestCase {
     /// the instruction field ran the highlighted row, and how digits typed into either field
     /// fired the 1–9 quick picks instead of being typed.
     func testActionPanelAsksTheFieldEditorWhoIsBeingEdited() throws {
-        let panel = try source("Sources/DevTypeApp/AIActionPanel.swift")
+        let panel = try source("Sources/DevTypeAppCore/AIActionPanel.swift")
         XCTAssertTrue(
             panel.contains("currentEditor() != nil"),
             "Editing state must come from the field editor, not from a first-responder comparison."
@@ -375,7 +379,7 @@ final class SourceContractTests: XCTestCase {
     /// instructions, so the failure surfaces while the user is writing it rather than at the
     /// moment they type the trigger.
     func testSnippetEditorRefusesACustomSnippetWithNoInstructions() throws {
-        let editor = try source("Sources/DevTypeApp/SnippetEditorSheet.swift")
+        let editor = try source("Sources/DevTypeAppCore/SnippetEditorSheet.swift")
         XCTAssertTrue(
             editor.contains("AITransformKind.named(selectedAITransform) == .custom"),
             "The editor must recognise a Custom AI snippet when validating the body."
@@ -389,7 +393,7 @@ final class SourceContractTests: XCTestCase {
     /// The preview panel's tone menu is a refinement of the request, not a replacement for
     /// it — it once assigned over the instruction the user had typed.
     func testPreviewPanelToneDoesNotReplaceAuthoredInstructions() throws {
-        let preview = try source("Sources/DevTypeApp/AIPreviewPanel.swift")
+        let preview = try source("Sources/DevTypeAppCore/AIPreviewPanel.swift")
         XCTAssertTrue(
             preview.contains("AIActionSelection.merged([authoredInstructions, toneInstruction])"),
             "Tone must be merged with the user's own instructions, never assigned over them."
@@ -407,7 +411,7 @@ final class SourceContractTests: XCTestCase {
     /// an active Secure Input session, and a muted app all came to say "Select text first" —
     /// advice the user has already followed, pointing at none of the three real causes.
     func testSelectionFailuresAreReportedWithTheirOwnReason() throws {
-        for path in ["Sources/DevTypeApp/AITransformFlow.swift", "Sources/DevTypeApp/AppDelegate.swift"] {
+        for path in ["Sources/DevTypeAppCore/AITransformFlow.swift", "Sources/DevTypeAppCore/AppDelegate.swift"] {
             let text = try source(path)
             guard text.contains("SelectionReader.read") || text.contains("selection.failure")
                     || text.contains("case .selection(") else {
@@ -423,7 +427,7 @@ final class SourceContractTests: XCTestCase {
     /// The AI hotkey path must ask for the reason, not just the text. `readSelectedText()`
     /// discards it, and this entry point is the one that pops the alert.
     func testAIHotkeyPathUsesTheTypedOutcome() throws {
-        let text = try source("Sources/DevTypeApp/AITransformFlow.swift")
+        let text = try source("Sources/DevTypeAppCore/AITransformFlow.swift")
         guard let start = offset(of: "static func presentFromHotkey", in: text),
               let end = offset(of: "static func presentFromEngine", in: text),
               start < end else {
@@ -454,7 +458,7 @@ final class SourceContractTests: XCTestCase {
     /// `PillBadgeView.updateCornerRadius()` ← `refreshStatusItemUI()` ←
     /// `injectAIReplacement`'s completion, on queue `com.devtype.inject`.
     func testRefreshStatusItemUIHopsToMainThread() throws {
-        let text = try source("Sources/DevTypeApp/AppDelegate.swift")
+        let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
 
         guard let start = offset(of: "private func refreshStatusItemUI()", in: text) else {
             return XCTFail("Could not locate refreshStatusItemUI() in AppDelegate.")
@@ -478,7 +482,7 @@ final class SourceContractTests: XCTestCase {
     /// The debug-only contract helper must stay debug-only. Making it unconditional would
     /// convert latent off-main calls into new production crashes.
     func testMainThreadContractHelperIsDebugOnly() throws {
-        let text = try source("Sources/DevTypeApp/MainThreadContract.swift")
+        let text = try source("Sources/DevTypeAppCore/MainThreadContract.swift")
 
         XCTAssertTrue(
             text.contains("dispatchPrecondition(condition: .onQueue(.main))"),
@@ -493,8 +497,8 @@ final class SourceContractTests: XCTestCase {
     /// AppKit helpers that mutate the status item / menus carry the contract, so a future
     /// off-main caller fails at the real call site instead of deep inside CoreAutoLayout.
     func testAppKitHelpersDeclareMainThreadContract() throws {
-        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
-        let theme = try source("Sources/DevTypeApp/DevTypeTheme.swift")
+        let appDelegate = try source("Sources/DevTypeAppCore/AppDelegate.swift")
+        let theme = try source("Sources/DevTypeAppCore/DevTypeTheme.swift")
 
         for (name, marker, text) in [
             ("rebuildRecentMenu()", "private func rebuildRecentMenu()", appDelegate),
@@ -519,7 +523,7 @@ final class SourceContractTests: XCTestCase {
     /// verbatim — running one through `MacroRenderer` would corrupt any value containing `{{`, and
     /// could resolve a nested `{{snippet:…}}` inside it.
     func testSecretResolutionNeverGoesThroughTheMacroRenderer() throws {
-        let flow = try source("Sources/DevTypeApp/SecretMenuFlow.swift")
+        let flow = try source("Sources/DevTypeAppCore/SecretMenuFlow.swift")
         guard let secretBranch = flow.range(of: "if snippet.isSecret {"),
               let renderCall = flow.range(of: "MacroRenderer.expand") else {
             return XCTFail("SecretMenuFlow no longer has the shape this contract describes.")
@@ -533,7 +537,7 @@ final class SourceContractTests: XCTestCase {
         // Touch ID gate lives. A surface that reached into `SecretStore` directly would be a
         // path around the gate — and the next one to be added would copy whichever example it
         // found first.
-        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
+        let appDelegate = try source("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertFalse(
             appDelegate.contains("SecretStore.shared.secret("),
             "Read secrets through `SecretMenuFlow.resolve`, never straight from the store."
@@ -593,7 +597,7 @@ final class SourceContractTests: XCTestCase {
 
         // And the UI reaches migrateLegacy(allowInteraction: true) only inside the flow that
         // has just told the user how many dialogs to expect.
-        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
+        let appDelegate = try source("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertEqual(
             appDelegate.components(separatedBy: "migrateLegacy(allowInteraction: true)").count - 1, 1,
             "One doorway: offerSecretMigration. A second caller is a second surprise prompt."
@@ -608,7 +612,7 @@ final class SourceContractTests: XCTestCase {
     /// §8.10: a locked login keychain must be diagnosed as locked, never reported as "no secret
     /// stored" — and the unlock dialog has exactly one explained doorway, like migration.
     func testLockedKeychainIsDiagnosedNotDeniedAndUnlockHasOneDoorway() throws {
-        let flow = try source("Sources/DevTypeApp/SecretMenuFlow.swift")
+        let flow = try source("Sources/DevTypeAppCore/SecretMenuFlow.swift")
         guard let lockCheck = flow.range(of: "isKeychainLocked()"),
               let missing = flow.range(of: ".failure(.secretUnavailable)") else {
             return XCTFail("SecretMenuFlow no longer has the shape this contract describes.")
@@ -618,7 +622,7 @@ final class SourceContractTests: XCTestCase {
             "Check the lock before declaring the secret missing — the fix is 'unlock', not 're-enter'."
         )
 
-        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
+        let appDelegate = try source("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertEqual(
             appDelegate.components(separatedBy: "requestKeychainUnlock()").count - 1, 1,
             "One doorway: offerKeychainUnlock. A second caller is a second surprise dialog."
@@ -680,7 +684,7 @@ final class SourceContractTests: XCTestCase {
     /// preview strip is fed by the replacement text, so without these guards the panel grew wider
     /// with every character typed.
     func testEditorCannotBeGrownByItsOwnContent() throws {
-        let editor = try source("Sources/DevTypeApp/SnippetEditorSheet.swift")
+        let editor = try source("Sources/DevTypeAppCore/SnippetEditorSheet.swift")
 
         XCTAssertTrue(
             editor.contains("previewLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)"),
@@ -700,7 +704,7 @@ final class SourceContractTests: XCTestCase {
     /// trailing constraint, so the overflow ran off the edge unreachable. It scrolls now — the
     /// trailing edge is the part that makes that true.
     func testBehaviourChipsAreBoundedByThePanelWidth() throws {
-        let editor = try source("Sources/DevTypeApp/SnippetEditorSheet.swift")
+        let editor = try source("Sources/DevTypeAppCore/SnippetEditorSheet.swift")
         XCTAssertTrue(editor.contains("chipsScroll.documentView = chipsRow"))
         XCTAssertTrue(
             editor.contains("chipsScroll.trailingAnchor.constraint(equalTo: titleField.trailingAnchor)"),
@@ -731,7 +735,7 @@ final class SourceContractTests: XCTestCase {
     /// about to paste into. The confirmation is a non-activating toast that any next action
     /// dismisses.
     func testCopyConfirmationIsNeverAModal() throws {
-        let appDelegate = try source("Sources/DevTypeApp/AppDelegate.swift")
+        let appDelegate = try source("Sources/DevTypeAppCore/AppDelegate.swift")
         // The switch moved out of `copyToClipboard` when the resolve step became asynchronous
         // for the Touch ID gate; the contract is about wherever the *result* is applied.
         guard let start = appDelegate.range(of: "private func applyCopyResult("),
@@ -757,7 +761,7 @@ final class SourceContractTests: XCTestCase {
 
     /// The toast must never become key or activate the app — that is the whole reason it exists.
     func testToastNeverTakesFocus() throws {
-        let toast = try source("Sources/DevTypeApp/ToastPanel.swift")
+        let toast = try source("Sources/DevTypeAppCore/ToastPanel.swift")
         XCTAssertTrue(toast.contains("override var canBecomeKey: Bool { false }"))
         XCTAssertTrue(toast.contains("override var canBecomeMain: Bool { false }"))
         XCTAssertTrue(
@@ -776,7 +780,7 @@ final class SourceContractTests: XCTestCase {
     /// documents. Without a first-presentation reset, long panes (notably Voice and AI) open in
     /// the middle and hide their primary enablement/status controls above the viewport.
     func testPreferencesTabsStartAtTheTopOnFirstPresentation() throws {
-        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
 
         XCTAssertTrue(
             preferences.contains("tabsShownAtLeastOnce.insert(tab).inserted"),
@@ -796,8 +800,8 @@ final class SourceContractTests: XCTestCase {
     /// constraint-managed pane host. Leaving the outer scroll view's autoresizing mask enabled
     /// adds a second set of constraints at that seam and can collapse every preferences pane.
     func testEmbeddedHomePreferencesPaneDisablesAutoresizingMaskConstraints() throws {
-        let home = try source("Sources/DevTypeApp/HomeViewController.swift")
-        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+        let home = try source("Sources/DevTypeAppCore/HomeViewController.swift")
+        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
 
         XCTAssertTrue(
             home.contains("scroll.translatesAutoresizingMaskIntoConstraints = false"),
@@ -813,7 +817,7 @@ final class SourceContractTests: XCTestCase {
     /// 110-point table leaves a large blank box that looks broken, and the macro table previously
     /// had no empty message at all.
     func testPreferencesListsUseTheSharedEmptyStateContainer() throws {
-        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
         let uses = preferences.components(separatedBy: "makeTableArea(").count - 1
 
         XCTAssertEqual(
@@ -831,7 +835,7 @@ final class SourceContractTests: XCTestCase {
     /// leading edge while popups sit on the trailing edge made adjacent cards feel unrelated and
     /// made long Voice labels harder to scan.
     func testPreferencesToggleRowsAlignLabelsLeadingAndSwitchesTrailing() throws {
-        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
         guard let start = preferences.range(of: "private func makeToggleRow("),
               let end = preferences.range(of: "\n    private func", range: start.upperBound..<preferences.endIndex)
         else {
@@ -850,7 +854,7 @@ final class SourceContractTests: XCTestCase {
     /// Speech recognizers and transcript-cleanup LLMs answer different questions, but their
     /// inventory does not need the data-table treatment intended for user-authored mappings.
     func testVoicePreferencesSeparatesSpeechModelsFromCleanupModels() throws {
-        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
 
         XCTAssertTrue(
             preferences.contains("makeVoiceRecognitionModelInventory"),
@@ -871,7 +875,7 @@ final class SourceContractTests: XCTestCase {
     }
 
     func testVoiceVocabularyAndTriggersUseNamedTableColumns() throws {
-        let preferences = try source("Sources/DevTypeApp/PreferencesWindowController.swift")
+        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
 
         XCTAssertTrue(preferences.contains("configureVoiceDictionaryTable"))
         XCTAssertTrue(preferences.contains("voiceDictSpoken"))
@@ -882,7 +886,7 @@ final class SourceContractTests: XCTestCase {
     }
 
     func testImportPreviewCancellationReleasesTheInProgressGuard() throws {
-        let preview = try source("Sources/DevTypeApp/SnippetImportPreviewSheet.swift")
+        let preview = try source("Sources/DevTypeAppCore/SnippetImportPreviewSheet.swift")
 
         XCTAssertTrue(
             preview.contains("onCancel: (() -> Void)? = nil"),
@@ -977,7 +981,7 @@ final class SourceContractTests: XCTestCase {
     }
 
     func testVoiceHUDPlacementSurvivesAHeadlessDisplayState() throws {
-        let hud = try source("Sources/DevTypeApp/VoiceHUDPanel.swift")
+        let hud = try source("Sources/DevTypeAppCore/VoiceHUDPanel.swift")
 
         XCTAssertTrue(hud.contains("private func screenForPlacement() -> NSScreen?"))
         XCTAssertTrue(hud.contains("NSScreen.main ?? NSScreen.screens.first"))

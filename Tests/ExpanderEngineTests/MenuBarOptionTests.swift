@@ -52,7 +52,7 @@ final class MenuBarOptionTests: XCTestCase {
     /// The menu item's visibility must be bound to the recorded outcome, and the restart action
     /// must clear that outcome — otherwise the item either never appears or never disappears.
     func testRestartMenuItemIsWiredToTheFailureState() throws {
-        let source = try appSource("Sources/DevTypeApp/AppDelegate.swift")
+        let source = try appSource("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertTrue(
             source.contains("restartEngineMenuItem?.isHidden = !urgentInject"),
             "Restart must be visible exactly while the last expansion refused or failed."
@@ -74,7 +74,7 @@ final class MenuBarOptionTests: XCTestCase {
     // MARK: - Keyboard shortcuts kill switch
 
     func testHotkeyRegistrationIsGatedOnThePreference() throws {
-        let source = try appSource("Sources/DevTypeApp/HotkeyManager.swift")
+        let source = try appSource("Sources/DevTypeAppCore/HotkeyManager.swift")
         XCTAssertTrue(
             source.contains("guard !HotkeyPreferences.shortcutsDisabled else"),
             "registerAll() is the single choke point; the kill switch must live there so a "
@@ -84,7 +84,7 @@ final class MenuBarOptionTests: XCTestCase {
 
     /// A menu that advertises ⌘/ while the hotkey is unregistered is a lie users will report.
     func testDisabledShortcutsAlsoHideTheMenuKeyEquivalent() throws {
-        let source = try appSource("Sources/DevTypeApp/AppDelegate.swift")
+        let source = try appSource("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertTrue(
             source.contains("guard !HotkeyPreferences.shortcutsDisabled else { return \"\" }"),
             "hotkeyMenuKeyEquivalent must stop advertising a chord that no longer fires."
@@ -145,7 +145,7 @@ final class MenuBarOptionTests: XCTestCase {
     /// Both reporting surfaces must consult the switch: the editor's live duplicate validation
     /// and the store's library-health report.
     func testReportingSurfacesConsultThePreference() throws {
-        let manager = try appSource("Sources/DevTypeApp/SnippetManagerViewController.swift")
+        let manager = try appSource("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
         XCTAssertTrue(
             manager.contains("guard SnippetStore.isConflictDetectionEnabled else { return nil }"),
             "The editor's duplicate validation must honour the switch."

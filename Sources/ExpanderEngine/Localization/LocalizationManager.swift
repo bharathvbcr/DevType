@@ -624,6 +624,8 @@ public final class LocalizationManager: ObservableObject {
             "editor.error.tooLong": "Triggers longer than %d characters can never fire.",
             "editor.error.duplicateLive": "Another snippet already uses this trigger.",
             "editor.enabled.help": "Turn this snippet off without deleting it. Disabled snippets never expand.",
+            "editor.tags.suggested.help": "Suggested by the on-device model. Switch it on to add this tag when you save; nothing is added unless you do.",
+            "editor.group.suggested.help": "Suggested by the on-device model. Switch it on to move this snippet to that group; switch it off to go back to the group you had.",
             "editor.caseSensitive.help": "When on, the trigger must be typed with exactly this capitalisation.",
             "editor.wordBoundary.help":
                 "When on, a bare-word trigger only fires after a space, punctuation, Return or Tab. Turn it off to expand the moment the last character is typed. Punctuation-leading triggers always fire instantly.",
@@ -938,6 +940,9 @@ public final class LocalizationManager: ObservableObject {
             "prefs.ai.removeMarkdown": "Remove Markdown from AI results",
             "prefs.ai.removeMarkdown.hint":
                 "Most apps show Markdown as literal characters, so **bold** arrives with the asterisks. DevType strips the formatting a model adds — headings, emphasis, links, code fences — and keeps what your own text already used. Code, SQL, JSON, and prompt-enhance results are left exactly as generated.",
+            "prefs.ai.tagSuggestions": "Suggest tags for new snippets",
+            "prefs.ai.tagSuggestions.hint":
+                "When you write a new snippet, the on-device model proposes a few tags and the group it seems to belong to. They appear as chips beside the other options and are applied only if you switch them on — a suggestion you ignore changes nothing. Secrets are never sent. Off by default because it spends model time on every new snippet.",
             "prefs.ai.allowlist": "Typed-Path App Allowlist",
             "prefs.ai.allowlist.hint":
                 "Empty means typed AI triggers work in every app. Add bundle IDs to restrict the typed path (and selection monitoring) to those apps only. The hotkey path is unaffected.",
@@ -2056,6 +2061,8 @@ public final class LocalizationManager: ObservableObject {
             "editor.error.tooLong": "%d자를 넘는 트리거는 실행되지 않습니다.",
             "editor.error.duplicateLive": "다른 스니펫이 이미 이 트리거를 사용하고 있습니다.",
             "editor.enabled.help": "삭제하지 않고 스니펫을 끕니다. 비활성 스니펫은 확장되지 않습니다.",
+            "editor.tags.suggested.help": "온디바이스 모델이 제안했습니다. 켜면 저장할 때 이 태그가 추가되며, 켜지 않으면 아무것도 추가되지 않습니다.",
+            "editor.group.suggested.help": "온디바이스 모델이 제안했습니다. 켜면 이 스니펫을 해당 그룹으로 옮기고, 끄면 원래 그룹으로 돌아갑니다.",
             "editor.caseSensitive.help": "켜면 트리거를 정확히 이 대소문자 그대로 입력해야 합니다.",
             "editor.wordBoundary.help":
                 "켜면 일반 단어 트리거는 공백, 문장 부호, Return, Tab 뒤에만 실행됩니다. 끄면 마지막 글자를 입력하는 즉시 확장됩니다. 문장 부호로 시작하는 트리거는 항상 즉시 실행됩니다.",
@@ -2354,6 +2361,9 @@ public final class LocalizationManager: ObservableObject {
             "prefs.ai.removeMarkdown": "AI 결과에서 마크다운 제거",
             "prefs.ai.removeMarkdown.hint":
                 "대부분의 앱은 마크다운을 문자 그대로 표시하므로 **굵게**가 별표와 함께 입력됩니다. DevType는 모델이 추가한 서식(제목, 강조, 링크, 코드 펜스)을 제거하고 원본 텍스트에 이미 있던 서식은 유지합니다. 코드, SQL, JSON, 프롬프트 개선 결과는 생성된 그대로 둡니다.",
+            "prefs.ai.tagSuggestions": "새 스니펫에 태그 제안",
+            "prefs.ai.tagSuggestions.hint":
+                "새 스니펫을 작성하면 온디바이스 모델이 태그 몇 개와 어울리는 그룹을 제안합니다. 제안은 다른 옵션 옆에 칩으로 표시되며, 켠 경우에만 적용됩니다. 무시한 제안은 아무것도 바꾸지 않습니다. 비밀은 전송되지 않습니다. 새 스니펫마다 모델 시간을 사용하므로 기본값은 꺼짐입니다.",
             "prefs.ai.allowlist": "입력 경로 앱 허용 목록",
             "prefs.ai.allowlist.hint":
                 "비어 있으면 모든 앱에서 입력형 AI 트리거가 동작합니다. 번들 ID를 추가하면 입력 경로(및 선택 관찰)를 해당 앱으로만 제한합니다. 단축키 경로는 영향을 받지 않습니다.",
@@ -3461,6 +3471,8 @@ public final class LocalizationManager: ObservableObject {
             "editor.error.tooLong": "%d 文字を超えるトリガーは展開されません。",
             "editor.error.duplicateLive": "別のスニペットがこのトリガーをすでに使っています。",
             "editor.enabled.help": "削除せずにスニペットをオフにします。無効なスニペットは展開されません。",
+            "editor.tags.suggested.help": "オンデバイスモデルによる提案です。オンにすると保存時にこのタグが追加されます。オンにしなければ何も追加されません。",
+            "editor.group.suggested.help": "オンデバイスモデルによる提案です。オンにするとこのスニペットをそのグループへ移動し、オフにすると元のグループに戻ります。",
             "editor.caseSensitive.help": "オンにすると、この大文字小文字のとおりに入力する必要があります。",
             "editor.wordBoundary.help":
                 "オンにすると、通常の単語トリガーはスペース・記号・Return・Tab の後だけで動作します。オフにすると最後の文字を入力した瞬間に展開されます。記号で始まるトリガーは常に即座に展開されます。",
@@ -3759,6 +3771,9 @@ public final class LocalizationManager: ObservableObject {
             "prefs.ai.removeMarkdown": "AI の結果から Markdown を削除",
             "prefs.ai.removeMarkdown.hint":
                 "多くのアプリは Markdown をそのままの文字として表示するため、**太字** はアスタリスク付きで入力されます。DevType はモデルが追加した書式（見出し、強調、リンク、コードフェンス）を削除し、元のテキストにあった書式は保持します。コード、SQL、JSON、プロンプト強化の結果はそのまま残します。",
+            "prefs.ai.tagSuggestions": "新しいスニペットにタグを提案",
+            "prefs.ai.tagSuggestions.hint":
+                "新しいスニペットを書くと、オンデバイスモデルがタグと合いそうなグループを提案します。提案は他のオプションの隣にチップとして表示され、オンにした場合のみ適用されます。無視した提案は何も変更しません。シークレットは送信されません。新しいスニペットごとにモデルの時間を使うため、既定ではオフです。",
             "prefs.ai.allowlist": "入力パスのアプリ許可リスト",
             "prefs.ai.allowlist.hint":
                 "空のときはすべてのアプリで入力型 AI トリガーが動作します。バンドル ID を追加すると、入力パス（および選択の監視）をそれらのアプリに限定します。ショートカット経路には影響しません。",

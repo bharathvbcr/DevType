@@ -65,15 +65,15 @@ The current flow is concentrated in `VoiceDictationCoordinator` and directly con
 
 Evidence anchors in the inspected baseline:
 
-- Engine routing is a direct coordinator switch at `Sources/DevTypeApp/VoiceDictationCoordinator.swift:190`.
+- Engine routing is a direct coordinator switch at `Sources/DevTypeAppCore/VoiceDictationCoordinator.swift:190`.
 - Voxtral and Fun-ASR delegate to Apple Speech at `Sources/ExpanderEngine/Voice/VoiceTranscriber.swift:117` and `Sources/ExpanderEngine/Voice/VoiceTranscriber.swift:134`.
 - Model readiness is a greater-than-10-MB file check at `Sources/ExpanderEngine/Voice/VoiceModelManager.swift:84`.
 - Recorder stop removes the tap, loads the journal with `Data(contentsOf:)`, writes WAV, and removes the journal at `Sources/ExpanderEngine/Voice/VoiceAudioRecorder.swift:203`.
 - Invalid state transitions return the unchanged state at `Sources/ExpanderEngine/Voice/DictationStateMachine.swift:53`.
 - The local correction transport builds one chat payload and decodes both OpenAI-style `choices` and Ollama’s older direct `response` shape at `Sources/ExpanderEngine/Voice/LocalLLMCleanupClient.swift:107`.
 - The existing delivery pipeline declares `PasteboardBroker`, `AXTextWriter`, `DeliveryVerifier`, and `EraseExecutor` as its collaborators at `Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift:56`.
-- Empty transcript and voice-command early returns occur after the state has entered insertion at `Sources/DevTypeApp/VoiceDictationCoordinator.swift:394-409`; the normal branch reports `.inserted` before delivery completion at `Sources/DevTypeApp/VoiceDictationCoordinator.swift:428-435`.
-- Cancellation clears capture/session references but does not invalidate outstanding recognition or correction work at `Sources/DevTypeApp/VoiceDictationCoordinator.swift:504-524`; final delivery also reactivates the captured app at `Sources/DevTypeApp/VoiceDictationCoordinator.swift:580-600`.
+- Empty transcript and voice-command early returns occur after the state has entered insertion at `Sources/DevTypeAppCore/VoiceDictationCoordinator.swift:394-409`; the normal branch reports `.inserted` before delivery completion at `Sources/DevTypeAppCore/VoiceDictationCoordinator.swift:428-435`.
+- Cancellation clears capture/session references but does not invalidate outstanding recognition or correction work at `Sources/DevTypeAppCore/VoiceDictationCoordinator.swift:504-524`; final delivery also reactivates the captured app at `Sources/DevTypeAppCore/VoiceDictationCoordinator.swift:580-600`.
 - The canonical injection completion is deliberately invoked after either normal settlement or the watchdog, so it is not a success receipt: `Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift:389-443`.
 - Current local cleanup unconditionally tries Foundation Models before HTTP at `Sources/ExpanderEngine/Voice/LocalLLMCleanupClient.swift:41-53`, derives output allowance from character count at line 133, and decodes `choices` or a top-level `response` at lines 153-166 rather than native Ollama chat's `message.content`.
 - The audio tap converts, allocates, locks, and writes at `Sources/ExpanderEngine/Voice/VoiceAudioRecorder.swift:145-183`; stop removes the tap, loads the entire journal, and deletes it at lines 203-244, while launch cleanup deletes all active journals at lines 71-75.

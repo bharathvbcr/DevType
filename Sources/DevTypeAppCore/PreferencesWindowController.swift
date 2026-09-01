@@ -313,6 +313,7 @@ final class PreferencesViewController: NSViewController,
     // AI
     private let aiEnabledSwitch = NSSwitch()
     private let aiRemoveMarkdownSwitch = NSSwitch()
+    private let aiTagSuggestionsSwitch = NSSwitch()
     private let requireBiometrySwitch = NSSwitch()
     private let aiAvailabilityLabel = DevTypeTheme.makeLabel(
         "",
@@ -2406,7 +2407,19 @@ final class PreferencesViewController: NSViewController,
             wrapping: true
         )
         markdownHint.translatesAutoresizingMaskIntoConstraints = false
-        var modeRows: [NSView] = [modesHint, markdownRow, markdownHint]
+        let tagRow = makeToggleRow(
+            title: loc.s("prefs.ai.tagSuggestions"),
+            toggle: aiTagSuggestionsSwitch,
+            action: #selector(aiTagSuggestionsChanged)
+        )
+        let tagHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.tagSuggestions.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        tagHint.translatesAutoresizingMaskIntoConstraints = false
+        var modeRows: [NSView] = [modesHint, markdownRow, markdownHint, tagRow, tagHint]
         aiOutputModePopups.removeAll()
         for kind in AITransformKind.builtInPalette {
             let popup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -2501,6 +2514,7 @@ final class PreferencesViewController: NSViewController,
         guard panes[.ai] != nil else { return }
         aiEnabledSwitch.state = AIPreferences.isEnabled ? .on : .off
         aiRemoveMarkdownSwitch.state = AIPreferences.removesMarkdown ? .on : .off
+        aiTagSuggestionsSwitch.state = SnippetTagSuggester.isEnabled ? .on : .off
         aiAvailabilityLabel.stringValue = loc.s(
             "prefs.ai.availability",
             loc.s(AITextTransformSupport.availability.localizationKey)
@@ -2533,6 +2547,10 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func aiRemoveMarkdownChanged() {
         AIPreferences.removesMarkdown = aiRemoveMarkdownSwitch.state == .on
+    }
+
+    @objc private func aiTagSuggestionsChanged() {
+        SnippetTagSuggester.isEnabled = aiTagSuggestionsSwitch.state == .on
     }
 
     @objc private func aiOutputModeChanged(_ sender: NSPopUpButton) {

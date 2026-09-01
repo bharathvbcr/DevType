@@ -165,7 +165,7 @@ seed_issue "Export the snippet library as a TextExpander CSV / JSON bundle" \
 
 DevType exports to DevType JSON, Espanso YAML, and CSV — see `SnippetExporter.Format` in
 `Sources/ExpanderEngine/Sync/SnippetExporter.swift` and the UI side in
-`Sources/DevTypeApp/LibraryExporter.swift`. Import from TextExpander already works
+`Sources/DevTypeAppCore/LibraryExporter.swift`. Import from TextExpander already works
 (`TEImporter.swift`), so the round trip is currently one-way.
 
 ## The task
@@ -282,7 +282,7 @@ seed_issue "Preferences: show which snippets a trigger conflict actually involve
 '## Background
 
 DevType detects trigger conflicts (`SnippetStore.isConflictDetectionEnabled`, surfaced through
-`Sources/DevTypeApp/LibraryHealth.swift` and `SnippetConflictResolverSheet.swift`). The
+`Sources/DevTypeAppCore/LibraryHealth.swift` and `SnippetConflictResolverSheet.swift`). The
 underlying detection already knows which snippets collide.
 
 ## The task

@@ -613,6 +613,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private let errorLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11, .medium), color: DevTypeTheme.accentBright, wrapping: true)
     private let charCountLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10, .medium), color: DevTypeTheme.textTertiary)
     private var editorContainer: NSView!
+    /// The option-chip row, held so suggestion chips can be appended to and removed from it.
+    private weak var chipsRow: NSStackView?
     private var macroButton: NSButton!
     /// The attach-image button, disabled while Secret is on: a snippet cannot be both.
     private weak var imageButton: NSButton?
@@ -648,6 +650,23 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     /// Newly picked image file — copied into the store on save.
     private var pickedImageURL: URL?
 
+    // MARK: - On-device tag suggestion (`SnippetTagSuggester`)
+
+    /// What the model offered and what the user has accepted of it. `nil` until a suggestion
+    /// arrives. Nothing here reaches the snippet without a chip being switched on.
+    private var acceptance: TagSuggestionAcceptance?
+    /// In-flight suggestion. Cancelled on every keystroke and when the sheet closes, so a
+    /// result for a body the user has since rewritten can never land.
+    private var suggestionTask: Task<Void, Never>?
+    /// The chips currently offering the suggestion, so a new suggestion can replace them
+    /// without disturbing the permanent option chips they sit beside.
+    private var suggestionChips: [ToggleChip] = []
+    /// The chip offering the suggested group, if one was offered.
+    private weak var groupSuggestionChip: ToggleChip?
+    /// The group selected before the group chip was switched on, restored if it is switched
+    /// back off — accepting a suggestion and then changing your mind must not strand you on it.
+    private var groupSelectionBeforeSuggestion: UUID?
+
     private var hasImage: Bool { pickedImageURL != nil || !attachedImagePath.isEmpty }
 
     init(
@@ -677,6 +696,12 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
+
+    deinit {
+        // The task captures `self` weakly, so this is not a leak fix — it stops a model
+        // request whose answer nothing will read from holding the adapter warm.
+        suggestionTask?.cancel()
+    }
 
     override func loadView() {
         let glass = GlassContainerView(
@@ -844,6 +869,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         secretField.isHidden = !(seed?.isSecret ?? false)
 
         let chipsRow = NSStackView(views: [enabledChip, caseChip, boundaryChip, plainChip, secretChip])
+        // Suggestion chips are appended to this same row rather than given a row of their own:
+        // the panel is a fixed 690pt and this one already scrolls horizontally when it overflows.
+        self.chipsRow = chipsRow
         chipsRow.orientation = .horizontal
         chipsRow.alignment = .centerY
         chipsRow.spacing = 8
@@ -1167,6 +1195,17 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
            let index = groups.firstIndex(where: { $0.id == id }) {
             groupPopup.selectItem(at: index)
         }
+        // Records the user's intent, nothing else — see `groupSelectionChangedManually`.
+        groupPopup.target = self
+        groupPopup.action = #selector(groupPopupChanged)
+    }
+
+    @objc private func groupPopupChanged() {
+        // A choice made in the popup itself supersedes the suggested one — the chip must stop
+        // presenting itself as the reason for the current selection.
+        acceptance?.groupSelectionChangedManually()
+        groupSuggestionChip?.isOn = false
+        groupSelectionBeforeSuggestion = nil
     }
 
     private func configureAITransformPopup(selectedRaw: String) {
@@ -1415,6 +1454,133 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             }
         }
         refreshPreview()
+        scheduleTagSuggestion()
+    }
+
+    // MARK: Tag suggestion
+
+    /// Debounce before asking the model. Long enough that it does not fire mid-sentence;
+    /// short enough to have an answer by the time the user reaches for Save.
+    private static let tagSuggestionDebounce = Duration.milliseconds(900)
+
+    /// Asks `SnippetTagSuggester` for tags once typing settles.
+    ///
+    /// New snippets only. Re-tagging an existing one would silently rewrite metadata the user
+    /// may have curated by hand, and the sheet gives them no way to see that it happened.
+    private func scheduleTagSuggestion() {
+        suggestionTask?.cancel()
+        suggestionTask = nil
+        guard existing == nil, SnippetTagSuggester.isActive else { return }
+        // A secret's body is the secret. It never reaches the model — the suggester refuses it
+        // too, but the caller that has the plaintext is the right place to stop.
+        let isSecret = secretChip?.isOn ?? false
+        let body = replacementView.string
+        guard SnippetTagSuggester.shouldSuggest(body: body, isSecret: isSecret) else {
+            clearSuggestionChips()
+            acceptance = nil
+            return
+        }
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else { return }
+        let title = titleField.stringValue
+        let names = groups.map(\.name)
+        suggestionTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.tagSuggestionDebounce)
+            guard !Task.isCancelled else { return }
+            let suggestion = await SnippetTagSuggester.suggest(
+                title: title,
+                body: body,
+                isSecret: isSecret,
+                groupNames: names
+            )
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.applyTagSuggestion(suggestion) }
+        }
+        #endif
+    }
+
+    /// Offers the suggestion. Applies none of it.
+    ///
+    /// Every chip starts off. A suggestion that the user never looks at therefore changes
+    /// nothing about the snippet they save, which is the point: the model's read of a
+    /// half-written body is a guess, and a guess should not be able to write to the library
+    /// just because the user was typing quickly.
+    private func applyTagSuggestion(_ suggestion: SnippetTagSuggester.Suggestion) {
+        clearSuggestionChips()
+        let acceptance = TagSuggestionAcceptance(suggestion: suggestion)
+        guard acceptance.hasAnythingToOffer else {
+            self.acceptance = nil
+            return
+        }
+        self.acceptance = acceptance
+
+        guard let chipsRow else { return }
+        for tag in suggestion.tags {
+            let chip = ToggleChip(
+                title: tag,
+                symbol: "tag",
+                isOn: false,
+                help: loc.s("editor.tags.suggested.help"),
+                target: self,
+                action: #selector(suggestedTagChipTapped(_:))
+            )
+            suggestionChips.append(chip)
+            chipsRow.addArrangedSubview(chip)
+        }
+        if let name = suggestion.groupName {
+            let chip = ToggleChip(
+                title: name,
+                symbol: "folder",
+                isOn: false,
+                help: loc.s("editor.group.suggested.help"),
+                target: self,
+                action: #selector(suggestedGroupChipTapped(_:))
+            )
+            groupSuggestionChip = chip
+            suggestionChips.append(chip)
+            chipsRow.addArrangedSubview(chip)
+        }
+    }
+
+    private func clearSuggestionChips() {
+        for chip in suggestionChips {
+            chipsRow?.removeArrangedSubview(chip)
+            chip.removeFromSuperview()
+        }
+        suggestionChips.removeAll()
+        groupSuggestionChip = nil
+        // A chip-driven group selection does not outlive the chip that caused it.
+        if acceptance?.isGroupAccepted == true, let previous = groupSelectionBeforeSuggestion {
+            selectGroup(id: previous)
+        }
+        groupSelectionBeforeSuggestion = nil
+    }
+
+    @objc private func suggestedTagChipTapped(_ sender: ToggleChip) {
+        sender.isOn.toggle()
+        acceptance?.setTag(sender.title, accepted: sender.isOn)
+    }
+
+    /// The one suggestion chip with an immediate effect — the group popup has to show the
+    /// change for the user to judge it. Switching it back off restores what was selected before.
+    @objc private func suggestedGroupChipTapped(_ sender: ToggleChip) {
+        sender.isOn.toggle()
+        acceptance?.setGroupAccepted(sender.isOn)
+        if sender.isOn {
+            groupSelectionBeforeSuggestion = selectedGroupID
+            if let name = acceptance?.suggestion.groupName,
+               let group = groups.first(where: { $0.name == name }) {
+                selectGroup(id: group.id)
+            }
+        } else if let previous = groupSelectionBeforeSuggestion {
+            selectGroup(id: previous)
+            groupSelectionBeforeSuggestion = nil
+        }
+    }
+
+    private func selectGroup(id: UUID) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        groupPopup.selectItem(at: index)
     }
 
     /// §2: Tab hops to the next editable span of the macro that was just
@@ -1871,6 +2037,13 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         )
         snippet.title = title.isEmpty ? Self.derivedTitle(from: replacement) : title
         snippet.triggerKeyword = trigger
+
+        // Only what the user switched on. Still re-normalized against whatever the snippet
+        // already carries, so an import's tags are never displaced and nothing is added twice.
+        let acceptedTags = acceptance?.tagsToApply ?? []
+        if !acceptedTags.isEmpty {
+            snippet.tags += SnippetTagSuggester.normalizedTags(acceptedTags, existing: snippet.tags)
+        }
 
         if hasImage {
             if let picked = pickedImageURL {

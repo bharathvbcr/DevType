@@ -236,7 +236,7 @@ final class BiometricGateTests: XCTestCase {
             "SnippetEditorSheet.swift",
             "ToastPanel.swift",
         ] {
-            let url = root.appendingPathComponent("Sources/DevTypeApp/\(name)")
+            let url = root.appendingPathComponent("Sources/DevTypeAppCore/\(name)")
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             XCTAssertFalse(
                 SourceContractTests.strippingComments(text).contains("SecretStore.shared.secret("),
@@ -246,7 +246,7 @@ final class BiometricGateTests: XCTestCase {
 
         // The editor may ask *whether* a secret exists — that reveals nothing — but not what it is.
         let editor = try String(
-            contentsOf: root.appendingPathComponent("Sources/DevTypeApp/SnippetEditorSheet.swift"),
+            contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/SnippetEditorSheet.swift"),
             encoding: .utf8
         )
         XCTAssertTrue(
