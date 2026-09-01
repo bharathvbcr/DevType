@@ -244,6 +244,17 @@ public struct SnippetGroup: Codable, Identifiable, Equatable {
     public var symbol: String
     /// Hex color tag (e.g. "#F24A3D"). Empty = default accent.
     public var colorHex: String
+    /// Bundle IDs every snippet in this group is limited to. Empty = no group-level limit.
+    ///
+    /// Composes with each snippet's own `includeApps` by intersection: both must allow the app.
+    /// Two lists that do not overlap mean the snippet can never fire anywhere, and
+    /// `SnippetStore.expandableSnippets` reports that by disabling it rather than by producing
+    /// an empty list — an empty `includeApps` means "everywhere", so collapsing to one would
+    /// invert the rule.
+    public var includeApps: [String]
+    /// Bundle IDs every snippet in this group is suppressed in. Unions with each snippet's own
+    /// `excludeApps`; blocking is subtractive, so a union needs no tie-break.
+    public var excludeApps: [String]
     public var snippets: [SnippetModel]
 
     public init(
@@ -252,6 +263,8 @@ public struct SnippetGroup: Codable, Identifiable, Equatable {
         enabled: Bool = true,
         symbol: String = "folder.fill",
         colorHex: String = "",
+        includeApps: [String] = [],
+        excludeApps: [String] = [],
         snippets: [SnippetModel] = []
     ) {
         self.id = id
@@ -259,11 +272,24 @@ public struct SnippetGroup: Codable, Identifiable, Equatable {
         self.enabled = enabled
         self.symbol = symbol
         self.colorHex = colorHex
+        self.includeApps = includeApps
+        self.excludeApps = excludeApps
         self.snippets = snippets
     }
 
+    /// §4.4 at group level — same rule as `SnippetModel.appliesTo(bundleID:)`, so the two
+    /// compose predictably and neither has to explain the other's behaviour.
+    public func appliesTo(bundleID: String?) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else { return includeApps.isEmpty }
+        if excludeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame }) {
+            return false
+        }
+        if includeApps.isEmpty { return true }
+        return includeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame })
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case id, name, enabled, symbol, colorHex, snippets
+        case id, name, enabled, symbol, colorHex, includeApps, excludeApps, snippets
     }
 
     public init(from decoder: Decoder) throws {
@@ -273,6 +299,8 @@ public struct SnippetGroup: Codable, Identifiable, Equatable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         symbol = try c.decodeIfPresent(String.self, forKey: .symbol) ?? "folder.fill"
         colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex) ?? ""
+        includeApps = try c.decodeIfPresent([String].self, forKey: .includeApps) ?? []
+        excludeApps = try c.decodeIfPresent([String].self, forKey: .excludeApps) ?? []
         snippets = try c.decodeIfPresent([SnippetModel].self, forKey: .snippets) ?? []
     }
 }

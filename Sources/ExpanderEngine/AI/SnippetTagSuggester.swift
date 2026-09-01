@@ -209,11 +209,16 @@ public enum SnippetTagSuggester {
             return .none
         }
         guard await Latch.shared.acquire() else { return .none }
-        defer { Task { await Latch.shared.release() } }
 
+        // Released with `await`, not from a detached `Task` in a `defer`. A deferred release is
+        // ordered *after* the caller resumes, so a second call made straight away — which is
+        // exactly what `SnippetLibraryTagger` does — found the latch still held and was dropped
+        // as if the model were busy. The editor never saw it, because its calls are a debounce
+        // apart. `defer` cannot `await`, so the release is spelled out on both paths instead.
+        let suggestion: Suggestion
         do {
             let raw = try await engine(prompt(title: title, body: body, groupNames: groupNames))
-            return Suggestion(
+            suggestion = Suggestion(
                 tags: normalizedTags(raw.tags, existing: existingTags),
                 groupName: resolvedGroupName(raw.group, in: groupNames)
             )
@@ -221,8 +226,10 @@ public enum SnippetTagSuggester {
             DevTypeLog.store.debug(
                 "[AI] tag suggestion declined: \(error.localizedDescription, privacy: .public)"
             )
-            return .none
+            suggestion = .none
         }
+        await Latch.shared.release()
+        return suggestion
     }
 
     #if canImport(FoundationModels)
@@ -246,7 +253,7 @@ public enum SnippetTagSuggester {
     /// an unusable model reads as "no engine" — the same state as running below macOS 26 — and
     /// takes the identical path through `suggest`.
     @available(macOS 26.0, *)
-    static func foundationModelsEngine() -> TaggingEngine? {
+    public static func foundationModelsEngine() -> TaggingEngine? {
         let probe = SystemLanguageModel(
             useCase: .contentTagging,
             guardrails: .permissiveContentTransformations

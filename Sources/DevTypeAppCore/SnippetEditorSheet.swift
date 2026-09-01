@@ -667,6 +667,11 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private var existingTagChips: [ToggleChip] = []
     /// The chip offering the suggested group, if one was offered.
     private weak var groupSuggestionChip: ToggleChip?
+    /// Per-app scope, edited in `SnippetAppScopeSheet` and written at save. Seeded from the
+    /// snippet so an imported scope survives an edit that never opens the sheet.
+    private var appScope: SnippetAppScope = .unscoped
+    private weak var appScopeChip: ToggleChip?
+
     /// Free-form tag entry. Lives at the end of the chip row, so it costs no vertical space in
     /// a panel whose height is fixed — the row already scrolls horizontally when it overflows.
     private let newTagField = NSTextField()
@@ -883,6 +888,22 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             existingTagChips.append(makeExistingTagChip(tag))
         }
         for chip in existingTagChips { chipsRow.addArrangedSubview(chip) }
+        appScope = SnippetAppScope(
+            includeApps: seed?.includeApps ?? [],
+            excludeApps: seed?.excludeApps ?? []
+        )
+        let scopeChip = ToggleChip(
+            title: SnippetAppScopeSummary.chipTitle(
+                include: appScope.includeApps, exclude: appScope.excludeApps, loc: loc
+            ),
+            symbol: "macwindow.on.rectangle",
+            isOn: appScope.isScoped,
+            help: loc.s("appscope.chip.help"),
+            target: self,
+            action: #selector(appScopeChipTapped)
+        )
+        appScopeChip = scopeChip
+        chipsRow.addArrangedSubview(scopeChip)
         configureNewTagField()
         chipsRow.addArrangedSubview(newTagField)
         chipsRow.orientation = .horizontal
@@ -1582,6 +1603,25 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         sender.isOn.toggle()
     }
 
+    /// Opens the scope editor. Unlike the other chips this one does not toggle: "all apps" is
+    /// not the opposite of a specific list, and silently clearing one on a click would throw
+    /// away exactly the thing the chip is advertising.
+    @objc private func appScopeChipTapped() {
+        SnippetAppScopeSheet.present(
+            from: view.window,
+            scope: appScope,
+            loc: loc
+        ) { [weak self] result in
+            guard let self, let result else { return }
+            self.appScope = result
+            self.appScopeChip?.isOn = result.isScoped
+            self.appScopeChip?.title = SnippetAppScopeSummary.chipTitle(
+                include: result.includeApps, exclude: result.excludeApps, loc: self.loc
+            )
+            self.appScopeChip?.needsDisplay = true
+        }
+    }
+
     private func makeExistingTagChip(_ tag: String) -> ToggleChip {
         ToggleChip(
             title: tag,
@@ -2120,10 +2160,18 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         // Tags are rebuilt from the chips rather than appended to, so switching one off
         // actually removes it. Suggestions are then normalized against what survived, so an
         // accepted suggestion cannot duplicate a tag the snippet already had.
+        snippet.includeApps = appScope.includeApps
+        snippet.excludeApps = appScope.excludeApps
+
         snippet.tags = SnippetTagAssembly.finalTags(
             kept: keptExistingTags,
             accepted: acceptance?.tagsToApply ?? []
         )
+
+        // §4.4: the matcher has honoured these on every keystroke since they were added, and
+        // both importers round-trip them — this is the first path that can *write* one.
+        snippet.includeApps = appScope.includeApps
+        snippet.excludeApps = appScope.excludeApps
 
         if hasImage {
             if let picked = pickedImageURL {

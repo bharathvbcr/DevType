@@ -506,6 +506,60 @@ public final class SnippetStore {
         loadGroups().flatMap(\.snippets)
     }
 
+    /// The library as the *matcher* must see it: a snippet in a disabled group is disabled.
+    ///
+    /// `group.enabled` was honoured by `SnippetExporter` and by `SnippetSearch.makeIndex`, but
+    /// by nothing on the expansion path — the engine is handed `groups.flatMap(\.snippets)` and
+    /// `AbbreviationMatcher` only checks `snippet.enabled`. Switching a group off therefore
+    /// changed what you could search and what you exported, and left every trigger in it firing.
+    ///
+    /// Snippets are returned *disabled* rather than dropped so that callers counting the library
+    /// still see them, and so the one filter every consumer already applies (`snippet.enabled`)
+    /// is the only rule anyone has to know. The group flag may only ever subtract: a snippet the
+    /// user switched off by hand stays off in an enabled group.
+    public static func expandableSnippets(in groups: [SnippetGroup]) -> [SnippetModel] {
+        groups.flatMap { group -> [SnippetModel] in
+            group.snippets.map { snippet in
+                var copy = snippet
+                if !group.enabled { copy.enabled = false }
+                foldGroupScope(of: group, into: &copy)
+                return copy
+            }
+        }
+    }
+
+    /// Merges a group's app scope into one of its snippets.
+    ///
+    /// Blocking unions — a snippet is suppressed if *either* list suppresses it, and subtraction
+    /// needs no tie-break. Limiting intersects, because both lists have to allow the app.
+    ///
+    /// The case that needs care is two `includeApps` lists that do not overlap. The intersection
+    /// is empty, and an empty `includeApps` means "everywhere" — so writing it back would turn
+    /// two contradictory limits into no limit at all, which is the exact inversion of what the
+    /// user asked for. Such a snippet can never fire anywhere, so it is disabled instead.
+    private static func foldGroupScope(of group: SnippetGroup, into snippet: inout SnippetModel) {
+        guard !group.includeApps.isEmpty || !group.excludeApps.isEmpty else { return }
+
+        for blocked in group.excludeApps
+        where !snippet.excludeApps.contains(where: { $0.caseInsensitiveCompare(blocked) == .orderedSame }) {
+            snippet.excludeApps.append(blocked)
+        }
+
+        guard !group.includeApps.isEmpty else { return }
+        if snippet.includeApps.isEmpty {
+            snippet.includeApps = group.includeApps
+            return
+        }
+        let shared = snippet.includeApps.filter { candidate in
+            group.includeApps.contains { $0.caseInsensitiveCompare(candidate) == .orderedSame }
+        }
+        if shared.isEmpty {
+            snippet.enabled = false
+        } else {
+            snippet.includeApps = shared
+        }
+    }
+
     public func loadGroups() -> [SnippetGroup] {
         lock.lock()
         defer { lock.unlock() }
@@ -1612,7 +1666,7 @@ public final class SnippetStore {
         let groupListenersCopy = groupListeners
         lock.unlock()
 
-        let flat = loaded.groups.flatMap(\.snippets)
+        let flat = Self.expandableSnippets(in: loaded.groups)
         // `self` is only needed to prove the store is still alive — both listener tables were
         // already copied out above, so nothing here reads through it.
         DispatchQueue.main.async { [weak self] in

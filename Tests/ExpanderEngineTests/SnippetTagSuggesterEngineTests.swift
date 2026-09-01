@@ -210,8 +210,9 @@ final class SnippetTagSuggesterEngineTests: XCTestCase {
     func testTheLatchIsReleasedAfterACall() async {
         let spy = EngineSpy(tags: ["invoice"])
         _ = await suggest(engine: spy.engine())
-        // Give the deferred release a turn.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // Deliberately no sleep. The release must be ordered before the caller resumes, or a
+        // batch making back-to-back calls has every one after the first dropped — which is the
+        // bug a sleep here previously hid.
         let second = await suggest(engine: spy.engine())
         XCTAssertEqual(second.tags, ["invoice"], "a later suggestion must still be able to run")
     }
@@ -223,7 +224,6 @@ final class SnippetTagSuggesterEngineTests: XCTestCase {
         let failing = EngineSpy()
         failing.result = .failure(Refused())
         _ = await suggest(engine: failing.engine())
-        try? await Task.sleep(nanoseconds: 50_000_000)
 
         let ok = EngineSpy(tags: ["invoice"])
         let result = await suggest(engine: ok.engine())

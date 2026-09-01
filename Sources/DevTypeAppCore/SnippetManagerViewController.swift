@@ -450,6 +450,25 @@ private final class EmptyStateView: NSView {
     }
 }
 
+/// The manager's free-text filter predicate.
+///
+/// Extracted from `applyFilterAndReloadTable` so the field's behaviour can be asserted without
+/// standing up a view controller — and so it stays honest about tags. `SnippetSearch` gained
+/// tag matching when tags became something a user could see and edit; this field searched the
+/// same library by different rules, which meant typing a tag here found nothing while typing it
+/// in the palette found the snippet.
+enum SnippetManagerFilter {
+
+    /// `query` is expected already trimmed and lowercased, as the field hands it over.
+    static func matches(_ snippet: SnippetModel, query: String) -> Bool {
+        if query.isEmpty { return true }
+        if snippet.triggerKeyword.lowercased().contains(query) { return true }
+        if snippet.displayTitle.lowercased().contains(query) { return true }
+        if snippet.replacementText.lowercased().contains(query) { return true }
+        return snippet.tags.contains { $0.lowercased().contains(query) }
+    }
+}
+
 enum SnippetFilterChip: Int, CaseIterable {
     case all = 0
     case enabled = 1
@@ -459,6 +478,7 @@ enum SnippetFilterChip: Int, CaseIterable {
     case macros = 5
     case conflicts = 6
     case unused = 7
+    case tagged = 8
 
     var localizationKey: String {
         switch self {
@@ -470,6 +490,7 @@ enum SnippetFilterChip: Int, CaseIterable {
         case .macros: return "manager.filter.macros"
         case .conflicts: return "manager.filter.conflicts"
         case .unused: return "manager.filter.unused"
+        case .tagged: return "manager.filter.tagged"
         }
     }
 }
@@ -1080,14 +1101,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             filtered = filtered.filter { conflictIDs.contains($0.id) }
         case .unused:
             filtered = filtered.filter { SnippetStore.shared.usageCount(for: $0) == 0 }
+        case .tagged:
+            filtered = filtered.filter { !$0.tags.isEmpty }
         }
 
         if !filter.isEmpty {
-            filtered = filtered.filter {
-                $0.triggerKeyword.lowercased().contains(filter)
-                    || $0.displayTitle.lowercased().contains(filter)
-                    || $0.replacementText.lowercased().contains(filter)
-            }
+            filtered = filtered.filter { SnippetManagerFilter.matches($0, query: filter) }
         }
         snippets = sorted(filtered)
         tableView.sortDescriptors = sortMode.sortDescriptor.map { [$0] } ?? []
@@ -1416,6 +1435,8 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
                     enabled: draft.enabled,
                     symbol: draft.symbol,
                     colorHex: draft.colorHex,
+                    includeApps: draft.scope.includeApps,
+                    excludeApps: draft.scope.excludeApps,
                     snippets: []
                 )
                 self.selectedGroupID = group.id
@@ -1448,6 +1469,8 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
                     groups[index].symbol = draft.symbol
                     groups[index].colorHex = draft.colorHex
                     groups[index].enabled = draft.enabled
+                    groups[index].includeApps = draft.scope.includeApps
+                    groups[index].excludeApps = draft.scope.excludeApps
                 }
             }
         )

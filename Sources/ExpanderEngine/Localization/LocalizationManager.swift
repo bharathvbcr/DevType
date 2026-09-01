@@ -505,6 +505,9 @@ public final class LocalizationManager: ObservableObject {
             "groupeditor.name": "Name",
             "groupeditor.icon": "Icon",
             "groupeditor.color": "Color",
+            "groupeditor.scope.label": "App scope",
+            "groupeditor.scope.help":
+                "Limit every snippet in this group to certain apps, or block them in some. Composes with each snippet's own scope: blocking applies if either says so, and limits must both allow the app.",
             "groupeditor.enabled": "Enabled",
             "groupeditor.save": "Save Group",
             "groupeditor.error.emptyName": "Enter a name for this group.",
@@ -624,6 +627,26 @@ public final class LocalizationManager: ObservableObject {
             "editor.error.tooLong": "Triggers longer than %d characters can never fire.",
             "editor.error.duplicateLive": "Another snippet already uses this trigger.",
             "editor.enabled.help": "Turn this snippet off without deleting it. Disabled snippets never expand.",
+            "appscope.title": "Where this snippet works",
+            "appscope.mode.only": "Only in",
+            "appscope.mode.never": "Never in",
+            "appscope.mode.label": "Which list to edit",
+            "appscope.list.label": "Bundle identifiers",
+            "appscope.bundleID.placeholder": "com.example.App",
+            "appscope.chooseApp": "Choose App…",
+            "appscope.remove": "Remove",
+            "appscope.chip.all": "All apps",
+            "appscope.chip.only.one": "Only %d app",
+            "appscope.chip.only.other": "Only %d apps",
+            "appscope.chip.except.one": "Except %d app",
+            "appscope.chip.except.other": "Except %d apps",
+            "appscope.chip.help":
+                "Limit this snippet to certain apps, or block it in them. Where it does not apply the trigger simply never fires.",
+            "appscope.explain.all": "This snippet works in every app.",
+            "appscope.explain.only": "This snippet works only in the apps listed above.",
+            "appscope.explain.except": "This snippet works everywhere except the apps listed above.",
+            "appscope.explain.both":
+                "Both lists have entries. “Never in” wins: an app on that list is blocked even if it is also on “Only in”.",
             "editor.tags.add.placeholder": "add tag",
             "editor.tags.existing.help": "A tag on this snippet. Switch it off to remove it when you save.",
             "editor.tags.suggested.help": "Suggested by the on-device model. Switch it on to add this tag when you save; nothing is added unless you do.",
@@ -763,6 +786,14 @@ public final class LocalizationManager: ObservableObject {
             "status.menu.attention": "Status: %@ ⚠",
 
             // §4.8: consolidated alerts.
+            "common.notNow": "Not Now",
+            "alert.import.tagOffer.one": "%d snippet has no tags. Suggest some on this Mac?",
+            "alert.import.tagOffer.other": "%d snippets have no tags. Suggest some on this Mac?",
+            "alert.import.tagOffer.confirm": "Suggest Tags",
+            "alert.import.tagResult.title": "Tagging finished",
+            "alert.import.tagResult": "Tagged %d · nothing to suggest for %d · skipped %d",
+            "alert.import.tagResult.partial.one": "%d snippet was not attempted.",
+            "alert.import.tagResult.partial.other": "%d snippets were not attempted.",
             "alert.import.title": "Import Complete",
             // §7.1: positional — ko/ja need the source name first, and mixing positional
             // and sequential specifiers in one format string is undefined, so all three
@@ -1617,6 +1648,7 @@ public final class LocalizationManager: ObservableObject {
             "manager.filter.images": "Images",
             "manager.filter.macros": "Macros",
             "manager.filter.conflicts": "Conflicts",
+            "manager.filter.tagged": "Tagged",
             "manager.filter.unused": "Unused",
 
             // AX Diagnostic Checklist
@@ -1948,6 +1980,9 @@ public final class LocalizationManager: ObservableObject {
             "groupeditor.name": "이름",
             "groupeditor.icon": "아이콘",
             "groupeditor.color": "색상",
+            "groupeditor.scope.label": "앱 범위",
+            "groupeditor.scope.help":
+                "이 그룹의 모든 스니펫을 특정 앱으로 제한하거나 일부 앱에서 차단합니다. 각 스니펫의 범위와 함께 적용됩니다. 차단은 둘 중 하나라도 지정하면 적용되고, 제한은 양쪽 모두 허용해야 합니다.",
             "groupeditor.enabled": "활성화",
             "groupeditor.save": "그룹 저장",
             "groupeditor.error.emptyName": "그룹 이름을 입력하세요.",
@@ -2063,6 +2098,24 @@ public final class LocalizationManager: ObservableObject {
             "editor.error.tooLong": "%d자를 넘는 트리거는 실행되지 않습니다.",
             "editor.error.duplicateLive": "다른 스니펫이 이미 이 트리거를 사용하고 있습니다.",
             "editor.enabled.help": "삭제하지 않고 스니펫을 끕니다. 비활성 스니펫은 확장되지 않습니다.",
+            "appscope.title": "이 스니펫이 동작하는 곳",
+            "appscope.mode.only": "다음에서만",
+            "appscope.mode.never": "다음에서는 제외",
+            "appscope.mode.label": "편집할 목록",
+            "appscope.list.label": "번들 식별자",
+            "appscope.bundleID.placeholder": "com.example.App",
+            "appscope.chooseApp": "앱 선택…",
+            "appscope.remove": "제거",
+            "appscope.chip.all": "모든 앱",
+            "appscope.chip.only.other": "%d개 앱에서만",
+            "appscope.chip.except.other": "%d개 앱 제외",
+            "appscope.chip.help":
+                "이 스니펫을 특정 앱으로 제한하거나 특정 앱에서 차단합니다. 적용되지 않는 곳에서는 트리거가 아예 실행되지 않습니다.",
+            "appscope.explain.all": "이 스니펫은 모든 앱에서 동작합니다.",
+            "appscope.explain.only": "이 스니펫은 위에 나열된 앱에서만 동작합니다.",
+            "appscope.explain.except": "이 스니펫은 위에 나열된 앱을 제외한 모든 곳에서 동작합니다.",
+            "appscope.explain.both":
+                "두 목록에 모두 항목이 있습니다. “제외”가 우선합니다. 해당 앱은 “다음에서만”에 있어도 차단됩니다.",
             "editor.tags.add.placeholder": "태그 추가",
             "editor.tags.existing.help": "이 스니펫에 지정된 태그입니다. 끄면 저장할 때 제거됩니다.",
             "editor.tags.suggested.help": "온디바이스 모델이 제안했습니다. 켜면 저장할 때 이 태그가 추가되며, 켜지 않으면 아무것도 추가되지 않습니다.",
@@ -2195,6 +2248,12 @@ public final class LocalizationManager: ObservableObject {
             "status.menu": "상태: %@",
             "status.menu.attention": "상태: %@ ⚠",
 
+            "common.notNow": "나중에",
+            "alert.import.tagOffer.other": "%d개 스니펫에 태그가 없습니다. 이 Mac에서 태그를 제안할까요?",
+            "alert.import.tagOffer.confirm": "태그 제안",
+            "alert.import.tagResult.title": "태그 지정 완료",
+            "alert.import.tagResult": "태그 지정 %d · 제안 없음 %d · 건너뜀 %d",
+            "alert.import.tagResult.partial.other": "%d개 스니펫은 시도하지 않았습니다.",
             "alert.import.title": "가져오기 완료",
             // §7.1: was "%@에서 %d개의 스니펫을 %d개 그룹으로 …" — the call site passes
             // (Int, Int, String), so the leading %@ consumed an Int as an object pointer.
@@ -3025,6 +3084,7 @@ public final class LocalizationManager: ObservableObject {
             "manager.filter.images": "이미지",
             "manager.filter.macros": "매크로",
             "manager.filter.conflicts": "충돌",
+            "manager.filter.tagged": "태그 있음",
             "manager.filter.unused": "미사용",
 
             // AX Diagnostic Checklist
@@ -3360,6 +3420,9 @@ public final class LocalizationManager: ObservableObject {
             "groupeditor.name": "名前",
             "groupeditor.icon": "アイコン",
             "groupeditor.color": "カラー",
+            "groupeditor.scope.label": "アプリの適用範囲",
+            "groupeditor.scope.help":
+                "このグループのすべてのスニペットを特定のアプリに限定するか、一部のアプリで無効にします。各スニペットの適用範囲と組み合わされ、無効化はどちらか一方が指定すれば適用され、限定は両方が許可する必要があります。",
             "groupeditor.enabled": "有効",
             "groupeditor.save": "グループを保存",
             "groupeditor.error.emptyName": "グループ名を入力してください。",
@@ -3475,6 +3538,24 @@ public final class LocalizationManager: ObservableObject {
             "editor.error.tooLong": "%d 文字を超えるトリガーは展開されません。",
             "editor.error.duplicateLive": "別のスニペットがこのトリガーをすでに使っています。",
             "editor.enabled.help": "削除せずにスニペットをオフにします。無効なスニペットは展開されません。",
+            "appscope.title": "このスニペットが動作する場所",
+            "appscope.mode.only": "次のみ",
+            "appscope.mode.never": "次を除く",
+            "appscope.mode.label": "編集するリスト",
+            "appscope.list.label": "バンドル識別子",
+            "appscope.bundleID.placeholder": "com.example.App",
+            "appscope.chooseApp": "アプリを選択…",
+            "appscope.remove": "削除",
+            "appscope.chip.all": "すべてのアプリ",
+            "appscope.chip.only.other": "%d 個のアプリのみ",
+            "appscope.chip.except.other": "%d 個のアプリを除く",
+            "appscope.chip.help":
+                "このスニペットを特定のアプリに限定するか、特定のアプリで無効にします。適用されない場所ではトリガー自体が発火しません。",
+            "appscope.explain.all": "このスニペットはすべてのアプリで動作します。",
+            "appscope.explain.only": "このスニペットは上に挙げたアプリでのみ動作します。",
+            "appscope.explain.except": "このスニペットは上に挙げたアプリを除くすべての場所で動作します。",
+            "appscope.explain.both":
+                "両方のリストに項目があります。「次を除く」が優先され、そのアプリは「次のみ」にあってもブロックされます。",
             "editor.tags.add.placeholder": "タグを追加",
             "editor.tags.existing.help": "このスニペットに付いているタグです。オフにすると保存時に削除されます。",
             "editor.tags.suggested.help": "オンデバイスモデルによる提案です。オンにすると保存時にこのタグが追加されます。オンにしなければ何も追加されません。",
@@ -3607,6 +3688,12 @@ public final class LocalizationManager: ObservableObject {
             "status.menu": "状態: %@",
             "status.menu.attention": "状態: %@ ⚠",
 
+            "common.notNow": "後で",
+            "alert.import.tagOffer.other": "%d 個のスニペットにタグがありません。この Mac で提案しますか？",
+            "alert.import.tagOffer.confirm": "タグを提案",
+            "alert.import.tagResult.title": "タグ付けが完了しました",
+            "alert.import.tagResult": "タグ付け %d · 提案なし %d · スキップ %d",
+            "alert.import.tagResult.partial.other": "%d 個のスニペットは実行していません。",
             "alert.import.title": "インポート完了",
             // §7.1: same fix as ko — the call site passes (Int, Int, String).
             "alert.import.body": "%3$@ から %1$d 件のスニペットを %2$d グループにインポートしました。",
@@ -4444,6 +4531,7 @@ public final class LocalizationManager: ObservableObject {
             "manager.filter.images": "画像",
             "manager.filter.macros": "マクロ",
             "manager.filter.conflicts": "競合",
+            "manager.filter.tagged": "タグあり",
             "manager.filter.unused": "未使用",
 
             // AX Diagnostic Checklist

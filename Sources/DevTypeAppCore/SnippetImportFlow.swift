@@ -118,6 +118,52 @@ enum SnippetImportFlow {
         }
     }
 
+    /// Runs `SnippetLibraryTagger` over the library and writes the result back.
+    ///
+    /// Reloads the groups inside the task rather than capturing them: the batch takes a model
+    /// call per snippet, and writing back a snapshot taken minutes earlier would revert
+    /// anything the user changed meanwhile.
+    private static func tagImportedLibrary(window: NSWindow?, loc: LocalizationManager) {
+        guard #available(macOS 26.0, *) else { return }
+        #if canImport(FoundationModels)
+        Task { @MainActor in
+            let groups = SnippetStore.shared.loadGroups()
+            let (updated, summary) = await SnippetLibraryTagger.tagLibrary(
+                groups,
+                engine: SnippetTagSuggester.foundationModelsEngine()
+            )
+            let outcome = SnippetStore.shared.saveGroups(updated)
+
+            var message = loc.s(
+                "alert.import.tagResult",
+                summary.tagged,
+                summary.noSuggestion,
+                summary.skipped
+            )
+            // Never present a capped or cancelled run as full coverage.
+            if !summary.isComplete {
+                message += "\n" + loc.p(
+                    "alert.import.tagResult.partial",
+                    count: summary.notAttempted,
+                    summary.notAttempted
+                )
+            }
+            if !outcome.didSave {
+                LibraryHealthMonitor.shared.refresh()
+                message += "\n\n" + loc.s("library.save.banner")
+            }
+            DevTypeLog.app.info(
+                "[Import] tagged=\(summary.tagged, privacy: .public) none=\(summary.noSuggestion, privacy: .public) skipped=\(summary.skipped, privacy: .public) notAttempted=\(summary.notAttempted, privacy: .public) saved=\(outcome.didSave, privacy: .public)"
+            )
+            DevTypeAlert.info(
+                title: loc.s("alert.import.tagResult.title"),
+                message: message,
+                window: window
+            )
+        }
+        #endif
+    }
+
     private static func resetImportState() {
         stateLock.lock()
         isImporting = false
@@ -164,11 +210,31 @@ enum SnippetImportFlow {
             DevTypeLog.app.info(
                 "[Import] kind=\(result.kind.rawValue, privacy: .public) added=\(summary.snippetsAdded, privacy: .public) updated=\(summary.snippetsUpdated, privacy: .public) saved=\(summary.outcome.didSave, privacy: .public)"
             )
-            DevTypeAlert.info(
-                title: loc.s("alert.import.title"),
-                message: body,
-                window: window
-            )
+            // An import is the one moment a whole library arrives untagged: unless the source
+            // carried `search_terms`, none of it is findable by tag or visible to the Tagged
+            // filter. Offered rather than done — it spends real model time per snippet.
+            let eligible = SnippetStore.shared.loadGroups()
+                .flatMap(\.snippets)
+                .filter(SnippetLibraryTagger.isEligible)
+                .count
+            if SnippetTagSuggester.isActive, eligible > 0 {
+                DevTypeAlert.confirm(
+                    title: loc.s("alert.import.title"),
+                    message: body + "\n\n" + loc.p("alert.import.tagOffer", count: eligible, eligible),
+                    confirmTitle: loc.s("alert.import.tagOffer.confirm"),
+                    cancelTitle: loc.s("common.notNow"),
+                    style: .informational,
+                    window: window
+                ) {
+                    tagImportedLibrary(window: window, loc: loc)
+                }
+            } else {
+                DevTypeAlert.info(
+                    title: loc.s("alert.import.title"),
+                    message: body,
+                    window: window
+                )
+            }
         case .failure(let error):
             DevTypeLog.app.error(
                 "[Import] failed: \(error.localizedDescription, privacy: .public)"

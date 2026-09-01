@@ -12,6 +12,9 @@ struct GroupDraft: Equatable {
     var symbol: String
     var colorHex: String
     var enabled: Bool
+    /// §4.4 at group level. Applies to every snippet in the group, composed with each
+    /// snippet's own scope — see `SnippetStore.expandableSnippets`.
+    var scope: SnippetAppScope = .unscoped
 }
 
 /// Glass sheet for creating / editing a snippet group: name, SF-symbol icon,
@@ -225,6 +228,8 @@ private final class GroupEditorController: NSViewController {
 
     private var selectedSymbol: String
     private var selectedColorHex: String
+    private var groupScope: SnippetAppScope = .unscoped
+    private weak var scopeButton: NSButton?
     private var iconButtons: [IconChoiceButton] = []
     private var swatchButtons: [ColorSwatchButton] = []
 
@@ -338,7 +343,29 @@ private final class GroupEditorController: NSViewController {
             color: DevTypeTheme.textPrimary
         )
         enabledLabel.translatesAutoresizingMaskIntoConstraints = false
-        let toggleRow = NSStackView(views: [enabledSwitch, enabledLabel])
+        groupScope = SnippetAppScope(
+            includeApps: existing?.includeApps ?? [],
+            excludeApps: existing?.excludeApps ?? []
+        )
+        let scope = NSButton(
+            title: SnippetAppScopeSummary.chipTitle(
+                include: groupScope.includeApps, exclude: groupScope.excludeApps, loc: loc
+            ),
+            target: self,
+            action: #selector(editScope)
+        )
+        scope.bezelStyle = .rounded
+        scope.controlSize = .small
+        scope.translatesAutoresizingMaskIntoConstraints = false
+        scope.toolTip = loc.s("groupeditor.scope.help")
+        scope.setAccessibilityLabel(loc.s("groupeditor.scope.label"))
+        scopeButton = scope
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let toggleRow = NSStackView(views: [enabledSwitch, enabledLabel, spacer, scope])
         toggleRow.orientation = .horizontal
         toggleRow.alignment = .centerY
         toggleRow.spacing = 7
@@ -450,6 +477,22 @@ private final class GroupEditorController: NSViewController {
         refreshPickers()
     }
 
+    /// Reuses the snippet scope editor: the two lists mean the same thing at both levels, and
+    /// a second picker would be a second place for the rule to drift.
+    @objc private func editScope() {
+        SnippetAppScopeSheet.present(
+            from: view.window,
+            scope: groupScope,
+            loc: loc
+        ) { [weak self] result in
+            guard let self, let result else { return }
+            self.groupScope = result
+            self.scopeButton?.title = SnippetAppScopeSummary.chipTitle(
+                include: result.includeApps, exclude: result.excludeApps, loc: self.loc
+            )
+        }
+    }
+
     @objc private func cancelTapped() { onFinish(nil) }
 
     @objc private func saveTapped() {
@@ -466,7 +509,8 @@ private final class GroupEditorController: NSViewController {
             name: name,
             symbol: selectedSymbol,
             colorHex: selectedColorHex,
-            enabled: enabledSwitch.state == .on
+            enabled: enabledSwitch.state == .on,
+            scope: groupScope
         ))
     }
 
