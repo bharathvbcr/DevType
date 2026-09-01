@@ -85,10 +85,10 @@ It expands typed triggers in place, renders Mustache and TextExpander macros, ru
 - ⚡ **Instant Expand-on-Match**: Low-latency swallowing ring buffer that instantly replaces typed triggers using Accessibility range replacement (with fallback to HID clipboard paste).
 - 🎙️ **Smart Dictation**: Push-to-talk speech-to-text with thought-revision / self-correction resolution, filler stripping, and custom vocabulary (inspired by [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)). Pick the recognizer in **Preferences → Voice**: Apple Speech, an on-device local model, or a local `whisper.cpp` server — all offline. A cloud engine is available but stays off unless you supply your own API key. See [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
 - 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize, prompt enhance, code explain/fix/test, git commit message, translate, convert to Markdown) using Apple Foundation Models (macOS 26+), plus a first-class offline **Remove Markdown** action running locally without an AI model on all supported macOS versions (macOS 14+). 100% private, zero API keys required.
-- 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy search for snippets and AI tools, inline math (`= 45 * 12.5`), custom one-shot AI prompts (`> …`), date offsets (`tomorrow`, `+3w`, `next friday`), instant text operations (case, sort, dedupe, Base64/URL/JSON, SHA-256/MD5), generators (UUID, lorem, password), and quick app navigation — ranked by your own usage.
+- 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy and conversational search for snippets and AI tools, optional on-device semantic routing, inline math (`= 45 * 12.5`), custom one-shot AI prompts (`> …`), date offsets (`tomorrow`, `+3w`, `next friday`), instant text operations (case, sort, dedupe, Base64/URL/JSON, SHA-256/MD5), generators (UUID, lorem, password), and quick app navigation — ranked by your own usage.
 - 🧩 **Dual Macro Engine**: Full support for both Mustache (`{{date:iso:+1d}}`, `{{clipboard}}`, `{{calc: 1+2}}`, `{{uuid}}`, `{{cursor}}`) and TextExpander (`%filltext:name=X%`, `%@+1D%`, `%snippet:x%`, `%|`, `%key:enter%`) template syntaxes.
 - 🖼️ **Rich Image Snippets**: Paste images directly from snippet triggers with full Espanso `image_path` import support.
-- 📦 **One-Click Importers**: Seamlessly import existing snippet libraries from TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML match configs — with one-click export to Espanso YAML, CSV, or DevType JSON.
+- 📦 **One-Click Importers**: Seamlessly import existing snippet libraries from TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML match configs — with export to Espanso YAML, an atomic Espanso `match/` folder, CSV, or DevType JSON.
 - 🛡️ **Privacy & Fail-Closed Security**: Automatic expansion pause during password entry (`NSSecureTextField`), Secure Event Input locks, IME composition, or in muted apps.
 - 🔒 **Secret Snippets**: Store passwords AES-GCM-encrypted, gated behind Touch ID, copied from the menu bar with an auto-clearing concealed clipboard — never in the library file, exports, or diagnostics. See [SECRETS.md](SECRETS.md).
 - 🔑 **Stable Identity TCC**: Packaged `.app` bundle with dedicated code identity (`com.devtype.app`) so macOS Accessibility & Input Monitoring permissions persist cleanly across updates.
@@ -157,7 +157,7 @@ Explore our complete documentation in the [`docs/`](docs/) directory:
 - 🏛️ **[Technical Architecture](docs/ARCHITECTURE.md)**: Deep dive into event taps, text injection pipelines, threading models, and exception safety.
 - 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
-- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,600+ headless unit tests across 120 suites, debugging, and release automation.
+- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,900+ headless unit tests, debugging, and release automation.
 - 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---
@@ -297,7 +297,7 @@ Yes! DevType is completely free and open-source under the MIT License.
 No. Keystrokes are processed locally in a volatile memory ring buffer solely for matching triggers, and they never leave your Mac. Expansion and AI transforms make no network requests — AI runs on Apple Foundation Models on-device. The only two features that can reach the network are the opt-in update check (off by default, and it sends no version, machine, or usage data) and the cloud dictation engine, which is inert unless you add your own API key.
 
 ### Can I import my existing snippets from TextExpander or Espanso?
-Yes. DevType includes built-in importers for TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML config folders or match files, preserving your triggers, replacements, and image attachments. Libraries can be exported back out as DevType JSON, Espanso YAML, or CSV.
+Yes. DevType includes built-in importers for TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML config folders or match files, preserving your triggers, replacements, and image attachments. Libraries can be exported back out as DevType JSON, a single Espanso YAML file, an atomic Espanso `match/` folder, or CSV.
 
 ### How does DevType handle passwords and secure fields?
 DevType automatically pauses keyword expansion whenever a secure text field (`NSSecureTextField`) is active or macOS Secure Event Input is locked. Storage: **secret snippets** hold passwords AES-GCM-encrypted behind Touch ID and copy them from the menu bar with an auto-clearing clipboard — see [SECRETS.md](SECRETS.md).

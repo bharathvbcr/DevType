@@ -1,6 +1,6 @@
 # Unwired code inventory
 
-Audit date: 2026-09-01, against `2529c71`. **Status: resolved — 0 dead declarations remain.**
+Audit date: 2026-09-01, against `b9e58b2`. **Status: resolved — 0 dead declarations remain.**
 
 This began as a read-only audit ("nothing here has been deleted"). It has since been acted
 on: everything below was either wired to a real call site or retired. The findings are kept
@@ -105,20 +105,19 @@ the result. I read line 2122 and did not scroll to :2131 where the validation ha
 (`await validateAPIKeyDetailed(key).isValid`) over the function that *is* wired and tested.
 It belongs in RETIRE, not here.
 
-### 3. AX capability diagnostics
+### 3. AX capability diagnostics (resolved)
 
 `AXWriteCapabilityStore.learnedVerdicts()` :448 — its own docstring says "Diagnostic dump:
-`key -> verdict`, sorted." Nothing consumes it. DevType already learns per-app whether to
-use AX writes or paste; surfacing that in the diagnostics report or a Preferences advanced
-pane would make "why does expansion behave differently in app X?" answerable. Pairs naturally
-with the existing `DiagnosticReport`.
+`key -> verdict`, sorted." At audit time nothing consumed it. DevType already learns per-app
+whether to use AX writes or paste; surfacing that in the diagnostics report makes "why does
+expansion behave differently in app X?" answerable. `b9e58b2` wires it into `DiagnosticReport`.
 
-### 4. Espanso multi-file export
+### 4. Espanso multi-file export (resolved)
 
 `SnippetExporter.espansoYAMLFiles(from:options:)` :113 emits one match file per group,
-deduplicating file names. The exporter currently offers only single-document Espanso YAML.
-This is the `match/` **directory** format, which is what Espanso users actually keep in
-version control. Natural fourth entry in `LibraryExporter.Choice`.
+deduplicating file names. At audit time the exporter offered only single-document Espanso YAML.
+`b9e58b2` adds this `match/` **directory** format to `LibraryExporter.Choice`, which is the
+layout Espanso users actually keep in version control.
 
 ### 5. Smaller, plausible wirings *(inferred — I did not trace intended call sites)*
 
@@ -138,10 +137,9 @@ version control. Natural fourth entry in `LibraryExporter.Choice`.
 
 ---
 
-## RESOLVED CONCURRENTLY — `PaletteToolRouter`
+## RESOLVED — `PaletteToolRouter`
 
-**No action needed. Recorded because the audit flagged it and it was fixed while the audit
-was being written.**
+**No action needed. Recorded because the audit flagged it and the following commit fixed it.**
 
 At `2529c71` this was the second-largest finding: `PaletteToolRouter`
 (`Sources/ExpanderEngine/AI/PaletteToolRouter.swift`, then 128 lines) was inert end to end.
@@ -152,8 +150,7 @@ and had no UI toggle, so setting `devtype.ai.semanticRoutingEnabled` by hand cha
 The three tools' `call(arguments:)` had 8 test references — the suite was green on a path
 production never ran.
 
-The concurrent command-palette work has since wired all of it (uncommitted at time of
-writing, +129 lines):
+The command-palette work in `89da369` wired all of it:
 
 - `InlineSearchPanel.scheduleRouting()` :760 now calls `shouldAttemptRouting`, debounces on
   `debounceMilliseconds`, and awaits `PaletteToolRouter.route(query:engine:)`.
@@ -165,9 +162,9 @@ writing, +129 lines):
   staleness guard testable without a model — closing the "tests assert an unreachable path"
   gap as well.
 
-One leftover to check when that work lands: `docs/ARCHITECTURE.md:238` still describes this
-as a Stage-2 router that "exists behind a preference flag and ships off by default." The
-flag now genuinely gates a live feature, so that sentence should be updated to match.
+The architecture guide now describes the router as a live, optional Stage-2 path: it remains
+off by default, uses a 250 ms debounce and DevType-owned tools, and drops stale or untrusted
+model output before it can become a palette row.
 
 ---
 
@@ -216,7 +213,7 @@ They are listed here only so a future sweep does not mistake them for dead code.
 ## Resolution — what was actually done
 
 All 20 dead declarations are gone: **8 wired**, **12 retired**. Full suite 1,910 tests,
-0 failures, clean build with no warnings.
+7 opt-in live-AI tests skipped, 0 failures, clean build with no warnings.
 
 ### Wired (8)
 

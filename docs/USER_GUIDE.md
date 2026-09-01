@@ -160,6 +160,7 @@ For complete voice architecture details, see [docs/VOICE_DICTATION.md](VOICE_DIC
 Press **`⌘/`** anywhere in macOS to bring up DevType's unified Command Palette:
 
 - **Search Snippets**: Type fuzzy keywords to find and insert snippets without remembering abbreviations. Results highlight matches, honor diacritics, and are ranked by how often (and how recently) *you* use them — the top rows show `⌘1`–`⌘9` quick-insert hints.
+- **Conversational Search (optional)**: Turn on **Preferences → AI → Semantic Search Routing** to let available on-device Apple Foundation Models resolve a natural-language query through DevType's date, text-operation, or snippet tools. Offline results appear immediately; routing is an additional bounded result and is off by default.
 - **Math Calculator**: Type `= 45 * 12.5` to evaluate inline and insert or copy the result.
 - **Custom AI**: Type `> make this sound like a Slack message` to run a one-shot on-device AI instruction over your current selection.
 - **Date Offsets & Tools**: Type `tomorrow`, `date+7`, `+3w`, `next friday`, or `epoch` to insert calculated dates; ISO and full formats included.
@@ -195,9 +196,15 @@ Easily migrate your entire snippet library:
 Use **Export…** in the menu bar (or Preferences → Snippets) to save your library as:
 - **DevType JSON**: Full-fidelity backup preserving all settings and groups.
 - **Espanso YAML**: Standard YAML configuration compatible with Espanso.
+- **Espanso folder**: A `match/`-style directory containing one YAML file per group, written atomically.
 - **CSV**: Spreadsheet-friendly export with columns for title, trigger, replacement, and group.
 
 Secret snippet *values* are structurally excluded from every export — at most an empty placeholder appears.
+
+Preferences → Snippets also shows the active library location. **Move Library…** copies the
+library to a folder such as iCloud Drive or Dropbox, **Link to Existing…** adopts an existing
+JSON library after backing up the local one, and **Stop Syncing** returns to the local store. A
+failed relocation is reported without changing the active library.
 
 ---
 
@@ -207,7 +214,7 @@ Open **DevType Preferences** from the menu bar or press **`⌘,`**. The window f
 
 1. 🏠 **Home**: First-class getting started dashboard displaying engine status, quick actions (New Snippet, Templates, Import), live scratchpad test field, active shortcuts summary, and top/recent snippets.
 2. ⚙️ **General**: Startup settings (Launch at login), application language (System, English, 한국어, 日本語), opt-in update check (at most once a day, zero telemetry), and the **Muted Apps** list (apps where DevType pauses expansion).
-3. 📚 **Snippets**: Secret snippets security configuration (Touch ID requirement), library storage path, import/export buttons, trigger-conflict detection, and detailed usage statistics.
+3. 📚 **Snippets**: Secret snippets security configuration (Touch ID requirement), library location controls, import/export buttons, trigger-conflict detection, and detailed usage statistics.
 4. ⌨️ **Hotkeys**: Customizable shortcut recorders for Command Palette (`⌘/`), AI Action Palette (`⌘⌥A`), Smart Dictation (`⌘⌥V`), and hotkey macro actions.
 5. 🎙️ **Voice**: Speech engine selector (Apple Speech, Local AI, Local Whisper, Gemini) with live readiness indicators, prompt tone styles, real-time typing options, custom phonetic vocabulary dictionary, voice action triggers, and microphone permissions.
 6. ✨ **AI** (macOS 26+): Enable on-device transforms, configure per-action output delivery (direct replace vs diff preview), manage application allowlists, and toggle optional semantic search routing.

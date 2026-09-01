@@ -40,7 +40,7 @@ The resolver and verification scripts have dedicated self-tests (`test-signing-i
 
 ## 🧪 Testing Guidelines
 
-DevType maintains **1,600+ unit, fuzz, and stress tests** across 120 suites in `Tests/ExpanderEngineTests/`.
+DevType maintains **1,900+ unit, fuzz, and stress tests** across the suites in `Tests/ExpanderEngineTests/`.
 
 ### Running Tests
 ```bash

@@ -48,7 +48,7 @@ graph TD
 ### 1. `ExpanderEngine` (Swift Target)
 The headless core library containing all business logic, matching algorithms, injection pipelines, macro evaluators, voice dictation subsystem, update checkers, and storage models.
 - **Subsystems**: `Engine` (event taps, text injection, type-ahead buffers), `Matching` (prefix search, abbreviation trie), `Macros` (Mustache & TextExpander parsing, safe math, date arithmetic), `AI` (Apple Foundation Models, selection gating, offline Markdown transforms), `Voice` (smart dictation, multi-engine ASR, durable audio capture, thought-revision correction), `Models` (snippets, groups, encrypted secret store, usage stats), `Permissions` (TCC verification, AX capability learning), `Sync` (TextExpander & Espanso importers, JSON/YAML/CSV exporters), and `Updates` (distance-aware version ordering, GitHub Releases update checker).
-- **Independence**: Has zero UI/AppKit window dependencies, enabling fast, headless unit testing in CI (1,600+ tests across 120 suites).
+- **Independence**: Has zero UI/AppKit window dependencies, enabling fast, headless unit testing in CI (1,900+ tests).
 - **Thread Safety**: Concurrency is managed via `UnfairLock` and dedicated serial run loop threads to guarantee sub-millisecond response times without race conditions.
 
 ### 2. `DevTypeSafety` (Objective-C Target)
@@ -233,9 +233,9 @@ Expansion correctness is verified, not assumed. The pipeline carries a set of ev
 
 The Command Palette and snippet search are offline-first:
 
-- `SnippetSearch` folds diacritics/case/width with a per-character origin table so highlight ranges stay correct across grapheme clusters; fields searched: trigger, title, group, content.
-- `UsageStatsStore` (snippets, UUID-keyed) and `CommandUsageStatsStore` (palette commands, string-keyed) compute a saturating frequency boost (~log₂ of use count) plus a recency kicker within 7 days, capped at 12 points — deliberately bounded so a hot item cannot outrank an exact trigger match.
-- Optional Stage-1 semantic boost uses offline `NLEmbedding` word vectors to reorder results; it never blocks rendering. A model-backed Stage-2 router (`PaletteToolRouter`) exists behind a preference flag and ships off by default.
+- `SnippetSearch` folds diacritics/case/width with a per-character origin table so highlight ranges stay correct across grapheme clusters; fields searched: trigger, title, tags, group, content.
+- `UsageStatsStore` (snippets, UUID-keyed) and `CommandUsageStatsStore` (palette commands, string-keyed) compute a saturating frequency boost (~log₂ of use count) plus a recency kicker within 7 days, capped at 12 points — deliberately bounded so a hot item cannot outrank an exact trigger match. Ephemeral math, date, and routed rows are excluded from command usage, and macro palette entries use the same bounded usage concepts.
+- Optional Stage-1 semantic boost uses offline `NLEmbedding` word vectors to reorder results; it never blocks rendering. The model-backed Stage-2 router (`PaletteToolRouter`) is wired behind the **Semantic Search Routing** preference and ships off by default. When enabled and a Foundation Models engine is available, it debounces for 250 ms, calls only DevType-owned tools, rejects prose/oversized results, and drops answers for stale queries.
 - Query-level result caches are keyed by library fingerprint, usage-stats revision, UI language, and clipboard state, then invalidated wholesale on changes.
 
 ---
@@ -261,4 +261,3 @@ DevType contains a dedicated, privacy-conscious update checking module (`Sources
 - **Strict Distance-Aware Version Parsing (`AppVersion`)**: Distinguishes `git describe` distance suffixes (e.g. `v0.1.2-3-gabc1234` is ahead of `v0.1.2`, not a pre-release).
 - **Navigation Safety**: Release URLs are strictly constructed locally for `https://github.com/bharathvbcr/DevType/releases/tag/v...` using strict alphanumeric and semantic version checks to prevent arbitrary URI scheme or host traversal.
 - **Fail-Closed Outcome Typing (`UpdateCheckOutcome`)**: Distinguishes between `.upToDate`, `.updateAvailable`, `.failed`, and `.undeterminedLocalVersion`, ensuring network outages never report a false "up to date" result.
-
