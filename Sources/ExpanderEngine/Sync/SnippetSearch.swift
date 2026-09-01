@@ -7,6 +7,10 @@ public enum SearchField: String, Equatable, Hashable, CaseIterable {
     case trigger
     case title
     case group
+    /// A curated search term from `SnippetModel.tags`. Carries no highlight ranges: a hit
+    /// belongs to one of several tags, and the highlight table is keyed by field, not by which
+    /// tag matched. `evaluate` drops range-less fields, so nothing renders.
+    case tag
     case content
 }
 
@@ -150,6 +154,10 @@ public struct SnippetSearchIndex {
         let bareTriggerOffset: Int
         let title: FoldedText
         let group: FoldedText
+        /// Folded `SnippetModel.tags`. Both interchange formats DevType speaks call these
+        /// search terms — Espanso imports `search_terms:` into them and `SnippetExporter`
+        /// writes them back out under that name — so searching them is what the field is for.
+        let tags: [FoldedText]
         let body: FoldedText
 
         /// Folded indices where a word starts in `title`, and the initials at those positions.
@@ -204,6 +212,7 @@ public enum SnippetSearch {
                 hasher.combine(snippet.triggerKeyword)
                 hasher.combine(snippet.displayTitle)
                 hasher.combine(snippet.replacementText.count)
+                hasher.combine(snippet.tags)
                 hasher.combine(snippet.updatedAt)
             }
         }
@@ -240,6 +249,7 @@ public enum SnippetSearch {
                     bareTriggerOffset: sigilCount,
                     title: titleFolded,
                     group: groupFolded,
+                    tags: snippet.tags.map { FoldedText.fold($0, locale: locale) },
                     body: FoldedText.fold(body, locale: locale),
                     titleWordStarts: wordStarts,
                     titleInitials: wordStarts.map { titleFolded.characters[$0] }
@@ -402,6 +412,7 @@ public enum SnippetSearch {
             bareTriggerOffset: leadingSigilCount(of: snippet.triggerKeyword),
             title: FoldedText.fold(snippet.displayTitle, locale: Locale.current),
             group: .empty,
+            tags: snippet.tags.map { FoldedText.fold($0, locale: Locale.current) },
             body: FoldedText.fold(indexedBodyText(snippet.replacementText), locale: Locale.current),
             titleWordStarts: [],
             titleInitials: []
@@ -504,7 +515,24 @@ public enum SnippetSearch {
             }
         }
 
-        // 3. Group name — §4.7: previously display-only.
+        // 3. Tags. Above the group name because a tag is a deliberate statement about this
+        // one snippet, where a group is an organisational bucket its neighbours share.
+        for tag in entry.tags where !tag.isEmpty {
+            let characters = tag.characters
+            if characters == term {
+                return FieldMatch(score: 560, field: .tag, ranges: [])
+            }
+            if characters.starts(with: term) {
+                return FieldMatch(score: 520, field: .tag, ranges: [])
+            }
+        }
+        for tag in entry.tags where !tag.isEmpty {
+            if firstOccurrence(of: term, in: tag.characters) != nil {
+                return FieldMatch(score: 440, field: .tag, ranges: [])
+            }
+        }
+
+        // 4. Group name — §4.7: previously display-only.
         if !entry.group.isEmpty {
             if entry.group.characters.starts(with: term) {
                 return FieldMatch(score: 420, field: .group, ranges: entry.group.originalRanges([0..<term.count]))
@@ -514,7 +542,7 @@ public enum SnippetSearch {
             }
         }
 
-        // 4. Fuzzy subsequence on the trigger — `sgn` finds `:signature`.
+        // 5. Fuzzy subsequence on the trigger — `sgn` finds `:signature`.
         if let fuzzy = subsequenceMatch(term: term, in: entry.trigger.characters) {
             return FieldMatch(
                 score: 300 + fuzzy.bonus,
@@ -530,7 +558,7 @@ public enum SnippetSearch {
             )
         }
 
-        // 5. Body, last and weakest.
+        // 6. Body, last and weakest.
         if let range = firstOccurrence(of: term, in: entry.body.characters) {
             return FieldMatch(score: 200, field: .content, ranges: entry.body.originalRanges([range]))
         }

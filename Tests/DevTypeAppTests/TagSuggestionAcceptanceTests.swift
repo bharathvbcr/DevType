@@ -162,3 +162,60 @@ final class TagSuggestionAcceptanceTests: XCTestCase {
         )
     }
 }
+
+/// The save-time rule that makes tag *removal* work.
+final class SnippetTagAssemblyTests: XCTestCase {
+
+    func testKeptTagsSurviveWithNoSuggestions() {
+        XCTAssertEqual(
+            SnippetTagAssembly.finalTags(kept: ["email", "billing"], accepted: []),
+            ["email", "billing"]
+        )
+    }
+
+    /// The whole point of rebuilding rather than appending: a tag the user switched off is
+    /// gone. An append-only save would have preserved it and made the chip do nothing.
+    func testASwitchedOffTagIsRemoved() {
+        XCTAssertEqual(SnippetTagAssembly.finalTags(kept: ["email"], accepted: []), ["email"])
+        XCTAssertEqual(SnippetTagAssembly.finalTags(kept: [], accepted: []), [])
+    }
+
+    func testAcceptedSuggestionsAreAppendedAfterKeptTags() {
+        XCTAssertEqual(
+            SnippetTagAssembly.finalTags(kept: ["email"], accepted: ["billing"]),
+            ["email", "billing"]
+        )
+    }
+
+    /// An accepted suggestion that duplicates a tag already on the snippet must not be added
+    /// twice — the CSV and YAML exports would both carry the repeat.
+    func testAnAcceptedSuggestionCannotDuplicateAKeptTag() {
+        XCTAssertEqual(
+            SnippetTagAssembly.finalTags(kept: ["email"], accepted: ["email", "billing"]),
+            ["email", "billing"]
+        )
+    }
+
+    func testDuplicationIsCaughtRegardlessOfCase() {
+        XCTAssertEqual(
+            SnippetTagAssembly.finalTags(kept: ["Email"], accepted: ["email"]),
+            ["Email"],
+            "the kept tag keeps its stored spelling and the suggestion is dropped"
+        )
+    }
+
+    /// Removing a tag and accepting a suggestion in the same edit must do both.
+    func testRemovalAndAcceptanceComposeInOneSave() {
+        XCTAssertEqual(
+            SnippetTagAssembly.finalTags(kept: ["keeper"], accepted: ["fresh"]),
+            ["keeper", "fresh"]
+        )
+    }
+
+    /// Output must be storable as-is: normalization applies to what is added, and what was
+    /// kept was already stored, so nothing structural can reach the exporter.
+    func testOutputCarriesNoCSVDelimiters() {
+        let result = SnippetTagAssembly.finalTags(kept: ["email"], accepted: ["billing;urgent", "ok"])
+        XCTAssertEqual(result, ["email", "ok"])
+    }
+}

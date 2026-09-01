@@ -117,3 +117,6 @@ Thumbs.db
 .devcouncil/*
 !.devcouncil/
 !.devcouncil/config.yaml
+
+# Coverage database (generated)
+.coverage

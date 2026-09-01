@@ -76,3 +76,22 @@ struct TagSuggestionAcceptance: Equatable {
         !suggestion.tags.isEmpty || suggestion.groupName != nil
     }
 }
+
+/// The save-time tag rule, in one place so it can be tested.
+///
+/// The editor rebuilds `SnippetModel.tags` from scratch on every save rather than appending to
+/// what was there. That is what makes removal work: a tag whose chip was switched off is simply
+/// absent from `kept`, where an append-only rule would have silently preserved it.
+enum SnippetTagAssembly {
+
+    /// - Parameters:
+    ///   - kept: tags whose chips are still on, in stored order.
+    ///   - accepted: suggested tags the user switched on, in suggestion order.
+    ///
+    /// `accepted` is re-normalized against `kept` so an accepted suggestion cannot duplicate a
+    /// tag the snippet already had — `normalizedTags` drops anything already present.
+    static func finalTags(kept: [String], accepted: [String]) -> [String] {
+        guard !accepted.isEmpty else { return kept }
+        return kept + SnippetTagSuggester.normalizedTags(accepted, existing: kept)
+    }
+}

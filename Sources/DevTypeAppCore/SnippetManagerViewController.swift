@@ -2019,9 +2019,9 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func bulkMoveSelected(_ sender: NSButton) {
-        let selectedRows = tableView.selectedRowIndexes
-        guard !selectedRows.isEmpty else { return }
-        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+        guard !tableView.selectedRowIndexes.isEmpty else { return }
+        // The selection is deliberately not captured here: `confirmBulkMove` reads it again
+        // when a destination is chosen, and that later read is the one that must win.
 
         let menu = NSMenu()
         for group in groups {

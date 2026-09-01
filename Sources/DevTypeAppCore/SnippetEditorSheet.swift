@@ -661,6 +661,10 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     /// The chips currently offering the suggestion, so a new suggestion can replace them
     /// without disturbing the permanent option chips they sit beside.
     private var suggestionChips: [ToggleChip] = []
+    /// One chip per tag the snippet already carries, each switched on. Switching one off
+    /// removes that tag at save — until now a tag could be written (by an Espanso import, or
+    /// by a suggestion) but never seen or taken back.
+    private var existingTagChips: [ToggleChip] = []
     /// The chip offering the suggested group, if one was offered.
     private weak var groupSuggestionChip: ToggleChip?
     /// The group selected before the group chip was switched on, restored if it is switched
@@ -872,6 +876,18 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         // Suggestion chips are appended to this same row rather than given a row of their own:
         // the panel is a fixed 690pt and this one already scrolls horizontally when it overflows.
         self.chipsRow = chipsRow
+        for tag in seed?.tags ?? [] {
+            let chip = ToggleChip(
+                title: tag,
+                symbol: "tag.fill",
+                isOn: true,
+                help: loc.s("editor.tags.existing.help"),
+                target: self,
+                action: #selector(existingTagChipTapped(_:))
+            )
+            existingTagChips.append(chip)
+            chipsRow.addArrangedSubview(chip)
+        }
         chipsRow.orientation = .horizontal
         chipsRow.alignment = .centerY
         chipsRow.spacing = 8
@@ -1556,6 +1572,15 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         groupSelectionBeforeSuggestion = nil
     }
 
+    @objc private func existingTagChipTapped(_ sender: ToggleChip) {
+        sender.isOn.toggle()
+    }
+
+    /// Tags the user left switched on, in their stored order.
+    private var keptExistingTags: [String] {
+        existingTagChips.filter(\.isOn).map(\.title)
+    }
+
     @objc private func suggestedTagChipTapped(_ sender: ToggleChip) {
         sender.isOn.toggle()
         acceptance?.setTag(sender.title, accepted: sender.isOn)
@@ -2038,12 +2063,13 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         snippet.title = title.isEmpty ? Self.derivedTitle(from: replacement) : title
         snippet.triggerKeyword = trigger
 
-        // Only what the user switched on. Still re-normalized against whatever the snippet
-        // already carries, so an import's tags are never displaced and nothing is added twice.
-        let acceptedTags = acceptance?.tagsToApply ?? []
-        if !acceptedTags.isEmpty {
-            snippet.tags += SnippetTagSuggester.normalizedTags(acceptedTags, existing: snippet.tags)
-        }
+        // Tags are rebuilt from the chips rather than appended to, so switching one off
+        // actually removes it. Suggestions are then normalized against what survived, so an
+        // accepted suggestion cannot duplicate a tag the snippet already had.
+        snippet.tags = SnippetTagAssembly.finalTags(
+            kept: keptExistingTags,
+            accepted: acceptance?.tagsToApply ?? []
+        )
 
         if hasImage {
             if let picked = pickedImageURL {
