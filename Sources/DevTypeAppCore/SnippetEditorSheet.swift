@@ -42,6 +42,18 @@ private final class EditorKeyablePanel: NSPanel {
 /// of merely describing it. Behavior options are capsule toggle chips rather
 /// than a settings-style switch grid. Validation renders inline (crimson label).
 enum SnippetEditorSheet {
+
+    /// First non-blank line of the body, truncated — the fallback when the user leaves the
+    /// title empty. Lives here rather than on the private controller because the
+    /// typed-repetition offer builds a draft without ever opening one.
+    static func derivedTitle(from replacement: String) -> String {
+        let firstLine = replacement
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+        if firstLine.isEmpty { return "Untitled" }
+        return firstLine.count > 40 ? String(firstLine.prefix(40)) + "…" : firstLine
+    }
     /// §1 / §3: sized once here so the panel and its glass container can never
     /// disagree. The extra height over the old 500×548 buys the new-snippet
     /// guide strip and a materially taller replacement editor.
@@ -2277,11 +2289,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     /// A blank Title used to save as "Untitled". Deriving the first line of the
     /// replacement (or the trigger) makes the manager list self-explanatory.
     static func derivedTitle(from replacement: String) -> String {
-        let firstLine = replacement
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty } ?? ""
-        if firstLine.isEmpty { return "Untitled" }
-        return firstLine.count > 40 ? String(firstLine.prefix(40)) + "…" : firstLine
+        SnippetEditorSheet.derivedTitle(from: replacement)
     }
 }

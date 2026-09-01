@@ -977,6 +977,21 @@ public final class LocalizationManager: ObservableObject {
             "prefs.ai.removeMarkdown": "Remove Markdown from AI results",
             "prefs.ai.removeMarkdown.hint":
                 "Most apps show Markdown as literal characters, so **bold** arrives with the asterisks. DevType strips the formatting a model adds — headings, emphasis, links, code fences — and keeps what your own text already used. Code, SQL, JSON, and prompt-enhance results are left exactly as generated.",
+            "prefs.repetition": "Notice phrases I retype",
+            "prefs.repetition.hint":
+                "Offers to turn something you type repeatedly into a snippet. Off until you turn it on and confirm what it keeps.",
+            "prefs.repetition.forget": "Forget What I've Typed",
+            "prefs.repetition.forget.done": "Everything DevType had counted has been discarded.",
+            "prefs.repetition.consent.title": "Notice phrases you retype?",
+            "prefs.repetition.consent.body":
+                "To spot a phrase you keep typing, DevType has to remember something about it between the times you type it.\n\nWhat it keeps: a one-way hash of each phrase and a count — not the text. The hash uses a random key made when DevType launches and thrown away when you quit or press Forget, so it cannot be turned back into what you typed.\n\nOnly once a phrase has recurred three times is the text itself held, so DevType can show you what it is offering to save. Nothing is written to disk and nothing leaves your Mac.\n\nDevType never looks at what you type in password fields, in apps you have muted, or at anything longer than the 64 characters it already reads to match a trigger.",
+            "prefs.repetition.consent.confirm": "Turn It On",
+            "repetition.reminder.title": "You already have a snippet for this",
+            "repetition.reminder.body": "Type %@ instead of writing it out:\n\n%@",
+            "repetition.offer.title": "Make this a snippet?",
+            "repetition.offer.body": "You have typed this %d times:\n\n%@",
+            "repetition.offer.confirm": "Create Snippet",
+            "repetition.offer.dismiss": "No Thanks",
             "prefs.ai.tagSuggestions": "Suggest tags for new snippets",
             "prefs.ai.tagSuggestions.hint":
                 "When you write a new snippet, the on-device model proposes a few tags and the group it seems to belong to. They appear as chips beside the other options and are applied only if you switch them on — a suggestion you ignore changes nothing. Secrets are never sent. Off by default because it spends model time on every new snippet.",
@@ -2432,6 +2447,21 @@ public final class LocalizationManager: ObservableObject {
             "prefs.ai.removeMarkdown": "AI 결과에서 마크다운 제거",
             "prefs.ai.removeMarkdown.hint":
                 "대부분의 앱은 마크다운을 문자 그대로 표시하므로 **굵게**가 별표와 함께 입력됩니다. DevType는 모델이 추가한 서식(제목, 강조, 링크, 코드 펜스)을 제거하고 원본 텍스트에 이미 있던 서식은 유지합니다. 코드, SQL, JSON, 프롬프트 개선 결과는 생성된 그대로 둡니다.",
+            "prefs.repetition": "반복 입력 문구 감지",
+            "prefs.repetition.hint":
+                "반복해서 입력하는 문구를 스니펫으로 만들도록 제안합니다. 켜고 내용을 확인하기 전까지는 꺼져 있습니다.",
+            "prefs.repetition.forget": "입력 기록 삭제",
+            "prefs.repetition.forget.done": "DevType가 집계한 내용을 모두 삭제했습니다.",
+            "prefs.repetition.consent.title": "반복 입력 문구를 감지할까요?",
+            "prefs.repetition.consent.body":
+                "반복해서 입력하는 문구를 찾으려면 DevType가 입력 사이에 무언가를 기억해야 합니다.\n\n저장하는 것: 각 문구의 단방향 해시와 횟수이며 텍스트 자체는 아닙니다. 해시에는 DevType 실행 시 생성되고 종료하거나 삭제를 누를 때 폐기되는 임의의 키를 사용하므로 입력한 내용으로 되돌릴 수 없습니다.\n\n같은 문구가 세 번 반복된 뒤에야 텍스트를 보관하며, 저장을 제안하는 내용을 보여주기 위한 것입니다. 디스크에 기록되지 않으며 Mac을 벗어나지 않습니다.\n\n암호 입력란, 음소거한 앱, 그리고 트리거 인식에 사용하는 64자를 넘는 내용은 보지 않습니다.",
+            "prefs.repetition.consent.confirm": "켜기",
+            "repetition.reminder.title": "이미 해당 스니펫이 있습니다",
+            "repetition.reminder.body": "직접 입력하는 대신 %@ 를 입력하세요:\n\n%@",
+            "repetition.offer.title": "스니펫으로 만들까요?",
+            "repetition.offer.body": "이 문구를 %d번 입력했습니다:\n\n%@",
+            "repetition.offer.confirm": "스니펫 만들기",
+            "repetition.offer.dismiss": "괜찮습니다",
             "prefs.ai.tagSuggestions": "새 스니펫에 태그 제안",
             "prefs.ai.tagSuggestions.hint":
                 "새 스니펫을 작성하면 온디바이스 모델이 태그 몇 개와 어울리는 그룹을 제안합니다. 제안은 다른 옵션 옆에 칩으로 표시되며, 켠 경우에만 적용됩니다. 무시한 제안은 아무것도 바꾸지 않습니다. 비밀은 전송되지 않습니다. 새 스니펫마다 모델 시간을 사용하므로 기본값은 꺼짐입니다.",
@@ -3876,6 +3906,21 @@ public final class LocalizationManager: ObservableObject {
             "prefs.ai.removeMarkdown": "AI の結果から Markdown を削除",
             "prefs.ai.removeMarkdown.hint":
                 "多くのアプリは Markdown をそのままの文字として表示するため、**太字** はアスタリスク付きで入力されます。DevType はモデルが追加した書式（見出し、強調、リンク、コードフェンス）を削除し、元のテキストにあった書式は保持します。コード、SQL、JSON、プロンプト強化の結果はそのまま残します。",
+            "prefs.repetition": "繰り返し入力する語句を検出",
+            "prefs.repetition.hint":
+                "繰り返し入力する語句をスニペットにすることを提案します。オンにして内容を確認するまでは無効です。",
+            "prefs.repetition.forget": "入力の記録を消去",
+            "prefs.repetition.forget.done": "DevType が数えていた内容をすべて破棄しました。",
+            "prefs.repetition.consent.title": "繰り返し入力する語句を検出しますか？",
+            "prefs.repetition.consent.body":
+                "繰り返し入力される語句を見つけるには、DevType が入力と入力の間で何かを覚えておく必要があります。\n\n保存するもの: 各語句の一方向ハッシュと回数であり、テキストそのものではありません。ハッシュには DevType の起動時に生成され、終了時または消去時に破棄されるランダムな鍵を使うため、入力内容に戻すことはできません。\n\nテキスト自体を保持するのは同じ語句が 3 回繰り返された後だけで、保存を提案する内容を表示するためです。ディスクには書き込まれず、Mac の外に出ることもありません。\n\nパスワード入力欄、ミュートしたアプリ、およびトリガー照合に使う 64 文字を超える内容は参照しません。",
+            "prefs.repetition.consent.confirm": "オンにする",
+            "repetition.reminder.title": "この内容のスニペットは既にあります",
+            "repetition.reminder.body": "毎回入力せず %@ と入力してください:\n\n%@",
+            "repetition.offer.title": "スニペットにしますか？",
+            "repetition.offer.body": "この語句を %d 回入力しています:\n\n%@",
+            "repetition.offer.confirm": "スニペットを作成",
+            "repetition.offer.dismiss": "結構です",
             "prefs.ai.tagSuggestions": "新しいスニペットにタグを提案",
             "prefs.ai.tagSuggestions.hint":
                 "新しいスニペットを書くと、オンデバイスモデルがタグと合いそうなグループを提案します。提案は他のオプションの隣にチップとして表示され、オンにした場合のみ適用されます。無視した提案は何も変更しません。シークレットは送信されません。新しいスニペットごとにモデルの時間を使うため、既定ではオフです。",

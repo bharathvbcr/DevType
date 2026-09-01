@@ -81,6 +81,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         bindSnippetStore()
         wireExpansionUsage()
+        wireRepetitionSuggestions()
         registerHotkeys()
         wireSecureClipboardPasteHint()
         presentLibraryHealthIfNeeded()
@@ -1009,6 +1010,71 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             EventTapEngine.shared.snippets = snippets
             DispatchQueue.main.async { self?.rebuildSecretsMenu() }
         }
+    }
+
+    /// Offers to turn a phrase you keep typing into a snippet.
+    ///
+    /// Presented once, when the phrase crosses the threshold — declining forgets that phrase so
+    /// the same offer cannot come back on the next repeat and become nagging.
+    private func wireRepetitionSuggestions() {
+        EventTapEngine.shared.onRepetitionNoticed = { [weak self] candidate in
+            guard let self else { return }
+            let preview = candidate.text.count > 60
+                ? String(candidate.text.prefix(60)) + "…"
+                : candidate.text
+            // You typed it three times by hand. If a snippet already covers it, what you needed
+            // was the trigger — not a second copy of the same body in the library.
+            if let existing = RepeatedPhraseLookup.existingSnippet(
+                for: candidate.text, in: SnippetStore.shared.loadGroups()
+            ) {
+                DevTypeAlert.info(
+                    title: self.loc.s("repetition.reminder.title"),
+                    message: self.loc.s(
+                        "repetition.reminder.body", existing.triggerKeyword, preview
+                    )
+                )
+            } else {
+                DevTypeAlert.confirm(
+                    title: self.loc.s("repetition.offer.title"),
+                    message: self.loc.s("repetition.offer.body", candidate.occurrences, preview),
+                    confirmTitle: self.loc.s("repetition.offer.confirm"),
+                    cancelTitle: self.loc.s("repetition.offer.dismiss"),
+                    style: .informational
+                ) {
+                    self.presentSnippetEditorForRepetition(candidate)
+                }
+            }
+            // Whether or not they take it, this phrase has had its one offer.
+            TypedRepetitionDetector.shared.forget(phrase: candidate.text)
+        }
+    }
+
+    private func presentSnippetEditorForRepetition(_ candidate: TypedRepetitionDetector.Candidate) {
+        let draft = SnippetModel(
+            title: SnippetEditorSheet.derivedTitle(from: candidate.text),
+            triggerKeyword: "",
+            replacementText: candidate.text
+        )
+        let store = SnippetStore.shared
+        let groups = store.loadGroups()
+        SnippetEditorSheet.present(
+            from: nil,
+            existing: nil,
+            draft: draft,
+            groups: groups,
+            currentGroupID: groups.first?.id,
+            validate: { _, _ in nil },
+            completion: { result, chosenGroupID in
+                guard let snippet = result else { return }
+                var groups = store.loadGroups()
+                let targetGroupID = chosenGroupID ?? groups.first?.id
+                if let targetGroupID,
+                   let index = groups.firstIndex(where: { $0.id == targetGroupID }) {
+                    groups[index].snippets.append(snippet)
+                    _ = store.saveGroups(groups)
+                }
+            }
+        )
     }
 
     private func wireExpansionUsage() {

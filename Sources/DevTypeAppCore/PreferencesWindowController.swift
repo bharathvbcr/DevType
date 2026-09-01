@@ -314,6 +314,7 @@ final class PreferencesViewController: NSViewController,
     private let aiEnabledSwitch = NSSwitch()
     private let aiRemoveMarkdownSwitch = NSSwitch()
     private let aiTagSuggestionsSwitch = NSSwitch()
+    private let repetitionSwitch = NSSwitch()
     private let requireBiometrySwitch = NSSwitch()
     private let aiAvailabilityLabel = DevTypeTheme.makeLabel(
         "",
@@ -2419,7 +2420,29 @@ final class PreferencesViewController: NSViewController,
             wrapping: true
         )
         tagHint.translatesAutoresizingMaskIntoConstraints = false
-        var modeRows: [NSView] = [modesHint, markdownRow, markdownHint, tagRow, tagHint]
+        let repetitionRow = makeToggleRow(
+            title: loc.s("prefs.repetition"),
+            toggle: repetitionSwitch,
+            action: #selector(repetitionChanged)
+        )
+        let repetitionHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.repetition.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        repetitionHint.translatesAutoresizingMaskIntoConstraints = false
+        let forgetButton = NSButton(
+            title: loc.s("prefs.repetition.forget"),
+            target: self,
+            action: #selector(repetitionForget)
+        )
+        forgetButton.translatesAutoresizingMaskIntoConstraints = false
+        forgetButton.bezelStyle = .rounded
+        var modeRows: [NSView] = [
+            modesHint, markdownRow, markdownHint, tagRow, tagHint,
+            repetitionRow, repetitionHint, forgetButton,
+        ]
         aiOutputModePopups.removeAll()
         for kind in AITransformKind.builtInPalette {
             let popup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -2515,6 +2538,7 @@ final class PreferencesViewController: NSViewController,
         aiEnabledSwitch.state = AIPreferences.isEnabled ? .on : .off
         aiRemoveMarkdownSwitch.state = AIPreferences.removesMarkdown ? .on : .off
         aiTagSuggestionsSwitch.state = SnippetTagSuggester.isEnabled ? .on : .off
+        repetitionSwitch.state = TypedRepetitionPreferences.isActive ? .on : .off
         aiAvailabilityLabel.stringValue = loc.s(
             "prefs.ai.availability",
             loc.s(AITextTransformSupport.availability.localizationKey)
@@ -2551,6 +2575,43 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func aiTagSuggestionsChanged() {
         SnippetTagSuggester.isEnabled = aiTagSuggestionsSwitch.state == .on
+    }
+
+    /// Turning this on is a consent decision, not a preference toggle, so the switch does not
+    /// take effect until the prompt is confirmed — and springs back if it is not. Turning it
+    /// off revokes consent and forgets everything rather than merely pausing.
+    @objc private func repetitionChanged() {
+        guard repetitionSwitch.state == .on else {
+            TypedRepetitionPreferences.revokeConsent()
+            return
+        }
+        if TypedRepetitionPreferences.hasCurrentConsent {
+            TypedRepetitionPreferences.isEnabled = true
+            return
+        }
+        repetitionSwitch.state = .off
+        DevTypeAlert.confirm(
+            title: loc.s("prefs.repetition.consent.title"),
+            message: loc.s("prefs.repetition.consent.body"),
+            confirmTitle: loc.s("prefs.repetition.consent.confirm"),
+            cancelTitle: loc.s("common.cancel"),
+            style: .informational,
+            window: view.window
+        ) { [weak self] in
+            TypedRepetitionPreferences.grantedConsentVersion =
+                TypedRepetitionPreferences.currentConsentVersion
+            TypedRepetitionPreferences.isEnabled = true
+            self?.repetitionSwitch.state = .on
+        }
+    }
+
+    @objc private func repetitionForget() {
+        TypedRepetitionDetector.shared.forgetAll()
+        DevTypeAlert.info(
+            title: loc.s("prefs.repetition.forget"),
+            message: loc.s("prefs.repetition.forget.done"),
+            window: view.window
+        )
     }
 
     @objc private func aiOutputModeChanged(_ sender: NSPopUpButton) {

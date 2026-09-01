@@ -322,6 +322,11 @@ public final class EventTapEngine {
     /// Called on the main queue after a snippet expansion inject completes successfully.
     public var onExpansionSucceeded: ((SnippetModel) -> Void)?
 
+    /// Fires once when a phrase reaches `TypedRepetitionDetector.repeatThreshold`, so the app
+    /// can offer to turn it into a snippet. Never fires unless the user switched the feature on
+    /// *and* confirmed the consent prompt.
+    public var onRepetitionNoticed: ((TypedRepetitionDetector.Candidate) -> Void)?
+
     /// Present fill-in UI from the app target. `(title, fields, completion)` — completion nil = cancel.
     public var presentFillIn: ((String, [FillField], @escaping ([Int: String]?) -> Void) -> Void)?
 
@@ -1095,6 +1100,23 @@ public final class EventTapEngine {
         // Heavy AX (secure/IME/focus) stays off-callback; refuse there reinjects the swallow.
         if context.isMuted {
             return Unmanaged.passUnretained(event)
+        }
+
+        // Typed-repetition detection. Deliberately *after* the mute check and behind a live
+        // Secure Input read, and it introduces no new retention: the phrase is the ring buffer
+        // that already exists for matching, is already capped at 64 characters, and is already
+        // emptied when Secure Input turns on. `TypedRepetitionDetector` keeps only a salted
+        // hash of it. Runs on Return / Enter / Tab, so this is not a per-keystroke cost.
+        if KeyClassifier.endsPhrase(keyCode: Int(keyCode)),
+           TypedRepetitionPreferences.isActive,
+           !AXContextChecker.isSecureEventInputEnabledLive() {
+            let phrase = String(bufferCharacters)
+            if let candidate = TypedRepetitionDetector.shared.record(
+                phrase: phrase, bundleID: context.bundleID
+            ) {
+                let handler = onRepetitionNoticed
+                DispatchQueue.main.async { handler?(candidate) }
+            }
         }
 
         // §2.1: cached matcher — one reference copy, no rebuild.

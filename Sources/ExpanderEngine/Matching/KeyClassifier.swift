@@ -16,6 +16,15 @@ public enum KeyAction: Equatable {
 /// Keycode → buffer action. Single classification point for the engine.
 public enum KeyClassifier {
 
+    /// Keys that end a phrase for `TypedRepetitionDetector`.
+    ///
+    /// Return / Enter / Tab are `.literal` to the matcher — DevType treats them as ordinary
+    /// characters that may terminate an expansion — so this is a separate question from
+    /// `action(forKeyCode:)`, not a fourth `KeyAction` case.
+    public static func endsPhrase(keyCode: Int) -> Bool {
+        keyCode == kVK_Return || keyCode == kVK_ANSI_KeypadEnter || keyCode == kVK_Tab
+    }
+
     public static func action(forKeyCode keyCode: Int) -> KeyAction {
         switch keyCode {
         case kVK_Delete:
