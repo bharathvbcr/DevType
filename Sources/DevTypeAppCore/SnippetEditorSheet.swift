@@ -667,6 +667,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private var existingTagChips: [ToggleChip] = []
     /// The chip offering the suggested group, if one was offered.
     private weak var groupSuggestionChip: ToggleChip?
+    /// Free-form tag entry. Lives at the end of the chip row, so it costs no vertical space in
+    /// a panel whose height is fixed — the row already scrolls horizontally when it overflows.
+    private let newTagField = NSTextField()
     /// The group selected before the group chip was switched on, restored if it is switched
     /// back off — accepting a suggestion and then changing your mind must not strand you on it.
     private var groupSelectionBeforeSuggestion: UUID?
@@ -877,17 +880,11 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         // the panel is a fixed 690pt and this one already scrolls horizontally when it overflows.
         self.chipsRow = chipsRow
         for tag in seed?.tags ?? [] {
-            let chip = ToggleChip(
-                title: tag,
-                symbol: "tag.fill",
-                isOn: true,
-                help: loc.s("editor.tags.existing.help"),
-                target: self,
-                action: #selector(existingTagChipTapped(_:))
-            )
-            existingTagChips.append(chip)
-            chipsRow.addArrangedSubview(chip)
+            existingTagChips.append(makeExistingTagChip(tag))
         }
+        for chip in existingTagChips { chipsRow.addArrangedSubview(chip) }
+        configureNewTagField()
+        chipsRow.addArrangedSubview(newTagField)
         chipsRow.orientation = .horizontal
         chipsRow.alignment = .centerY
         chipsRow.spacing = 8
@@ -1541,7 +1538,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
                 action: #selector(suggestedTagChipTapped(_:))
             )
             suggestionChips.append(chip)
-            chipsRow.addArrangedSubview(chip)
+            insertChipBeforeTagField(chip, in: chipsRow)
         }
         if let name = suggestion.groupName {
             let chip = ToggleChip(
@@ -1554,7 +1551,16 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             )
             groupSuggestionChip = chip
             suggestionChips.append(chip)
-            chipsRow.addArrangedSubview(chip)
+            insertChipBeforeTagField(chip, in: chipsRow)
+        }
+
+    }
+
+    private func insertChipBeforeTagField(_ chip: ToggleChip, in row: NSStackView) {
+        if let index = row.arrangedSubviews.firstIndex(of: newTagField) {
+            row.insertArrangedSubview(chip, at: index)
+        } else {
+            row.addArrangedSubview(chip)
         }
     }
 
@@ -1574,6 +1580,54 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
     @objc private func existingTagChipTapped(_ sender: ToggleChip) {
         sender.isOn.toggle()
+    }
+
+    private func makeExistingTagChip(_ tag: String) -> ToggleChip {
+        ToggleChip(
+            title: tag,
+            symbol: "tag.fill",
+            isOn: true,
+            help: loc.s("editor.tags.existing.help"),
+            target: self,
+            action: #selector(existingTagChipTapped(_:))
+        )
+    }
+
+    private func configureNewTagField() {
+        newTagField.translatesAutoresizingMaskIntoConstraints = false
+        newTagField.placeholderString = loc.s("editor.tags.add.placeholder")
+        newTagField.font = DevTypeTheme.font(11, .medium)
+        newTagField.isBordered = false
+        newTagField.drawsBackground = false
+        newTagField.focusRingType = .none
+        newTagField.target = self
+        newTagField.action = #selector(newTagEntered)
+        newTagField.setAccessibilityLabel(loc.s("editor.tags.add.placeholder"))
+        newTagField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        newTagField.widthAnchor.constraint(equalToConstant: 120).isActive = true
+    }
+
+    /// Return in the tag field. The typed text goes through the same normalizer the model's
+    /// suggestions do, so a hand-typed tag cannot carry a delimiter the exporter would read back
+    /// as structure, and cannot duplicate one the snippet already has.
+    @objc private func newTagEntered() {
+        let raw = newTagField.stringValue
+        let accepted = SnippetTagSuggester.normalizedTags([raw], existing: keptExistingTags)
+        guard let tag = accepted.first else {
+            // Rejected: empty, a duplicate, too long, or delimiter-bearing. Leave the text in
+            // place rather than silently discarding what the user typed.
+            NSSound.beep()
+            return
+        }
+        let chip = makeExistingTagChip(tag)
+        existingTagChips.append(chip)
+        // Always before the entry field, so the field stays the last thing in the row.
+        if let row = chipsRow, let index = row.arrangedSubviews.firstIndex(of: newTagField) {
+            row.insertArrangedSubview(chip, at: index)
+        } else {
+            chipsRow?.addArrangedSubview(chip)
+        }
+        newTagField.stringValue = ""
     }
 
     /// Tags the user left switched on, in their stored order.

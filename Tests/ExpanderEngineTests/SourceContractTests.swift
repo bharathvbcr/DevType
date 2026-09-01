@@ -988,46 +988,17 @@ final class SourceContractTests: XCTestCase {
         XCTAssertFalse(hud.contains("NSScreen.screens[0]"))
     }
 
-    func testVoiceAsyncCaptureTasksRejectCancellationAndStaleGenerations() throws {
-        let coordinator = try source("Sources/ExpanderEngine/Voice/Session/VoiceSessionCoordinator.swift")
-        guard let start = coordinator.range(of: "case .startAudioCapture:"),
-              let finalize = coordinator.range(
-                  of: "\n            case .finalizeAudioCapture:",
-                  range: start.upperBound..<coordinator.endIndex
-              ),
-              let transcribe = coordinator.range(
-                  of: "\n            case .transcribeAudio",
-                  range: finalize.upperBound..<coordinator.endIndex
-              ) else {
-            return XCTFail("Could not locate the voice capture command tasks.")
-        }
-
-        let startBody = String(coordinator[start.upperBound..<finalize.lowerBound])
-        let finalizeBody = String(coordinator[finalize.upperBound..<transcribe.lowerBound])
-
-        XCTAssertGreaterThanOrEqual(
-            startBody.components(separatedBy: "isCurrentGeneration(generation)").count - 1,
-            2,
-            "Capture start must check the generation both before and after an awaited setup/start."
-        )
-        XCTAssertGreaterThanOrEqual(
-            startBody.components(separatedBy: "try Task.checkCancellation()").count - 1,
-            2,
-            "Capture start must not turn cooperative cancellation into a new capture."
-        )
-        XCTAssertTrue(
-            startBody.contains("await self.capture.cancelCapture()"),
-            "A stale task that completed setup must explicitly tear down capture resources."
-        )
-        XCTAssertTrue(
-            startBody.contains("catch is CancellationError"),
-            "Cancellation must not be reported as a microphone failure."
-        )
-        XCTAssertTrue(
-            finalizeBody.contains("try Task.checkCancellation()")
-                && finalizeBody.contains("catch is CancellationError"),
-            "Finalization must stop cooperatively without reporting a stale failure."
-        )
-    }
+    // `testVoiceAsyncCaptureTasksRejectCancellationAndStaleGenerations` lived here. It counted
+    // `isCurrentGeneration` / `Task.checkCancellation` tokens inside the `.startAudioCapture`
+    // and `.finalizeAudioCapture` switch cases to assert that a superseded session tears the
+    // microphone back down and that cancellation is not reported as a device failure.
+    //
+    // Both rules are now enforced by `VoiceCaptureRaceTests`, which runs the code against a
+    // capture double instead of reading it: it retires the generation *while* `startCapture` is
+    // in flight and asserts the microphone is actually released. That is strictly stronger —
+    // the token count passed on any arrangement of the right substrings, and would have stayed
+    // green if a guard checked the wrong generation or sat after the call it was meant to
+    // precede. Deleted rather than kept alongside, so there is one owner of the rule; keeping
+    // it would also have failed purely because the bodies moved into named methods.
 
 }

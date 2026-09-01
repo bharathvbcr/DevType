@@ -23,19 +23,26 @@ let package = Package(
         .target(
             name: "ExpanderEngine",
             dependencies: [
-                .product(name: "Yams", package: "Yams")
+                .product(name: "Yams", package: "Yams"),
+                // Only for the legacy-keychain trampolines: Swift cannot suppress a
+                // per-call deprecation warning and ObjC can. See DevTypeSafety.h.
+                "DevTypeSafety"
             ],
             linkerSettings: [
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
-                .linkedFramework("Carbon")
+                .linkedFramework("Carbon"),
+                .linkedFramework("Security")
             ]
         ),
         // ObjC-only: the `@try/@catch` trampoline Swift cannot express. See
         // Sources/DevTypeSafety/include/DevTypeSafety.h.
         .target(
-            name: "DevTypeSafety"
+            name: "DevTypeSafety",
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
         ),
         // Every window, controller and panel. A library rather than part of the
         // executable so `DevTypeAppTests` can `@testable import` it — an

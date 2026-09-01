@@ -1,4 +1,5 @@
 import CryptoKit
+import DevTypeSafety
 import Foundation
 import Security
 
@@ -456,10 +457,13 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     /// is what turns "partition mismatch" into a status we can heal instead of a password
     /// dialog the user has to read.
     private func withoutKeychainUI<T>(_ body: () -> T) -> T {
+        // Pre-seeded `true`: `DTKeychainGetUserInteractionAllowed` leaves it untouched when the
+        // read fails, and restoring "allowed" is the safe direction — suppression is
+        // process-wide, so leaking it would silence a prompt some other code path wanted.
         var previous: DarwinBoolean = true
-        SecKeychainGetUserInteractionAllowed(&previous)
-        SecKeychainSetUserInteractionAllowed(false)
-        defer { SecKeychainSetUserInteractionAllowed(previous.boolValue) }
+        _ = DTKeychainGetUserInteractionAllowed(&previous)
+        _ = DTKeychainSetUserInteractionAllowed(false)
+        defer { _ = DTKeychainSetUserInteractionAllowed(previous.boolValue) }
         return body()
     }
 
@@ -655,7 +659,7 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     /// after N minutes", "lock when sleeping"); DevType must diagnose it, not deny the secret.
     public func keychainLocked() -> Bool {
         var status = SecKeychainStatus(0)
-        guard SecKeychainGetStatus(nil, &status) == errSecSuccess else {
+        guard DTKeychainGetDefaultStatus(&status) == errSecSuccess else {
             // No default keychain at all — not a lock problem; let reads speak for themselves.
             return false
         }
@@ -665,7 +669,7 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     /// The system unlock prompt — the login password dialog macOS itself owns. Reached only
     /// through UI that told the user why (same doorway rule as migration).
     public func requestKeychainUnlock() -> Bool {
-        let status = SecKeychainUnlock(nil, 0, nil, false)
+        let status = DTKeychainUnlockDefault()
         diagnostics.note("keychain unlock request", status)
         return status == errSecSuccess
     }

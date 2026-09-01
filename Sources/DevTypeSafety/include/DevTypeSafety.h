@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
+#import <Security/Security.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -47,5 +48,40 @@ NSException *_Nullable DTMakeKeyAndOrderFrontCatchingException(NSWindow *window)
 /// setter raised for any other reason); the caller must treat `object` as not
 /// configured and take its documented fallback path.
 BOOL DTSetValueForKeyCatching(NSObject *object, id _Nullable value, NSString *key);
+
+/// # Legacy keychain trampolines
+///
+/// `SecKeychain*` was deprecated wholesale in macOS 10.10 in favour of the data-protection
+/// keychain. DevType cannot use that one, and the reason is not preference: per TN3137 its
+/// access groups "must be authorized by a provisioning profile", and a self-signed DevType
+/// build claiming that entitlement is SIGKILLed by AMFI on launch. `KeychainSecretBackingStore`
+/// documents the same decision from the Swift side. So the file-based keychain is the only
+/// store available to this app, and these four functions are the only API that reaches the
+/// parts of it DevType needs — none of them has a data-protection equivalent, because the
+/// data-protection keychain has neither partition dialogs nor a user-lockable state.
+///
+/// That makes the deprecation permanent rather than a migration DevType has not got round to.
+/// Left inline in Swift it produced five warnings on every clean build, which is exactly the
+/// noise that hides a *new* warning. Swift has no per-call diagnostic suppression; ObjC does,
+/// so the calls live here behind a documented pragma — the same reason the trampolines above
+/// live here.
+///
+/// These are deliberately one-to-one with the C functions: same arguments, same return values,
+/// same order. Nothing about what is stored, where, under which ACL, or who may read it is
+/// changed by routing through them.
+
+/// `SecKeychainGetUserInteractionAllowed`. Leaves `*outAllowed` untouched on failure, so a
+/// caller that pre-seeds it with its desired default keeps that default.
+OSStatus DTKeychainGetUserInteractionAllowed(Boolean *outAllowed);
+
+/// `SecKeychainSetUserInteractionAllowed`. Process-wide, which is why callers restore it.
+OSStatus DTKeychainSetUserInteractionAllowed(Boolean allowed);
+
+/// `SecKeychainGetStatus` for the default keychain. A non-`errSecSuccess` return means there is
+/// no default keychain — distinct from one that exists and is locked, and callers rely on that.
+OSStatus DTKeychainGetDefaultStatus(SecKeychainStatus *outStatus);
+
+/// `SecKeychainUnlock(NULL, 0, NULL, false)` — the system login-password dialog.
+OSStatus DTKeychainUnlockDefault(void);
 
 NS_ASSUME_NONNULL_END

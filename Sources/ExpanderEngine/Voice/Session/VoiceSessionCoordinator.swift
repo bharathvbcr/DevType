@@ -5,8 +5,10 @@ public actor VoiceSessionCoordinator {
     public static let shared = VoiceSessionCoordinator()
 
     private var activeState: VoiceSessionState?
-    private var taskBag: SessionTaskBag?
-    private let capture = DurableVoiceCapture.shared
+    /// `internal` rather than `private` only so `VoiceCaptureRaceTests` can retire a generation
+    /// mid-flight, which is the whole shape of the race being guarded.
+    var taskBag: SessionTaskBag?
+    private let capture: any VoiceCaptureEngine
     private let store = VoiceSessionStore.shared
     private let speechRegistry = SpeechProviderRegistry.shared
     private let correctionRegistry = CorrectionProviderRegistry.shared
@@ -33,7 +35,20 @@ public actor VoiceSessionCoordinator {
     /// manifest forever. The actor makes this a serialized state bit, not a racy global flag.
     private var handlingPersistenceFailure = false
 
-    private init() {}
+    private init() {
+        capture = DurableVoiceCapture.shared
+    }
+
+    /// Test seam. Production always goes through `shared`; this exists so the capture-start and
+    /// capture-finalize races can be driven against a double instead of a live microphone.
+    init(capture: any VoiceCaptureEngine) {
+        self.capture = capture
+    }
+
+    /// Test seam: install a bag so `performStartAudioCapture` has a generation to compare against.
+    func installTaskBagForTesting(_ bag: SessionTaskBag?) {
+        taskBag = bag
+    }
 
     // Actor-isolated setters — callbacks are stored state and cannot be assigned
     // from outside the actor.
@@ -261,6 +276,73 @@ public actor VoiceSessionCoordinator {
         processEvent(.failureOccurred(failure), generation: generation)
     }
 
+    // MARK: - Capture task bodies
+    //
+    // Lifted out of `executeCommands` so the ordering rules below can be driven directly by
+    // `VoiceCaptureRaceTests`. Inside a `Task { }` in a switch case they were reachable only by
+    // booting a whole session against a real microphone, which is why the guarantees they carry
+    // were previously asserted by grepping this file.
+
+    /// Opens the microphone for `generation`, or tears it back down if that generation retired
+    /// while it was being opened.
+    ///
+    /// Two awaits sit between entry and a live microphone, and a session can be superseded or
+    /// stopped across either. Checking only on the way in is what allowed a cancelled session to
+    /// still open the mic and leave it open — which the user sees as a recording indicator that
+    /// never goes away.
+    func performStartAudioCapture(
+        sessionDir: URL,
+        snapshot: VoiceSessionSnapshot,
+        generation: SessionGeneration
+    ) async {
+        do {
+            guard taskBag?.isCurrentGeneration(generation) == true else { return }
+            try Task.checkCancellation()
+            await startLiveRecognition(snapshot: snapshot, generation: generation)
+            try Task.checkCancellation()
+            try await capture.startCapture(sessionDirectory: sessionDir)
+            // Setup finished, but this task may have lost the race while it ran.
+            guard taskBag?.isCurrentGeneration(generation) == true else {
+                await capture.cancelCapture()
+                return
+            }
+        } catch is CancellationError {
+            // A cooperative stop, not a device problem. This used to fall into the catch below
+            // and surface as `.noMicrophone`, so every superseded session accused the user's
+            // microphone of being broken.
+            await capture.cancelCapture()
+        } catch {
+            let fail = (error as? VoiceFailure) ?? VoiceFailure(
+                stage: .audioCapture,
+                code: .noMicrophone,
+                redactedDetail: error.localizedDescription
+            )
+            _ = processEvent(.failureOccurred(fail), generation: generation)
+        }
+    }
+
+    /// Closes the microphone and hands the artifact to the reducer, unless this generation
+    /// retired first — in which case the artifact belongs to a session nobody is waiting on.
+    func performFinalizeAudioCapture(generation: SessionGeneration) async {
+        do {
+            try Task.checkCancellation()
+            await finishLiveRecognition()
+            try Task.checkCancellation()
+            let artifact = try await capture.stopCapture()
+            _ = processEvent(.audioFinalized(artifact), generation: generation)
+        } catch is CancellationError {
+            // Reporting `.zeroFramesCaptured` here turned an ordinary stop into a failure
+            // banner for a session the user had already moved on from.
+        } catch {
+            let fail = (error as? VoiceFailure) ?? VoiceFailure(
+                stage: .audioFinalization,
+                code: .zeroFramesCaptured,
+                redactedDetail: error.localizedDescription
+            )
+            _ = processEvent(.failureOccurred(fail), generation: generation)
+        }
+    }
+
     private func executeCommands(_ commands: [VoiceSessionCommand], for snapshot: VoiceSessionSnapshot, generation: SessionGeneration) {
         for command in commands {
             // A command can synchronously expose a persistence failure, which transitions the
@@ -279,36 +361,9 @@ public actor VoiceSessionCoordinator {
                 let sessionDir = store.sessionDirectory(for: snapshot.sessionID)
                 let task = Task { [weak self] in
                     guard let self = self else { return }
-                    do {
-                        // Two awaits sit between here and a live microphone, and a session can
-                        // be superseded or stopped across either of them. Checking only on the
-                        // way in is what allowed a cancelled session to still open the mic.
-                        guard await self.taskBag?.isCurrentGeneration(generation) == true else { return }
-                        try Task.checkCancellation()
-                        await self.startLiveRecognition(snapshot: snapshot, generation: generation)
-                        try Task.checkCancellation()
-                        try await self.capture.startCapture(sessionDirectory: sessionDir)
-                        // Setup finished, but this task may have lost the race while it ran.
-                        // Returning without tearing down would leave the microphone open for a
-                        // session nobody is listening to — audible to the user as a recording
-                        // indicator that never goes away.
-                        guard await self.taskBag?.isCurrentGeneration(generation) == true else {
-                            await self.capture.cancelCapture()
-                            return
-                        }
-                    } catch is CancellationError {
-                        // A cooperative stop, not a device problem. This used to fall into the
-                        // catch below and surface as `.noMicrophone`, so every superseded
-                        // session accused the user's microphone of being broken.
-                        await self.capture.cancelCapture()
-                    } catch {
-                        let fail = (error as? VoiceFailure) ?? VoiceFailure(
-                            stage: .audioCapture,
-                            code: .noMicrophone,
-                            redactedDetail: error.localizedDescription
-                        )
-                        _ = await self.processEvent(.failureOccurred(fail), generation: generation)
-                    }
+                    await self.performStartAudioCapture(
+                        sessionDir: sessionDir, snapshot: snapshot, generation: generation
+                    )
                 }
                 _ = taskBag?.add(task)
 
@@ -316,24 +371,7 @@ public actor VoiceSessionCoordinator {
                 armWatchdog(seconds: snapshot.timeoutSeconds, generation: generation)
                 let task = Task { [weak self] in
                     guard let self = self else { return }
-                    do {
-                        try Task.checkCancellation()
-                        await self.finishLiveRecognition()
-                        try Task.checkCancellation()
-                        let artifact = try await self.capture.stopCapture()
-                        _ = await self.processEvent(.audioFinalized(artifact), generation: generation)
-                    } catch is CancellationError {
-                        // The artifact belongs to a session nobody is waiting on. Reporting
-                        // `.zeroFramesCaptured` here turned an ordinary stop into a failure
-                        // banner for a session the user had already moved on from.
-                    } catch {
-                        let fail = (error as? VoiceFailure) ?? VoiceFailure(
-                            stage: .audioFinalization,
-                            code: .zeroFramesCaptured,
-                            redactedDetail: error.localizedDescription
-                        )
-                        _ = await self.processEvent(.failureOccurred(fail), generation: generation)
-                    }
+                    await self.performFinalizeAudioCapture(generation: generation)
                 }
                 _ = taskBag?.add(task)
 

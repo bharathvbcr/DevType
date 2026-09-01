@@ -156,7 +156,74 @@ public enum SnippetTagSuggester {
         return lines.joined(separator: "\n")
     }
 
-    // MARK: - Model path
+    // MARK: - The model call, behind a seam
+
+    /// Raw, untrusted model output — before `normalizedTags` and `resolvedGroupName` have had
+    /// their say. Exists so the composition around the model can be driven without one.
+    public struct RawTagging: Sendable, Equatable {
+        public let tags: [String]
+        public let group: String?
+
+        public init(tags: [String], group: String?) {
+            self.tags = tags
+            self.group = group
+        }
+    }
+
+    /// The one step that genuinely needs macOS 26 and on-device model assets.
+    ///
+    /// Everything else in `suggest` — the two preference gates, the secret refusal, the
+    /// eligibility floor, the single-flight latch, normalization, group resolution, and the
+    /// "every failure is just no suggestion" rule — is ordinary logic that was previously
+    /// unreachable from a test purely because it sat in the same function as the model call.
+    public typealias TaggingEngine = @Sendable (String) async throws -> RawTagging
+
+    /// Serializes suggestions so two editors open at once cannot contend for the model.
+    /// Not availability-gated: the latch is a plain actor, and the rule it enforces is
+    /// testable without a model.
+    actor Latch {
+        static let shared = Latch()
+        private var busy = false
+        func acquire() -> Bool {
+            if busy { return false }
+            busy = true
+            return true
+        }
+        func release() { busy = false }
+    }
+
+    /// Best-effort. Returns `.none` for every failure — no engine, an unsupported UI language,
+    /// a refusal, a busy latch — because a snippet saving without tags is the normal case, not
+    /// an error worth showing anyone.
+    ///
+    /// A `nil` engine means "no model available here" and is the normal state below macOS 26.
+    static func suggest(
+        title: String,
+        body: String,
+        isSecret: Bool,
+        existingTags: [String],
+        groupNames: [String],
+        engine: TaggingEngine?
+    ) async -> Suggestion {
+        guard isActive, shouldSuggest(body: body, isSecret: isSecret), let engine else {
+            return .none
+        }
+        guard await Latch.shared.acquire() else { return .none }
+        defer { Task { await Latch.shared.release() } }
+
+        do {
+            let raw = try await engine(prompt(title: title, body: body, groupNames: groupNames))
+            return Suggestion(
+                tags: normalizedTags(raw.tags, existing: existingTags),
+                groupName: resolvedGroupName(raw.group, in: groupNames)
+            )
+        } catch {
+            DevTypeLog.store.debug(
+                "[AI] tag suggestion declined: \(error.localizedDescription, privacy: .public)"
+            )
+            return .none
+        }
+    }
 
     #if canImport(FoundationModels)
 
@@ -173,22 +240,39 @@ public enum SnippetTagSuggester {
         var group: String
     }
 
-    /// Serializes suggestions so two editors open at once cannot contend for the model.
+    /// The production engine, or `nil` when this Mac cannot serve one.
+    ///
+    /// The availability and locale checks happen here rather than inside the returned closure so
+    /// an unusable model reads as "no engine" — the same state as running below macOS 26 — and
+    /// takes the identical path through `suggest`.
     @available(macOS 26.0, *)
-    private actor Latch {
-        static let shared = Latch()
-        private var busy = false
-        func acquire() -> Bool {
-            if busy { return false }
-            busy = true
-            return true
+    static func foundationModelsEngine() -> TaggingEngine? {
+        let probe = SystemLanguageModel(
+            useCase: .contentTagging,
+            guardrails: .permissiveContentTransformations
+        )
+        guard probe.isAvailable else { return nil }
+        // B'3: the locale check is free; letting an unsupported language fail inside `respond`
+        // costs a full prefill first.
+        guard probe.supportsLocale(.current) else { return nil }
+
+        return { prompt in
+            let model = SystemLanguageModel(
+                useCase: .contentTagging,
+                guardrails: .permissiveContentTransformations
+            )
+            let session = LanguageModelSession(model: model)
+            let response = try await session.respond(
+                to: prompt,
+                generating: Tagging.self,
+                // Tagging is classification, not composition. Greedy also makes a second pass
+                // over an unchanged snippet return the same tags.
+                options: GenerationOptions(sampling: .greedy)
+            )
+            return RawTagging(tags: response.content.tags, group: response.content.group)
         }
-        func release() { busy = false }
     }
 
-    /// Best-effort. Returns `.none` for every failure — an unavailable model, an unsupported
-    /// UI language, a refusal, a busy latch — because a snippet saving without tags is the
-    /// normal case, not an error worth showing anyone.
     @available(macOS 26.0, *)
     public static func suggest(
         title: String,
@@ -197,40 +281,14 @@ public enum SnippetTagSuggester {
         existingTags: [String] = [],
         groupNames: [String] = []
     ) async -> Suggestion {
-        guard isActive, shouldSuggest(body: body, isSecret: isSecret) else { return .none }
-
-        let model = SystemLanguageModel(
-            useCase: .contentTagging,
-            guardrails: .permissiveContentTransformations
+        await suggest(
+            title: title,
+            body: body,
+            isSecret: isSecret,
+            existingTags: existingTags,
+            groupNames: groupNames,
+            engine: foundationModelsEngine()
         )
-        guard model.isAvailable else { return .none }
-        // B′3: the locale check is free; letting an unsupported language fail inside
-        // `respond` costs a full prefill first.
-        guard model.supportsLocale(.current) else { return .none }
-
-        guard await Latch.shared.acquire() else { return .none }
-        defer { Task { await Latch.shared.release() } }
-
-        do {
-            let session = LanguageModelSession(model: model)
-            let response = try await session.respond(
-                to: prompt(title: title, body: body, groupNames: groupNames),
-                generating: Tagging.self,
-                // Tagging is classification, not composition. Greedy also makes a second
-                // pass over an unchanged snippet return the same tags.
-                options: GenerationOptions(sampling: .greedy)
-            )
-            let content = response.content
-            return Suggestion(
-                tags: normalizedTags(content.tags, existing: existingTags),
-                groupName: resolvedGroupName(content.group, in: groupNames)
-            )
-        } catch {
-            DevTypeLog.store.debug(
-                "[AI] tag suggestion declined: \(error.localizedDescription, privacy: .public)"
-            )
-            return .none
-        }
     }
 
     #endif
