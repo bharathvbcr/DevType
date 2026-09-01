@@ -350,14 +350,6 @@ public final class PermissionCoordinator {
         return lines
     }
 
-    public func markAXPossiblyNeedsRelaunch() {
-        DevTypeLog.permission.notice(
-            "[Permission] Accessibility may need relaunch (granted in Settings but preflight still false)"
-        )
-        sawAXGrantedWhileUntrusted = true
-        emitStatus(snapshot: probe.snapshot())
-    }
-
     private func handleSnapshotChange(_ snapshot: PermissionSnapshot) {
         if snapshot.canUseAX {
             ProcessIdentity.rememberAccessibilityGranted(

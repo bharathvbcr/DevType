@@ -68,10 +68,6 @@ public actor VoiceSessionCoordinator {
         onDeliveryIntercept = handler
     }
 
-    public func activePhase() -> SessionPhase? {
-        activeState?.phase
-    }
-
     /// The raw and corrected transcripts of the current session, once recognition has run.
     /// Used to show the user what cleanup changed, and to offer a revert.
     public func transcripts() -> (raw: String, final: String)? {

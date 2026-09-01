@@ -1651,15 +1651,6 @@ public actor AITextTransformer {
     }
 }
 
-#else
-
-/// Stub when FoundationModels is unavailable at compile time.
-public enum AITextTransformerUnavailable {
-    public static var availability: AIModelAvailability {
-        .unavailable(.unsupportedOS)
-    }
-}
-
 #endif
 
 /// Process-wide availability that compiles on every deployment target.

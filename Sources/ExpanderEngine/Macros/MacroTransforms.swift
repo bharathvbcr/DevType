@@ -218,10 +218,6 @@ public final class MacroCounterStore: @unchecked Sendable {
         lock.unlock()
         defaults.removeObject(forKey: defaultsKey)
     }
-
-    public func allCounters() -> [String: Int] {
-        lock.withLock { values }
-    }
 }
 
 // MARK: - Volatile value memoization

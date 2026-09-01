@@ -886,10 +886,11 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         let bulkMoveBtn = CapsuleButton(title: loc.s("manager.bulk.moveToGroup"), style: .secondary, target: self, action: #selector(bulkMoveSelected(_:)))
         let bulkDuplicateBtn = CapsuleButton(title: loc.s("manager.bulk.duplicate"), style: .secondary, target: self, action: #selector(bulkDuplicateSelected))
         let bulkPrefixSuffixBtn = CapsuleButton(title: loc.s("manager.bulk.prefixSuffix"), style: .secondary, target: self, action: #selector(bulkPrefixSuffixSelected))
+        let bulkExportBtn = CapsuleButton(title: loc.s("manager.bulk.export"), style: .secondary, target: self, action: #selector(bulkExportSelected))
         let bulkDeleteBtn = CapsuleButton(title: loc.s("manager.bulk.delete"), style: .destructive, target: self, action: #selector(bulkDeleteSelected))
         let bulkSelectAllBtn = CapsuleButton(title: loc.s("manager.bulk.selectAll"), style: .secondary, target: self, action: #selector(selectAllSnippets))
 
-        let bulkLeftStack = NSStackView(views: [selectedCountLabel, bulkEnableBtn, bulkDisableBtn, bulkMoveBtn, bulkDuplicateBtn, bulkPrefixSuffixBtn])
+        let bulkLeftStack = NSStackView(views: [selectedCountLabel, bulkEnableBtn, bulkDisableBtn, bulkMoveBtn, bulkDuplicateBtn, bulkPrefixSuffixBtn, bulkExportBtn])
         bulkLeftStack.orientation = .horizontal
         bulkLeftStack.spacing = 8
         bulkLeftStack.alignment = .centerY
@@ -2125,7 +2126,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func bulkExportSelected() {
-        LibraryExporter.present(from: view.window)
+        let selectedRows = tableView.selectedRowIndexes
+        guard !selectedRows.isEmpty else { return }
+        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+        guard !selectedIDs.isEmpty else { return }
+
+        LibraryExporter.present(from: view.window, restrictedTo: selectedIDs)
     }
 
     @objc private func bulkPrefixSuffixSelected() {

@@ -232,14 +232,6 @@ public enum DateFormatLibrary {
         return formatter
     }
 
-    /// Drops every cached formatter. Locale is already part of the cache key, so this is only
-    /// needed for tests and for explicit "the user changed their region" handling.
-    public static func invalidateFormatterCache() {
-        formatterLock.lock()
-        formatterCache.removeAll()
-        formatterLock.unlock()
-    }
-
     // MARK: - Spec parsing (§3.5)
 
     /// Arithmetic calendar for date offsets. Gregorian so `+1M` means "next month" regardless

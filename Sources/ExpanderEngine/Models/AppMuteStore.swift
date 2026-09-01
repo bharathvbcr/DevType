@@ -48,11 +48,6 @@ public final class AppMuteStore {
         return mutedBundleIDs.contains(bundleID)
     }
 
-    public func isFrontmostMuted() -> Bool {
-        guard let id = AXContextChecker.shared.frontmostApplicationBundleIdentifier() else { return false }
-        return isMuted(id)
-    }
-
     public func allMuted() -> [String] {
         lock.lock()
         defer { lock.unlock() }

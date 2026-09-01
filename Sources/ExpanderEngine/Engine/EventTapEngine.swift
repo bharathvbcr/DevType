@@ -1088,7 +1088,7 @@ public final class EventTapEngine {
         let lastUTF16Count = lastEventUTF16Count
         lock.unlock()
 
-        // §2.3: cached frontmost facts. `AppMuteStore.isFrontmostMuted()` (NSWorkspace + NSLock),
+        // §2.3: cached frontmost facts. The mute lookup (NSWorkspace + `AppMuteStore.isMuted`),
         // `TISCopyCurrentKeyboardInputSource` and `isFrontmostAppTerminal()` all used to run per
         // key; with §1.1 they would also be AppKit/Carbon calls off the main thread.
         contextLock.lock()
@@ -1782,12 +1782,6 @@ public final class EventTapEngine {
                 )
             }
         }
-    }
-
-    /// Drop any held expansion. The generation bump inside the coordinator invalidates every
-    /// pending timer, so a cancelled hold can never fire later.
-    public func cancelHeldExpansion() {
-        heldCoordinator.cancelAll(reason: .bufferReset)
     }
 
     /// A keystroke produced no match while an expansion was held.

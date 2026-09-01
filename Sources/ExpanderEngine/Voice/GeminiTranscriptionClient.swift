@@ -320,9 +320,4 @@ public actor GeminiTranscriptionClient {
         }
         return message
     }
-
-    /// Convenience validation returning boolean status.
-    public func validateAPIKey(_ key: String) async -> Bool {
-        return await validateAPIKeyDetailed(key).isValid
-    }
 }

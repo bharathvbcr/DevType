@@ -203,20 +203,6 @@ public final class AXContextChecker {
         return nil
     }
 
-    /// Every distinct focused element the three AX probes can resolve, in probe order.
-    ///
-    /// `focusedElement()` returns the *first* probe that answers, which is right for the
-    /// keystroke path (cheapest wins) but wrong when the question is "where is the user's
-    /// selection?". The system-wide probe and the app-scoped probe routinely resolve to
-    /// different elements — a browser window vs. the web area inside it — and only one of them
-    /// reports the selection. Trying only the winner is how a real selection reads as none.
-    ///
-    /// Costs up to three AX round-trips, so this is for explicit user gestures (AI hotkey,
-    /// palette) and never for the per-keystroke gate.
-    public func focusedElementCandidates() -> [AXUIElement] {
-        probeFocusedElements(activateManualAccessibilityIfEmpty: false).candidates
-    }
-
     /// Focus probe with the per-probe outcome kept, and an optional Chromium wake-up.
     public struct FocusProbeResult {
         public let candidates: [AXUIElement]
@@ -941,12 +927,6 @@ public final class AXContextChecker {
 
     public func frontmostApplicationBundleIdentifier() -> String? {
         return NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-    }
-
-    /// True when the frontmost app is a known IDE (Cursor / VS Code / Xcode, …).
-    public func frontmostIsIDEBundle() -> Bool {
-        guard let bundleID = frontmostApplicationBundleIdentifier() else { return false }
-        return isIDEBundleID(bundleID)
     }
 
     private static func isMissingFocus(_ focus: FocusQueryResult) -> Bool {

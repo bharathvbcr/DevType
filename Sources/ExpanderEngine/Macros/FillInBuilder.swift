@@ -29,22 +29,17 @@ public enum FillInBuilder {
         "%fillpartend%", "%fillpart:", "%case:", "%caseend%",
     ]
 
+    /// Names and options cannot carry `:` or `%` — both are clause structure inside a
+    /// `%keyword:…%` body. Stripped rather than rejected: unlike spliced fill-part content
+    /// (see `contentIsRepresentable`), a mangled *name* is visible to the user in the fill-in
+    /// prompt, so it reports itself.
     private static func sanitizeToken(_ token: String) -> String {
         token.filter { $0 != ":" && $0 != "%" }
     }
 
+    /// Default values cannot carry `%` for the same reason. Also stripped, not rejected.
     private static func sanitizeDefault(_ value: String) -> String {
         value.filter { $0 != "%" }
-    }
-
-    /// True when `value` can be embedded as a default clause.
-    public static func defaultValueIsRepresentable(_ value: String) -> Bool {
-        !value.contains("%")
-    }
-
-    /// True when `token` can be embedded as a name or option clause.
-    public static func nameOrOptionIsRepresentable(_ token: String) -> Bool {
-        !token.contains(":") && !token.contains("%")
     }
 
     /// True when `content` can be spliced verbatim into a `%fillpart` section

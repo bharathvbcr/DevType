@@ -1045,6 +1045,13 @@ public final class SnippetStore {
         try Self.encodeLibrary(loadGroups())
     }
 
+    /// §0.4: same envelope as `exportLibraryData()` but for an explicit group list,
+    /// so the manager's bulk bar can export just the selected snippets. Routes through
+    /// the same `encodeLibrary` as the whole-library path — one encode implementation.
+    public static func exportLibraryData(groups: [SnippetGroup]) throws -> Data {
+        try encodeLibrary(groups)
+    }
+
     /// §0.4: writes the export to `url` (use with `NSSavePanel`).
     public func exportLibrary(to url: URL) throws {
         let data = try exportLibraryData()
@@ -1809,22 +1816,6 @@ public final class SnippetStore {
         let result = try SnippetImporter.importFrom(url)
         let summary = importGroups(result.groups, mode: mode)
         return (result, summary)
-    }
-
-    /// Imports TextExpander data from a folder URL.
-    @discardableResult
-    public func importTextExpander(from folder: URL) throws -> TEImporter.ImportResult {
-        let result = try TEImporter.importFolder(folder)
-        _ = importGroups(result.groups)
-        return result
-    }
-
-    /// Imports Espanso matches (Tier A static) from a config root, match folder, package, or YAML file.
-    @discardableResult
-    public func importEspanso(from url: URL) throws -> EspansoImporter.ImportResult {
-        let result = try EspansoImporter.importFrom(url)
-        _ = importGroups(result.groups)
-        return result
     }
 
     // MARK: - Trigger hygiene (§1.9)

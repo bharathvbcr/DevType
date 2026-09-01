@@ -246,6 +246,8 @@ final class PreferencesViewController: NSViewController,
     // General
     private let openAtLoginSwitch = NSSwitch()
     private let automaticUpdateSwitch = NSSwitch()
+    /// Only meaningful while the library lives somewhere the user chose; disabled otherwise.
+    private var libraryStopSyncButton: CapsuleButton?
     private let updateStatusLabel = DevTypeTheme.makeLabel(
         "",
         font: DevTypeTheme.font(10.5),
@@ -864,6 +866,104 @@ final class PreferencesViewController: NSViewController,
         refreshRemovalButton(for: mutedTable)
     }
 
+    /// "Stop Syncing" is enabled only when there is something to stop — while the library is
+    /// already at the default local path the button would be a no-op that still moves files.
+    private func refreshLibraryLocation() {
+        libraryPathLabel.stringValue = loc.s("prefs.snippets.libraryPath", store.activeLocationURL.path)
+        let isCustom = UserDefaults.standard
+            .string(forKey: SnippetStore.DeviceStateKey.storeLocationPath)?
+            .isEmpty == false
+        libraryStopSyncButton?.isEnabled = isCustom
+    }
+
+    /// Copies the library into a folder the user picks (an iCloud/Dropbox folder, typically)
+    /// and switches to it. `saveSnippetsAs` backs up anything it overwrites there.
+    @objc private func libraryMoveClicked() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.title = loc.s("prefs.snippets.library.move")
+        panel.message = loc.s("prefs.snippets.library.move.message")
+        panel.prompt = loc.s("prefs.snippets.library.move")
+        presentLibraryPanel(panel) { url in
+            SnippetStore.shared.saveSnippetsAs(toDirectory: url)
+        }
+    }
+
+    /// Adopts a library that already exists at the chosen file, backing up the local one first.
+    /// This *replaces* what is on screen, so the confirmation says so before anything moves.
+    @objc private func libraryLinkClicked() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        panel.title = loc.s("prefs.snippets.library.link")
+        panel.message = loc.s("prefs.snippets.library.link.message")
+        panel.prompt = loc.s("prefs.snippets.library.link")
+        presentLibraryPanel(panel) { url in
+            SnippetStore.shared.linkToSnippets(at: url)
+        }
+    }
+
+    @objc private func libraryStopSyncingClicked() {
+        let alert = NSAlert()
+        alert.messageText = loc.s("prefs.snippets.library.stop")
+        alert.informativeText = loc.s("prefs.snippets.library.stop.message")
+        alert.addButton(withTitle: loc.s("prefs.snippets.library.stop"))
+        alert.addButton(withTitle: loc.s("common.cancel"))
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            self.reportRelocation(SnippetStore.shared.stopSyncing())
+        }
+        if let window = view.window {
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
+        }
+    }
+
+    private func presentLibraryPanel(
+        _ panel: NSOpenPanel,
+        perform: @escaping (URL) -> SnippetStore.RelocationResult
+    ) {
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            self.reportRelocation(perform(url))
+        }
+        if let window = view.window {
+            panel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(panel.runModal())
+        }
+    }
+
+    /// Always names the backup on success: a relocation the user cannot undo by hand is one
+    /// they have to trust blindly, and the store already wrote the copy that makes it undoable.
+    private func reportRelocation(_ result: SnippetStore.RelocationResult) {
+        refreshLibraryLocation()
+        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+        if result.success {
+            var message = loc.s("prefs.snippets.library.done.body", result.activeLocation.path)
+            if let backup = result.backupURL {
+                message += "\n\n" + loc.s("prefs.snippets.library.done.backup", backup.path)
+            }
+            DevTypeAlert.info(
+                title: loc.s("prefs.snippets.library.done.title"),
+                message: message,
+                window: view.window
+            )
+        } else {
+            DevTypeAlert.warn(
+                title: loc.s("prefs.snippets.library.failed.title"),
+                message: result.message ?? loc.s("prefs.snippets.library.failed.title"),
+                window: view.window
+            )
+        }
+    }
+
     @objc private func automaticUpdateCheckChanged() {
         UpdatePreferences.automaticCheckEnabled = automaticUpdateSwitch.state == .on
         refreshUpdateStatusLabel()
@@ -1031,7 +1131,48 @@ final class PreferencesViewController: NSViewController,
         ioButtons.orientation = .horizontal
         ioButtons.spacing = 8
         ioButtons.translatesAutoresizingMaskIntoConstraints = false
-        stackInCard(libraryCard, views: [libraryPathLabel, ioButtons])
+
+        // Where the library lives. `SnippetStore.saveSnippetsAs` / `linkToSnippets` /
+        // `stopSyncing` have always persisted the choice under `storeLocationPath` and been
+        // read back by `resolveLocation` on launch — this row is the door to them. It belongs
+        // beside the path label that already names the active location rather than in its own
+        // card somewhere else.
+        let locationNote = DevTypeTheme.makeLabel(
+            loc.s("prefs.snippets.library.note"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        locationNote.translatesAutoresizingMaskIntoConstraints = false
+        libraryStopSyncButton = CapsuleButton(
+            title: loc.s("prefs.snippets.library.stop"),
+            symbol: "xmark.circle",
+            style: .secondary,
+            target: self,
+            action: #selector(libraryStopSyncingClicked)
+        )
+        let locationButtons = NSStackView(views: [
+            CapsuleButton(
+                title: loc.s("prefs.snippets.library.move"),
+                symbol: "externaldrive",
+                style: .secondary,
+                target: self,
+                action: #selector(libraryMoveClicked)
+            ),
+            CapsuleButton(
+                title: loc.s("prefs.snippets.library.link"),
+                symbol: "link",
+                style: .secondary,
+                target: self,
+                action: #selector(libraryLinkClicked)
+            ),
+            libraryStopSyncButton!
+        ])
+        locationButtons.orientation = .horizontal
+        locationButtons.spacing = 8
+        locationButtons.translatesAutoresizingMaskIntoConstraints = false
+
+        stackInCard(libraryCard, views: [libraryPathLabel, ioButtons, locationNote, locationButtons])
 
         // §1.9: `SnippetSearch.conflictingTriggers` was dead code. Surfacing the
         // store's `triggerConflicts()` is how the user learns that `:Hi` and `:hi`
@@ -1054,7 +1195,7 @@ final class PreferencesViewController: NSViewController,
     }
 
     private func reloadSnippets() {
-        libraryPathLabel.stringValue = loc.s("prefs.snippets.libraryPath", store.activeLocationURL.path)
+        refreshLibraryLocation()
         rescanConflicts()
     }
 
@@ -2477,6 +2618,22 @@ final class PreferencesViewController: NSViewController,
             )
             modeRows.append(row)
         }
+
+        // Every popup above writes a per-kind override; without this there is no way back to
+        // the built-in default short of knowing which mode each kind shipped with.
+        let resetModesButton = CapsuleButton(
+            title: loc.s("prefs.ai.output.restoreDefaults"),
+            style: .secondary,
+            target: self,
+            action: #selector(aiOutputModeRestoreDefaultsClicked)
+        )
+        resetModesButton.translatesAutoresizingMaskIntoConstraints = false
+        let resetRow = NSStackView(views: [resetModesButton])
+        resetRow.orientation = .horizontal
+        resetRow.alignment = .centerY
+        resetRow.translatesAutoresizingMaskIntoConstraints = false
+        modeRows.append(resetRow)
+
         stackInCard(modesCard, views: modeRows)
 
         // Typed-path allowlist
@@ -2630,6 +2787,16 @@ final class PreferencesViewController: NSViewController,
             message: loc.s("prefs.repetition.forget.done"),
             window: view.window
         )
+    }
+
+    /// Clears every per-kind output-mode override so each transform falls back to the
+    /// built-in default. `resetOutputMode` removes the key rather than writing a value, so
+    /// a later change to a default reaches users who never touched the setting.
+    @objc private func aiOutputModeRestoreDefaultsClicked() {
+        for kind in AITransformKind.builtInPalette {
+            AIPreferences.resetOutputMode(for: kind)
+        }
+        reloadAI()
     }
 
     @objc private func aiOutputModeChanged(_ sender: NSPopUpButton) {

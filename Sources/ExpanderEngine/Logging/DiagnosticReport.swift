@@ -48,6 +48,11 @@ public enum DiagnosticReport {
         public var injectTelemetryLines: [String]
         /// §3.9: triggers longer than the match buffer, which can never fire.
         public var overlongTriggerLines: [String]
+        /// Per-app AX-write verdicts learned by `AXWriteCapabilityStore`. Answers "why does
+        /// expansion behave differently in this one app?": a `falseSuccess` app is one where
+        /// AX reported a write it did not perform, so DevType permanently pastes there instead.
+        /// Bundle IDs only — never a snippet, never typed text.
+        public var axWriteVerdictLines: [String]
         /// Prefix-debounce hold lifecycle counters (`EventTapEngine.prefixDebounceDiagnostics()`).
         /// `races-absorbed` counts debounce timers that lost to a keystroke at the deadline —
         /// each one used to be a possible double expansion.
@@ -98,6 +103,7 @@ public enum DiagnosticReport {
             tapDisableSummary: String? = nil,
             injectTelemetryLines: [String] = [],
             overlongTriggerLines: [String] = [],
+            axWriteVerdictLines: [String] = [],
             aiLines: [String] = [],
             secretLines: [String] = [],
             prefixDebounceSummary: String? = nil,
@@ -130,6 +136,7 @@ public enum DiagnosticReport {
             self.tapDisableSummary = tapDisableSummary
             self.injectTelemetryLines = injectTelemetryLines
             self.overlongTriggerLines = overlongTriggerLines
+            self.axWriteVerdictLines = axWriteVerdictLines
             self.aiLines = aiLines
             self.secretLines = secretLines
             self.prefixDebounceSummary = prefixDebounceSummary
@@ -238,6 +245,7 @@ public enum DiagnosticReport {
             tapDisableSummary: EventTapEngine.shared.tapDisableCounters.summaryLine,
             injectTelemetryLines: PermissionCoordinator.shared.injectTelemetrySummaryLines(),
             overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics(),
+            axWriteVerdictLines: captureAXWriteVerdictLines(),
             aiLines: captureAILines(),
             secretLines: captureSecretLines(
                 pendingMigrationCount: { SecretStore.shared.snippetIDsPendingMigration().count },
@@ -327,6 +335,28 @@ public enum DiagnosticReport {
         // The step trail: every fetch/heal/migrate with its OSStatus, accounts aliased to
         // "item A/B/…" — the exact sequence that produced whatever the user just saw.
         + accessDiagnostics.trail().suffix(16).map { "  trail: \($0)" }
+    }
+
+    /// Renders `AXWriteCapabilityStore`'s learned per-app verdicts for the report.
+    ///
+    /// `unknown` entries are omitted: they mean "not yet observed", which is the state every
+    /// app starts in and says nothing. The two that matter are `trusted` (AX writes verified)
+    /// and `falseSuccess` (AX claimed a write it did not make — DevType pastes there forever
+    /// after), and `falseSuccess` is the one a confused bug report is usually about.
+    static func captureAXWriteVerdictLines(
+        store: AXWriteCapabilityStore = .shared
+    ) -> [String] {
+        let interesting = store.learnedVerdicts().filter { $0.verdict != .unknown }
+        guard !interesting.isEmpty else { return [] }
+        return interesting.map { entry in
+            let label: String
+            switch entry.verdict {
+            case .trusted: label = "trusted (AX writes verified)"
+            case .falseSuccess: label = "falseSuccess (AX lied — pasting instead)"
+            case .unknown: label = "unknown"
+            }
+            return "\(entry.key): \(label)"
+        }
     }
 
     static func captureAILines(
@@ -497,6 +527,14 @@ public enum DiagnosticReport {
             lines.append("(none)")
         } else {
             lines.append(contentsOf: context.overlongTriggerLines)
+        }
+
+        lines.append("")
+        lines.append("-- Learned AX write verdicts (per app) --")
+        if context.axWriteVerdictLines.isEmpty {
+            lines.append("(none learned yet)")
+        } else {
+            lines.append(contentsOf: context.axWriteVerdictLines)
         }
 
         // §9.1: the mirror's own section. OSLog's direct fetch above is bounded by what logd
