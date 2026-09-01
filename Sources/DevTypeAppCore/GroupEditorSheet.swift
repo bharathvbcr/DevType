@@ -36,7 +36,7 @@ enum GroupEditorSheet {
         // unclosable by any path but its own.
         if activePanel != nil { return }
         let panel = GroupEditorKeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 448),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 476),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -228,6 +228,8 @@ private final class GroupEditorController: NSViewController {
 
     private var selectedSymbol: String
     private var selectedColorHex: String
+    private let symbolField = NSTextField()
+    private let colorWell = NSColorWell()
     private var groupScope: SnippetAppScope = .unscoped
     private weak var scopeButton: NSButton?
     private var iconButtons: [IconChoiceButton] = []
@@ -260,7 +262,7 @@ private final class GroupEditorController: NSViewController {
             tint: DevTypeTheme.accent.withAlphaComponent(0.09),
             material: .popover
         )
-        glass.frame = NSRect(x: 0, y: 0, width: 400, height: 448)
+        glass.frame = NSRect(x: 0, y: 0, width: 400, height: 476)
         let root = glass.contentView
 
         // Header
@@ -317,13 +319,38 @@ private final class GroupEditorController: NSViewController {
         iconGrid.setAccessibilityLabel(loc.s("ax.groupeditor.icon"))
         root.addSubview(iconGrid)
 
+        // Any SF Symbol, not just the fourteen above. `SnippetGroup.symbol` has always been a
+        // free-form string — the grid was the only thing narrowing it — so this needs no model
+        // change and an unrecognised name is refused rather than stored as a blank icon.
+        symbolField.translatesAutoresizingMaskIntoConstraints = false
+        symbolField.placeholderString = loc.s("groupeditor.symbol.placeholder")
+        symbolField.font = DevTypeTheme.font(11)
+        symbolField.target = self
+        symbolField.action = #selector(customSymbolEntered)
+        symbolField.setAccessibilityLabel(loc.s("groupeditor.symbol.placeholder"))
+        symbolField.toolTip = loc.s("groupeditor.symbol.help")
+        root.addSubview(symbolField)
+
         // Color swatches ("none" + palette)
         let colorCaption = caption(loc.s("groupeditor.color"))
         root.addSubview(colorCaption)
         swatchButtons = ([""] + DevTypeTheme.groupColorPalette).map { hex in
             ColorSwatchButton(colorHex: hex, target: self, action: #selector(colorTapped(_:)))
         }
-        let swatchRow = NSStackView(views: swatchButtons)
+        // Same story for the colour: `colorHex` stores any "#RRGGBB", the palette was the only
+        // thing limiting it to eight.
+        colorWell.translatesAutoresizingMaskIntoConstraints = false
+        colorWell.target = self
+        colorWell.action = #selector(customColorPicked)
+        colorWell.setAccessibilityLabel(loc.s("groupeditor.color.custom"))
+        colorWell.toolTip = loc.s("groupeditor.color.custom")
+        colorWell.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        colorWell.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        if let current = DevTypeTheme.colorFromHex(existing?.colorHex ?? "") {
+            colorWell.color = current
+        }
+
+        let swatchRow = NSStackView(views: swatchButtons + [colorWell])
         swatchRow.orientation = .horizontal
         swatchRow.spacing = 10
         swatchRow.translatesAutoresizingMaskIntoConstraints = false
@@ -418,7 +445,12 @@ private final class GroupEditorController: NSViewController {
             iconGrid.topAnchor.constraint(equalTo: iconCaption.bottomAnchor, constant: 6),
             iconGrid.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
 
-            colorCaption.topAnchor.constraint(equalTo: iconGrid.bottomAnchor, constant: 12),
+            symbolField.topAnchor.constraint(equalTo: iconGrid.bottomAnchor, constant: 8),
+            symbolField.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+            symbolField.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
+            symbolField.heightAnchor.constraint(equalToConstant: 20),
+
+            colorCaption.topAnchor.constraint(equalTo: symbolField.bottomAnchor, constant: 12),
             colorCaption.leadingAnchor.constraint(equalTo: nameCaption.leadingAnchor),
             swatchRow.topAnchor.constraint(equalTo: colorCaption.bottomAnchor, constant: 8),
             swatchRow.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
@@ -491,6 +523,29 @@ private final class GroupEditorController: NSViewController {
                 include: result.includeApps, exclude: result.excludeApps, loc: self.loc
             )
         }
+    }
+
+    /// Return in the symbol field. Refused unless macOS can actually render the name — a
+    /// mistyped symbol would otherwise be stored and draw as nothing in the sidebar, with no
+    /// way to tell that from an icon that simply has not loaded.
+    @objc private func customSymbolEntered() {
+        let name = symbolField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        guard NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil else {
+            showError(loc.s("groupeditor.error.unknownSymbol", name))
+            return
+        }
+        selectedSymbol = name
+        symbolField.stringValue = ""
+        errorLabel.stringValue = ""
+        errorLabel.isHidden = true
+        // Deselects every grid button on its own when the symbol is not one of them.
+        refreshPickers()
+    }
+
+    @objc private func customColorPicked() {
+        selectedColorHex = DevTypeTheme.hexFromColor(colorWell.color)
+        refreshPickers()
     }
 
     @objc private func cancelTapped() { onFinish(nil) }

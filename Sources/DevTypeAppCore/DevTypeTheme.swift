@@ -178,6 +178,23 @@ enum DevTypeTheme {
         "#0A84FF", "#BF5AF2", "#FF375F", "#8E8E93"
     ]
 
+    /// Inverse of `colorFromHex`. Converting is required — an `NSColorWell` hands back whatever
+    /// space the system picker was in, and reading `redComponent` off a non-RGB colour traps
+    /// rather than converting.
+    ///
+    /// **Calibrated, not sRGB**, because that is what `colorFromHex` builds with. Converting to
+    /// sRGB here instead shifted every channel on the way back: `#DC2626` returned as `#E53D31`,
+    /// so re-picking a palette colour would quietly restyle the group. The two functions have to
+    /// agree on a space to be inverses of each other; which space the palette *should* have used
+    /// is a separate question this does not answer.
+    static func hexFromColor(_ color: NSColor) -> String {
+        guard let rgb = color.usingColorSpace(.genericRGB) else { return "" }
+        let r = Int((rgb.redComponent * 255).rounded())
+        let g = Int((rgb.greenComponent * 255).rounded())
+        let b = Int((rgb.blueComponent * 255).rounded())
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+
     /// Parses "#RRGGBB" (or "RRGGBB") into an NSColor; nil when invalid/empty.
     static func colorFromHex(_ hex: String) -> NSColor? {
         var cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines)

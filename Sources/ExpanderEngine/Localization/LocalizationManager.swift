@@ -505,6 +505,10 @@ public final class LocalizationManager: ObservableObject {
             "groupeditor.name": "Name",
             "groupeditor.icon": "Icon",
             "groupeditor.color": "Color",
+            "groupeditor.symbol.placeholder": "Or type any SF Symbol name",
+            "groupeditor.symbol.help": "Any SF Symbol works, not just the icons above. Unrecognised names are refused.",
+            "groupeditor.color.custom": "Custom colour",
+            "groupeditor.error.unknownSymbol": "No SF Symbol named \"%@\".",
             "groupeditor.scope.label": "App scope",
             "groupeditor.scope.help":
                 "Limit every snippet in this group to certain apps, or block them in some. Composes with each snippet's own scope: blocking applies if either says so, and limits must both allow the app.",
@@ -1980,6 +1984,10 @@ public final class LocalizationManager: ObservableObject {
             "groupeditor.name": "이름",
             "groupeditor.icon": "아이콘",
             "groupeditor.color": "색상",
+            "groupeditor.symbol.placeholder": "또는 SF Symbol 이름 입력",
+            "groupeditor.symbol.help": "위 아이콘 외에 모든 SF Symbol을 사용할 수 있습니다. 인식되지 않는 이름은 거부됩니다.",
+            "groupeditor.color.custom": "사용자 지정 색상",
+            "groupeditor.error.unknownSymbol": "\"%@\" 이름의 SF Symbol이 없습니다.",
             "groupeditor.scope.label": "앱 범위",
             "groupeditor.scope.help":
                 "이 그룹의 모든 스니펫을 특정 앱으로 제한하거나 일부 앱에서 차단합니다. 각 스니펫의 범위와 함께 적용됩니다. 차단은 둘 중 하나라도 지정하면 적용되고, 제한은 양쪽 모두 허용해야 합니다.",
@@ -3420,6 +3428,10 @@ public final class LocalizationManager: ObservableObject {
             "groupeditor.name": "名前",
             "groupeditor.icon": "アイコン",
             "groupeditor.color": "カラー",
+            "groupeditor.symbol.placeholder": "または SF Symbol 名を入力",
+            "groupeditor.symbol.help": "上のアイコン以外の SF Symbol も使えます。認識できない名前は拒否されます。",
+            "groupeditor.color.custom": "カスタムカラー",
+            "groupeditor.error.unknownSymbol": "\"%@\" という SF Symbol はありません。",
             "groupeditor.scope.label": "アプリの適用範囲",
             "groupeditor.scope.help":
                 "このグループのすべてのスニペットを特定のアプリに限定するか、一部のアプリで無効にします。各スニペットの適用範囲と組み合わされ、無効化はどちらか一方が指定すれば適用され、限定は両方が許可する必要があります。",
