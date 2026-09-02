@@ -41,7 +41,7 @@ The resolver and verification scripts have dedicated self-tests (`test-signing-i
 
 ## 🧪 Testing Guidelines
 
-DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The v0.1.4 expansion-recovery suite contains 1,950 tests: the standard run passes 1,936 and skips 14. Seven live-AI tests and seven native AppKit window tests require explicit opt-in; the latter briefly display synthetic UI.
+DevType maintains **2,000 unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The standard suite runs 2,000 tests: 1,986 pass and 14 are skipped. Seven live-AI tests and seven native AppKit window tests require explicit opt-in; the latter briefly display synthetic UI.
 
 ### Running Tests
 ```bash

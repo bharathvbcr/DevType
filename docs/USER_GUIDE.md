@@ -58,6 +58,9 @@ Click the **DevType icon** in your macOS menu bar and select **Snippet Manager�
 - **Secret Snippets**: Passwords and sensitive keys stored in AES-GCM encrypted storage behind Touch ID.
 - **AI Action Snippets**: Triggers that run an on-device AI transform over your current text selection (created from the built-in template catalog or the editor).
 
+### Searching Snippets
+Type in the search field at the top of the Snippet Manager to quickly filter your library. Multi-word queries match conjunctively across triggers, labels, tags, and content (e.g. `sig email`), matching the same ranking logic used in the Command Palette.
+
 ---
 
 ## 4. Using Dynamic Macros & Templates
@@ -113,6 +116,7 @@ DevType comes with private, on-device AI writing tools powered by Apple Foundati
 3. Choose an Action:
    - ✍️ **Proofread**: Fix grammar, punctuation, and typos directly in place.
    - 🔄 **Rewrite** / 🗣️ **Paraphrase**: Polish text for clarity, flow, or fresh wording.
+   - 🔀 **Merge & Rewrite**: Deduplicate and fold overlapping notes, fragments, or resume bullets into one coherent passage while strictly preserving facts, metrics, tools, and list formatting.
    - 📈 **Expand** / 📉 **Condense**: Elaborate on ideas or tighten text while preserving meaning.
    - 👔 **Tone Shift**: Make text more *Formal* or *Friendly*.
    - 📋 **Bulletize**: Transform paragraph text into clean bullet points.
@@ -159,8 +163,10 @@ For complete voice architecture details, see [docs/VOICE_DICTATION.md](VOICE_DIC
 
 Press **`⌘/`** anywhere in macOS to bring up DevType's unified Command Palette:
 
-- **Search Snippets**: Type fuzzy keywords to find and insert snippets without remembering abbreviations. Results highlight matches, honor diacritics, and are ranked by how often (and how recently) *you* use them — the top rows show `⌘1`–`⌘9` quick-insert hints.
-- **Conversational Search (optional)**: Turn on **Preferences → AI → Semantic Search Routing** to let available on-device Apple Foundation Models resolve a natural-language query through DevType's date, text-operation, or snippet tools. Offline results appear immediately; routing is an additional bounded result and is off by default.
+- **Selection-Aware Suggestions**: When opened with selected text, the empty palette automatically surfaces AI transforms and local text operations first, keeping perishable actions above the fold while pushing navigation down.
+- **Dynamic Section Leading**: Sections are led by their best hit rather than a static commands/AI/snippets order, so a high-scoring snippet or transform immediately surfaces above lower-scoring commands.
+- **Search Snippets**: Type fuzzy or multi-word keywords to find and insert snippets without remembering abbreviations. Results highlight matches, honor diacritics, and are ranked by how often (and how recently) *you* use them — the top rows show `⌘1`–`⌘9` quick-insert hints. Keystroke paths enforce query length limits (512 chars, 12 terms) for zero typing latency.
+- **Conversational Search (optional)**: Turn on **Preferences → AI → Semantic Search Routing** to let available on-device Apple Foundation Models resolve a natural-language query through DevType's date, text-operation, or snippet tools. Routing has an 8-second safety deadline; offline results appear immediately.
 - **Math Calculator**: Type `= 45 * 12.5` to evaluate inline and insert or copy the result.
 - **Custom AI**: Type `> make this sound like a Slack message` to run a one-shot on-device AI instruction over your current selection.
 - **Date Offsets & Tools**: Type `tomorrow`, `date+7`, `+3w`, `next friday`, or `epoch` to insert calculated dates; ISO and full formats included.
