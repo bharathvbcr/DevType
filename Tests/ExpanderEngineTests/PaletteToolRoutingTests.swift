@@ -173,18 +173,30 @@ final class PaletteToolRoutingTests: XCTestCase {
     /// the user explicitly asked for.
     func testConcurrentRoutingIsSerialized() async {
         let counter = Sendable_Counter()
+        let firstEntered = Sendable_AsyncGate()
+        let releaseFirst = Sendable_AsyncGate()
         async let a = PaletteToolRouter.route(query: "the date next friday") { _ in
             counter.increment()
+            firstEntered.signal()
+            await releaseFirst.wait()
             try? await Task.sleep(nanoseconds: 40_000_000)
             return "2026-09-04"
         }
+
+        await firstEntered.wait()
+
         async let b = PaletteToolRouter.route(query: "the date next monday") { _ in
             counter.increment()
             return "2026-09-07"
         }
-        let results = await [a, b]
-        XCTAssertEqual(results.compactMap { $0 }.count, 1, "The latch must drop the second call.")
+
+        let secondResult = await b
+        XCTAssertNil(secondResult, "The latch must drop the overlapping call.")
         XCTAssertEqual(counter.value, 1, "Only one call may reach the model.")
+
+        releaseFirst.signal()
+        let firstResult = await a
+        XCTAssertNotNil(firstResult, "The in-flight call still completes normally.")
     }
 
     /// The latch must be released on both paths, or the first failure wedges routing for the
@@ -210,4 +222,35 @@ final class Sendable_Counter: @unchecked Sendable {
     private var count = 0
     func increment() { lock.lock(); count += 1; lock.unlock() }
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+
+final class Sendable_AsyncGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signaled = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if signaled {
+                signaled = false
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiter = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func signal() {
+        lock.lock()
+        let continuation = waiter
+        waiter = nil
+        if continuation == nil {
+            signaled = true
+        }
+        lock.unlock()
+        continuation?.resume()
+    }
 }
