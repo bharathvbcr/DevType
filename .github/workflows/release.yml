@@ -8,7 +8,9 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A release tag is immutable release state. Do not cancel a running publish
+  # halfway through an upload when a retry or duplicate event is queued.
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -21,6 +23,7 @@ jobs:
     # publishing a garbage-named release.
     if: github.ref_type == 'tag'
     runs-on: macos-14
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,12 +47,20 @@ jobs:
       - name: Show toolchain
         run: swift --version && xcodebuild -version
 
+      - name: Run local CI release gate
+        # The gate verifies source/build/package health. It may use the runner's
+        # local signing fallback; the distribution step below is intentionally
+        # stricter and requires Developer ID plus notarization credentials.
+        env:
+          DEVTYPE_SKIP_AUTO_CERT: '1'
+        run: ./Scripts/ci-local.sh
+
       - name: Build & Package DMG
         env:
-          DEVTYPE_SKIP_NOTARIZE: '1'
-          DEVTYPE_SKIP_AUTO_CERT: '1'
           DEVTYPE_RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          # Never publish a deliberately unnotarized artifact. release.sh fails
+          # closed when the runner lacks a Developer ID identity or notary profile.
           ./Scripts/release.sh
 
       - name: Locate DMG

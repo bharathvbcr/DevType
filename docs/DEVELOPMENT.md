@@ -31,6 +31,7 @@ All common workflows are automated via shell scripts in the `Scripts/` directory
 | **DMG Selection** | `./Scripts/select-release-dmg.sh` | Picks exactly one `DevType-<version>.dmg`; zero or multiple candidates is fatal. Has a stubbed self-test (`test-release-dmg-select.sh`). |
 | **Release Preflight** | `./Scripts/release-preflight.sh` | Validates git cleanliness, tags, and local CI before tagging/publishing releases. |
 | **Signing Preflight** | `./Scripts/release-signing-preflight.sh` | Validates that the active signing identity meets distribution requirements. |
+| **Release Version Check** | `./Scripts/verify-release-version.sh` | Refuses to package a bundle whose stamped version differs from the exact release tag. |
 | **Asset Verification** | `./Scripts/verify-release-asset-list.sh` | Verifies published GitHub release asset inventories to prevent missing or mismatched assets. |
 | **Seed Issues** | `./Scripts/seed-good-first-issues.sh` | Seeds curated, self-contained `good first issue` candidates for open-source contributors. |
 
@@ -114,7 +115,7 @@ Outside a Git checkout, packaging falls back to the plist values. Local CI fails
 DevType checks for updates itself (`Sources/ExpanderEngine/Updates/`); Sparkle is not embedded, and the inert `SUFeedURL` / `SUEnableInstallerLauncherService` keys that used to sit in `Info.plist` have been removed — they configured a framework that was never present, and pointed at an account that is not this project's.
 
 - **`AppVersion`** parses and orders version strings. It is deliberately not a plain SemVer comparator: `git describe`'s `-<N>-g<sha>` suffix means *N commits **after*** the tag, while SemVer reads the same characters as a *pre-release **of*** it. Reading it the SemVer way tells anyone running a post-tag build to "update" to the release they are already ahead of, so the distance suffix is detected specifically and ordered above the bare tag. `AppVersionTests` pins the full ordering.
-- **`UpdateChecker`** asks the GitHub Releases API for the latest release, and does nothing else — it never downloads or installs. Acting on a result opens the release page in the browser. That is a constraint, not an omission: `release.yml` publishes with `DEVTYPE_SKIP_NOTARIZE=1`, so CI DMGs are signed but not notarized, and silently installing a non-notarized bundle is precisely what Gatekeeper exists to stop. An in-place updater has to enable notarization in CI first.
+- **`UpdateChecker`** asks the GitHub Releases API for the latest release, and does nothing else — it never downloads or installs. Acting on a result opens the release page in the browser. That is a constraint, not an omission: the GitHub release workflow now fails closed unless it can produce a Developer ID-signed, notarized artifact, and silently installing an untrusted local DMG is precisely what Gatekeeper exists to stop.
 - **Off by default.** Nothing contacts the network until the user enables *Preferences → General → Updates*; automatic checks then run at most once a day. "Check for Updates…" in the menu bar is an explicit request and always works.
 - **Failure is never silence.** `UpdateCheckOutcome` keeps `.failed` and `.undeterminedLocalVersion` distinct from `.upToDate`, so a check that could not run never renders as one that ran and found nothing.
 - The request carries no version, machine, or install identifier — a static `User-Agent`, an ephemeral session with no cookie or credential storage, and a bounded response read.
@@ -125,17 +126,20 @@ DevType checks for updates itself (`Sources/ExpanderEngine/Updates/`); Sparkle i
 xcrun notarytool store-credentials DevTypeNotary \
   --apple-id you@example.com --team-id TEAMID --password <app-specific-password>
 
-# Tag the release
+# Commit, validate, then tag the release. The tag must point at the same clean
+# commit whose local CI passed.
+git commit -m "your release changes"
+./Scripts/ci-local.sh
 git tag -a v0.1.0 -m "Release v0.1.0"
 
 # Build, sign, notarize, staple, and produce dist/DevType-<version>.dmg
 DEVTYPE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./Scripts/release.sh
 
-# Dry run without notarization (local-signing DMG only)
+# Dry run without notarization (local-only DMG; never upload this artifact)
 DEVTYPE_SKIP_NOTARIZE=1 ./Scripts/release.sh
 ```
 
-Environment knobs: `DEVTYPE_SIGN_IDENTITY` (Developer ID identity), `DEVTYPE_NOTARY_PROFILE` (default `DevTypeNotary`), `DEVTYPE_SKIP_NOTARIZE=1`. The DMG selector refuses to guess if zero *or* multiple `DevType-<expected-version>.dmg` files exist.
+Environment knobs: `DEVTYPE_SIGN_IDENTITY` (Developer ID identity), `DEVTYPE_NOTARY_PROFILE` (default `DevTypeNotary`), and `DEVTYPE_SKIP_NOTARIZE=1` for local-only dry runs. A tagged release never sets the skip flag: the GitHub workflow runs `ci:local`, then `release.sh` fails closed if Developer ID signing or the notary profile is unavailable. Configure the certificate and notary credentials on the runner before pushing a release tag. The release workflow also requires exact tag/version agreement, curated notes, one matching DMG with no residue assets, and a byte-identical downloaded artifact before it reports success.
 
 ---
 

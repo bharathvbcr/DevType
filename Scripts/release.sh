@@ -24,6 +24,7 @@
 #   DEVTYPE_SIGN_IDENTITY  Developer ID Application: Name (TEAMID)   [required unless skipping]
 #   DEVTYPE_NOTARY_PROFILE notarytool keychain profile name          [default DevTypeNotary]
 #   DEVTYPE_SKIP_NOTARIZE  1 to skip notarize/staple
+#   DEVTYPE_RELEASE_TAG    exact vMAJOR.MINOR.PATCH tag being published
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,6 +32,9 @@ DIST="${ROOT}/dist"
 APP_BUNDLE="${ROOT}/.build/DevType.app"
 NOTARY_PROFILE="${DEVTYPE_NOTARY_PROFILE:-DevTypeNotary}"
 SKIP_NOTARIZE="${DEVTYPE_SKIP_NOTARIZE:-0}"
+RELEASE_TAG="${DEVTYPE_RELEASE_TAG:-}"
+STAGE=""
+ZIP=""
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -39,10 +43,26 @@ case "${SKIP_NOTARIZE}" in
   *) die "DEVTYPE_SKIP_NOTARIZE must be 0 or 1 (got '${SKIP_NOTARIZE}')" ;;
 esac
 
+if [[ -n "${RELEASE_TAG}" && "${SKIP_NOTARIZE}" == "1" ]]; then
+  die "DEVTYPE_SKIP_NOTARIZE=1 is only permitted for untagged local dry runs; tagged release ${RELEASE_TAG} must be notarized"
+fi
+
+cleanup_release_artifacts() {
+  # Keep retries deterministic without deleting anything outside the exact
+  # staging paths this invocation created.
+  if [[ -n "${STAGE}" && -d "${STAGE}" ]]; then
+    rm -rf "${STAGE}"
+  fi
+  if [[ -n "${ZIP}" && -f "${ZIP}" ]]; then
+    rm -f "${ZIP}"
+  fi
+}
+trap cleanup_release_artifacts EXIT
+
 # CI supplies the tag explicitly so git-describe cannot quietly build a version
 # other than the ref being published. Local dry-runs may omit it intentionally.
-if [[ -n "${DEVTYPE_RELEASE_TAG:-}" ]]; then
-  "${ROOT}/Scripts/release-preflight.sh" "${DEVTYPE_RELEASE_TAG}"
+if [[ -n "${RELEASE_TAG}" ]]; then
+  "${ROOT}/Scripts/release-preflight.sh" "${RELEASE_TAG}"
 fi
 
 # --- 1. Identity check ------------------------------------------------------
@@ -62,6 +82,9 @@ DEVTYPE_HARDENED_RUNTIME=1 "${ROOT}/Scripts/package-app.sh" release
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP_BUNDLE}/Contents/Info.plist")"
 echo "==> version ${VERSION}"
+if [[ -n "${RELEASE_TAG}" ]]; then
+  "${ROOT}/Scripts/verify-release-version.sh" "${RELEASE_TAG}" "${VERSION}"
+fi
 
 # Verify the hardened runtime flag actually landed. Notarization fails without it,
 # and the failure message from Apple is much less obvious than this one.
@@ -114,8 +137,6 @@ if [[ "${SKIP_NOTARIZE}" != "1" ]]; then
     || die "DMG notarization failed"
   xcrun stapler staple "${DMG}" || die "DMG stapler failed"
 fi
-
-rm -rf "${STAGE}"
 
 # --- 5. Verify like an end user --------------------------------------------
 echo "==> final verification"
