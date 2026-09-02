@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://devtype.vbcr.dev/"><img src="https://img.shields.io/badge/website-devtype.vbcr.dev-EC4899?style=flat&logo=apple&logoColor=white" alt="Live Website"></a>
   <a href="https://github.com/bharathvbcr/DevType/actions/workflows/ci.yml"><img src="https://github.com/bharathvbcr/DevType/actions/workflows/ci.yml/badge.svg" alt="CI Status"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2014.0%2B-blue" alt="macOS 14+">
   <img src="https://img.shields.io/badge/language-Swift%205.9-orange" alt="Swift 5.9">
@@ -24,6 +25,10 @@
 
 <p align="center">
   <img src="docs/assets/devtype_social_preview.jpg" alt="DevType macOS Text Expander Social Preview Banner" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://devtype.vbcr.dev/"><strong>Explore the Live Interactive Typing Sandbox &amp; Documentation (devtype.vbcr.dev) &rarr;</strong></a>
 </p>
 
 **DevType** is a fast, lightweight, native macOS text expander and snippet manager built with Swift and AppKit. Equipped with on-device AI text transformations powered by Apple Foundation Models, DevType offers sub-millisecond keyword expansion and offline writing tools with zero cloud telemetry.
