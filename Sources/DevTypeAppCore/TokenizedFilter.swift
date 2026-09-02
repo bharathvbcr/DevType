@@ -21,10 +21,15 @@ enum TokenizedFilter {
     /// so forgiving an unmatched word would widen the result instead of sharpening it. That is
     /// the opposite of the palette's rule, where an unfamiliar word in a natural-language
     /// phrase should not blank the list.
+    /// Bounded for the same reason the palette is: every term is scanned against every field
+    /// of every row, and a paste into a search field should not become list-sized work.
+    static let maximumQueryTerms = 12
+
     static func matches(query: String, fields: [String]) -> Bool {
         let terms = query
             .lowercased()
             .split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == ";" })
+            .prefix(maximumQueryTerms)
             .map(String.init)
         guard !terms.isEmpty else { return true }
         let haystack = fields.map { $0.lowercased() }

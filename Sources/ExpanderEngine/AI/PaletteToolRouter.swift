@@ -16,6 +16,14 @@ import FoundationModels
 public enum PaletteToolRouter {
     public static let debounceMilliseconds: Int = 250
 
+    /// Longest a routing round trip may take before the row is abandoned.
+    ///
+    /// Without a bound, a model that never answers holds the single-flight latch for the rest
+    /// of the session: every later keystroke finds the latch busy, and routing is dead with no
+    /// error surfaced anywhere. The timeout relies on the engine honouring cancellation, which
+    /// `LanguageModelSession.respond` does.
+    public static let timeoutSeconds: Double = 8
+
     /// Longest text a routed row will carry. The palette shows one line; anything longer is
     /// the model having written prose instead of calling a tool, which is not a result.
     public static let maximumResultCharacters = 400
@@ -42,6 +50,10 @@ public enum PaletteToolRouter {
         guard AIPreferences.isEnabled, AIPreferences.isSemanticRoutingEnabled else { return false }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= 4 else { return false }
+        // Past the ranking cap it is a paste, not a question. Refusing here also keeps the
+        // routed row's staleness check honest: `buildRows` compares against a clamped query,
+        // so a routed answer to an unclamped one could never match it anyway.
+        guard trimmed.count <= CommandPaletteCatalog.maximumQueryCharacters else { return false }
         // Typed prefixes already have deterministic handlers.
         if trimmed.hasPrefix("=") || trimmed.hasPrefix(">") { return false }
         return true
@@ -58,6 +70,25 @@ public enum PaletteToolRouter {
             return true
         }
         func release() { busy = false }
+    }
+
+    /// Runs `work`, returning `nil` when it has not finished within `seconds`.
+    ///
+    /// The loser is cancelled rather than left running, so a timed-out round trip does not go
+    /// on consuming the model behind a palette the user has already closed.
+    static func withTimeout(
+        seconds: Double,
+        _ work: @escaping @Sendable () async throws -> String
+    ) async throws -> String? {
+        try await withThrowingTaskGroup(of: String?.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? nil
+        }
     }
 
     /// Nothing the model returns is trusted as a row.
@@ -80,9 +111,13 @@ public enum PaletteToolRouter {
     /// answer and routing is only ever an addition to it.
     ///
     /// A `nil` engine means "no model available here" and is the normal state below macOS 26.
-    public static func route(query: String, engine: RoutingEngine?) async -> Routed? {
+    public static func route(
+        query: String,
+        engine: RoutingEngine?,
+        timeout: Double = timeoutSeconds
+    ) async -> Routed? {
         guard let engine, shouldAttemptRouting(query: query) else { return nil }
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = CommandPaletteCatalog.boundedQuery(query)
         guard await Latch.shared.acquire() else { return nil }
 
         // Released explicitly on both paths rather than in a `defer`: a deferred release is
@@ -90,8 +125,12 @@ public enum PaletteToolRouter {
         // still held and be dropped as if the model were busy.
         let routed: Routed?
         do {
-            let raw = try await engine(trimmed)
-            routed = sanitize(raw).map { Routed(query: trimmed, text: $0) }
+            // Cancelled between acquiring the latch and starting work — the palette closed, so
+            // there is nothing left to answer. Checked inside the do/catch so the latch below
+            // is still released.
+            try Task.checkCancellation()
+            let raw = try await withTimeout(seconds: timeout) { try await engine(trimmed) }
+            routed = raw.flatMap(sanitize).map { Routed(query: trimmed, text: $0) }
         } catch {
             DevTypeLog.store.debug(
                 "[AI] palette routing declined: \(error.localizedDescription, privacy: .public)"

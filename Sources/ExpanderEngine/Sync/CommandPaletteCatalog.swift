@@ -612,6 +612,32 @@ public enum CommandPaletteCatalog {
         }
     }
 
+    // MARK: - Input bounds
+
+    /// Longest query the ranking paths will consider.
+    ///
+    /// A palette query is something a person types; past this it is a paste. The cap bounds
+    /// three separate unbounded costs at once: tokenization, the per-term scan across the
+    /// catalogue, and the query string retained as a cache key.
+    public static let maximumQueryCharacters = 512
+
+    /// Most terms any one query contributes to ranking.
+    ///
+    /// Coverage scoring removed the old conjunctive early exit — the previous scorer returned
+    /// on the first unmatched term, so a junk paste cost one comparison per command, while the
+    /// replacement scores every term against every command to learn which terms the catalogue
+    /// understands. Measured, that turned a 5,000-word paste into a 3-second synchronous
+    /// freeze on the keystroke path. Bounding the term count restores a fixed ceiling without
+    /// giving up the coverage rule: nobody narrows a palette with a thirteenth word.
+    public static let maximumQueryTerms = 12
+
+    /// Clamps a raw query to the bounds above. Applied at every ranking entry point.
+    public static func boundedQuery(_ query: String) -> String {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > maximumQueryCharacters else { return trimmed }
+        return String(trimmed.prefix(maximumQueryCharacters))
+    }
+
     // MARK: - Ranking weights
 
     /// Boost applied to the top semantic neighbour, decaying by rank.
@@ -670,7 +696,7 @@ public enum CommandPaletteCatalog {
         limit: Int = 40
     ) -> [PaletteCommandHit] {
         guard limit > 0 else { return [] }
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = boundedQuery(query)
         var hits: [PaletteCommandHit] = []
 
         if let typed = parseTypedQuery(trimmed) {
@@ -867,7 +893,7 @@ public enum CommandPaletteCatalog {
         routedResult: PaletteToolRouter.Routed? = nil,
         context: PaletteContext = .none
     ) -> [PaletteListRow] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = boundedQuery(query)
         let libStamp = SnippetSearch.fingerprint(of: groups, includeDisabled: false)
         let cmdRev = CommandUsageStatsStore.shared.revision
         let snipRev = UsageStatsStore.shared.revision
@@ -1067,7 +1093,7 @@ public enum CommandPaletteCatalog {
     /// silently matching nothing.
     public static func contentTerms(_ terms: [String]) -> [String] {
         let content = terms.filter { !queryStopwords.contains($0) }
-        return content.isEmpty ? terms : content
+        return Array((content.isEmpty ? terms : content).prefix(maximumQueryTerms))
     }
 
     /// Per-term match scores for one command; `nil` where the term did not match at all.
@@ -1427,6 +1453,7 @@ public enum CommandPaletteCatalog {
         query
             .lowercased()
             .split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == ";" })
+            .prefix(maximumQueryTerms)
             .map(String.init)
             .filter { !$0.isEmpty }
     }
@@ -1851,7 +1878,10 @@ enum PaletteSemanticIndex {
             .map(String.init)
             .filter { !$0.isEmpty }
         let content = tokens.filter { !CommandPaletteCatalog.queryStopwords.contains($0) }
-        let effective = content.isEmpty ? tokens : content
+        // Same ceiling the lexical path uses. This runs on every keystroke over the whole
+        // catalogue, and averaging a thousand pasted words says nothing a dozen would not.
+        let effective = Array((content.isEmpty ? tokens : content)
+            .prefix(CommandPaletteCatalog.maximumQueryTerms))
         guard !effective.isEmpty else { return nil }
 
         var sum: [Double] = []

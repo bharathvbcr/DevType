@@ -45,4 +45,26 @@ final class TokenizedFilterTests: XCTestCase {
         XCTAssertTrue(TokenizedFilter.matches(query: "formal", fields: ["Make Formal", ""]))
         XCTAssertFalse(TokenizedFilter.matches(query: "formal", fields: ["", ""]))
     }
+
+    /// Every term is scanned against every field of every row, so the term count needs the
+    /// same ceiling the palette uses — a paste into a search field should not become
+    /// list-sized work.
+    func testTermCountIsCapped() {
+        let huge = (0..<5000).map { "w\($0)" }.joined(separator: " ")
+        let start = Date()
+        _ = TokenizedFilter.matches(query: huge, fields: fields)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.2)
+        XCTAssertEqual(TokenizedFilter.maximumQueryTerms, 12)
+    }
+
+    /// Capping drops trailing words, which can only widen the match. It must never narrow one
+    /// that used to succeed.
+    func testCappingNeverExcludesAPreviouslyMatchingRow() {
+        let padded = "formal " + (0..<50).map { "w\($0)" }.joined(separator: " ")
+        XCTAssertTrue(TokenizedFilter.matches(query: "formal", fields: fields))
+        XCTAssertFalse(
+            TokenizedFilter.matches(query: padded, fields: fields),
+            "Words inside the cap that do not match must still exclude the row."
+        )
+    }
 }

@@ -582,9 +582,15 @@ public enum SnippetSearch {
     // MARK: Matching primitives
 
     /// Splits a query into folded terms. Whitespace separates AND-ed terms (§4.7).
+    /// Most terms one query contributes. Every term is scanned against every indexed field of
+    /// every snippet, so an unbounded term count makes a paste into the search field a
+    /// library-sized amount of work on the keystroke path.
+    static let maximumQueryTerms = 12
+
     private static func tokenize(_ query: String) -> [[Character]] {
         query.components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
+            .prefix(maximumQueryTerms)
             .map { Array(FoldedText.fold($0, locale: Locale.current).characters) }
             .filter { !$0.isEmpty }
     }

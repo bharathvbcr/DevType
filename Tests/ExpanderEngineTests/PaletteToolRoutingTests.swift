@@ -199,6 +199,73 @@ final class PaletteToolRoutingTests: XCTestCase {
         XCTAssertNotNil(firstResult, "The in-flight call still completes normally.")
     }
 
+
+    // MARK: - Bounds
+
+    /// A model that never answers used to hold the single-flight latch for the rest of the
+    /// session: every later keystroke found it busy and routing was dead, with no error
+    /// surfaced anywhere. The timeout is what makes that recoverable.
+    func testATimedOutCallReleasesTheLatch() async {
+        let hung = await PaletteToolRouter.route(
+            query: "the date next friday",
+            engine: { _ in
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+                return "never"
+            },
+            timeout: 0.3
+        )
+        XCTAssertNil(hung, "A call past the deadline must be abandoned, not awaited.")
+
+        let after = await PaletteToolRouter.route(
+            query: "the date next monday", engine: { _ in "2026-09-07" }
+        )
+        XCTAssertNotNil(after, "Routing must still work after a hung call.")
+    }
+
+    /// The deadline must not truncate a normal answer.
+    func testAPromptAnswerIsNotAffectedByTheDeadline() async {
+        let routed = await PaletteToolRouter.route(
+            query: "the date next friday", engine: { _ in "2026-09-04" }, timeout: 5
+        )
+        XCTAssertEqual(routed?.text, "2026-09-04")
+    }
+
+    /// The panel cancels its routing task when it closes. That must not strand the latch.
+    func testACancelledRouteDoesNotStrandTheLatch() async {
+        let task = Task {
+            await PaletteToolRouter.route(
+                query: "the date next friday",
+                engine: { _ in
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    return "never"
+                },
+                timeout: 9
+            )
+        }
+        task.cancel()
+        _ = await task.value
+
+        let after = await PaletteToolRouter.route(
+            query: "the date next monday", engine: { _ in "2026-09-07" }
+        )
+        XCTAssertNotNil(after, "A cancelled route must leave routing usable.")
+    }
+
+    /// Past the ranking cap a query is a paste, not a question — and a routed answer to an
+    /// unclamped query could never match the clamped one `buildRows` compares against.
+    func testAnOverlongQueryIsNotRouted() async {
+        let huge = String(repeating: "a", count: CommandPaletteCatalog.maximumQueryCharacters + 1)
+        XCTAssertFalse(PaletteToolRouter.shouldAttemptRouting(query: huge))
+
+        let called = Sendable_Box()
+        let routed = await PaletteToolRouter.route(query: huge) { _ in
+            called.set()
+            return "x"
+        }
+        XCTAssertNil(routed)
+        XCTAssertFalse(called.value, "An overlong query must not reach the model.")
+    }
+
     /// The latch must be released on both paths, or the first failure wedges routing for the
     /// rest of the session.
     func testLatchIsReleasedAfterAFailure() async {
