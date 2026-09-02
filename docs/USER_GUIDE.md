@@ -177,7 +177,7 @@ Need to store passwords, API keys, or recovery codes?
 1. Open the Snippet Manager (`⌘⇧M`) and mark the snippet as **Secret**.
 2. DevType encrypts the snippet with **AES-GCM** into a sealed archive; the single master key lives in your macOS Keychain.
 3. Secrets **never** expand from typed triggers (preventing accidental disclosure in chat windows or screen shares).
-4. Focus the password field. When macOS Secure Input is active, the menu bar shows a key and **Copy Secret**. Click it to open **Search Secrets** directly, then search for and choose a secret. Right-click or Control-click the button to open the full DevType menu. The Copy Secret submenu also remains available during ordinary typing.
+4. Focus the password field. When macOS Secure Input is active, the menu bar shows a key and **Copy Secret**. Click it to open **Search Secrets** directly, then single-click a result to copy it. You can also use the arrow keys and press Return. Right-click or Control-click the button to open the full DevType menu. The Copy Secret submenu also remains available during ordinary typing.
 5. DevType prompts for **Touch ID** (password fallback available; one check covers 30 seconds of back-to-back copies), copies the secret to the clipboard with concealment flags (hiding it from clipboard managers), and auto-clears the clipboard after 90 seconds.
 6. Return to the password field and press **`⌘V`** to paste. Typed triggers remain paused while Secure Input is active.
 7. The Touch ID gate itself can be toggled under **Preferences → Snippets → Secrets** or from the bottom of the **Copy Secret** menu.

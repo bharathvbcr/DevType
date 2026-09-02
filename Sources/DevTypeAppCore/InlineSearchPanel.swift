@@ -61,6 +61,8 @@ enum InlineSearchPanel {
         var showsCommands: Bool { self != .copySecrets }
 
         var showsOnlySecrets: Bool { self == .copySecrets }
+
+        var copiesSelection: Bool { self != .insert }
     }
 
     /// Result of committing a palette row.
@@ -501,6 +503,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     private var groups: [SnippetGroup] = []
     private var rows: [PaletteListRow] = []
     private var selection = 0
+    private var didFinish = false
     private var keyMonitor: Any?
     private var listenerToken: UUID?
     /// Clipboard text + changeCount — refreshed on open / when changeCount moves (not every keystroke).
@@ -593,7 +596,8 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         tableView.dataSource = self
         tableView.delegate = self
         tableView.target = self
-        tableView.doubleAction = #selector(expandSelected)
+        tableView.action = mode.copiesSelection ? #selector(commitClickedRow) : nil
+        tableView.doubleAction = #selector(commitClickedRow)
         tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row")))
         tableView.setAccessibilityLabel(loc.s("ax.searchResults"))
         searchField.setAccessibilityLabel(loc.s("search.placeholder"))
@@ -609,7 +613,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         let navigateCap = KeyCapView("↑↓")
         let navigateLabel = DevTypeTheme.makeLabel(loc.s("search.hint.navigate"), font: DevTypeTheme.font(10.5, .medium), color: DevTypeTheme.textTertiary)
         let expandCap = KeyCapView("↩")
-        let expandLabel = DevTypeTheme.makeLabel(loc.s("search.hint.expand"), font: DevTypeTheme.font(10.5, .medium), color: DevTypeTheme.textTertiary)
+        let expandLabel = DevTypeTheme.makeLabel(loc.s(mode.copiesSelection ? "search.hint.copy" : "search.hint.expand"), font: DevTypeTheme.font(10.5, .medium), color: DevTypeTheme.textTertiary)
         let jumpCap = KeyCapView("⌘1–9")
         let jumpLabel = DevTypeTheme.makeLabel(loc.s("search.hint.jump"), font: DevTypeTheme.font(10.5, .medium), color: DevTypeTheme.textTertiary)
         countLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -719,6 +723,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
+        didFinish = true
         semanticWorkItem?.cancel()
         // Same reason the semantic work item is cancelled here: a routing round trip
         // outliving the panel would resolve against a search field that is no longer on
@@ -894,7 +899,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
                 if event.modifierFlags.contains(.command),
                    let digit = Self.digitKeyCodes[Int(event.keyCode)] {
                     if let pick = self.pickAtJumpIndex(digit - 1) {
-                        self.onPick(pick)
+                        self.commit(pick)
                         return nil
                     }
                 }
@@ -913,17 +918,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
     /// Jump index among selectable rows only (headers skipped).
     private func pickAtJumpIndex(_ index: Int) -> InlineSearchPanel.Pick? {
-        let selectable = rows.compactMap { row -> InlineSearchPanel.Pick? in
-            switch row {
-            case .command(let hit):
-                guard hit.isEnabled else { return nil }
-                return .command(hit.command, insertText: hit.insertText)
-            case .snippet(let hit):
-                return .snippet(hit.snippet)
-            case .header:
-                return nil
-            }
-        }
+        let selectable = rows.indices.compactMap { pick(at: $0) }
         guard selectable.indices.contains(index) else { return nil }
         return selectable[index]
     }
@@ -959,9 +954,9 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         applySelection(scroll: true)
     }
 
-    private func selectedPick() -> InlineSearchPanel.Pick? {
-        guard rows.indices.contains(selection) else { return nil }
-        switch rows[selection] {
+    private func pick(at index: Int) -> InlineSearchPanel.Pick? {
+        guard rows.indices.contains(index), rows[index].isSelectable else { return nil }
+        switch rows[index] {
         case .command(let hit):
             return .command(hit.command, insertText: hit.insertText)
         case .snippet(let hit):
@@ -972,11 +967,28 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     }
 
     @objc private func expandSelected() {
-        guard let pick = selectedPick() else { return }
+        guard let pick = pick(at: selection) else { return }
+        commit(pick)
+    }
+
+    @objc private func commitClickedRow() {
+        // A click in blank space or a header must never commit the keyboard selection.
+        guard let pick = pick(at: tableView.clickedRow) else { return }
+        commit(pick)
+    }
+
+    private func commit(_ pick: InlineSearchPanel.Pick) {
+        // All mouse, Return, and jump-key paths finish this panel exactly once.
+        guard !didFinish else { return }
+        didFinish = true
         onPick(pick)
     }
 
-    @objc private func cancel() { onCancel() }
+    @objc private func cancel() {
+        guard !didFinish else { return }
+        didFinish = true
+        onCancel()
+    }
 
     // MARK: Table
 

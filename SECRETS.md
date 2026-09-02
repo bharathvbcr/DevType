@@ -30,6 +30,9 @@ is allowed to show a dialog, and the measured keychain behaviour the design is b
 
 When macOS Secure Input is active, the menu-bar button shows a key and **Copy Secret**.
 Clicking it opens **Search Secrets** directly, with the search field ready for typing.
+Single-click a result, or select it with the arrow keys and press Return, to begin copying.
+The authentication gate runs before the value is read; merely highlighting or filtering
+results does not read or copy a secret.
 Right-click or Control-click the button for the full DevType menu, including the existing
 Copy Secret submenu, permission recovery, and engine diagnostics. Opening search does not
 read or copy a secret; choosing a result uses the same authentication and clipboard

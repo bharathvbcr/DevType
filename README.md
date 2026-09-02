@@ -162,7 +162,7 @@ Explore our complete documentation in the [`docs/`](docs/) directory:
 - 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
 - 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,900+ headless unit tests, debugging, and release automation.
-- 📦 **[Release notes](docs/releases/v0.1.4.md)**: v0.1.4 password-field menu improvements, verification, and signing status. See also the [direct-search follow-up](docs/releases/v0.1.4-follow-up.md).
+- 📦 **[Release notes](docs/releases/v0.1.4.md)**: v0.1.4 password-field menu improvements, verification, and signing status. See also the [direct-search follow-up](docs/releases/v0.1.4-follow-up.md) and [secret-selection fix](docs/releases/v0.1.4-secret-selection-fix.md).
 - 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---
