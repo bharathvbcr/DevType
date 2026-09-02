@@ -401,6 +401,47 @@ final class BiometricGateTests: XCTestCase {
         XCTAssertEqual(policies(), [.deviceOwnerAuthentication])
     }
 
+    func testInvalidateDuringEvaluationDoesNotCancelInFlightEvaluation() {
+        var replyBlock: ((Bool, Error?) -> Void)?
+        let authenticator = LocalAuthenticationAuthenticator(
+            availabilityProbe: { .biometry("Touch ID") },
+            evaluator: { _, _, _, completion in
+                replyBlock = completion
+            }
+        )
+        let gate = BiometricGate(authenticator: authenticator)
+
+        var outcome: BiometricGate.Outcome?
+        gate.authorize(reason: "reveal") { outcome = $0 }
+
+        // Simulating app resignation (e.g. palette window closing after user picks a secret)
+        gate.invalidate()
+
+        // User finishes Touch ID successfully
+        replyBlock?(true, nil)
+
+        XCTAssertEqual(outcome, .authorized, "An in-flight evaluation must not be cancelled by invalidate()")
+    }
+
+    func testEveryEvaluationUsesAFreshLAContext() {
+        var contexts: [LAContext] = []
+        let authenticator = LocalAuthenticationAuthenticator(
+            availabilityProbe: { .biometry("Touch ID") },
+            evaluator: { _, _, _, completion in completion(true, nil) },
+            contextFactory: {
+                let ctx = LAContext()
+                contexts.append(ctx)
+                return ctx
+            }
+        )
+
+        authenticator.evaluate(reason: "first") { _ in }
+        authenticator.evaluate(reason: "second") { _ in }
+
+        XCTAssertEqual(contexts.count, 2, "Each evaluation must get a fresh LAContext")
+        XCTAssertTrue(contexts[0] !== contexts[1], "LAContext instances must not be shared across evaluations")
+    }
+
     // MARK: - The diagnostic report
 
     /// "It asks for my password instead of Touch ID" was not diagnosable from the report at all:

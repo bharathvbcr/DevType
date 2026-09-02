@@ -187,22 +187,21 @@ public final class LocalAuthenticationAuthenticator: BiometricAuthenticating {
         _ completion: @escaping (Bool, Error?) -> Void
     ) -> Void
 
-    /// One context, reused, so macOS can apply its own reuse rules on top of ours; replaced after
-    /// `invalidate()` because an `LAContext` remembers its last successful evaluation.
-    private var context = LAContext()
-    private let lock = UnfairLock()
     private let availabilityProbe: () -> BiometricGate.Availability
     private let evaluator: PolicyEvaluator?
     private let fallbackTitle: () -> String
+    private let contextFactory: () -> LAContext
 
     public init(
         availabilityProbe: (() -> BiometricGate.Availability)? = nil,
         evaluator: PolicyEvaluator? = nil,
-        fallbackTitle: @escaping () -> String = { LocalizationManager.shared.s("secret.auth.usePassword") }
+        fallbackTitle: @escaping () -> String = { LocalizationManager.shared.s("secret.auth.usePassword") },
+        contextFactory: @escaping () -> LAContext = LAContext.init
     ) {
         self.availabilityProbe = availabilityProbe ?? LocalAuthenticationAuthenticator.probeAvailability
         self.evaluator = evaluator
         self.fallbackTitle = fallbackTitle
+        self.contextFactory = contextFactory
     }
 
     public func availability() -> BiometricGate.Availability {
@@ -264,8 +263,9 @@ public final class LocalAuthenticationAuthenticator: BiometricAuthenticating {
     public func evaluate(reason: String, completion: @escaping (BiometricGate.Outcome) -> Void) {
         let availability = availabilityProbe()
         let policy = Self.initialPolicy(for: availability)
+        let context = contextFactory()
 
-        run(policy: policy, reason: reason) { [weak self] success, error in
+        run(context: context, policy: policy, reason: reason) { [weak self] success, error in
             guard let self else { return completion(.cancelled) }
             if success { return completion(.authorized) }
 
@@ -275,13 +275,14 @@ public final class LocalAuthenticationAuthenticator: BiometricAuthenticating {
                   Self.shouldEscalateToPassword(after: error) else {
                 return completion(Self.outcome(for: error))
             }
-            self.run(policy: .deviceOwnerAuthentication, reason: reason) { success, error in
+            self.run(context: context, policy: .deviceOwnerAuthentication, reason: reason) { success, error in
                 completion(success ? .authorized : Self.outcome(for: error))
             }
         }
     }
 
     private func run(
+        context: LAContext,
         policy: LAPolicy,
         reason: String,
         completion: @escaping (Bool, Error?) -> Void
@@ -291,10 +292,6 @@ public final class LocalAuthenticationAuthenticator: BiometricAuthenticating {
             return evaluator(policy, reason, title, completion)
         }
 
-        lock.lock()
-        let context = self.context
-        lock.unlock()
-
         // Name the fallback button ourselves. Left unset, macOS labels it "Enter Password" only
         // in some configurations and hides it in others, so the way out of a failed finger was
         // not reliably visible.
@@ -303,10 +300,9 @@ public final class LocalAuthenticationAuthenticator: BiometricAuthenticating {
     }
 
     public func invalidate() {
-        lock.lock()
-        context.invalidate()
-        context = LAContext()
-        lock.unlock()
+        // No persistent LAContext across evaluation sessions: each evaluation creates its own
+        // fresh `LAContext` so previous evaluation state cannot linger, while backgrounding the app
+        // or closing a palette window will not abort an in-flight prompt the user requested.
     }
 
     /// Map `LAError` to something the caller can act on.

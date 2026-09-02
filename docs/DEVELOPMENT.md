@@ -41,7 +41,7 @@ The resolver and verification scripts have dedicated self-tests (`test-signing-i
 
 ## 🧪 Testing Guidelines
 
-DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The v0.1.4 follow-up suite contains 1,936 tests. Seven live-AI tests and seven native AppKit window tests require explicit opt-in; the latter briefly display synthetic UI.
+DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The v0.1.4 follow-up suite contains 1,938 tests. Seven live-AI tests and seven native AppKit window tests require explicit opt-in; the latter briefly display synthetic UI.
 
 ### Running Tests
 ```bash
