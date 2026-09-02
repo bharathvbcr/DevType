@@ -506,10 +506,11 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
                 filteredActions = allActions
             } else {
                 filteredActions = allActions.filter { kind in
-                    let title = loc.s(kind.localizationKey).lowercased()
-                    let desc = description(for: kind).lowercased()
-                    let tag = behaviorTag(for: kind).lowercased()
-                    return title.contains(query) || desc.contains(query) || tag.contains(query)
+                    TokenizedFilter.matches(query: query, fields: [
+                        loc.s(kind.localizationKey),
+                        description(for: kind),
+                        behaviorTag(for: kind)
+                    ])
                 }
             }
             selection = 0

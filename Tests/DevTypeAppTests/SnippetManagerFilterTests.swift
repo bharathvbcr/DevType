@@ -84,4 +84,43 @@ final class SnippetManagerFilterTests: XCTestCase {
         XCTAssertEqual(SnippetFilterChip.unused.rawValue, 7)
         XCTAssertEqual(SnippetFilterChip.tagged.rawValue, 8)
     }
+
+    // MARK: - Parity with the palette
+
+    /// The manager matched the whole query as one substring of one field, so a multi-word
+    /// query only worked when the words happened to be adjacent in that order, in a single
+    /// field. Both of these found the snippet in the palette and nothing here.
+    func testWordOrderAndCrossFieldQueriesMatchLikeThePalette() {
+        let s = snippet(trigger: ":sig", title: "Email Signature", body: "Best regards, Bharath")
+        XCTAssertTrue(
+            SnippetManagerFilter.matches(s, query: "sig email"),
+            "Word order must not decide whether the manager finds a snippet."
+        )
+        XCTAssertTrue(
+            SnippetManagerFilter.matches(s, query: "signature best"),
+            "A query spanning title and body must match, as it does in the palette."
+        )
+    }
+
+    /// Filtering stays conjunctive: every word has to land somewhere. A manager filter is a
+    /// narrowing tool, and forgiving an unmatched word here would widen the list instead.
+    func testEveryWordMustStillMatchSomething() {
+        let s = snippet(trigger: ":sig", title: "Email Signature", body: "Best regards")
+        XCTAssertFalse(
+            SnippetManagerFilter.matches(s, query: "signature zzzz"),
+            "An unmatched word must still exclude the snippet."
+        )
+    }
+
+    /// The two searches must answer the same question. This fails the moment either side
+    /// grows a rule the other lacks, which is how the tag gap arrived in the first place.
+    func testManagerAndPaletteAgreeOnTheSameLibrary() {
+        let s = snippet(trigger: ":sig", title: "Email Signature", body: "Best regards", tags: ["work"])
+        let group = SnippetGroup(name: "G", snippets: [s])
+        for query in ["sig", "email", "work", "sig email", "signature best", "zzz", "email zzz"] {
+            let manager = SnippetManagerFilter.matches(s, query: query)
+            let palette = !SnippetSearch.run(query: query, in: [group]).isEmpty
+            XCTAssertEqual(manager, palette, "manager and palette disagree on \"\(query)\"")
+        }
+    }
 }

@@ -163,10 +163,12 @@ private final class ShortcutReferenceViewController: NSViewController, NSTableVi
             filteredShortcuts = allShortcuts
         } else {
             filteredShortcuts = allShortcuts.filter {
-                $0.title.lowercased().contains(q)
-                || $0.section.lowercased().contains(q)
-                || $0.keyCaps.joined(separator: " ").lowercased().contains(q)
-                || ($0.note?.lowercased().contains(q) == true)
+                TokenizedFilter.matches(query: q, fields: [
+                    $0.title,
+                    $0.section,
+                    $0.keyCaps.joined(separator: " "),
+                    $0.note ?? ""
+                ])
             }
         }
         tableView.reloadData()

@@ -460,12 +460,17 @@ private final class EmptyStateView: NSView {
 enum SnippetManagerFilter {
 
     /// `query` is expected already trimmed and lowercased, as the field hands it over.
+    ///
+    /// Delegates to `SnippetSearch` rather than testing the fields again here. The previous
+    /// version matched the *whole* query as one substring of one field, so it disagreed with
+    /// the palette on any multi-word query: "sig email" and "signature best" found the
+    /// snippet in the palette and nothing in the manager, because no single field contains
+    /// either string. Tag parity had already been patched into this function once; matching
+    /// through the canonical scorer is what stops the next such divergence rather than
+    /// waiting to be told about it.
     static func matches(_ snippet: SnippetModel, query: String) -> Bool {
         if query.isEmpty { return true }
-        if snippet.triggerKeyword.lowercased().contains(query) { return true }
-        if snippet.displayTitle.lowercased().contains(query) { return true }
-        if snippet.replacementText.lowercased().contains(query) { return true }
-        return snippet.tags.contains { $0.lowercased().contains(query) }
+        return SnippetSearch.score(snippet: snippet, needle: query) != nil
     }
 }
 
