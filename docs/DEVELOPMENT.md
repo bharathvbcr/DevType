@@ -115,7 +115,7 @@ Outside a Git checkout, packaging falls back to the plist values. Local CI fails
 DevType checks for updates itself (`Sources/ExpanderEngine/Updates/`); Sparkle is not embedded, and the inert `SUFeedURL` / `SUEnableInstallerLauncherService` keys that used to sit in `Info.plist` have been removed — they configured a framework that was never present, and pointed at an account that is not this project's.
 
 - **`AppVersion`** parses and orders version strings. It is deliberately not a plain SemVer comparator: `git describe`'s `-<N>-g<sha>` suffix means *N commits **after*** the tag, while SemVer reads the same characters as a *pre-release **of*** it. Reading it the SemVer way tells anyone running a post-tag build to "update" to the release they are already ahead of, so the distance suffix is detected specifically and ordered above the bare tag. `AppVersionTests` pins the full ordering.
-- **`UpdateChecker`** asks the GitHub Releases API for the latest release, and does nothing else — it never downloads or installs. Acting on a result opens the release page in the browser. That is a constraint, not an omission: the GitHub release workflow now fails closed unless it can produce a Developer ID-signed, notarized artifact, and silently installing an untrusted local DMG is precisely what Gatekeeper exists to stop.
+- **`UpdateChecker`** asks the GitHub Releases API for the latest release, and does nothing else — it never downloads or installs. Acting on a result opens the release page in the browser. The current GitHub workflow publishes an explicitly marked development-signed, unnotarized DMG because this project does not have Developer ID/notarization credentials; Gatekeeper may reject it and users must approve it manually. An in-place updater remains disabled until trusted distribution is available.
 - **Off by default.** Nothing contacts the network until the user enables *Preferences → General → Updates*; automatic checks then run at most once a day. "Check for Updates…" in the menu bar is an explicit request and always works.
 - **Failure is never silence.** `UpdateCheckOutcome` keeps `.failed` and `.undeterminedLocalVersion` distinct from `.upToDate`, so a check that could not run never renders as one that ran and found nothing.
 - The request carries no version, machine, or install identifier — a static `User-Agent`, an ephemeral session with no cookie or credential storage, and a bounded response read.
@@ -137,9 +137,16 @@ DEVTYPE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./Scripts/r
 
 # Dry run without notarization (local-only DMG; never upload this artifact)
 DEVTYPE_SKIP_NOTARIZE=1 ./Scripts/release.sh
+
+# Explicit untrusted tagged publication when Developer ID/notarization is unavailable
+DEVTYPE_RELEASE_TAG=v0.1.3 \
+  DEVTYPE_SKIP_AUTO_CERT=1 \
+  DEVTYPE_SKIP_NOTARIZE=1 \
+  DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1 \
+  ./Scripts/release.sh
 ```
 
-Environment knobs: `DEVTYPE_SIGN_IDENTITY` (Developer ID identity), `DEVTYPE_NOTARY_PROFILE` (default `DevTypeNotary`), and `DEVTYPE_SKIP_NOTARIZE=1` for local-only dry runs. A tagged release never sets the skip flag: the GitHub workflow runs `ci:local`, then `release.sh` fails closed if Developer ID signing or the notary profile is unavailable. Configure the certificate and notary credentials on the runner before pushing a release tag. The release workflow also requires exact tag/version agreement, curated notes, one matching DMG with no residue assets, and a byte-identical downloaded artifact before it reports success.
+Environment knobs: `DEVTYPE_SIGN_IDENTITY` (Developer ID identity), `DEVTYPE_NOTARY_PROFILE` (default `DevTypeNotary`), and `DEVTYPE_SKIP_NOTARIZE=1` for local-only dry runs. A tagged unnotarized release must additionally set `DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1`; this is an explicit trust downgrade, not a default. The GitHub workflow runs `ci:local`, checks exact tag/version agreement, requires curated notes and one matching DMG with no residue assets, and compares the published download byte-for-byte. Its current v0.1.3 policy intentionally permits the unnotarized artifact and warns users accordingly.
 
 ---
 

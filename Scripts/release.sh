@@ -19,12 +19,15 @@
 # Usage:
 #   ./Scripts/release.sh                       # build + sign + notarize + staple + dmg
 #   DEVTYPE_SKIP_NOTARIZE=1 ./Scripts/release.sh   # dry run: sign + dmg only
+#   DEVTYPE_RELEASE_TAG=v0.1.3 DEVTYPE_SKIP_NOTARIZE=1 \
+#     DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1 ./Scripts/release.sh   # explicit untrusted publication
 #
 # Env:
 #   DEVTYPE_SIGN_IDENTITY  Developer ID Application: Name (TEAMID)   [required unless skipping]
 #   DEVTYPE_NOTARY_PROFILE notarytool keychain profile name          [default DevTypeNotary]
 #   DEVTYPE_SKIP_NOTARIZE  1 to skip notarize/staple
 #   DEVTYPE_RELEASE_TAG    exact vMAJOR.MINOR.PATCH tag being published
+#   DEVTYPE_ALLOW_UNTRUSTED_RELEASE 1 to explicitly publish a tagged unnotarized build
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,6 +36,7 @@ APP_BUNDLE="${ROOT}/.build/DevType.app"
 NOTARY_PROFILE="${DEVTYPE_NOTARY_PROFILE:-DevTypeNotary}"
 SKIP_NOTARIZE="${DEVTYPE_SKIP_NOTARIZE:-0}"
 RELEASE_TAG="${DEVTYPE_RELEASE_TAG:-}"
+ALLOW_UNTRUSTED_RELEASE="${DEVTYPE_ALLOW_UNTRUSTED_RELEASE:-0}"
 STAGE=""
 ZIP=""
 
@@ -43,8 +47,16 @@ case "${SKIP_NOTARIZE}" in
   *) die "DEVTYPE_SKIP_NOTARIZE must be 0 or 1 (got '${SKIP_NOTARIZE}')" ;;
 esac
 
-if [[ -n "${RELEASE_TAG}" && "${SKIP_NOTARIZE}" == "1" ]]; then
-  die "DEVTYPE_SKIP_NOTARIZE=1 is only permitted for untagged local dry runs; tagged release ${RELEASE_TAG} must be notarized"
+case "${ALLOW_UNTRUSTED_RELEASE}" in
+  0|1) ;;
+  *) die "DEVTYPE_ALLOW_UNTRUSTED_RELEASE must be 0 or 1 (got '${ALLOW_UNTRUSTED_RELEASE}')" ;;
+esac
+
+if [[ "${ALLOW_UNTRUSTED_RELEASE}" == "1" && "${SKIP_NOTARIZE}" != "1" ]]; then
+  die "DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1 requires DEVTYPE_SKIP_NOTARIZE=1"
+fi
+if [[ -n "${RELEASE_TAG}" && "${SKIP_NOTARIZE}" == "1" && "${ALLOW_UNTRUSTED_RELEASE}" != "1" ]]; then
+  die "tagged release ${RELEASE_TAG} is unnotarized; set DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1 only for an explicitly untrusted publication"
 fi
 
 cleanup_release_artifacts() {

@@ -57,10 +57,14 @@ jobs:
 
       - name: Build & Package DMG
         env:
+          # This project cannot use Developer ID/notarization credentials. The
+          # explicit opt-in publishes a development-signed, unnotarized DMG;
+          # release notes and the README warn users that Gatekeeper may reject it.
+          DEVTYPE_ALLOW_UNTRUSTED_RELEASE: '1'
+          DEVTYPE_SKIP_AUTO_CERT: '1'
+          DEVTYPE_SKIP_NOTARIZE: '1'
           DEVTYPE_RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          # Never publish a deliberately unnotarized artifact. release.sh fails
-          # closed when the runner lacks a Developer ID identity or notary profile.
           ./Scripts/release.sh
 
       - name: Locate DMG

@@ -122,6 +122,10 @@ Every global shortcut is rebindable in **Preferences → Hotkeys**, which is als
 ### Option 1: Download Pre-built Release
 Download the latest macOS disk image (`.dmg`) directly from the [DevType GitHub Releases Page](https://github.com/bharathvbcr/DevType/releases/latest).
 
+> **v0.1.3 distribution note:** this build is development-signed and unnotarized because Apple
+> Developer ID/notarization credentials are unavailable. Gatekeeper may reject it; if you trust the
+> source, use **Open** from Finder or **System Settings → Privacy & Security → Open Anyway**.
+
 1. Open the downloaded `.dmg`.
 2. Drag **DevType.app** to your `/Applications` folder.
 3. Open DevType and follow the Permissions Setup Wizard.
