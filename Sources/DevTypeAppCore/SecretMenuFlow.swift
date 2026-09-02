@@ -11,6 +11,19 @@ import ExpanderEngine
 /// their app with nothing of ours in the path.
 enum SecretMenuFlow {
 
+    /// Move the existing submenu, preserving its authenticated actions and identity.
+    /// Called before tracking starts; no rows are moved while a menu is open.
+    static func positionMenuItem(_ item: NSMenuItem, in menu: NSMenu, prioritize: Bool, normalIndex: Int) {
+        assertMainThread()
+        let currentIndex = menu.index(of: item)
+        guard currentIndex >= 0 else { return }
+        let firstAction = menu.items.firstIndex { !$0.isSeparatorItem && $0.view == nil } ?? 0
+        let destination = max(0, min(prioritize ? firstAction : normalIndex, menu.numberOfItems - 1))
+        guard currentIndex != destination else { return }
+        menu.removeItem(item)
+        menu.insertItem(item, at: destination)
+    }
+
     /// Resolve a snippet to text, asking for Touch ID first when the snippet is a secret.
     ///
     /// **Every** read of a secret goes through here — the menu, the copy palette, the insert

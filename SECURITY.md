@@ -35,7 +35,7 @@ DevType strictly requests only the macOS permissions required for core expansion
 - `Microphone` (`AVCaptureDevice`): On-demand permission required exclusively for Smart Voice Dictation (`⌘⌥V`).
 - `Speech Recognition` (`SFSpeechRecognizer`): On-demand permission used for on-device Apple Speech transcription.
 
-All official releases are signed and notarized with a stable Apple Developer ID or local self-signed certificate, ensuring permissions persist safely across updates.
+Local builds use the available signing identity, preferring Developer ID, then Apple Development, then a local certificate. The local v0.1.4 build uses Apple Development signing and is **not notarized**. A successful `codesign` verification is distinct from Gatekeeper approval: notarized distribution requires Developer ID signing and acceptance by Apple’s notary service. The installer compares designated requirements and handles a changed identity separately from a normal version update.
 
 ---
 

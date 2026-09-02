@@ -18,6 +18,18 @@ import XCTest
 
 final class SourceContractTests: XCTestCase {
 
+    func testStatusButtonUsesTheSecureInputPresentationAtTheLiveBoundary() throws {
+        let app = try source("Sources/DevTypeAppCore/AppDelegate.swift")
+        let start = try XCTUnwrap(app.range(of: "private func refreshStatusItemUI()"))
+        let end = try XCTUnwrap(app.range(of: "private func refreshOpenAtLoginMenuItem()"))
+        let body = String(app[start.lowerBound..<end.lowerBound])
+        XCTAssertTrue(body.contains("AXContextChecker.isSecureEventInputEnabledLive()"),
+                      "Menu refresh must re-read Secure Input rather than replay a queued sample")
+        XCTAssertTrue(body.contains("StatusItemPresentation("),
+                      "The status button must use the tested dynamic presentation")
+        XCTAssertTrue(body.contains("presentation.apply(to: button)"))
+    }
+
     // MARK: - Source access
 
     /// Repo root derived from this file's location (`Tests/ExpanderEngineTests/…`).

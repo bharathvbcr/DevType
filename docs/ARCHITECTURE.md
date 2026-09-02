@@ -99,6 +99,8 @@ sequenceDiagram
 - **Swallowing Ring Buffer**: Intercepted keystrokes are evaluated against active triggers. If an abbreviation prefix is matched, the event tap swallows the keystrokes so they never render in the target document.
 - **Dead Keys & IME**: The engine tracks input source states, dead keys (accents), and IME composition to prevent breaking non-Latin and accented typing flows.
 - **Fail-Closed Security**: `SecureInputMonitor` continuously checks `IsSecureEventInputEnabled()` and `AXContextChecker` checks for `NSSecureTextField`. If active, the event tap immediately yields to ensure password privacy.
+- **Secure-input status lifecycle**: the monitor polls every 350 ms by default, synchronizes timer ownership and its change gate, and rejects queued callbacks from stopped or replaced generations. The menu-bar UI re-reads Secure Input live before updating the engine flag.
+- **Password-field menu presentation**: `StatusItemPresentation` maps the live secure-input signal to a localized key and **Copy Secret** independently of engine permission/pause diagnostics. `StatusItemContext` retains the clicked copy affordance during menu tracking; menu rebuilds are deferred until close. The existing `SecretMenuFlow` submenu is promoted before tracking, so authentication and clipboard handling retain one owner.
 
 ---
 

@@ -21,65 +21,89 @@ public final class SecureInputMonitor {
 
     private var monitorTimer: DispatchSourceTimer?
     private let monitorQueue = DispatchQueue(label: "com.devtype.secureinputmonitor", qos: .utility)
-    /// §1.11: `lastReportedLocked` is written by the timer handler (monitorQueue) and by
-    /// `start`/`stopMonitoring` (usually main). It was previously unsynchronized — an
-    /// `Optional<Bool>` torn between threads silently drops or duplicates lock transitions,
-    /// which is exactly the edge that decides whether DevType is muted in a password field.
+    /// Timer ownership, generation and the edge gate share one lock. Cancellation
+    /// alone does not revoke a timer handler or a delivery already queued on main.
     private let stateLock = UnfairLock()
-    /// Change-gate: only invoke onChange when lock state actually flips.
+    private var generation: UUID?
     private var lastReportedLocked: Bool?
+    private let statusProvider: (() -> LockStatus)?
 
-    public init() {}
+    public init() {
+        statusProvider = nil
+    }
 
-    /// Reads-and-updates the change gate atomically. Returns `true` when the caller should notify.
-    private func shouldReport(_ isLocked: Bool) -> Bool {
+    /// Deterministic state source for lifecycle tests; production always uses the OS probe.
+    init(statusProvider: @escaping () -> LockStatus) {
+        self.statusProvider = statusProvider
+    }
+
+    deinit {
+        stopMonitoring()
+    }
+
+    static func pollingInterval(_ interval: TimeInterval) -> TimeInterval {
+        guard interval.isFinite, interval > 0 else { return 0.35 }
+        return min(5, max(0.05, interval))
+    }
+
+    private func shouldReport(_ isLocked: Bool, generation expected: UUID) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        // Edge-triggered: notify only on first sample or when locked state changes.
+        guard generation == expected else { return false }
         guard lastReportedLocked == nil || lastReportedLocked != isLocked else { return false }
         lastReportedLocked = isLocked
         return true
     }
 
-    private func clearReportedState() {
+    private func isCurrent(_ expected: UUID) -> Bool {
         stateLock.lock()
-        lastReportedLocked = nil
-        stateLock.unlock()
+        defer { stateLock.unlock() }
+        return generation == expected
     }
 
     public func startMonitoring(interval: TimeInterval = 0.35, onChange: @escaping (LockStatus) -> Void) {
-        stopMonitoring()
-        clearReportedState()
-        DevTypeLog.secureInput.info(
-            "[SecureInput] monitor started interval=\(interval, privacy: .public)s"
-        )
-
+        let interval = Self.pollingInterval(interval)
+        let currentGeneration = UUID()
         let timer = DispatchSource.makeTimerSource(queue: monitorQueue)
         timer.schedule(deadline: .now(), repeating: interval)
         timer.setEventHandler { [weak self] in
-            guard let self = self else { return }
-            let status = self.checkLockStatus()
-            guard self.shouldReport(status.isLocked) else { return }
-            let app = status.holdingAppName ?? "nil"
-            let pid = status.holdingPID.map { String($0) } ?? "nil"
-            DevTypeLog.secureInput.info(
-                "[SecureInput] lock \(status.isLocked ? "enabled" : "released", privacy: .public) frontmost=\(app, privacy: .public) pid=\(pid, privacy: .public)"
-            )
-            DispatchQueue.main.async {
+            guard let self, self.isCurrent(currentGeneration) else { return }
+            let status = self.statusProvider?() ?? self.checkLockStatus()
+            guard self.shouldReport(status.isLocked, generation: currentGeneration) else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isCurrent(currentGeneration) else { return }
+                let app = status.holdingAppName ?? "nil"
+                let pid = status.holdingPID.map { String($0) } ?? "nil"
+                DevTypeLog.secureInput.info(
+                    "[SecureInput] lock \(status.isLocked ? "enabled" : "released", privacy: .public) frontmost=\(app, privacy: .public) pid=\(pid, privacy: .public)"
+                )
                 onChange(status)
             }
         }
-        timer.resume()
+
+        stateLock.lock()
+        monitorTimer?.cancel()
+        generation = currentGeneration
+        lastReportedLocked = nil
         monitorTimer = timer
+        // Resume while ownership is locked: stop/start from another thread cannot
+        // cancel an unresumed source and deallocate it in the suspended state.
+        timer.resume()
+        stateLock.unlock()
+        DevTypeLog.secureInput.info("[SecureInput] monitor started interval=\(interval, privacy: .public)s")
     }
 
     public func stopMonitoring() {
-        if monitorTimer != nil {
-            DevTypeLog.secureInput.debug("[SecureInput] monitor stopped")
-        }
+        stateLock.lock()
+        let wasMonitoring = monitorTimer != nil
+        generation = nil
         monitorTimer?.cancel()
         monitorTimer = nil
-        clearReportedState()
+        lastReportedLocked = nil
+        stateLock.unlock()
+        if wasMonitoring {
+            DevTypeLog.secureInput.debug("[SecureInput] monitor stopped")
+        }
     }
 
     public func checkLockStatus() -> LockStatus {

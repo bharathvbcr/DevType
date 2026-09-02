@@ -84,7 +84,7 @@ public enum EngineDisplayStatus: Equatable {
         case .paused:
             return "DevType is paused"
         case .secure:
-            return "Secure Input active — typed abbreviations muted. Use ⌘/ to paste into password fields (typing cannot work)."
+            return LocalizationManager.shared.s("status.secure.copyHelp", LocalizationManager.shared.s("menu.copySecret"))
         case .active:
             if degradedInject {
                 let names = missingCapabilityNames.filter { $0 != "Input Monitoring" && $0 != "Accessibility" }

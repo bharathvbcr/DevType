@@ -28,6 +28,13 @@ is allowed to show a dialog, and the measured keychain behaviour the design is b
   holds our write. The final keystroke — `⌘V` in the target app — is the user's own, which is
   what makes this work inside password fields where synthetic input paths are curtailed.
 
+When macOS Secure Input is active, the menu-bar button shows a key and **Copy Secret**.
+Opening it puts the existing Copy Secret submenu first. The choice stays stable while the
+menu is open, even if opening the menu releases password-field focus; closing it restores
+the current status. Expansion remains blocked, and selecting a secret still uses the same
+authentication and clipboard auto-clear flow. Permission and engine diagnostics remain in
+the menu.
+
 ## Touch ID gate
 
 Every secret read funnels through one resolver (`SecretMenuFlow.resolve`) that asks for

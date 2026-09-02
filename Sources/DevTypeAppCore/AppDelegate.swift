@@ -6,7 +6,10 @@ import ServiceManagement
 // MARK: - Main Application Delegate
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var statusMenuOpen = false
+    private var statusItemContext = StatusItemContext()
+    private var menuRebuildPending = false
+    private var secretsMenuItem: NSMenuItem?
+    private var secretsMenuNormalIndex = 0
     private var secretsSubmenu: NSMenu?
     private var snippetWindowController: NSWindowController?
     private var permissionWindowController: NSWindowController?
@@ -367,20 +370,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func rebuildMenu() {
+        guard !statusItemContext.menuIsOpen else {
+            menuRebuildPending = true
+            refreshStatusItemUI()
+            return
+        }
+        menuRebuildPending = false
         statusItem?.menu = buildMenu()
         refreshStatusItemUI()
-    }
-
-    /// True while the status menu is open, i.e. while AppKit is painting the
-    /// selection fill behind the button. `refreshStatusItemUI()` reads it when it
-    /// picks the monogram's ink.
-    fileprivate var isStatusMenuOpen: Bool {
-        get { statusMenuOpen }
-        set {
-            guard statusMenuOpen != newValue else { return }
-            statusMenuOpen = newValue
-            refreshStatusItemUI()
-        }
     }
 
     private func makeMenuHeaderView() -> NSView {
@@ -509,6 +506,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         secretsItem.submenu = secretsMenu
         secretsSubmenu = secretsMenu
         rebuildSecretsMenu()
+        secretsMenuItem = secretsItem
+        secretsMenuNormalIndex = menu.numberOfItems
         menu.addItem(secretsItem)
 
         menu.addItem(item(loc.s("menu.import"), "square.and.arrow.down", #selector(importSnippets(_:))))
@@ -680,6 +679,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func rebuildRecentMenu() {
         assertMainThread()
+        // Store/preference callbacks can arrive during menu tracking too.
+        guard !statusItemContext.menuIsOpen else {
+            menuRebuildPending = true
+            return
+        }
         guard let recentSubmenu else { return }
         recentSubmenu.removeAllItems()
         if recentSnippets.isEmpty {
@@ -704,6 +708,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func rebuildSecretsMenu() {
         assertMainThread()
+        // Store/preference callbacks can arrive during menu tracking too.
+        guard !statusItemContext.menuIsOpen else {
+            menuRebuildPending = true
+            return
+        }
         guard let secretsSubmenu else { return }
         secretsSubmenu.removeAllItems()
 
@@ -1771,47 +1780,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startSecureInputMonitoring() {
-        SecureInputMonitor.shared.startMonitoring(interval: 0.35) { [weak self] status in
-            EventTapEngine.shared.isSecureInputActive = status.isLocked
+        SecureInputMonitor.shared.startMonitoring(interval: 0.35) { [weak self] _ in
+            // The notification is a wake-up, not an authoritative queued snapshot.
             self?.refreshStatusItemUI()
-        }
-    }
-
-    private func statusColor(for display: EngineDisplayStatus, urgent: Bool) -> NSColor {
-        switch display {
-        case .active:
-            return urgent ? DevTypeTheme.statusOrange : DevTypeTheme.statusGreen
-        case .secure:
-            return DevTypeTheme.statusBlue
-        case .paused:
-            return DevTypeTheme.statusGray
-        case .needsPermissions, .tapFailed:
-            return DevTypeTheme.accent
-        }
-    }
-
-    /// §5.2: five engine states used to map onto dot colours only.
-    /// These three helpers add the non-colour channels: a glyph stamped into the
-    /// badge, a localized name spoken by VoiceOver, and an optional text title
-    /// beside the icon.
-    private func statusKind(for display: EngineDisplayStatus) -> EngineDisplayStatusKind {
-        switch display {
-        case .active: return .active
-        case .secure: return .secure
-        case .paused: return .paused
-        case .needsPermissions: return .needsPermissions
-        case .tapFailed: return .tapFailed
-        }
-    }
-
-    private func statusName(for display: EngineDisplayStatus, urgent: Bool) -> String {
-        if urgent, display == .active { return loc.s("status.injectIssue") }
-        switch display {
-        case .active: return loc.s("status.active")
-        case .secure: return loc.s("status.secure")
-        case .paused: return loc.s("status.paused")
-        case .needsPermissions: return loc.s("status.needsPermissions")
-        case .tapFailed: return loc.s("status.tapFailed")
         }
     }
 
@@ -1826,12 +1797,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         assertMainThread()
+        let secureInputActive = AXContextChecker.isSecureEventInputEnabledLive()
+        EventTapEngine.shared.isSecureInputActive = secureInputActive
+        statusItemContext.refresh(secureInputActive: secureInputActive)
         let snapshot = PermissionProbe().snapshot()
         let display = EngineDisplayStatus.resolve(
             snapshot: snapshot,
             isTapRunning: EventTapEngine.shared.isTapRunning,
             isEnabled: EventTapEngine.shared.isEnabled,
-            isSecureInputActive: EventTapEngine.shared.isSecureInputActive
+            isSecureInputActive: secureInputActive
         )
         if lastLoggedDisplayStatus != display {
             DevTypeLog.app.info(
@@ -1847,48 +1821,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 return false
             }
         }()
-        let urgent = urgentInject || snapshot.isDegradedInject
-        // The restart affordance tracks the failure state exactly: visible while the last
-        // expansion refused or failed, gone once one succeeds (or the user restarts).
         restartEngineMenuItem?.isHidden = !urgentInject
-        let color = statusColor(for: display, urgent: urgent)
-        let kind = statusKind(for: display)
-        let name = statusName(for: display, urgent: urgentInject)
-        let needsAttention = display.requiresAction || urgent
-        // §0.3: a blocked or conflicted library also deserves the attention state.
-        let libraryUnhealthy = LibraryHealthMonitor.shared.condition != nil
-
-        // The working state earns no badge: a permanently lit indicator carries no
-        // information and only dulls the states that do. Note this is narrower than
-        // `!needsAttention` — `.active` is also the kind reported while an inject is
-        // degraded, where `urgent` turns the badge orange, and that warning has to
-        // survive. `.paused` and `.secure` keep their badges: they are not failures
-        // but they are not "typing works", either.
-        let quiet = display == .active && !urgent
-        let badge: (kind: EngineDisplayStatusKind, tint: NSColor)? = quiet ? nil : (kind, color)
-
+        let presentation = StatusItemPresentation(
+            display: display,
+            snapshot: snapshot,
+            isSecureInputActive: statusItemContext.offersCopySecret,
+            urgentInject: urgentInject,
+            libraryUnhealthy: LibraryHealthMonitor.shared.condition != nil,
+            differentiateWithoutColor: DevTypeAccessibility.differentiateWithoutColor,
+            highlighted: statusItemContext.menuIsOpen,
+            loc: loc
+        )
+        let name = presentation.statusName
+        let color = presentation.statusColor
+        let needsAttention = presentation.needsAttention
         if let button = statusItem?.button {
-            // §5.2: shape channel inside the badge, so state survives greyscale
-            // and colour-blind vision.
-            button.image = DevTypeTheme.statusItemImage(
-                badge: badge,
-                highlighted: statusMenuOpen,
-                accessibilityLabel: name
-            )
-            // §5.2: text channel. Always on under Differentiate Without Color;
-            // otherwise only when something actually needs attention, so the menu
-            // bar stays quiet in the normal case.
-            let showsText = DevTypeAccessibility.differentiateWithoutColor
-                || needsAttention
-                || libraryUnhealthy
-            button.title = showsText ? " \(name)" : ""
-            button.imagePosition = showsText ? .imageLeading : .imageOnly
-            button.toolTip = display.toolTip(snapshot: snapshot)
-            // §5.1: VoiceOver reads the state instead of an unlabeled image;
-            // tooltips are unreliable under VO.
-            button.setAccessibilityLabel(loc.s("ax.status.item"))
-            button.setAccessibilityValue(name)
-            button.setAccessibilityHelp(loc.s("ax.status.item.help", name))
+            presentation.apply(to: button)
         }
         statusToggleMenuItem?.title = needsAttention
             ? loc.s("status.menu.attention", name)
@@ -2202,19 +2150,38 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Status menu open/close
 
 extension AppDelegate: NSMenuDelegate {
-    public func menuNeedsUpdate(_ menu: NSMenu) {
+    private func prepareStatusMenu(_ menu: NSMenu) {
+        guard menu === statusItem?.menu, !statusItemContext.menuIsOpen else { return }
+        // Capture the affordance the user clicked before opening changes field focus.
+        let copyRequested = statusItemContext.offersCopySecret
+            || AXContextChecker.isSecureEventInputEnabledLive()
         updateDynamicMenuItems()
+        statusItemContext.openMenu(secureInputActive: copyRequested)
+        if let secretsMenuItem {
+            SecretMenuFlow.positionMenuItem(
+                secretsMenuItem, in: menu,
+                prioritize: statusItemContext.offersCopySecret,
+                normalIndex: secretsMenuNormalIndex
+            )
+        }
+        refreshStatusItemUI()
     }
 
-    /// AppKit paints the selection fill behind the status button while the menu is
-    /// open but leaves a non-template image untouched, so the monogram is redrawn
-    /// in the selected-menu ink for as long as the menu is up.
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        prepareStatusMenu(menu)
+    }
+
     public func menuWillOpen(_ menu: NSMenu) {
-        isStatusMenuOpen = true
-        updateDynamicMenuItems()
+        prepareStatusMenu(menu)
     }
 
     public func menuDidClose(_ menu: NSMenu) {
-        isStatusMenuOpen = false
+        guard menu === statusItem?.menu else { return }
+        statusItemContext.closeMenu(secureInputActive: AXContextChecker.isSecureEventInputEnabledLive())
+        if menuRebuildPending {
+            rebuildMenu()
+        } else {
+            refreshStatusItemUI()
+        }
     }
 }

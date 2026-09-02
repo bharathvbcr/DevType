@@ -21,15 +21,15 @@ All common workflows are automated via shell scripts in the `Scripts/` directory
 |---|---|---|
 | **Signing Identity** | `./Scripts/signing-identity.sh` | Prints the identity builds will use: Developer ID → Apple Development → self-signed → ad-hoc. Read-only. |
 | **Local Signing Certificate** | `./Scripts/make-signing-cert.sh` | Generates the `DevType Local Signing` self-signed cert so TCC permissions survive rebuilds. Only needed when you have no Apple Development certificate. |
-| **Run Unit Tests** | `./Scripts/test.sh [-v]` | Runs the headless SwiftPM test suite (`ExpanderEngineTests`). Pins `DEVELOPER_DIR` to full Xcode — Command Line Tools-only toolchains break `swift test`. |
+| **Run Unit Tests** | `./Scripts/test.sh [-v]` | Runs the SwiftPM engine and AppKit-core tests (`ExpanderEngineTests`, `DevTypeAppTests`). Pins `DEVELOPER_DIR` to full Xcode — Command Line Tools-only toolchains break `swift test`. |
 | **Package Application** | `./Scripts/package-app.sh [release\|debug]` | Compiles binaries, bundles resources, stamps version from Git, and signs `.build/DevType.app`. Skips wipe+resign when nothing changed to preserve the CDHash. |
 | **Build Application** | `./Scripts/build_app.sh [release\|debug]` | Thin wrapper delegating to `package-app.sh`. |
-| **Install Application** | `./Scripts/install-app.sh` | Packages if needed, installs one daily-driver copy into `/Applications` (falls back to `~/Applications`), quits other DevType processes, and quarantines stale `build/` artifacts. |
+| **Install Application** | `./Scripts/install-app.sh [release\|debug]` | Packages if needed, installs one daily-driver copy into `/Applications` (falls back to `~/Applications`), quits other DevType processes, and quarantines stale `build/` artifacts. |
 | **Local CI Verification** | `./Scripts/ci-local.sh` | Full validation pipeline: script syntax lint, plist lint, script self-tests, unit tests, debug + release builds, packaging, bundle-ID/version verification (fails if placeholder versions survive), and codesign verification. Mirrors GitHub CI. |
 | **Reset Permissions** | `./Scripts/reset-tcc.sh` | Resets the macOS TCC database for `com.devtype.app` to test fresh onboarding flows. |
 | **Release & Notarize** | `./Scripts/release.sh` | Build → Developer ID sign → notarize → staple → DMG. Takes no positional arguments; see configuration below. |
 | **DMG Selection** | `./Scripts/select-release-dmg.sh` | Picks exactly one `DevType-<version>.dmg`; zero or multiple candidates is fatal. Has a stubbed self-test (`test-release-dmg-select.sh`). |
-| **Release Preflight** | `./Scripts/release-preflight.sh` | Validates git cleanliness, tags, and local CI before tagging/publishing releases. |
+| **Release Preflight** | `./Scripts/release-preflight.sh` | Requires an existing exact tag at HEAD, a clean worktree, matching release notes, and disabled default voice tracing. Run local CI separately. |
 | **Signing Preflight** | `./Scripts/release-signing-preflight.sh` | Validates that the active signing identity meets distribution requirements. |
 | **Release Version Check** | `./Scripts/verify-release-version.sh` | Refuses to package a bundle whose stamped version differs from the exact release tag. |
 | **Asset Verification** | `./Scripts/verify-release-asset-list.sh` | Verifies published GitHub release asset inventories to prevent missing or mismatched assets. |
@@ -41,7 +41,7 @@ The resolver and verification scripts have dedicated self-tests (`test-signing-i
 
 ## 🧪 Testing Guidelines
 
-DevType maintains **1,900+ unit, fuzz, and stress tests** across the suites in `Tests/ExpanderEngineTests/`.
+DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The v0.1.4 suite contains 1,926 tests; seven live-AI tests require explicit opt-in.
 
 ### Running Tests
 ```bash
@@ -52,10 +52,14 @@ DevType maintains **1,900+ unit, fuzz, and stress tests** across the suites in `
 ./Scripts/test.sh -v
 
 # Run a specific test class
-swift test --filter SecretSnippetStressTests
+./Scripts/test.sh --filter SecretSnippetStressTests
 
 # Run a single test case
-swift test --filter testBiometricGateGating
+./Scripts/test.sh --filter testBiometricGateGating
+
+# Check secure-input monitor lifecycle races with Thread Sanitizer
+./Scripts/test.sh --scratch-path /tmp/devtype-secure-input-tsan --sanitize thread \
+  --filter SecureInputMonitorLifecycleTests
 ```
 
 Continuous integration (`.github/workflows/ci.yml`) runs `swift build` + `swift test` on macOS 14 plus a dedicated **macOS 26 job**, because `AITextTransformer` compiles against Apple Foundation Models only where `canImport(FoundationModels)` holds — the older runner guards the stub path, the newer one compiles and tests the real AI plumbing.
@@ -130,7 +134,13 @@ xcrun notarytool store-credentials DevTypeNotary \
 # commit whose local CI passed.
 git commit -m "your release changes"
 ./Scripts/ci-local.sh
-git tag -a v0.1.0 -m "Release v0.1.0"
+git tag -a v0.1.4 -m "Release v0.1.4"
+./Scripts/release-preflight.sh v0.1.4
+
+# Local release installation using the available signing identity
+./Scripts/install-app.sh release
+./Scripts/verify-release-version.sh v0.1.4 \
+  "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/DevType.app/Contents/Info.plist)"
 
 # Build, sign, notarize, staple, and produce dist/DevType-<version>.dmg
 DEVTYPE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./Scripts/release.sh
@@ -139,14 +149,14 @@ DEVTYPE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./Scripts/r
 DEVTYPE_SKIP_NOTARIZE=1 ./Scripts/release.sh
 
 # Explicit untrusted tagged publication when Developer ID/notarization is unavailable
-DEVTYPE_RELEASE_TAG=v0.1.3 \
+DEVTYPE_RELEASE_TAG=v0.1.4 \
   DEVTYPE_SKIP_AUTO_CERT=1 \
   DEVTYPE_SKIP_NOTARIZE=1 \
   DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1 \
   ./Scripts/release.sh
 ```
 
-Environment knobs: `DEVTYPE_SIGN_IDENTITY` (Developer ID identity), `DEVTYPE_NOTARY_PROFILE` (default `DevTypeNotary`), and `DEVTYPE_SKIP_NOTARIZE=1` for local-only dry runs. A tagged unnotarized release must additionally set `DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1`; this is an explicit trust downgrade, not a default. The GitHub workflow runs `ci:local`, checks exact tag/version agreement, requires curated notes and one matching DMG with no residue assets, and compares the published download byte-for-byte. Its current v0.1.3 policy intentionally permits the unnotarized artifact and warns users accordingly.
+Environment knobs: `DEVTYPE_SIGN_IDENTITY` (Developer ID identity), `DEVTYPE_NOTARY_PROFILE` (default `DevTypeNotary`), and `DEVTYPE_SKIP_NOTARIZE=1` for local-only dry runs. A tagged unnotarized release must additionally set `DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1`; this is an explicit trust downgrade, not a default. The GitHub workflow runs `ci:local`, checks exact tag/version agreement, requires curated notes and one matching DMG with no residue assets, and compares the published download byte-for-byte. The workflow’s explicit untrusted-release policy permits the unnotarized artifact and warns users accordingly.
 
 ---
 
