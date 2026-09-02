@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+import Foundation
 @testable import ExpanderEngine
 
 /// The two capture races in `VoiceSessionCoordinator`, driven for real.
@@ -56,6 +57,29 @@ final class VoiceCaptureRaceTests: XCTestCase {
         }
 
         func cancelCapture() { cancelCount += 1 }
+    }
+
+    /// Synchronous, lock-guarded observation for the coordinator's `@Sendable` callback.
+    /// Capturing a mutable local array here compiles with the newer local toolchain but is
+    /// rejected by the macOS 14/Xcode 15 release runner's concurrency diagnostics.
+    private final class PhaseRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var phases: [SessionPhase] = []
+
+        func append(_ phase: SessionPhase) {
+            lock.lock()
+            phases.append(phase)
+            lock.unlock()
+        }
+
+        func containsFailure() -> Bool {
+            lock.lock()
+            let snapshot = phases
+            lock.unlock()
+            return snapshot.contains {
+                String(describing: $0).lowercased().contains("fail")
+            }
+        }
     }
 
     // MARK: - Fixtures
@@ -167,7 +191,7 @@ final class VoiceCaptureRaceTests: XCTestCase {
         let bag = SessionTaskBag(sessionID: snapshot.sessionID, generation: snapshot.generation)
         await coordinator.installTaskBagForTesting(bag)
 
-        var reportedPhases: [SessionPhase] = []
+        let reportedPhases = PhaseRecorder()
         await coordinator.setOnPhaseChange { phase in reportedPhases.append(phase) }
 
         await coordinator.performStartAudioCapture(
@@ -177,7 +201,7 @@ final class VoiceCaptureRaceTests: XCTestCase {
         let cancels = await spy.cancelCount
         XCTAssertGreaterThan(cancels, 0, "a cancelled start must still release the device")
         XCTAssertFalse(
-            reportedPhases.contains(where: { String(describing: $0).lowercased().contains("fail") }),
+            reportedPhases.containsFailure(),
             "cancellation is a cooperative stop, not a failure to surface"
         )
     }
@@ -230,13 +254,13 @@ final class VoiceCaptureRaceTests: XCTestCase {
         let bag = SessionTaskBag(sessionID: snapshot.sessionID, generation: snapshot.generation)
         await coordinator.installTaskBagForTesting(bag)
 
-        var reportedPhases: [SessionPhase] = []
+        let reportedPhases = PhaseRecorder()
         await coordinator.setOnPhaseChange { phase in reportedPhases.append(phase) }
 
         await coordinator.performFinalizeAudioCapture(generation: snapshot.generation)
 
         XCTAssertFalse(
-            reportedPhases.contains(where: { String(describing: $0).lowercased().contains("fail") }),
+            reportedPhases.containsFailure(),
             "a cancelled finalize must not surface a failure"
         )
     }
