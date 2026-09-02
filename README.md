@@ -162,7 +162,7 @@ Explore our complete documentation in the [`docs/`](docs/) directory:
 - 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
 - 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,900+ headless unit tests, debugging, and release automation.
-- 📦 **[Release notes](docs/releases/v0.1.4.md)**: v0.1.4 password-field menu improvements, verification, and signing status.
+- 📦 **[Release notes](docs/releases/v0.1.4.md)**: v0.1.4 password-field menu improvements, verification, and signing status. See also the [direct-search follow-up](docs/releases/v0.1.4-follow-up.md).
 - 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---
@@ -209,7 +209,7 @@ Full detail in [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
 Mark any snippet **Secret** in the editor and its value moves out of the snippet library entirely — AES-GCM-sealed in an encrypted archive, with a single master key in the login keychain, gated behind **Touch ID**.
 
 - **Copy, don't type**: secrets never expand from typed triggers — macOS Secure Event Input withholds keystrokes in password fields, and a typo firing a password into a chat window is avoided by design. Use **menu bar → Copy Secret ▸** or **Search Secrets…**, then paste with `⌘V`.
-- **Password-field shortcut**: when macOS Secure Input is active, the menu bar shows a key and **Copy Secret**. Open it to find the secret submenu first; its position stays stable until the menu closes.
+- **Password-field shortcut**: when macOS Secure Input is active, the menu bar shows a key and **Copy Secret**. Click it to open **Search Secrets** directly. Right-click or Control-click the button for the full DevType menu.
 - **Touch ID first**: each copy asks for Touch ID (password fallback available, one 30-second reuse window).
 - **Auto-clearing clipboard**: copies are marked concealed (clipboard managers ignore them) and cleared after 90 seconds.
 - **Zero leaks by construction**: values are absent from `snippets.json`, every export, the editor after save, and diagnostic reports.

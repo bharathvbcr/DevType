@@ -7,9 +7,9 @@ import ServiceManagement
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var statusItemContext = StatusItemContext()
+    private var statusMenu: NSMenu?
+    private var statusItemInteraction: StatusItemInteraction?
     private var menuRebuildPending = false
-    private var secretsMenuItem: NSMenuItem?
-    private var secretsMenuNormalIndex = 0
     private var secretsSubmenu: NSMenu?
     private var snippetWindowController: NSWindowController?
     private var permissionWindowController: NSWindowController?
@@ -364,7 +364,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             button.setAccessibilityLabel(loc.s("ax.status.item"))
             button.setAccessibilityHelp(loc.s("ax.status.item.help", loc.s("status.paused")))
         }
-        statusItem?.menu = buildMenu()
+        statusMenu = buildMenu()
+        if let button = statusItem?.button {
+            statusItemInteraction = StatusItemInteraction(
+                button: button,
+                offersCopySecret: { [weak self] in
+                    // Honor the visible action even if the click releases Secure Input.
+                    self?.statusItemContext.offersCopySecret == true
+                        || AXContextChecker.isSecureEventInputEnabledLive()
+                },
+                openSearchSecrets: { [weak self] in self?.openSecretSearch(nil) },
+                openMenu: { [weak self] button in self?.showStatusMenu(from: button) }
+            )
+        }
         // Do not refresh here — Listen+AX can already be granted while the tap is not
         // installed yet. Refreshing would flash Tap Failed before coordinator.start().
     }
@@ -376,7 +388,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         menuRebuildPending = false
-        statusItem?.menu = buildMenu()
+        statusMenu = buildMenu()
         refreshStatusItemUI()
     }
 
@@ -437,10 +449,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
-        // The status button does not flip its appearance while the menu is open,
-        // so the icon has to be redrawn against the (dark) selection fill itself.
-        menu.delegate = self
-
         let headerItem = NSMenuItem()
         headerItem.view = makeMenuHeaderView()
         menu.addItem(headerItem)
@@ -506,8 +514,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         secretsItem.submenu = secretsMenu
         secretsSubmenu = secretsMenu
         rebuildSecretsMenu()
-        secretsMenuItem = secretsItem
-        secretsMenuNormalIndex = menu.numberOfItems
         menu.addItem(secretsItem)
 
         menu.addItem(item(loc.s("menu.import"), "square.and.arrow.down", #selector(importSnippets(_:))))
@@ -761,7 +767,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Copy palette narrowed to secrets, for libraries with more of them than a submenu can hold.
     @objc private func openSecretSearch(_ sender: Any?) {
-        InlineSearchPanel.toggle(mode: .copySecrets) { [weak self] pick, _, _ in
+        InlineSearchPanel.open(mode: .copySecrets) { [weak self] pick, _, _ in
             guard let self, case .snippet(let snippet) = pick else { return }
             self.copyToClipboard(snippet)
         }
@@ -2147,41 +2153,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - Status menu open/close
+// MARK: - Status menu tracking
 
-extension AppDelegate: NSMenuDelegate {
-    private func prepareStatusMenu(_ menu: NSMenu) {
-        guard menu === statusItem?.menu, !statusItemContext.menuIsOpen else { return }
-        // Capture the affordance the user clicked before opening changes field focus.
-        let copyRequested = statusItemContext.offersCopySecret
-            || AXContextChecker.isSecureEventInputEnabledLive()
+extension AppDelegate {
+    private func showStatusMenu(from button: NSButton) {
+        guard let menu = statusMenu, !statusItemContext.menuIsOpen else { return }
         updateDynamicMenuItems()
-        statusItemContext.openMenu(secureInputActive: copyRequested)
-        if let secretsMenuItem {
-            SecretMenuFlow.positionMenuItem(
-                secretsMenuItem, in: menu,
-                prioritize: statusItemContext.offersCopySecret,
-                normalIndex: secretsMenuNormalIndex
-            )
-        }
+        statusItemContext.openMenu(secureInputActive: statusItemContext.offersCopySecret)
+        button.highlight(true)
         refreshStatusItemUI()
-    }
-
-    public func menuNeedsUpdate(_ menu: NSMenu) {
-        prepareStatusMenu(menu)
-    }
-
-    public func menuWillOpen(_ menu: NSMenu) {
-        prepareStatusMenu(menu)
-    }
-
-    public func menuDidClose(_ menu: NSMenu) {
-        guard menu === statusItem?.menu else { return }
-        statusItemContext.closeMenu(secureInputActive: AXContextChecker.isSecureEventInputEnabledLive())
-        if menuRebuildPending {
-            rebuildMenu()
-        } else {
-            refreshStatusItemUI()
+        defer {
+            // popUp has finished tracking. AppKit forbids restructuring menus inside
+            // menuWillOpen/menuDidClose; deferred store updates are safe here instead.
+            button.highlight(false)
+            statusItemContext.closeMenu(secureInputActive: AXContextChecker.isSecureEventInputEnabledLive())
+            if menuRebuildPending {
+                rebuildMenu()
+            } else {
+                refreshStatusItemUI()
+            }
         }
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: button.bounds.minX, y: button.bounds.minY),
+            in: button
+        )
     }
 }

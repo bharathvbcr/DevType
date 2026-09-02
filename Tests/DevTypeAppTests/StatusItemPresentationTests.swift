@@ -43,6 +43,7 @@ final class StatusItemPresentationTests: XCTestCase {
                 )
                 subject.apply(to: button)
                 XCTAssertEqual(subject.offersCopySecret, secure)
+                XCTAssertEqual(button.accessibilityRole(), secure ? .button : .menuButton)
                 XCTAssertEqual(subject.needsAttention, display.requiresAction || urgent || snapshot.isDegradedInject)
                 if secure {
                     XCTAssertEqual(button.title, " \(copy)")
@@ -113,47 +114,6 @@ final class StatusItemPresentationTests: XCTestCase {
             XCTAssertTrue(context.offersCopySecret)
             context.refresh(secureInputActive: false)
             XCTAssertFalse(context.offersCopySecret)
-        }
-    }
-
-    func testMenuPromotionPreservesActionsAndRestoresExactOrder() {
-        let menu = NSMenu()
-        let header = NSMenuItem()
-        header.view = NSView()
-        menu.addItem(header)
-        menu.addItem(.separator())
-        for title in ["Settings", "Library", "Copy Snippet", "Copy Secret", "Recovery", "Quit"] {
-            menu.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: ""))
-        }
-        let original = menu.items
-        let secret = original[5]
-        let submenu = NSMenu()
-        let choose = NSMenuItem(title: "Synthetic test secret", action: #selector(NSObject.description), keyEquivalent: "")
-        submenu.addItem(choose)
-        secret.submenu = submenu
-        let action = choose.action
-        for _ in 0..<1_000 {
-            SecretMenuFlow.positionMenuItem(secret, in: menu, prioritize: true, normalIndex: 5)
-            XCTAssertTrue(menu.items[2] === secret)
-            XCTAssertEqual(menu.numberOfItems, original.count)
-            SecretMenuFlow.positionMenuItem(secret, in: menu, prioritize: true, normalIndex: 5)
-            XCTAssertTrue(secret.submenu === submenu)
-            XCTAssertTrue(submenu.items[0] === choose)
-            XCTAssertEqual(choose.action, action)
-            SecretMenuFlow.positionMenuItem(secret, in: menu, prioritize: false, normalIndex: 5)
-            XCTAssertEqual(menu.items, original)
-        }
-    }
-
-    func testMenuPromotionHandlesEmptyMissingAndExtremePositions() {
-        let menu = NSMenu()
-        let secret = NSMenuItem(title: "Copy Secret", action: nil, keyEquivalent: "")
-        SecretMenuFlow.positionMenuItem(secret, in: menu, prioritize: true, normalIndex: Int.max)
-        XCTAssertEqual(menu.numberOfItems, 0)
-        menu.addItem(secret)
-        for position in [Int.min, -1, 0, 1, Int.max] {
-            SecretMenuFlow.positionMenuItem(secret, in: menu, prioritize: false, normalIndex: position)
-            XCTAssertEqual(menu.items, [secret])
         }
     }
 

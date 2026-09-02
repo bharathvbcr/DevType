@@ -21,7 +21,7 @@ Before submitting an issue, please check our documentation resources:
 
 ### 1. Snippets are not expanding when I type. What should I do?
 1. Press **`⌘⇧P`** (or choose **Permission Recovery** from the menu bar) to see the live status of Accessibility and Input Monitoring with one-click fixes.
-2. Check the menu-bar status. A pause indicator means expansion is paused. A key with **Copy Secret** means macOS Secure Input is active: choose a saved secret from the menu, then paste with `⌘V` in the password field. Typed triggers stay paused there.
+2. Check the menu-bar status. A pause indicator means expansion is paused. A key with **Copy Secret** means macOS Secure Input is active: click it to open Search Secrets, choose a saved secret, then paste with `⌘V` in the password field. Right-click or Control-click the button for the full menu. Typed triggers stay paused there.
 3. Ensure the active application is not in your **Muted Apps** list.
 4. Try typing in standard macOS applications like TextEdit or Notes to verify system-level expansion.
 5. If permissions appear granted in macOS System Settings but expansion still fails, see our [Permissions Guide](docs/PERMISSIONS_GUIDE.md) for steps on resetting the TCC cache.

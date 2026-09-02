@@ -100,12 +100,15 @@ enum InlineSearchPanel {
         suspension = nil
     }
 
-    private static func open(
-        store: SnippetStore,
-        loc: LocalizationManager,
+    static func open(
+        store: SnippetStore = .shared,
+        loc: LocalizationManager = .shared,
         mode: Mode = .insert,
         onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Outcome) -> Void
     ) {
+        // Explicit opens must show the requested mode even when another palette is up.
+        // Release the previous panel's matching suspension and dismissal observers first.
+        close()
         let sourceApp = NSWorkspace.shared.frontmostApplication
         // Read the selection HERE, before `NSApp.activate(ignoringOtherApps:)` below makes
         // DevType frontmost. `SelectionReader` resolves the *system-wide* focused element,
@@ -757,7 +760,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         routingTask?.cancel()
         routingTask = nil
         let query = searchField.stringValue
-        guard PaletteToolRouter.shouldAttemptRouting(query: query) else { return }
+        guard mode.showsCommands, PaletteToolRouter.shouldAttemptRouting(query: query) else { return }
 
         routingTask = Task { [weak self] in
             try? await Task.sleep(
@@ -784,6 +787,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
     private func scheduleSemanticBoost() {
         semanticWorkItem?.cancel()
+        guard mode.showsCommands else { return }
         let query = searchField.stringValue
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }

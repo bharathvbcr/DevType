@@ -41,7 +41,7 @@ The resolver and verification scripts have dedicated self-tests (`test-signing-i
 
 ## 🧪 Testing Guidelines
 
-DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The v0.1.4 suite contains 1,926 tests; seven live-AI tests require explicit opt-in.
+DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The v0.1.4 follow-up suite contains 1,931 tests. Seven live-AI tests and two native AppKit window tests require explicit opt-in; the latter briefly display synthetic UI.
 
 ### Running Tests
 ```bash
@@ -56,6 +56,9 @@ DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/Expander
 
 # Run a single test case
 ./Scripts/test.sh --filter testBiometricGateGating
+
+# Show synthetic AppKit UI to check direct secret search and native status-button events
+DEVTYPE_RUN_APPKIT_SMOKE=1 ./Scripts/test.sh --filter SecretSearchWindowTests
 
 # Check secure-input monitor lifecycle races with Thread Sanitizer
 ./Scripts/test.sh --scratch-path /tmp/devtype-secure-input-tsan --sanitize thread \

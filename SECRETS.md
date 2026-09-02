@@ -29,11 +29,11 @@ is allowed to show a dialog, and the measured keychain behaviour the design is b
   what makes this work inside password fields where synthetic input paths are curtailed.
 
 When macOS Secure Input is active, the menu-bar button shows a key and **Copy Secret**.
-Opening it puts the existing Copy Secret submenu first. The choice stays stable while the
-menu is open, even if opening the menu releases password-field focus; closing it restores
-the current status. Expansion remains blocked, and selecting a secret still uses the same
-authentication and clipboard auto-clear flow. Permission and engine diagnostics remain in
-the menu.
+Clicking it opens **Search Secrets** directly, with the search field ready for typing.
+Right-click or Control-click the button for the full DevType menu, including the existing
+Copy Secret submenu, permission recovery, and engine diagnostics. Opening search does not
+read or copy a secret; choosing a result uses the same authentication and clipboard
+auto-clear flow. Typed expansion remains blocked in secure fields.
 
 ## Touch ID gate
 

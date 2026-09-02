@@ -30,6 +30,26 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(body.contains("presentation.apply(to: button)"))
     }
 
+    func testCopySecretButtonOpensSecretSearchDirectly() throws {
+        let app = try source("Sources/DevTypeAppCore/AppDelegate.swift")
+        let setupStart = try XCTUnwrap(app.range(of: "private func setupStatusItem()"))
+        let setupEnd = try XCTUnwrap(app.range(of: "private func rebuildMenu()"))
+        let setup = String(app[setupStart.lowerBound..<setupEnd.lowerBound])
+        XCTAssertTrue(setup.contains("StatusItemInteraction("),
+                      "The status button must dispatch a direct action instead of always opening its menu")
+        XCTAssertTrue(setup.contains("openSecretSearch(nil)"),
+                      "The direct copy action must use the existing secret-search entry point")
+        XCTAssertFalse(setup.contains("statusItem?.menu ="),
+                       "An attached NSStatusItem menu intercepts the button action")
+        let searchStart = try XCTUnwrap(app.range(of: "@objc private func openSecretSearch"))
+        let searchEnd = try XCTUnwrap(app.range(of: "private func appendBiometryToggle"))
+        let search = String(app[searchStart.lowerBound..<searchEnd.lowerBound])
+        XCTAssertTrue(search.contains("InlineSearchPanel.open(mode: .copySecrets)"),
+                      "An explicit search click must open secrets even if another palette is already visible")
+        XCTAssertTrue(search.contains("self.copyToClipboard(snippet)"),
+                      "Search results must retain the canonical authenticated copy path")
+    }
+
     // MARK: - Source access
 
     /// Repo root derived from this file's location (`Tests/ExpanderEngineTests/…`).

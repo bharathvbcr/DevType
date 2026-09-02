@@ -3,6 +3,18 @@ import XCTest
 
 final class CommandPaletteMatchingTests: XCTestCase {
 
+    func testZeroCommandLimitCannotBeBypassedByPrefixesOrRoutedAnswers() {
+        for query in [">", ">date", "synthetic secret query"] {
+            for limit in [0, -1] {
+                let rows = CommandPaletteCatalog.buildRows(
+                    query: query, groups: [], commandLimit: limit,
+                    routedResult: .init(query: query, text: "Synthetic answer")
+                )
+                XCTAssertTrue(rows.isEmpty, "Secret-only search must not offer commands: \(query)")
+            }
+        }
+    }
+
     private let posix = Locale(identifier: "en_US_POSIX")
     private let utc = TimeZone(secondsFromGMT: 0)!
 

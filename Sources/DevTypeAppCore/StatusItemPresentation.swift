@@ -65,7 +65,7 @@ struct StatusItemPresentation {
         button.title = title
         button.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
         button.toolTip = toolTip
-        button.setAccessibilityRole(.menuButton)
+        button.setAccessibilityRole(offersCopySecret ? .button : .menuButton)
         button.setAccessibilityLabel(accessibilityLabel)
         button.setAccessibilityValue(accessibilityValue)
         button.setAccessibilityHelp(accessibilityHelp)
@@ -129,5 +129,53 @@ struct StatusItemContext {
     mutating func closeMenu(secureInputActive: Bool) {
         menuIsOpen = false
         refresh(secureInputActive: secureInputActive)
+    }
+}
+
+/// Dispatch the status button's native action before mouse-up can change field focus.
+/// A secondary click always preserves access to settings, diagnostics, and the full menu.
+final class StatusItemInteraction: NSObject {
+    private let offersCopySecret: () -> Bool
+    private let openSearchSecrets: () -> Void
+    private let openMenu: (NSButton) -> Void
+    private var lastClickEvent: NSEvent?
+
+    init(
+        button: NSButton,
+        offersCopySecret: @escaping () -> Bool,
+        openSearchSecrets: @escaping () -> Void,
+        openMenu: @escaping (NSButton) -> Void
+    ) {
+        self.offersCopySecret = offersCopySecret
+        self.openSearchSecrets = openSearchSecrets
+        self.openMenu = openMenu
+        super.init()
+        button.target = self
+        button.action = #selector(activate(_:))
+        button.sendAction(on: [.leftMouseDown, .rightMouseUp])
+    }
+
+    @objc private func activate(_ sender: NSButton) {
+        // Programmatic/AX presses can leave the previous mouse event in currentEvent.
+        // Only consume a fresh event of a type this button actually dispatches.
+        let event = NSApp.currentEvent.flatMap { event in
+            guard sender.window != nil, event.window === sender.window,
+                  event !== lastClickEvent,
+                  event.type == .leftMouseDown || event.type == .rightMouseUp else { return nil as NSEvent? }
+            lastClickEvent = event
+            return event
+        }
+        activate(sender, event: event)
+    }
+
+    func activate(_ sender: NSButton, event: NSEvent?) {
+        assertMainThread()
+        let secondaryClick = event?.type == .rightMouseDown || event?.type == .rightMouseUp
+            || event?.modifierFlags.contains(.control) == true
+        if !secondaryClick && offersCopySecret() {
+            openSearchSecrets()
+        } else {
+            openMenu(sender)
+        }
     }
 }

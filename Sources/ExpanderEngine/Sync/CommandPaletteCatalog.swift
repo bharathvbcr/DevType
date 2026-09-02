@@ -587,6 +587,7 @@ public enum CommandPaletteCatalog {
         aiDisabledReason: String? = nil,
         limit: Int = 40
     ) -> [PaletteCommandHit] {
+        guard limit > 0 else { return [] }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         var hits: [PaletteCommandHit] = []
 
@@ -808,7 +809,7 @@ public enum CommandPaletteCatalog {
         }
         paletteCacheLock.unlock()
 
-        let isExplicitCommandQuery = trimmed.hasPrefix(">")
+        let isExplicitCommandQuery = commandLimit > 0 && trimmed.hasPrefix(">")
         let cmdQuery = isExplicitCommandQuery
             ? String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
             : trimmed
@@ -869,7 +870,7 @@ public enum CommandPaletteCatalog {
         // A routed answer leads the command section when it is still answering the query on
         // screen. Routing is debounced and asynchronous, so an answer to an older query is
         // dropped rather than shown against text the user has already moved past.
-        if let routed = routedResult, routed.query == trimmed, !isExplicitCommandQuery {
+        if commandLimit > 0, let routed = routedResult, routed.query == trimmed, !isExplicitCommandQuery {
             commandSection.insert(routedHit(routed, loc: loc), at: 0)
         }
         let aiSection = commandHits.filter { $0.command.section == .ai }
