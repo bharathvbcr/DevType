@@ -102,6 +102,22 @@ enum InlineSearchPanel {
         suspension = nil
     }
 
+    /// Selection state, reduced to what ranking needs.
+    ///
+    /// Only a real, non-empty selection counts. Every `SelectionReader` failure — Accessibility
+    /// revoked, secure input, a muted app, nothing focused — means we do not know that text is
+    /// selected, and promoting transforms on a guess would put rows the user cannot act on
+    /// above the ones they can.
+    static func context(
+        for outcome: SelectionReader.Outcome
+    ) -> CommandPaletteCatalog.PaletteContext {
+        guard let result = outcome.result,
+              !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .none
+        }
+        return .selection
+    }
+
     static func open(
         store: SnippetStore = .shared,
         loc: LocalizationManager = .shared,
@@ -135,6 +151,7 @@ enum InlineSearchPanel {
             store: store,
             loc: loc,
             mode: mode,
+            context: InlineSearchPanel.context(for: sourceSelection),
             onPick: { pick in
                 close()
                 onPick(pick, sourceApp, sourceSelection)
@@ -497,6 +514,9 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     private let store: SnippetStore
     private let loc: LocalizationManager
     private let mode: InlineSearchPanel.Mode
+    /// What was true in the app behind us when the palette opened. Captured once, because a
+    /// live re-read would resolve to our own search field the moment the panel takes key.
+    private let context: CommandPaletteCatalog.PaletteContext
     private let onPick: (InlineSearchPanel.Pick) -> Void
     private let onCancel: () -> Void
 
@@ -525,12 +545,14 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         store: SnippetStore,
         loc: LocalizationManager,
         mode: InlineSearchPanel.Mode = .insert,
+        context: CommandPaletteCatalog.PaletteContext = .none,
         onPick: @escaping (InlineSearchPanel.Pick) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.store = store
         self.loc = loc
         self.mode = mode
+        self.context = context
         self.onPick = onPick
         self.onCancel = onCancel
         super.init(nibName: nil, bundle: nil)
@@ -838,7 +860,8 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             // The boost closures below read this panel's own store, not the shared singleton,
             // so the cache has to key on that store's revision or it serves stale rankings.
             boostRevision: store.usageStatsStore.revision,
-            routedResult: routedResult
+            routedResult: routedResult,
+            context: context
         )
 
         if selection < 0 || !rows.indices.contains(selection) || !rows[selection].isSelectable {

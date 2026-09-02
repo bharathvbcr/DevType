@@ -458,6 +458,7 @@ public enum CommandPaletteCatalog {
         let aiDisabledReason: String?
         let semanticBoostIDs: [String]
         let routedText: String?
+        let context: PaletteContext
         /// Revision of whatever stores the caller's boost closures actually read. The two
         /// shared revisions above cannot stand in for them: a caller boosting from its own
         /// store would mutate that store without moving `shared.revision`, leaving the cache
@@ -531,6 +532,86 @@ public enum CommandPaletteCatalog {
         PaletteSemanticIndex.invalidateCache()
     }
 
+    // MARK: - Context
+
+    /// What the palette knows about the caller's situation at the moment it opens.
+    ///
+    /// The empty palette used to show one hardcoded list regardless. For the most common
+    /// reason to open it — select some text, then rewrite it — that list led with date
+    /// insertion and put every transform below the navigation rows, so nothing above the fold
+    /// was the thing the user came for.
+    public enum PaletteContext: String, Equatable, Sendable {
+        /// Text is selected in the frontmost app, so a transform is the likely next step.
+        case selection
+        /// Nothing is selected. Inserting something is the likely next step.
+        case none
+    }
+
+    /// Empty-palette suggestions when text is selected: transforms first, in rough order of
+    /// how often a selection is handed to them, and no navigation at all — nobody selects a
+    /// paragraph in order to open Preferences.
+    public static let selectionSuggestionIDs = [
+        "ai.proofread", "ai.rewrite", "ai.formal", "ai.friendly",
+        "ai.condense", "ai.expand", "ai.bulletize", "ai.paraphrase",
+        "ai.translate", "ai.totelugu", "ai.tohindi",
+        "tool.upper", "tool.lower", "tool.count"
+    ]
+
+    /// Empty-palette suggestions when nothing is selected. Inserting a date or the clipboard
+    /// is the likely next step, and the navigation rows are worth surfacing because there is
+    /// no transform to compete with them.
+    public static let idleSuggestionIDs = [
+        "date.today", "date.tomorrow", "date.time", "tool.clipboard",
+        "ai.proofread", "ai.translate", "ai.totelugu", "ai.tohindi",
+        "ai.formal", "ai.promptenhance",
+        "nav.preferences", "nav.snippets", "tool.upper", "tool.uuid"
+    ]
+
+    /// Registering a command is not the same as making it discoverable: anything missing from
+    /// the list for a context stays invisible in it until the user already knows its name.
+    public static func suggestionIDs(
+        for context: PaletteContext,
+        aiEnabled: Bool
+    ) -> [String] {
+        switch context {
+        case .none:
+            return idleSuggestionIDs
+        case .selection:
+            // With AI unavailable the transform rows would lead as greyed-out rows the user
+            // cannot pick, which is worse than not promoting them. Local text ops still work
+            // on a selection, so they keep the lead and the idle list fills in behind.
+            guard aiEnabled else {
+                let local = selectionSuggestionIDs.filter { !$0.hasPrefix("ai.") }
+                return local + idleSuggestionIDs
+            }
+            return selectionSuggestionIDs + idleSuggestionIDs
+        }
+    }
+
+    /// Context nudge, applied wherever commands are ranked.
+    ///
+    /// Small on purpose: at ±25 against lexical scores near 1000 it settles ties and reorders
+    /// the empty palette, and cannot override what the user actually typed. Typing "pref" with
+    /// a paragraph selected still finds Preferences.
+    public static func contextBoost(
+        for command: PaletteCommand,
+        context: PaletteContext,
+        aiEnabled: Bool
+    ) -> Int {
+        guard context == .selection else { return 0 }
+        switch command.action {
+        case .ai, .aiCustom:
+            return aiEnabled ? 25 : 0
+        case .textOp, .count:
+            return 15
+        case .navigate:
+            // A selection is live and perishable: navigating away abandons it.
+            return -25
+        default:
+            return 0
+        }
+    }
+
     // MARK: - Ranking weights
 
     /// Boost applied to the top semantic neighbour, decaying by rank.
@@ -585,6 +666,7 @@ public enum CommandPaletteCatalog {
         semanticBoostIDs: [String] = [],
         commandUsageBoost: ((String) -> Int)? = nil,
         aiDisabledReason: String? = nil,
+        context: PaletteContext = .none,
         limit: Int = 40
     ) -> [PaletteCommandHit] {
         guard limit > 0 else { return [] }
@@ -612,15 +694,7 @@ public enum CommandPaletteCatalog {
             for id in recent where !suggestedIDs.contains(id) {
                 suggestedIDs.append(id)
             }
-            // Shown when the palette opens with nothing typed. Registering a command is not
-            // enough to make it discoverable — anything missing here stays invisible until
-            // the user already knows its name.
-            let fallback = [
-                "date.today", "date.tomorrow", "date.time", "tool.clipboard",
-                "ai.proofread", "ai.translate", "ai.totelugu", "ai.tohindi",
-                "ai.formal", "ai.promptenhance",
-                "nav.preferences", "nav.snippets", "tool.upper", "tool.uuid"
-            ]
+            let fallback = suggestionIDs(for: context, aiEnabled: aiDisabledReason == nil)
             for id in fallback where !suggestedIDs.contains(id) {
                 suggestedIDs.append(id)
             }
@@ -637,6 +711,12 @@ public enum CommandPaletteCatalog {
                 } else {
                     score += CommandUsageStatsStore.shared.rankBoost(for: command.id)
                 }
+                // Habit still counts, but a live selection says more about the next step than
+                // a tally does: the most-used command is often a date insert, and that is not
+                // what a paragraph was selected for.
+                score += contextBoost(
+                    for: command, context: context, aiEnabled: aiDisabledReason == nil
+                )
                 hits.append(makeHit(
                     command,
                     score: max(1, score),
@@ -703,6 +783,9 @@ public enum CommandPaletteCatalog {
             adjusted += commandUsageBoost?(command.id)
                 ?? CommandUsageStatsStore.shared.rankBoost(for: command.id)
             adjusted += conversationalBoost(query: trimmed, command: command)
+            adjusted += contextBoost(
+                for: command, context: context, aiEnabled: aiDisabledReason == nil
+            )
             admitted.insert(command.id)
             hits.append(makeHit(
                 command,
@@ -738,6 +821,9 @@ public enum CommandPaletteCatalog {
                 adjusted += commandUsageBoost?(command.id)
                     ?? CommandUsageStatsStore.shared.rankBoost(for: command.id)
                 adjusted += conversationalBoost(query: trimmed, command: command)
+                adjusted += contextBoost(
+                    for: command, context: context, aiEnabled: aiDisabledReason == nil
+                )
                 admitted.insert(id)
                 hits.append(makeHit(
                     command,
@@ -778,7 +864,8 @@ public enum CommandPaletteCatalog {
         commandLimit: Int = 20,
         snippetLimit: Int = 40,
         boostRevision: UInt64? = nil,
-        routedResult: PaletteToolRouter.Routed? = nil
+        routedResult: PaletteToolRouter.Routed? = nil,
+        context: PaletteContext = .none
     ) -> [PaletteListRow] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let libStamp = SnippetSearch.fingerprint(of: groups, includeDisabled: false)
@@ -798,6 +885,7 @@ public enum CommandPaletteCatalog {
             aiDisabledReason: aiDisabledReason,
             semanticBoostIDs: semanticBoostIDs,
             routedText: routedResult.flatMap { $0.query == trimmed ? $0.text : nil },
+            context: context,
             boostRevision: boostRevision ?? 0
         )
 
@@ -821,6 +909,7 @@ public enum CommandPaletteCatalog {
             semanticBoostIDs: semanticBoostIDs,
             commandUsageBoost: commandUsageBoost,
             aiDisabledReason: aiDisabledReason,
+            context: context,
             limit: isExplicitCommandQuery ? max(commandLimit, 50) : commandLimit
         )
 
@@ -875,17 +964,29 @@ public enum CommandPaletteCatalog {
         }
         let aiSection = commandHits.filter { $0.command.section == .ai }
 
-        if !commandSection.isEmpty {
-            rows.append(.header(.commands))
-            rows.append(contentsOf: commandSection.map { .command($0) })
+        // Sections lead by their best hit, not by a fixed order.
+        //
+        // They used to be emitted commands-then-AI-then-snippets unconditionally, so an AI row
+        // could outscore every command row and still render below all of them. With a
+        // selection live that put the whole reason the palette was opened under the fold, and
+        // no amount of scoring inside a section could fix it.
+        //
+        // Ties keep the canonical order, so the list does not jitter between keystrokes when
+        // two sections happen to match equally well.
+        let sections: [(section: PaletteSection, best: Int, rows: [PaletteListRow])] = [
+            (.commands, commandSection.first?.score ?? Int.min, commandSection.map { .command($0) }),
+            (.ai, aiSection.first?.score ?? Int.min, aiSection.map { .command($0) }),
+            (.snippets, snippetHits.first?.score ?? Int.min, snippetHits.map { .snippet($0) })
+        ]
+        let canonical = PaletteSection.allCases
+        let ordered = sections.sorted {
+            $0.best != $1.best
+                ? $0.best > $1.best
+                : canonical.firstIndex(of: $0.section)! < canonical.firstIndex(of: $1.section)!
         }
-        if !aiSection.isEmpty {
-            rows.append(.header(.ai))
-            rows.append(contentsOf: aiSection.map { .command($0) })
-        }
-        if !snippetHits.isEmpty {
-            rows.append(.header(.snippets))
-            rows.append(contentsOf: snippetHits.map { .snippet($0) })
+        for entry in ordered where !entry.rows.isEmpty {
+            rows.append(.header(entry.section))
+            rows.append(contentsOf: entry.rows)
         }
 
         paletteCacheLock.lock()
@@ -944,7 +1045,7 @@ public enum CommandPaletteCatalog {
     public static let minimumPartialTermScore = 700
 
     /// Share of the score a partial match keeps as coverage approaches zero. Full coverage
-    /// keeps 100%, so a command matching every term always outranks one matching some.
+    /// keeps 100%, so a command that matches every term always outranks one that matches some.
     public static let partialCoverageFloor = 0.55
 
     /// Query words that carry no command meaning. Excluded from the coverage denominator so
