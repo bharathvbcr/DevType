@@ -9,6 +9,121 @@ import XCTest
 ///     selection and the remaining backspaces ate the user's preceding text.
 final class EraseSafetyTests: XCTestCase {
 
+    func testZeroCaretWithTriggerIn44UnitFieldRecoversAsUnverified() {
+        let value = String(repeating: "x", count: 40) + "`slm"
+        XCTAssertEqual(value.utf16.count, 44)
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`slm"), value: value,
+            caretLocation: 0, selectionLength: 0
+        )
+        guard case .unavailable(let reason) = result else {
+            return XCTFail("A corroborated trigger with a zero AX caret needs HID recovery, got \(result)")
+        }
+        XCTAssertTrue(reason.contains("expectedTextInScan=present"), reason)
+        XCTAssertTrue(reason.contains("scan=full"), reason)
+    }
+
+    func testEveryCaretBeforeTriggerWidthUsesTheSameRecoveryPolicy() {
+        for trigger in ["`slm", "🎓ab", "e\u{0301}bc", "a b "] {
+            let value = "prefix " + trigger.replacingOccurrences(of: " ", with: "\u{00A0}")
+            for caret in 0..<trigger.utf16.count {
+                let result = ErasePreconditionChecker.evaluate(
+                    plan: ErasePlan(text: trigger), value: value,
+                    caretLocation: caret, selectionLength: 0
+                )
+                guard case .unavailable = result else {
+                    XCTFail("Expected recovery for \(trigger.debugDescription) at \(caret), got \(result)")
+                    continue
+                }
+            }
+        }
+    }
+
+    func testZeroCaretRecoveryHonoursCaseFolding() {
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`slm", caseInsensitive: true), value: "prefix `SLM",
+            caretLocation: 0, selectionLength: 0
+        )
+        guard case .unavailable = result else { return XCTFail("Got \(result)") }
+        XCTAssertTrue(ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`slm"), value: "prefix `SLM",
+            caretLocation: 0, selectionLength: 0
+        ).blocksErase)
+    }
+
+    func testReadableWrongFieldAtZeroCaretStillRefusesWithPresenceEvidence() {
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`slm"), value: String(repeating: "x", count: 44),
+            caretLocation: 0, selectionLength: 0
+        )
+        guard case .mismatch(let reason) = result else { return XCTFail("Got \(result)") }
+        XCTAssertTrue(reason.contains("expectedTextInScan=absent"), reason)
+        XCTAssertTrue(reason.contains("scan=full"), reason)
+    }
+
+    func testGeometryRecoveryCannotAuthoriseUndoOrASelection() {
+        let value = "prefix `slm suffix"
+        for caret in [0, 2, value.utf16.count] {
+            XCTAssertTrue(ErasePreconditionChecker.evaluate(
+                plan: ErasePlan(text: "`slm"), value: value,
+                caretLocation: caret, selectionLength: 0,
+                insertionPointFollowsExpectedText: false
+            ).blocksErase)
+            for selection: Int? in [nil, 1, 8] {
+                XCTAssertTrue(ErasePreconditionChecker.evaluate(
+                    plan: ErasePlan(text: "`slm"), value: value,
+                    caretLocation: caret, selectionLength: selection
+                ).blocksErase, "A selection must not license blind erase at \(caret)")
+            }
+        }
+    }
+
+    func testZeroCaretRecoveryNeverClaimsCompleteSearchOfOversizedValue() {
+        let value = String(repeating: "x", count: DeliveryVerifier.maxVerificationScanUTF16 + 1) + "`slm"
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`slm"), value: value,
+            caretLocation: 0, selectionLength: 0
+        )
+        guard case .mismatch(let reason) = result else { return XCTFail("Got \(result)") }
+        XCTAssertTrue(reason.contains("expectedTextInScan=absent"), reason)
+        XCTAssertTrue(reason.contains("scan=caretWindow"), reason)
+    }
+
+    func testUnverifiedPreconditionRequiresHIDInsteadOfAXRangeReplacement() {
+        XCTAssertTrue(ErasePreconditionResult.unavailable("unreadable range").requiresHID)
+        XCTAssertFalse(ErasePreconditionResult.ok.requiresHID)
+        XCTAssertTrue(ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`slm"), value: "prefix `slm",
+            caretLocation: 0, selectionLength: 0
+        ).requiresHID)
+    }
+
+    func testEraseContextRejectsNewInputAndDifferentOrUnknownTarget() {
+        let pipeline = TextInjectionPipeline()
+        pipeline.beginDeliveryWindow()
+        let baseline = pipeline.deliveryInputUnitsForTesting
+        XCTAssertTrue(pipeline.eraseContextIsCurrent(inputUnits: baseline, targetPID: 7, frontmostPID: 7))
+        XCTAssertFalse(pipeline.eraseContextIsCurrent(inputUnits: baseline, targetPID: 7, frontmostPID: 8))
+        XCTAssertFalse(pipeline.eraseContextIsCurrent(inputUnits: baseline, targetPID: 7, frontmostPID: nil))
+        XCTAssertFalse(pipeline.eraseContextIsCurrent(inputUnits: baseline, targetPID: nil, frontmostPID: nil))
+        pipeline.noteDeliveryInput()
+        XCTAssertFalse(pipeline.eraseContextIsCurrent(inputUnits: baseline, targetPID: 7, frontmostPID: 7))
+    }
+
+    func testCaseInsensitiveRecoveryBoundsBeforeLengthChangingCaseFold() {
+        // U+0130 lowercases to two scalars. Folding the entire AXValue before applying
+        // the original caret offset moves the scan thousands of units away from the trigger.
+        let prefix = String(repeating: "İ", count: 40_000)
+        let value = prefix + "`SLM suffix"
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: "`slm", caseInsensitive: true), value: value,
+            caretLocation: value.utf16.count, selectionLength: 0
+        )
+        guard case .unavailable(let reason) = result else { return XCTFail("Got \(result)") }
+        XCTAssertTrue(reason.contains("expectedTextInScan=present"), reason)
+        XCTAssertTrue(reason.contains("scan=caretWindow"), reason)
+    }
+
     // MARK: - §8.6 caret-geometry corroboration (Claude Desktop incident, 2026-08-07)
 
     /// The field incident, byte for byte: the user typed `` `rtes ``, and Electron returned a

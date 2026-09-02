@@ -33,6 +33,59 @@ final class BackspaceIntegrityTests: XCTestCase {
         ErasePlan(text: text)
     }
 
+    func testRecoveredCaretPostsOnlyBeforeMutationAndWhileContextIsCurrent() {
+        let plan = ErasePlan(text: "🎓ab") // Four UTF-16 units, three backspaces.
+        let result = ErasePreconditionChecker.evaluate(
+            plan: plan, value: "prefix 🎓ab", caretLocation: 0, selectionLength: 0
+        )
+        for afterWrite in [false, true] {
+            for contextIsCurrent in [false, true] {
+                let poster = FakeBackspacePoster()
+                poster.postedToReport = 3
+                let executor = EraseExecutor(hid: poster)
+                let done = expectation(description: "guarded erase")
+                var completed = 0
+                var strikes = 0
+                executor.finishGuardedErase(
+                    plan: plan, afterPossibleWrite: afterWrite, result: result,
+                    canProceed: { contextIsCurrent },
+                    onUnverifiableAfterWrite: { _ in strikes += 1 }
+                ) { erased in
+                    completed += 1
+                    XCTAssertEqual(erased, contextIsCurrent && !afterWrite)
+                    done.fulfill()
+                }
+                wait(for: [done], timeout: 2)
+                XCTAssertEqual(completed, 1)
+                XCTAssertEqual(poster.requestedCounts, contextIsCurrent && !afterWrite ? [3] : [])
+                XCTAssertEqual(strikes, contextIsCurrent && afterWrite ? 1 : 0)
+            }
+        }
+    }
+
+    func testContextInvalidatedAfterPreconditionNeverPostsEvenForVerifiedText() {
+        let poster = FakeBackspacePoster()
+        poster.postedToReport = 3
+        let executor = EraseExecutor(hid: poster)
+        var contextIsCurrent = true
+        let canProceed = { contextIsCurrent }
+        let result = ErasePreconditionChecker.evaluate(
+            plan: makePlan(), value: "abc", caretLocation: 3, selectionLength: 0
+        )
+        XCTAssertEqual(result, .ok)
+        contextIsCurrent = false // User clicks while the AX retry is outstanding.
+        let done = expectation(description: "cancelled erase")
+        executor.finishGuardedErase(
+            plan: makePlan(), afterPossibleWrite: false, result: result,
+            canProceed: canProceed, onUnverifiableAfterWrite: nil
+        ) { erased in
+            XCTAssertFalse(erased)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 2)
+        XCTAssertEqual(poster.requestedCounts, [])
+    }
+
     private func finish(
         _ executor: EraseExecutor,
         plan: ErasePlan,

@@ -104,6 +104,13 @@ public enum ErasePreconditionResult: Equatable {
         if case .mismatch = self { return true }
         return false
     }
+
+    /// A best-effort erase must use the app's real insertion point, never the AX range
+    /// that could not be verified. An empty erase already evaluates to `.ok`.
+    public var requiresHID: Bool {
+        if case .unavailable = self { return true }
+        return false
+    }
 }
 
 public enum ErasePreconditionChecker {
@@ -165,7 +172,7 @@ public enum ErasePreconditionChecker {
 
         // The trigger sits immediately before the selection start. A pre-existing user selection is
         // allowed — the AX replace path already widens from `location`.
-        let units = Array(value.utf16)
+        let units = value.utf16
         let end = caretLocation
         let start = end - plan.utf16Count
 
@@ -183,54 +190,39 @@ public enum ErasePreconditionChecker {
                 "AXValue (\(units.count) units) cannot hold a \(plan.utf16Count)-unit trigger — virtualised field"
             )
         }
-        // The value is long enough to hold the trigger, yet the caret sits too close to the start.
-        // The field is readable and it disagrees with us — erasing here would run off the front.
-        guard start >= 0 else {
-            return .mismatch(
-                "caret \(end) leaves no room for a \(plan.utf16Count)-unit erase in a \(units.count)-unit field"
-            )
+        let disagreement: String
+        if start < 0 {
+            disagreement = "caret \(end) leaves no room for a \(plan.utf16Count)-unit erase in a \(units.count)-unit field"
+        } else {
+            // Copy only the trigger window, not the entire AXValue.
+            let lower = units.index(units.startIndex, offsetBy: start)
+            let upper = units.index(lower, offsetBy: plan.utf16Count)
+            let rawActual = String(decoding: units[lower..<upper], as: UTF16.self)
+            let actual = rawActual.normalizedWhitespace
+            let normExpected = expected.normalizedWhitespace
+            let matches = plan.caseInsensitive
+                ? actual.lowercased() == normExpected.lowercased()
+                : actual == normExpected
+            if matches { return .ok }
+            disagreement = "field holds \(debugQuote(rawActual)), expected \(debugQuote(expected))"
         }
 
-        let slice = Array(units[start..<end])
-        let rawActual = String(utf16CodeUnits: slice, count: slice.count)
-        let actual = rawActual.normalizedWhitespace
-        let normExpected = expected.normalizedWhitespace
-        let matches = plan.caseInsensitive
-            ? actual.lowercased() == normExpected.lowercased()
-            : actual == normExpected
-        guard matches else {
-            // §8.6: the slice depends on TWO reads agreeing — AXValue for the text and
-            // AXSelectedTextRange for where the caret is *within that text*. Electron hosts
-            // (field incident: Claude Desktop refusing `` `rtes `` because the slice read
-            // "round" — a fragment of unrelated prose) return the two in inconsistent
-            // coordinate spaces: the value is content-accurate, the caret indexes something
-            // else. A mismatch is therefore only trustworthy testimony when the
-            // position-independent read agrees the trigger is absent. If the value *does*
-            // contain the just-typed trigger, the geometry — not the field — is the liar:
-            // degrade to `.unavailable`, the same best-effort blind-erase baseline every
-            // AX-opaque host already uses. The backspaces operate at the app's real insertion
-            // point, which sits immediately after the trigger keystrokes the tap just
-            // observed, so the count remains well-founded.
-            //
-            // A mismatch with the trigger nowhere in the value keeps refusing — that is the
-            // genuine "field changed under us" signal this guard exists for.
-            //
-            // The downgrade's premise — backspaces land right after the expected text — holds
-            // only when the caller vouches for it. The undo path opts out and takes the honest
-            // mismatch instead, because its caret may sit past text typed after the expansion.
-            if insertionPointFollowsExpectedText {
-                let haystack = plan.caseInsensitive ? value.lowercased() : value
-                let needle = plan.caseInsensitive ? expected.lowercased() : expected
-                if DeliveryVerifier.boundedContains(needle, in: haystack, caretLocation: end) == true {
-                    return .unavailable(
-                        "caret slice reads \(debugQuote(rawActual)) but the value does contain the"
-                            + " expected text — caret geometry untrusted, proceeding best-effort"
-                    )
-                }
-            }
-            return .mismatch("field holds \(debugQuote(rawActual)), expected \(debugQuote(expected))")
+        // AXValue and AXSelectedTextRange can use inconsistent coordinates, including a
+        // zero caret in a nonempty Claude field. Both disagreement paths need the same
+        // bounded corroboration. This authorises HID recovery, never an AX range write.
+        let containsExpected = DeliveryVerifier.boundedContains(
+            expected, in: value, caretLocation: end, caseInsensitive: plan.caseInsensitive
+        )
+        let presence = containsExpected.map { $0 ? "present" : "absent" } ?? "unavailable"
+        let scan = units.count <= DeliveryVerifier.maxVerificationScanUTF16 ? "full" : "caretWindow"
+        let evidence = "caret=\(end) selection=\(selectionLength.map(String.init) ?? "unavailable")"
+            + " valueUTF16=\(units.count) expectedTextInScan=\(presence) scan=\(scan)"
+        if insertionPointFollowsExpectedText, selectionLength == 0, containsExpected == true {
+            return .unavailable(
+                "\(disagreement) — caret geometry untrusted, proceeding best-effort; \(evidence)"
+            )
         }
-        return .ok
+        return .mismatch("\(disagreement); \(evidence)")
     }
 
     /// Short, redaction-friendly rendering for logs — length plus a bounded prefix. Exotic
@@ -254,4 +246,3 @@ public enum ErasePreconditionChecker {
         return "\"\(rendered)…\"(\(text.count))"
     }
 }
-

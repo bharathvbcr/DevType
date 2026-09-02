@@ -82,7 +82,7 @@ It expands typed triggers in place, renders Mustache and TextExpander macros, ru
 
 ## ✨ Key Features
 
-- ⚡ **Instant Expand-on-Match**: Low-latency swallowing ring buffer that instantly replaces typed triggers using Accessibility range replacement (with fallback to HID clipboard paste).
+- ⚡ **Instant Expand-on-Match**: Replaces typed triggers using Accessibility range replacement, with guarded keyboard/paste recovery for inconsistent cursor reports. Input and application changes observed during the erase check cancel the operation.
 - 🎙️ **Smart Dictation**: Push-to-talk speech-to-text with thought-revision / self-correction resolution, filler stripping, and custom vocabulary (inspired by [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)). Pick the recognizer in **Preferences → Voice**: Apple Speech, an on-device local model, or a local `whisper.cpp` server — all offline. A cloud engine is available but stays off unless you supply your own API key. See [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
 - 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, expand, condense, tone shift, bulletize, prompt enhance, code explain/fix/test, git commit message, translate, convert to Markdown) using Apple Foundation Models (macOS 26+), plus a first-class offline **Remove Markdown** action running locally without an AI model on all supported macOS versions (macOS 14+). 100% private, zero API keys required.
 - 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy and conversational search for snippets and AI tools, optional on-device semantic routing, inline math (`= 45 * 12.5`), custom one-shot AI prompts (`> …`), date offsets (`tomorrow`, `+3w`, `next friday`), instant text operations (case, sort, dedupe, Base64/URL/JSON, SHA-256/MD5), generators (UUID, lorem, password), and quick app navigation — ranked by your own usage.
@@ -147,7 +147,7 @@ cd DevType
 ./Scripts/package-app.sh release
 
 # 4. Install to /Applications
-./Scripts/install-app.sh
+./Scripts/install-app.sh release
 open /Applications/DevType.app
 ```
 
@@ -162,7 +162,7 @@ Explore our complete documentation in the [`docs/`](docs/) directory:
 - 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
 - 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 1,900+ headless unit tests, debugging, and release automation.
-- 📦 **[Release notes](docs/releases/v0.1.4.md)**: v0.1.4 password-field menu improvements, verification, and signing status. See also the [direct-search follow-up](docs/releases/v0.1.4-follow-up.md), [secret-selection fix](docs/releases/v0.1.4-secret-selection-fix.md), and [Touch ID search fix](docs/releases/v0.1.4-touchid-search-fix.md).
+- 📦 **[Release notes](docs/releases/v0.1.4.md)**: v0.1.4 expansion recovery, cancellation safety, password-field menu improvements, verification, and signing status.
 - 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---

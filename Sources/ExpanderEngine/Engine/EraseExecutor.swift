@@ -214,15 +214,22 @@ public final class EraseExecutor {
     ///   verdict so the next expansion skips the AX write instead of refusing forever. Never
     ///   invoked for `.mismatch` (a readable field that disagrees — usually a moved caret, not a
     ///   broken app).
+    /// - Parameter canProceed: live input/focus guard, re-evaluated after retries and before
+    ///   posting. A caller that observed a context change must not erase from the stale snapshot.
     public func performGuardedErase(
         plan: ErasePlan,
         afterPossibleWrite: Bool = false,
         insertionPointFollowsExpectedText: Bool = true,
+        canProceed: @escaping () -> Bool = { true },
         onUnverifiableAfterWrite: ((String) -> Void)? = nil,
         completion: @escaping (Bool) -> Void
     ) {
         guard plan.backspaceCount > 0 else {
             completion(true)
+            return
+        }
+        guard canProceed() else {
+            completion(false)
             return
         }
         // Resolve focus once and share it: `AXContextChecker.focusedElement()` is a multi-step AX
@@ -253,6 +260,7 @@ public final class EraseExecutor {
                         plan: plan,
                         afterPossibleWrite: afterPossibleWrite,
                         result: second,
+                        canProceed: canProceed,
                         onUnverifiableAfterWrite: onUnverifiableAfterWrite,
                         completion: completion
                     )
@@ -263,6 +271,7 @@ public final class EraseExecutor {
                 plan: plan,
                 afterPossibleWrite: afterPossibleWrite,
                 result: result,
+                canProceed: canProceed,
                 onUnverifiableAfterWrite: onUnverifiableAfterWrite,
                 completion: completion
             )
@@ -275,9 +284,15 @@ public final class EraseExecutor {
         plan: ErasePlan,
         afterPossibleWrite: Bool,
         result: ErasePreconditionResult,
+        canProceed: () -> Bool = { true },
         onUnverifiableAfterWrite: ((String) -> Void)?,
         completion: @escaping (Bool) -> Void
     ) {
+        guard canProceed() else {
+            DevTypeLog.inject.error("[Inject] erase aborted — input or target application changed")
+            completion(false)
+            return
+        }
         if afterPossibleWrite, case .unavailable(let why) = result {
             DevTypeLog.inject.error(
                 "[Inject] erase refused after an attempted AX write — cannot verify field (\(why, privacy: .public)). Proceeding would risk injecting twice."

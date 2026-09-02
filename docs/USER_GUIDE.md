@@ -229,7 +229,8 @@ Muted apps are also reachable straight from the menu bar (**Mute Frontmost App**
 
 ## 11. Troubleshooting & FAQs
 
-- **Text is not expanding**: Verify permissions under **Preferences → Home** or press **`⌘⇧P`** to open Permission Recovery.
+- **Text is not expanding**: Press **`⌘⇧P`** to open Permission Recovery and inspect **Last inject**. A permission failure and an erase refusal need different remedies; see [expansion troubleshooting](../SUPPORT.md#1-snippets-are-not-expanding-when-i-type-what-should-i-do).
+- **Expansion cancelled after moving the cursor**: Refocus the intended field and retype the trigger. DevType cancels when it observes input or an application change during the erase check.
 - **Accidental expansion in games or terminals**: Add the app to your **Muted Apps** list in Preferences → General or choose **Mute Frontmost App** from the menu bar.
 - **Shortcut conflicts**: Re-record your global hotkeys in **Preferences → Hotkeys**.
 - **Need help?**: Check our [Support Guide](../SUPPORT.md) or open an issue on GitHub.

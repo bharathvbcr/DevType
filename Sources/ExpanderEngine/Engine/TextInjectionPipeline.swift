@@ -14,8 +14,8 @@ import Foundation
 ///
 /// This also folds in `EventTapEngine.mustReinjectOnRefuse(didSwallow:)`, which is the single rule
 /// that makes the swallow contract safe: the tap only returns `nil` for the trigger key after the
-/// planner has synchronously said the expand may proceed, so **any** later refuse owes the user
-/// that keystroke back.
+/// planner has synchronously said the expand may proceed, so a later refuse owes the user
+/// that keystroke back while the target is unchanged. A changed erase context suppresses replay.
 public struct SwallowedKey {
     /// True when the event tap swallowed the final trigger key (`return nil` from the callback).
     public let didSwallow: Bool
@@ -61,8 +61,8 @@ public struct SwallowedKey {
 /// The safety contract, unchanged:
 /// * fail closed when AX is unavailable,
 /// * refuse inside secure text fields, during IME composition, and in muted apps,
-/// * the trigger key is swallowed only after a sync-safe planner allow, and every asynchronous
-///   refuse reinjects it.
+/// * the trigger key is swallowed only after a sync-safe planner allow; an asynchronous refuse
+///   reinjects it unless input/focus changes made replay unsafe.
 public final class TextInjectionPipeline {
     public static let shared = TextInjectionPipeline()
 
@@ -600,9 +600,8 @@ public final class TextInjectionPipeline {
     /// Opens the delivery-input window for one expansion. Called when the tap claims the inject
     /// critical section — before any key can pass through that delivery.
     ///
-    /// Cheap and unconditional: the counter is only ever *read* by `rememberExpansion`, which
-    /// runs inside the same window, so increments landing outside a delivery (most keystrokes)
-    /// are discarded by the next `beginDeliveryWindow()` without ever affecting a record.
+    /// Increments outside a delivery are discarded by the next `beginDeliveryWindow()`.
+    /// During delivery, the counter guards both erases and the eventual undo record.
     public func beginDeliveryWindow() {
         lastExpansionLock.lock()
         _deliveryInputUnits = 0
@@ -621,6 +620,18 @@ public final class TextInjectionPipeline {
     /// Internal test reader for the delivery-window counter. Not public API.
     var deliveryInputUnitsForTesting: Int {
         lastExpansionLock.withLock { _deliveryInputUnits }
+    }
+
+    /// Re-check after asynchronous AX retries and immediately before erase. Clicks and
+    /// pass-through keys already feed this counter through the event tap.
+    func eraseContextIsCurrent(
+        inputUnits: Int,
+        targetPID: pid_t?,
+        frontmostPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    ) -> Bool {
+        guard let targetPID,
+              frontmostPID == targetPID else { return false }
+        return lastExpansionLock.withLock { _deliveryInputUnits == inputUnits }
     }
 
     /// Whether one pass-through key observed during delivery breaks the blind-undo premise.
@@ -961,6 +972,8 @@ public final class TextInjectionPipeline {
         /// Keep the optional: a bundle-less frontmost app must not be learned under the literal
         /// key "nil", which would then disable AX writes for every other bundle-less app.
         let frontBundleID: String?
+        let frontPID: pid_t?
+        let deliveryInputUnits: Int
 
         var frontBundle: String { frontBundleID ?? "nil" }
     }
@@ -1032,7 +1045,9 @@ public final class TextInjectionPipeline {
             canUseAX: snapshot.canUseAX,
             canPostEvents: snapshot.canPostEvents
         )
-        let frontBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let frontBundleID = frontApp?.bundleIdentifier
+        let deliveryInputUnits = lastExpansionLock.withLock { _deliveryInputUnits }
         let frontBundle = frontBundleID ?? "nil"
         // #region agent log
         TextInjectionPipeline.debugLogInject(
@@ -1074,7 +1089,9 @@ public final class TextInjectionPipeline {
             trailingKeys: trailingKeys,
             snippetLookup: snippetLookup,
             snapshot: snapshot,
-            frontBundleID: frontBundleID
+            frontBundleID: frontBundleID,
+            frontPID: frontApp?.processIdentifier,
+            deliveryInputUnits: deliveryInputUnits
         )
 
         // Backstop before anything destructive: if AX can read the field, the trigger must actually
@@ -1084,6 +1101,17 @@ public final class TextInjectionPipeline {
         // §8.3: asynchronous, so the one-shot retry is available here (on main) without a 30 ms
         // `Thread.sleep` that would stall the event tap.
         eraser.evaluateErasePrecondition(plan: erasePlan) { eraseCheck in
+            guard erasePlan.isEmpty || self.eraseContextIsCurrent(
+                inputUnits: context.deliveryInputUnits, targetPID: context.frontPID
+            ) else {
+                let reason = "Expansion cancelled — input or target application changed before erase"
+                self.refuseInject(
+                    reason, path: "eraseContextChanged", swallowed: swallowed,
+                    allowKeyReplay: false,
+                    refuseContext: .capture(reason: reason, decision: decision), completion: completion
+                )
+                return
+            }
             // #region agent log
             if eraseCheck != .ok {
                 let label: String
@@ -1112,18 +1140,28 @@ public final class TextInjectionPipeline {
                     "Erase precondition failed — \(why)",
                     path: "erasePrecondition",
                     swallowed: swallowed,
+                    refuseContext: .capture(reason: "Erase precondition failed — \(why)", decision: decision),
                     completion: completion
                 )
                 return
             }
-            self.performInject(context: context, completion: completion)
+            self.performInject(context: context, eraseCheck: eraseCheck, completion: completion)
         }
     }
 
-    private func performInject(context: InjectContext, completion: @escaping InjectionCompletion) {
+    private func performInject(
+        context: InjectContext,
+        eraseCheck: ErasePreconditionResult,
+        completion: @escaping InjectionCompletion
+    ) {
         let swallowed = context.swallowed
         let erasePlan = context.erasePlan
         let frontBundle = context.frontBundle
+        let canProceed = {
+            erasePlan.isEmpty || self.eraseContextIsCurrent(
+                inputUnits: context.deliveryInputUnits, targetPID: context.frontPID
+            )
+        }
 
         // Image snippets bypass all text/AX paths: erase the trigger with HID
         // backspaces, then paste the image through the clipboard.
@@ -1146,12 +1184,13 @@ public final class TextInjectionPipeline {
                 )
                 return
             }
-            eraser.performGuardedErase(plan: erasePlan) { erased in
+            eraser.performGuardedErase(plan: erasePlan, canProceed: canProceed) { erased in
                 guard erased else {
                     self.refuseInject(
                         "Erase precondition failed before image paste — field no longer holds the trigger",
                         path: "imagePaste",
                         swallowed: swallowed,
+                        allowKeyReplay: canProceed(),
                         completion: completion
                     )
                     return
@@ -1259,11 +1298,10 @@ public final class TextInjectionPipeline {
         )
         // #endregion
 
-        // Skip the AX selected-text write when this app/role is known — seeded, learned this
-        // session, or persisted from an earlier launch — to report success without mutating.
-        // Role-aware: WhatsApp's AXTextArea can be condemned without affecting other roles.
+        // An unverifiable precondition cannot license writing through those same AX coordinates.
+        // Also skip apps/roles known to report successful writes without mutating.
         let focusedRole = AXContextChecker.shared.focusedElementRole()
-        var preferHID = TextInjectionPipeline.shouldSkipAXSelectedText(
+        var preferHID = eraseCheck.requiresHID || TextInjectionPipeline.shouldSkipAXSelectedText(
             bundleID: frontBundle,
             role: focusedRole
         )
@@ -1271,7 +1309,7 @@ public final class TextInjectionPipeline {
         if preferHID {
             TextInjectionPipeline.debugLogInject(
                 hypothesisId: "M3",
-                message: "skip AX range — weak selected-text app",
+                message: "skip AX range — unverified precondition or weak selected-text app",
                 data: [
                     "frontmostBundle": frontBundle,
                     "preferHID": true,
@@ -1280,6 +1318,15 @@ public final class TextInjectionPipeline {
             )
         }
         // #endregion
+
+        guard canProceed() else {
+            refuseInject(
+                "Expansion cancelled — input or target application changed before erase",
+                path: "eraseContextChanged", swallowed: swallowed,
+                allowKeyReplay: false, completion: completion
+            )
+            return
+        }
 
         switch effectivePlan {
         case .refuse(let reason):
@@ -1409,6 +1456,7 @@ public final class TextInjectionPipeline {
         eraser.performGuardedErase(
             plan: erasePlan,
             afterPossibleWrite: attemptedAXWrite,
+            canProceed: canProceed,
             onUnverifiableAfterWrite: { why in
                 // Self-healing: an attempted AX write left the field unreadable even after the
                 // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
@@ -1441,6 +1489,7 @@ public final class TextInjectionPipeline {
                     "Erase precondition failed before paste — field no longer holds the trigger",
                     path: "guardedErase",
                     swallowed: swallowed,
+                    allowKeyReplay: canProceed(),
                     completion: completion
                 )
                 return
@@ -1879,15 +1928,17 @@ public final class TextInjectionPipeline {
     /// §8.2: the single refuse path. There were nine near-identical eight-line call sites of this
     /// in `injectOnMain` differing only in a reason string.
     ///
-    /// The swallow contract lives here: an asynchronous refuse owes the user the key the tap ate.
+    /// An asynchronous refuse owes the user the swallowed key while its target is unchanged.
+    /// Once input/focus changes, replay could type (or press Return) into the wrong field.
     private func refuseInject(
         _ reason: String,
         path: String,
         swallowed: SwallowedKey,
+        allowKeyReplay: Bool = true,
         refuseContext: PermissionCoordinator.InjectRefuseProvenance? = nil,
         completion: @escaping InjectionCompletion
     ) {
-        if swallowed.mustReinjectOnRefuse {
+        if allowKeyReplay, swallowed.mustReinjectOnRefuse {
             _ = reinjectSwallowedKey(swallowed)
         }
         PermissionCoordinator.shared.recordInjectOutcome(

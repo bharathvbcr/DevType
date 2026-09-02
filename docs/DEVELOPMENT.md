@@ -41,7 +41,7 @@ The resolver and verification scripts have dedicated self-tests (`test-signing-i
 
 ## 🧪 Testing Guidelines
 
-DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The v0.1.4 follow-up suite contains 1,938 tests. Seven live-AI tests and seven native AppKit window tests require explicit opt-in; the latter briefly display synthetic UI.
+DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The v0.1.4 expansion-recovery suite contains 1,950 tests: the standard run passes 1,936 and skips 14. Seven live-AI tests and seven native AppKit window tests require explicit opt-in; the latter briefly display synthetic UI.
 
 ### Running Tests
 ```bash
@@ -56,6 +56,9 @@ DevType maintains **1,900+ unit, fuzz, and stress tests** across `Tests/Expander
 
 # Run a single test case
 ./Scripts/test.sh --filter testBiometricGateGating
+
+# Check erase recovery, cancellation, Unicode handling, undo, and duplicate-insertion guards
+./Scripts/test.sh --filter 'EraseSafetyTests|BackspaceIntegrityTests|DoubleInjectGuardTests|EraseUndoStressTests|WhitespaceFoldingStressTests|SourceContractTests'
 
 # Show synthetic AppKit UI to check direct secret search and native status-button events
 DEVTYPE_RUN_APPKIT_SMOKE=1 ./Scripts/test.sh --filter SecretSearchWindowTests
@@ -116,6 +119,18 @@ DevType avoids hardcoded version strings. `Resources/Info.plist` ships placehold
 - **`CFBundleVersion`** = monotonic commit count — the number macOS compares when deciding which of two bundles is newer.
 
 Outside a Git checkout, packaging falls back to the plist values. Local CI fails the build if a placeholder version survives stamping, so field diagnostics always map to an exact commit.
+
+For a local rebuild requested under an existing version, check whether the tag is published
+before assigning that release name. Preserve an unpublished tag's original object under
+`refs/archive/` and record its old and new targets alongside the build archive. Do not move a
+published tag. Keep the build number derived from the new commit count, and verify the
+packaged version with `Scripts/verify-release-version.sh` before installation.
+
+Before removing old build outputs, inventory the ignored `.build/`, `build/`, and `dist/`
+directories and preserve a recoverable copy of the installed app. `install-app.sh` packages
+again, so carry the same configuration, Xcode toolchain, and signing identity into installation.
+Compare the old and new designated requirements before replacing the app: the installer
+resets TCC if those requirements differ. Verify deep/strict codesign and Gatekeeper separately.
 
 ### Update Checking
 

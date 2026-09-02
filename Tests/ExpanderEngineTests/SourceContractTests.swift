@@ -18,6 +18,30 @@ import XCTest
 
 final class SourceContractTests: XCTestCase {
 
+    func testEraseRecoveryCarriesEvidenceAndRechecksInputBeforePosting() throws {
+        let pipeline = try source("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
+        let check = try XCTUnwrap(pipeline.range(of: "eraser.evaluateErasePrecondition(plan: erasePlan) { eraseCheck in"))
+        let next = try XCTUnwrap(pipeline.range(of: "private func performInject("))
+        let gate = String(pipeline[check.lowerBound..<next.lowerBound])
+        XCTAssertTrue(gate.contains("eraseContextIsCurrent("), "A stale AX retry must not erase after input/focus changes")
+        XCTAssertTrue(gate.contains("allowKeyReplay: false"), "Cancellation must not replay a swallowed Return into a new target")
+        XCTAssertTrue(gate.contains("refuseContext: .capture("), "The refusal must retain the original expansion gate")
+        XCTAssertTrue(gate.contains("decision: decision"))
+        XCTAssertTrue(gate.contains("eraseCheck: eraseCheck"), "The AX/HID choice needs the actual precondition result")
+        let inject = String(pipeline[next.lowerBound...])
+        XCTAssertTrue(inject.contains("eraseCheck.requiresHID ||"), "Unverified coordinates must not be sent back to AX")
+        XCTAssertEqual(inject.components(separatedBy: "canProceed: canProceed").count - 1, 2,
+                       "Both image and text erases must keep the live input/focus guard")
+        XCTAssertEqual(inject.components(separatedBy: "allowKeyReplay: canProceed()").count - 1, 2)
+        XCTAssertTrue(inject.contains("if allowKeyReplay, swallowed.mustReinjectOnRefuse"))
+        let eraser = try source("Sources/ExpanderEngine/Engine/EraseExecutor.swift")
+        let finish = try XCTUnwrap(eraser.range(of: "func finishGuardedErase("))
+        let posting = String(eraser[finish.lowerBound...])
+        let contextGuard = try XCTUnwrap(posting.range(of: "guard canProceed()"))
+        let post = try XCTUnwrap(posting.range(of: "hid.sendBackspacesAsync("))
+        XCTAssertLessThan(contextGuard.lowerBound, post.lowerBound)
+    }
+
     func testStatusButtonUsesTheSecureInputPresentationAtTheLiveBoundary() throws {
         let app = try source("Sources/DevTypeAppCore/AppDelegate.swift")
         let start = try XCTUnwrap(app.range(of: "private func refreshStatusItemUI()"))

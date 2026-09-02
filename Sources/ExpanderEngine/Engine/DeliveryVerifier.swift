@@ -191,29 +191,37 @@ public final class DeliveryVerifier {
     public static func boundedContains(
         _ needle: String,
         in value: String,
-        caretLocation: Int?
+        caretLocation: Int?,
+        caseInsensitive: Bool = false
     ) -> Bool? {
         guard !needle.isEmpty else { return true }
         let total = value.utf16.count
+        let searchValue: String
         if total <= maxVerificationScanUTF16 {
-            return value.normalizedWhitespace.contains(needle.normalizedWhitespace)
+            searchValue = value
+        } else {
+            // Bound FIRST, fold the window only. Whitespace folding is 1:1 in UTF-16 units (see
+            // WhitespaceFolding.swift), so offsets computed on the raw value are valid on folded
+            // text — folding the whole value here would reintroduce the full-field O(n) copy this
+            // bound exists to prevent, on every 50 ms hold-loop tick.
+            guard let caretLocation, caretLocation >= 0, caretLocation <= total else { return nil }
+            let needleUnits = needle.utf16.count
+            let lower = max(0, caretLocation - needleUnits - verificationCaretSlackUTF16)
+            let upper = min(total, caretLocation + verificationCaretSlackUTF16)
+            guard lower < upper else { return nil }
+            // Mid-surrogate offsets round to scalar boundaries when slicing (verified behaviour) —
+            // the slack absorbs the at-most-one-unit shrink at each edge.
+            let lowerIndex = String.Index(utf16Offset: lower, in: value)
+            let upperIndex = String.Index(utf16Offset: upper, in: value)
+            guard lowerIndex < upperIndex else { return nil }
+            searchValue = String(value[lowerIndex..<upperIndex])
         }
-        // Bound FIRST, fold the window only. Whitespace folding is 1:1 in UTF-16 units (see
-        // WhitespaceFolding.swift), so offsets computed on the raw value are valid on folded
-        // text — folding the whole value here would reintroduce the full-field O(n) copy this
-        // bound exists to prevent, on every 50 ms hold-loop tick.
-        guard let caretLocation, caretLocation >= 0, caretLocation <= total else { return nil }
-        let needleUnits = needle.utf16.count
-        let lower = max(0, caretLocation - needleUnits - verificationCaretSlackUTF16)
-        let upper = min(total, caretLocation + verificationCaretSlackUTF16)
-        guard lower < upper else { return nil }
-        // Mid-surrogate offsets round to scalar boundaries when slicing (verified behaviour) —
-        // the slack absorbs the at-most-one-unit shrink at each edge.
-        let lowerIndex = String.Index(utf16Offset: lower, in: value)
-        let upperIndex = String.Index(utf16Offset: upper, in: value)
-        guard lowerIndex < upperIndex else { return nil }
-        return String(value[lowerIndex..<upperIndex]).normalizedWhitespace
-            .contains(needle.normalizedWhitespace)
+        // Fold after selecting the window: lowercasing can change UTF-16 length, and
+        // applying it to the full value would both move the caret and bypass the bound.
+        let haystack = searchValue.normalizedWhitespace
+        let expected = needle.normalizedWhitespace
+        return caseInsensitive
+            ? haystack.lowercased().contains(expected.lowercased())
+            : haystack.contains(expected)
     }
 }
-

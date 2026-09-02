@@ -24,7 +24,9 @@ Before submitting an issue, please check our documentation resources:
 2. Check the menu-bar status. A pause indicator means expansion is paused. A key with **Copy Secret** means macOS Secure Input is active: click it to open Search Secrets, choose a saved secret, then paste with `⌘V` in the password field. Right-click or Control-click the button for the full menu. Typed triggers stay paused there.
 3. Ensure the active application is not in your **Muted Apps** list.
 4. Try typing in standard macOS applications like TextEdit or Notes to verify system-level expansion.
-5. If permissions appear granted in macOS System Settings but expansion still fails, see our [Permissions Guide](docs/PERMISSIONS_GUIDE.md) for steps on resetting the TCC cache.
+5. Check **Last inject** in the diagnostic report. An **Erase precondition failed** message means the replacement reached its safety check; resetting permissions does not address the reported text/cursor disagreement. In v0.1.4, a zero or near-zero reported cursor can recover through keyboard deletion and paste when the trigger is found and no selection is reported.
+6. If the report says **input or target application changed**, place the cursor in the intended field and retype the trigger. DevType cancels instead of erasing or replaying a key into a changed target.
+7. If the diagnostic report identifies a permission failure, follow the [Permissions Guide](docs/PERMISSIONS_GUIDE.md). For an erase refusal, include the target app and the diagnostic report with the bug report. `expectedTextInScan` records whether the trigger was found; `scan=caretWindow` means only part of a large field was searched.
 
 ### 2. How do I trigger On-Device AI text transforms?
 Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A). You can also type assigned trigger abbreviations (e.g. `:fix`, `:rw`) when configured in **Preferences → AI**. Note that on-device Apple Foundation Models require macOS 26+, while **Remove Markdown** runs offline locally on all supported macOS versions (macOS 14+).
