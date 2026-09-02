@@ -402,24 +402,42 @@ final class AIMarkdownStripperTests: XCTestCase {
 
     func testEveryKindHasADeliberatePolicy() {
         // Code and structured output: `*`, `_`, `#` and backticks are the program.
-        for kind in [AITransformKind.fixCode, .generateDocstring, .toJson,
-                     .generateUnitTests, .sqlQuery, .promptEnhance, .toMarkdown] {
+        let preserved: [AITransformKind] = [.fixCode, .generateDocstring, .toJson,
+                                            .generateUnitTests, .sqlQuery, .promptEnhance,
+                                            .toMarkdown]
+        // Kinds that owe the author their layout.
+        let layoutPreserving: [AITransformKind] = [.proofread, .translate, .translateTelugu,
+                                                   .translateHindi, .bulletize, .mergeRewrite]
+        // Prose.
+        let prose: [AITransformKind] = [.rewrite, .paraphrase, .expand, .condense, .formal,
+                                        .friendly, .explainCode, .explainRegex,
+                                        .gitCommitMessage, .custom, .removeMarkdown]
+
+        for kind in preserved {
             XCTAssertEqual(kind.markdownPolicy, .preserve, "\(kind.rawValue) must not be stripped")
         }
-        // Kinds that owe the author their layout.
-        for kind in [AITransformKind.proofread, .translate, .translateTelugu,
-                     .translateHindi, .bulletize] {
+        for kind in layoutPreserving {
             XCTAssertEqual(kind.markdownPolicy, .stripPreservingLayout, "\(kind.rawValue)")
         }
-        // Prose.
-        for kind in [AITransformKind.rewrite, .paraphrase, .expand, .condense, .formal,
-                     .friendly, .explainCode, .explainRegex, .gitCommitMessage, .custom,
-                     .removeMarkdown] {
+        for kind in prose {
             XCTAssertEqual(kind.markdownPolicy, .strip, "\(kind.rawValue)")
         }
+
         // And no kind is left undecided. A new case fails here until it is classified
         // above — the policy is a decision, not something to inherit by accident.
-        XCTAssertEqual(AITransformKind.allCases.count, 23)
+        //
+        // Stated as coverage rather than a hand-bumped count: a count only proves someone
+        // edited a number, while this proves every kind sits in exactly one bucket. Adding a
+        // case and bumping a total used to be enough to pass without classifying anything.
+        let classified = preserved + layoutPreserving + prose
+        XCTAssertEqual(
+            Set(classified).count, classified.count,
+            "A kind is listed in more than one policy group."
+        )
+        XCTAssertEqual(
+            Set(AITransformKind.allCases).subtracting(classified), [],
+            "Every kind must be given a Markdown policy here."
+        )
     }
 
     /// A layout-preserving kind must never break the line-structure contract that the

@@ -24,6 +24,9 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     case paraphrase
     case expand
     case condense
+    /// Several fragments in — one coherent piece out. Deduplicates overlapping content
+    /// rather than merely shortening it, which is what separates it from `condense`.
+    case mergeRewrite = "mergerewrite"
     case formal
     case friendly
     case bulletize
@@ -86,6 +89,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             return "Generate a conventional git commit message for:\n\n"
         case .sqlQuery:
             return "Generate an optimized SQL query for:\n\n"
+        case .mergeRewrite:
+            return "Merge the text below into one piece:\n\n"
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
              .bulletize, .promptEnhance, .custom:
             return Self.genericFraming
@@ -146,6 +151,25 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             return """
             You condense the user's text to be shorter and tighter while preserving the
             essential meaning. Drop filler, not substance. Do not add a preamble or labels.
+            """
+        case .mergeRewrite:
+            return """
+            You merge the user's text into one coherent piece.
+
+            The input is several separate fragments — bullet points, notes, lines
+            written at different times — that overlap. Combine them: state each
+            distinct fact once, fold duplicated and near-duplicated claims together,
+            and cut the connective filler that repetition creates.
+
+            This is not summarizing. Every specific detail the fragments carry —
+            numbers, metrics, tools, names, dates, outcomes — survives into the merged
+            text. Dropping one is the failure here, and is worse than a longer result.
+
+            Keep the form the input arrived in: merged bullets stay a shorter bullet
+            list using "- " markers, merged prose stays prose. Keep the original
+            language, register, and tense.
+
+            Return ONLY the merged text — no preamble, labels, or commentary.
             """
         case .formal:
             return """
@@ -336,7 +360,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             return 0.2
         case .promptEnhance, .toMarkdown:
             return 0.35
-        case .rewrite, .paraphrase, .condense, .formal, .friendly, .bulletize, .explainCode, .generateDocstring, .explainRegex, .gitCommitMessage:
+        case .rewrite, .paraphrase, .condense, .mergeRewrite, .formal, .friendly, .bulletize, .explainCode, .generateDocstring, .explainRegex, .gitCommitMessage:
             return 0.4
         case .expand, .generateUnitTests:
             return 0.6
@@ -353,8 +377,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread, .translate, .translateTelugu, .translateHindi, .toJson,
              .sqlQuery, .fixCode, .explainRegex, .removeMarkdown:
             return true
-        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+        case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .formal,
+             .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .generateUnitTests, .gitCommitMessage, .custom, .toMarkdown:
             return false
         }
@@ -370,8 +394,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         // Hindi. Native script in the reply is unusable in the field it lands in.
         case .translate, .translateTelugu, .translateHindi:
             return .latinOnly
-        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+        case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .formal,
+             .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
              .explainRegex, .sqlQuery, .custom, .toMarkdown:
             return .unconstrained
@@ -386,8 +410,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread, .removeMarkdown:
             return .correction
         // Markdown syntax is characters the source did not have, so growth is expected.
-        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+        case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .formal,
+             .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
              .explainRegex, .sqlQuery, .translate, .translateTelugu,
              .translateHindi, .custom, .toMarkdown:
@@ -414,7 +438,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     /// before this runs, so `.preserve` still does not leak ```` ``` ```` into a field.
     public var markdownPolicy: AIMarkdownPolicy {
         switch self {
-        case .proofread, .translate, .translateTelugu, .translateHindi, .bulletize:
+        case .proofread, .translate, .translateTelugu, .translateHindi, .bulletize,
+             .mergeRewrite:
             return .stripPreservingLayout
         case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
              .explainCode, .explainRegex, .gitCommitMessage, .custom, .removeMarkdown:
@@ -440,9 +465,10 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         switch self {
         case .removeMarkdown:
             return false
-        case .proofread, .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .explainCode, .generateDocstring, .fixCode,
-             .toJson, .generateUnitTests, .gitCommitMessage, .explainRegex, .sqlQuery,
+        case .proofread, .rewrite, .paraphrase, .expand, .condense, .mergeRewrite,
+             .formal, .friendly, .bulletize, .promptEnhance, .explainCode,
+             .generateDocstring, .fixCode, .toJson, .generateUnitTests,
+             .gitCommitMessage, .explainRegex, .sqlQuery,
              .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown:
             return true
         }
@@ -456,8 +482,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread, .translate, .translateTelugu, .translateHindi:
             return true
         // Removing a fence or a rule takes its whole line with it, by design.
-        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+        case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .formal,
+             .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
              .explainRegex, .sqlQuery, .custom, .removeMarkdown, .toMarkdown:
             return false
@@ -470,10 +496,11 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .proofread, .removeMarkdown:
             return .direct
         // Restructures the whole selection, so it is reviewed before it replaces anything.
-        case .rewrite, .paraphrase, .expand, .condense, .formal, .friendly, .bulletize,
-             .promptEnhance, .explainCode, .generateDocstring, .fixCode, .toJson,
-             .generateUnitTests, .gitCommitMessage, .explainRegex, .sqlQuery,
-             .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown:
+        case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .formal,
+             .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
+             .fixCode, .toJson, .generateUnitTests, .gitCommitMessage, .explainRegex,
+             .sqlQuery, .translate, .translateTelugu, .translateHindi, .custom,
+             .toMarkdown:
             return .preview
         }
     }
@@ -487,6 +514,9 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .paraphrase: return 1.25
         case .expand: return 2.0
         case .condense: return 0.6
+        // Below input, above `condense`: deduplicating still has to carry every distinct
+        // fact through, so it cannot compress as hard.
+        case .mergeRewrite: return 0.7
         case .formal: return 1.2
         case .friendly: return 1.2
         case .bulletize: return 1.1
@@ -519,7 +549,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             return true
         // Heading levels and list continuity are decisions about the whole document; a
         // paragraph formatted alone cannot know it is the third item of a list.
-        case .rewrite, .paraphrase, .expand, .condense, .promptEnhance,
+        case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .promptEnhance,
              .explainCode, .generateDocstring, .fixCode, .toJson,
              .generateUnitTests, .gitCommitMessage, .explainRegex,
              .sqlQuery, .custom, .toMarkdown:

@@ -94,7 +94,7 @@ enum MacroPaletteRanking {
                     descriptor, terms: scoredTerms, categoryTitle: title, loc: loc
                 )
                 for (index, value) in scores.enumerated()
-                where (value ?? 0) >= CommandPaletteCatalog.minimumPartialTermScore {
+                where (value ?? 0) >= CommandPaletteCatalog.minimumDiscriminatingTermScore {
                     discriminating[index] = true
                 }
                 perMacro.append((descriptor, category, scores))

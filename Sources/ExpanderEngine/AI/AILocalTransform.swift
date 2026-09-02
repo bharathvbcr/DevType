@@ -31,9 +31,10 @@ public enum AILocalTransform {
         case .removeMarkdown:
             return .success(removingMarkdown(from: input))
 
-        case .proofread, .rewrite, .paraphrase, .expand, .condense, .formal, .friendly,
-             .bulletize, .promptEnhance, .explainCode, .generateDocstring, .fixCode,
-             .toJson, .generateUnitTests, .gitCommitMessage, .explainRegex, .sqlQuery,
+        case .proofread, .rewrite, .paraphrase, .expand, .condense, .mergeRewrite,
+             .formal, .friendly, .bulletize, .promptEnhance, .explainCode,
+             .generateDocstring, .fixCode, .toJson, .generateUnitTests,
+             .gitCommitMessage, .explainRegex, .sqlQuery,
              .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown:
             return nil
         }

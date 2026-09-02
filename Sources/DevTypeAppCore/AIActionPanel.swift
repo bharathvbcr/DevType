@@ -595,6 +595,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         case .paraphrase: return "Rephrase with alternative words"
         case .expand: return "Flesh out thoughts and add detail"
         case .condense: return "Make concise and remove fluff"
+        case .mergeRewrite: return "Fold overlapping notes into one"
         case .formal: return "Professional and polished tone"
         case .friendly: return "Warm and approachable tone"
         case .bulletize: return "Convert into structured bullets"
@@ -620,7 +621,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         switch kind {
         case .proofread, .translate, .translateTelugu, .translateHindi:
             return "Preserves length"
-        case .condense, .gitCommitMessage, .removeMarkdown:
+        case .condense, .mergeRewrite, .gitCommitMessage, .removeMarkdown:
             return "Shortens"
         case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
             return "Expands"
@@ -633,7 +634,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         switch kind {
         case .proofread, .translate, .translateTelugu, .translateHindi:
             return DevTypeTheme.statusGreen
-        case .condense, .gitCommitMessage, .removeMarkdown:
+        case .condense, .mergeRewrite, .gitCommitMessage, .removeMarkdown:
             return DevTypeTheme.statusOrange
         case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
             return DevTypeTheme.statusBlue

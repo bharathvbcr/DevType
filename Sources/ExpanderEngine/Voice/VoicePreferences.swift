@@ -315,6 +315,8 @@ public enum VoicePreferences {
         "rewrite": "rewrite",
         "expand": "expand",
         "condense": "condense",
+        "merge": "mergerewrite",
+        "merge notes": "mergerewrite",
         "prompt enhance": "promptenhance",
         "enhance prompt": "promptenhance",
         "proofread": "proofread",

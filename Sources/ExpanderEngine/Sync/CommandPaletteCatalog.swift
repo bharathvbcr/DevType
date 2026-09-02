@@ -551,8 +551,8 @@ public enum CommandPaletteCatalog {
     /// how often a selection is handed to them, and no navigation at all — nobody selects a
     /// paragraph in order to open Preferences.
     public static let selectionSuggestionIDs = [
-        "ai.proofread", "ai.rewrite", "ai.formal", "ai.friendly",
-        "ai.condense", "ai.expand", "ai.bulletize", "ai.paraphrase",
+        "ai.proofread", "ai.rewrite", "ai.condense", "ai.mergerewrite",
+        "ai.formal", "ai.friendly", "ai.expand", "ai.bulletize", "ai.paraphrase",
         "ai.translate", "ai.totelugu", "ai.tohindi",
         "tool.upper", "tool.lower", "tool.count"
     ]
@@ -787,7 +787,8 @@ public enum CommandPaletteCatalog {
         for entry in index.entries {
             if case .undoAI = entry.command.action, !AIUndoStore.hasUndo { continue }
             let scores = termScores(entry: entry, terms: scoredTerms)
-            for (i, value) in scores.enumerated() where (value ?? 0) >= minimumPartialTermScore {
+            for (i, value) in scores.enumerated()
+            where (value ?? 0) >= minimumDiscriminatingTermScore {
                 discriminating[i] = true
             }
             scoresByID[entry.command.id] = scores
@@ -1070,8 +1071,22 @@ public enum CommandPaletteCatalog {
     /// catalogue on any multi-word query.
     public static let minimumPartialTermScore = 700
 
+    /// Score at which a term counts as one the catalogue *understands*, and so may veto a
+    /// command that misses it.
+    ///
+    /// Higher than the admission floor on purpose: every tier at or above 800 is a match at a
+    /// word boundary — an exact trigger, alias or title, or a prefix of one. Below it sits
+    /// `alias.contains(term)`, which fires mid-word.
+    ///
+    /// That distinction is not theoretical. Adding "fold together" as a merge alias made the
+    /// three letters in "to-get-her" a mid-word match for "get", which promoted `get` to a
+    /// capability word and silently vetoed proofread for "get rid of the typos" — a query
+    /// about something else entirely. Any alias can collide with any short word this way, so
+    /// the rule is that only a word-boundary match may speak for the catalogue.
+    public static let minimumDiscriminatingTermScore = 800
+
     /// Share of the score a partial match keeps as coverage approaches zero. Full coverage
-    /// keeps 100%, so a command that matches every term always outranks one that matches some.
+    /// keeps 100%, so a command matching every term always outranks one matching some.
     public static let partialCoverageFloor = 0.55
 
     /// Query words that carry no command meaning. Excluded from the coverage denominator so
@@ -1669,7 +1684,19 @@ public enum CommandPaletteCatalog {
         case .expand:
             return ["expand", "elaborate", "longer", "add detail", "flesh out"]
         case .condense:
-            return ["condense", "shorten", "summarize", "summary", "tighter", "brief"]
+            return [
+                "condense", "shorten", "shorter", "make shorter", "make it shorter",
+                "summarize", "summary", "tighter", "brief", "less wordy", "trim"
+            ]
+        case .mergeRewrite:
+            // "merge" leads because that is the distinct verb; "condense"/"summarize"
+            // are deliberately absent so they keep resolving to `condense`, which is a
+            // different job on a single passage.
+            return [
+                "merge", "merge and rewrite", "merge rewrite", "combine", "consolidate",
+                "merge bullets", "combine bullets", "resume points", "resume bullets",
+                "condense info", "merge notes", "merge points", "combine notes"
+            ]
         case .formal:
             return [
                 "formal", "make formal", "make this formal", "professional",
