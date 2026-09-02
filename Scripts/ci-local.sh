@@ -72,6 +72,8 @@ echo "  - Checking release tag/bundle version matching..."
 "${ROOT}/Scripts/test-release-version.sh"
 echo "  - Checking release preflight..."
 "${ROOT}/Scripts/test-release-preflight.sh"
+echo "  - Checking draft publication and failure recovery..."
+python3 "${ROOT}/Scripts/test-release-publication.py"
 
 echo "==> 2. Running SwiftPM Unit Tests"
 "${ROOT}/Scripts/test.sh" -v

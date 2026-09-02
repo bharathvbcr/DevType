@@ -33,6 +33,7 @@ All common workflows are automated via shell scripts in the `Scripts/` directory
 | **Signing Preflight** | `./Scripts/release-signing-preflight.sh` | Validates that the active signing identity meets distribution requirements. |
 | **Release Version Check** | `./Scripts/verify-release-version.sh` | Refuses to package a bundle whose stamped version differs from the exact release tag. |
 | **Asset Verification** | `./Scripts/verify-release-asset-list.sh` | Verifies published GitHub release asset inventories to prevent missing or mismatched assets. |
+| **Publish Verified Draft** | `GH_REPO=owner/repo ./Scripts/publish-release.sh <tag> <dist-dir>` | Requires the remote tag to match HEAD, uploads to a draft, verifies exact notes and downloaded bytes, then publishes and rechecks. Refuses to overwrite a public release. |
 | **Seed Issues** | `./Scripts/seed-good-first-issues.sh` | Seeds curated, self-contained `good first issue` candidates for open-source contributors. |
 
 The resolver and verification scripts have dedicated self-tests (`test-signing-identity.sh`, `test-release-dmg-select.sh`, `test-release-signing-preflight.sh`, `test-release-preflight.sh`, `test-release-asset-list.sh`, `test-release-guard.sh`, `test-release-version.sh`) that run inside local CI with stubbed environments.
@@ -148,11 +149,12 @@ DevType checks for updates itself (`Sources/ExpanderEngine/Updates/`); Sparkle i
 xcrun notarytool store-credentials DevTypeNotary \
   --apple-id you@example.com --team-id TEAMID --password <app-specific-password>
 
-# Commit, validate, then tag the release. The tag must point at the same clean
-# commit whose local CI passed.
+# Commit and tag locally, then validate that exact clean release commit.
+# If the tag already exists, inspect its local and remote state first; never
+# move a published tag. Preserve an unpublished tag object before replacing it.
 git commit -m "your release changes"
-./Scripts/ci-local.sh
 git tag -a v0.1.4 -m "Release v0.1.4"
+./ci:local
 ./Scripts/release-preflight.sh v0.1.4
 
 # Local release installation using the available signing identity
@@ -174,7 +176,11 @@ DEVTYPE_RELEASE_TAG=v0.1.4 \
   ./Scripts/release.sh
 ```
 
-Environment knobs: `DEVTYPE_SIGN_IDENTITY` (Developer ID identity), `DEVTYPE_NOTARY_PROFILE` (default `DevTypeNotary`), and `DEVTYPE_SKIP_NOTARIZE=1` for local-only dry runs. A tagged unnotarized release must additionally set `DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1`; this is an explicit trust downgrade, not a default. The GitHub workflow runs `ci:local`, checks exact tag/version agreement, requires curated notes and one matching DMG with no residue assets, and compares the published download byte-for-byte. The workflow’s explicit untrusted-release policy permits the unnotarized artifact and warns users accordingly.
+Environment knobs: `DEVTYPE_SIGN_IDENTITY` (Developer ID identity), `DEVTYPE_NOTARY_PROFILE` (default `DevTypeNotary`), and `DEVTYPE_SKIP_NOTARIZE=1` for local-only dry runs. A tagged unnotarized release must additionally set `DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1`; this is an explicit trust downgrade, not a default. The workflow's existing opt-in permits an ad-hoc signed, unnotarized GitHub artifact.
+
+Push `main` and verify its CI before pushing the release tag. The tag-triggered Release workflow also calls the full CI workflow from the same commit and waits for macOS 14, macOS 26, packaging, and hygiene checks. CI uses a distinct concurrency group so the reusable workflow cannot cancel its caller. Each job has a timeout.
+
+After `ci:local` and DMG construction, `publish-release.sh` creates or resumes a draft. It verifies remote tag provenance, exact title and notes (including trailing newlines), the complete asset inventory, and a byte-identical download before publication. It repeats verification after publication. API errors fail the job; downloads retry at most five times. Upload or draft-verification failures leave a draft for inspection and retry. Extra assets must be inspected and removed deliberately before retrying. An already published release is never overwritten by a rerun; inspect its state and use a new version for changed artifacts. `python3 Scripts/test-release-publication.py` exercises these paths locally without contacting GitHub.
 
 ---
 

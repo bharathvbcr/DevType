@@ -127,7 +127,7 @@ Every global shortcut is rebindable in **Preferences → Hotkeys**, which is als
 ### Option 1: Download Pre-built Release
 Download the latest macOS disk image (`.dmg`) directly from the [DevType GitHub Releases Page](https://github.com/bharathvbcr/DevType/releases/latest).
 
-> **Signing note:** development-signed builds, including the local v0.1.4 build, are unnotarized.
+> **Signing note:** the GitHub v0.1.4 DMG is ad-hoc signed and unnotarized. Local builds may use Apple Development signing.
 > A valid local signature does not establish Gatekeeper approval. If you trust the source,
 > use **Open** from Finder or **System Settings → Privacy & Security → Open Anyway** when required.
 

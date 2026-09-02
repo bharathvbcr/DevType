@@ -16,8 +16,15 @@ permissions:
   contents: write
 
 jobs:
+  ci:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   release:
     name: Build & Publish Release
+    needs: [ci]
     # Every step below assumes a strict tag ref (release name, notes file,
     # version assertion); a manual dispatch from a branch must skip instead of
     # publishing a garbage-named release.
@@ -48,9 +55,8 @@ jobs:
         run: swift --version && xcodebuild -version
 
       - name: Run local CI release gate
-        # The gate verifies source/build/package health. It may use the runner's
-        # local signing fallback; the distribution step below is intentionally
-        # stricter and requires Developer ID plus notarization credentials.
+        # Verify source/build/package health before using the explicit
+        # unnotarized publication policy below.
         env:
           DEVTYPE_SKIP_AUTO_CERT: '1'
         run: ./Scripts/ci-local.sh
@@ -67,75 +73,8 @@ jobs:
         run: |
           ./Scripts/release.sh
 
-      - name: Locate DMG
-        id: dmg
-        # Fails on zero, multiple, or version-mismatched candidates — never
-        # uploads an arbitrary or mislabeled artifact.
-        run: Scripts/select-release-dmg.sh dist "${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        # Pin the publishing action to the commit behind v3 so a mutable tag cannot
-        # change the code that receives contents:write during a retry.
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: ${{ steps.dmg.outputs.dmg_path }}
-          body_path: docs/releases/${{ github.ref_name }}.md
-          name: DevType ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          # The repository maintains curated per-tag notes. Generated notes are
-          # disabled so retries cannot duplicate the body or append unrelated
-          # commit activity to the release description.
-          generate_release_notes: false
-          append_body: false
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify published release
+      - name: Verify draft and publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          EXPECTED_DMG: ${{ steps.dmg.outputs.dmg_name }}
-          LOCAL_DMG: ${{ steps.dmg.outputs.dmg_path }}
-        run: |
-          set -euo pipefail
-
-          [[ "$(gh release view "${RELEASE_TAG}" --json tagName --jq .tagName)" == "${RELEASE_TAG}" ]] \
-            || { echo "::error::published release tag does not match ${RELEASE_TAG}"; exit 1; }
-          [[ "$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft)" == "false" ]] \
-            || { echo "::error::published release is still a draft"; exit 1; }
-          [[ "$(gh release view "${RELEASE_TAG}" --json isPrerelease --jq .isPrerelease)" == "false" ]] \
-            || { echo "::error::published release is unexpectedly a prerelease"; exit 1; }
-
-          EXPECTED_BODY="$(cat "docs/releases/${RELEASE_TAG}.md")"
-          PUBLISHED_BODY="$(gh release view "${RELEASE_TAG}" --json body --jq .body)"
-          [[ "${PUBLISHED_BODY}" == "${EXPECTED_BODY}" ]] \
-            || { echo "::error::published release body differs from curated notes"; exit 1; }
-
-          VERIFY_DIR="$(mktemp -d "${RUNNER_TEMP}/devtype-release-verify.XXXXXX")"
-          trap 'rm -rf "${VERIFY_DIR}"' EXIT
-          gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' \
-            > "${VERIFY_DIR}/asset-names.txt"
-          Scripts/verify-release-asset-list.sh "${EXPECTED_DMG}" \
-            < "${VERIFY_DIR}/asset-names.txt"
-
-          DOWNLOADED=0
-          for attempt in 1 2 3 4 5; do
-            if gh release download "${RELEASE_TAG}" \
-              --pattern "${EXPECTED_DMG}" --dir "${VERIFY_DIR}" --clobber; then
-              DOWNLOADED=1
-              break
-            fi
-            [[ "${attempt}" -lt 5 ]] || break
-            sleep "$((attempt * 2))"
-          done
-          [[ "${DOWNLOADED}" -eq 1 ]] \
-            || { echo "::error::could not download ${EXPECTED_DMG} after bounded retries"; exit 1; }
-
-          DOWNLOADED_DMG="${VERIFY_DIR}/${EXPECTED_DMG}"
-          Scripts/select-release-dmg.sh "${VERIFY_DIR}" "${RELEASE_TAG#v}" >/dev/null
-          cmp -s "${LOCAL_DMG}" "${DOWNLOADED_DMG}" \
-            || { echo "::error::published DMG differs from the locally built artifact"; exit 1; }
-          echo "verified GitHub release ${RELEASE_TAG}: notes and ${EXPECTED_DMG} match"
+          GH_REPO: ${{ github.repository }}
+        run: ./Scripts/publish-release.sh "${GITHUB_REF_NAME}" dist
