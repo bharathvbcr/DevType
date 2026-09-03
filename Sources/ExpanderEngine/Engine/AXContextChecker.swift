@@ -11,6 +11,19 @@ public final class AXContextChecker {
     /// Delay before a single focus-query retry after `.cannotComplete` (main thread only).
     public static let focusQueryRetryDelaySeconds: TimeInterval = 0.03
 
+    /// Budget for the *retry* attempt. Repeating a 50 ms probe that just expired asks the same
+    /// question of the same busy app and mostly gets the same answer — the retry was spent
+    /// without buying information. The escalated budget is paid only on the path that was
+    /// otherwise about to refuse the expansion outright, so the cost lands on the rare failure
+    /// rather than on every keystroke, and the ceiling stays well inside a human-noticeable
+    /// pause. A refused expansion costs the user their text; 150 ms costs them nothing.
+    public static let retryMessagingTimeoutSeconds: Float = 0.15
+
+    /// Pure policy: the AX messaging budget for one focus-query attempt.
+    public static func focusQueryTimeout(attemptIndex: Int) -> Float {
+        attemptIndex == 0 ? messagingTimeoutSeconds : retryMessagingTimeoutSeconds
+    }
+
     /// Stable refuse reason when Secure Event Input is locked.
     public static let secureInputActiveReason = "Secure Input active — expand blocked"
 
@@ -120,9 +133,9 @@ public final class AXContextChecker {
     }
 
     /// System-wide AX element with messaging timeout applied.
-    public func systemWideElement() -> AXUIElement {
+    public func systemWideElement(timeoutSeconds: Float = messagingTimeoutSeconds) -> AXUIElement {
         let systemWide = AXUIElementCreateSystemWide()
-        Self.applyMessagingTimeout(to: systemWide)
+        Self.applyMessagingTimeout(to: systemWide, seconds: timeoutSeconds)
         return systemWide
     }
 
@@ -132,22 +145,44 @@ public final class AXContextChecker {
     }
 
     /// Maps a focus-query failure to a stable fail-closed reason string.
-    public static func reasonForFocusQueryFailure(_ error: AXError) -> String {
-        if error == .cannotComplete {
-            return "AX focus query timed out — expand blocked (fail-closed)"
+    ///
+    /// `appResponding` is the corroborating witness: the same `.cannotComplete` means two very
+    /// different things depending on whether the app answers AX at all. A hung host is the
+    /// user's problem to notice; a host that answers `AXRole` promptly but cannot produce a
+    /// focused element in the budget is *ours*, and is the case a longer retry budget fixes.
+    /// The report carried neither, so both looked identical in the one line it prints.
+    public static func reasonForFocusQueryFailure(
+        _ error: AXError,
+        appResponding: Bool? = nil
+    ) -> String {
+        let witness: String
+        switch appResponding {
+        case .some(true): witness = " (app answers AX — focus query specifically timed out)"
+        case .some(false): witness = " (app is not answering AX at all)"
+        case nil: witness = ""
         }
-        return "AX focus query failed (code \(error.rawValue)) — expand blocked (fail-closed)"
+        if error == .cannotComplete {
+            return "AX focus query timed out\(witness) — expand blocked (fail-closed)"
+        }
+        return "AX focus query failed (code \(error.rawValue))\(witness) — expand blocked (fail-closed)"
     }
 
     /// Maps focus query result to a fail-closed block reason, or `nil` when focus is available.
-    public static func focusBlockReason(for focus: FocusQueryResult) -> String? {
+    ///
+    /// `appResponding` is threaded through rather than probed here so this stays a pure
+    /// function: the caller decides whether one more AX round trip is affordable, and only the
+    /// refuse path pays for it.
+    public static func focusBlockReason(
+        for focus: FocusQueryResult,
+        appResponding: Bool? = nil
+    ) -> String? {
         switch focus {
         case .available:
             return nil
         case .missing:
             return "No focused AX element — expand blocked (fail-closed)"
         case .axFailure(let error):
-            return reasonForFocusQueryFailure(error)
+            return reasonForFocusQueryFailure(error, appResponding: appResponding)
         case .untrusted:
             return "AXIsProcessTrusted false — expand blocked (fail-closed)"
         }
@@ -184,7 +219,7 @@ public final class AXContextChecker {
 
     /// Focused AX element query with typed errors. Retries once on `.cannotComplete` when on the main thread.
     public func queryFocusedElement(allowTimeoutRetry: Bool = true) -> FocusQueryResult {
-        let first = copyFocusedElementOnce()
+        let first = copyFocusedElementOnce(timeoutSeconds: Self.focusQueryTimeout(attemptIndex: 0))
         guard allowTimeoutRetry,
               case .axFailure(let error) = first,
               Self.shouldRetryFocusQuery(error: error, attemptIndex: 0),
@@ -192,7 +227,7 @@ public final class AXContextChecker {
             return first
         }
         Thread.sleep(forTimeInterval: Self.focusQueryRetryDelaySeconds)
-        return copyFocusedElementOnce()
+        return copyFocusedElementOnce(timeoutSeconds: Self.focusQueryTimeout(attemptIndex: 1))
     }
 
     /// Focused AX element, if available (errors collapse to `nil` for legacy callers).
@@ -777,7 +812,15 @@ public final class AXContextChecker {
                     focus: focus
                 )
             }
-            let reason = Self.focusBlockReason(for: focus)
+            // Corroborate before refusing. One bounded `AXRole` round trip on the path that is
+            // already giving up costs nothing the user notices, and it is the difference
+            // between "this app is hung" and "our focus budget was too small" in the report.
+            var appResponding: Bool?
+            if case .axFailure = focus,
+               let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                appResponding = Self.appRespondsToAX(pid: pid)
+            }
+            let reason = Self.focusBlockReason(for: focus, appResponding: appResponding)
                 ?? "No focused AX element — expand blocked (fail-closed)"
             let snapshot = DiagnosticReport.ExpandGateSnapshot(
                 canUseAX: true,
@@ -938,8 +981,10 @@ public final class AXContextChecker {
 
     /// Probe order: system-wide → app-scoped frontmost → focused-application chain.
     /// Fail-closed (returns last non-available result) when every path fails.
-    private func copyFocusedElementOnce() -> FocusQueryResult {
-        let systemWide = systemWideElement()
+    private func copyFocusedElementOnce(
+        timeoutSeconds: Float = messagingTimeoutSeconds
+    ) -> FocusQueryResult {
+        let systemWide = systemWideElement(timeoutSeconds: timeoutSeconds)
         let systemWideCopy = copyFocusedUIElement(from: systemWide)
         let systemWideMapped = mapFocusCopy(systemWideCopy)
 
@@ -967,11 +1012,11 @@ public final class AXContextChecker {
         if needsFallbackProbes {
             if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
                 let appEl = AXUIElementCreateApplication(pid)
-                Self.applyMessagingTimeout(to: appEl)
+                Self.applyMessagingTimeout(to: appEl, seconds: timeoutSeconds)
                 appScopedCopy = copyFocusedUIElement(from: appEl)
                 appScopedMapped = mapFocusCopy(appScopedCopy)
             }
-            chain = copyFocusedElementViaFocusedApplicationChain()
+            chain = copyFocusedElementViaFocusedApplicationChain(timeoutSeconds: timeoutSeconds)
         }
 
         let chainMapped = chain.mapped
@@ -1060,8 +1105,10 @@ public final class AXContextChecker {
         var uiKind: String
     }
 
-    private func copyFocusedElementViaFocusedApplicationChain() -> FocusedApplicationChainResult {
-        let systemWide = systemWideElement()
+    private func copyFocusedElementViaFocusedApplicationChain(
+        timeoutSeconds: Float = messagingTimeoutSeconds
+    ) -> FocusedApplicationChainResult {
+        let systemWide = systemWideElement(timeoutSeconds: timeoutSeconds)
         var appRef: CFTypeRef?
         let appAttr = AXUIElementCopyAttributeValue(
             systemWide,
@@ -1089,7 +1136,7 @@ public final class AXContextChecker {
         }
 
         let focusedApp = unsafeBitCast(appRef, to: AXUIElement.self)
-        Self.applyMessagingTimeout(to: focusedApp)
+        Self.applyMessagingTimeout(to: focusedApp, seconds: timeoutSeconds)
         let uiCopy = copyFocusedUIElement(from: focusedApp)
         let mapped = mapFocusCopy(uiCopy)
         let uiKind: String

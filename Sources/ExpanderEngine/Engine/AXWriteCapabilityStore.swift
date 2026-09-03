@@ -44,6 +44,26 @@ public final class AXWriteCapabilityStore {
     /// verdicts under a distinct key namespace.
     private var deliveryReadProven: Set<String> = []
 
+    /// The app build string observed when a `(bundle, role)` was condemned.
+    ///
+    /// Condemnation is otherwise permanent, and its own escape hatch is unreachable:
+    /// `trustedStreak` rehabilitates after verified AX writes, but a condemned app is never
+    /// given an AX write to verify, so the streak can never start. The result is a one-way
+    /// door — 11 of 16 apps in a real field report — and every expansion into those apps then
+    /// pastes via the clipboard, which is what produces `postedUnverified` and holds the
+    /// payload on the general pasteboard while waiting for evidence that can never arrive.
+    ///
+    /// An app *update* is the one event that plausibly changes the answer, and the store
+    /// already accepts the converse ("an app update can regress a once-truthful mirror").
+    /// Re-opening the verdict on a build change costs at most one re-tested expansion per
+    /// update — the same cost a never-seen app already pays — and is self-limiting: nothing is
+    /// re-probed while the app sits still.
+    private var condemnedBuild: [String: String] = [:]
+
+    /// Resolves an app's current build string. Injectable so tests never touch the filesystem;
+    /// the default is cached per bundle ID because the inject path consults verdicts often.
+    private let currentBuild: (String) -> String?
+
     /// `nil` disables persistence (used by tests and by the plain `init()`).
     private let fileURL: URL?
     private let ioQueue = DispatchQueue(label: "com.devtype.axwritecapability.io", qos: .utility)
@@ -59,14 +79,19 @@ public final class AXWriteCapabilityStore {
         self.init(fileURL: nil)
     }
 
-    public init(fileURL: URL?) {
+    public init(
+        fileURL: URL?,
+        currentBuild: @escaping (String) -> String? = AppBuildStamp.shared.build(forBundleID:)
+    ) {
         self.fileURL = fileURL
+        self.currentBuild = currentBuild
         if let fileURL {
             let parent = fileURL.deletingLastPathComponent()
             try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
             let loaded = Self.loadFromDisk(fileURL: fileURL)
             learned = loaded.verdicts
             deliveryReadProven = loaded.proven
+            condemnedBuild = loaded.condemnedBuild
         }
     }
 
@@ -232,8 +257,18 @@ public final class AXWriteCapabilityStore {
         let composite = learned[compositeKey] ?? (canonical == bundleID ? nil : learned[rawCompositeKey])
         let bundleOnly = learned[canonical] ?? (canonical == bundleID ? nil : learned[bundleID])
         lock.unlock()
-        if let composite { return composite }
-        if let bundleOnly { return bundleOnly }
+        if let composite {
+            if composite == .falseSuccess, retireStaleCondemnation(key: compositeKey, bundleID: canonical) {
+                return .unknown
+            }
+            return composite
+        }
+        if let bundleOnly {
+            if bundleOnly == .falseSuccess, retireStaleCondemnation(key: canonical, bundleID: canonical) {
+                return .unknown
+            }
+            return bundleOnly
+        }
         return Self.seedVerdict(bundleID: canonical)
     }
 
@@ -254,6 +289,44 @@ public final class AXWriteCapabilityStore {
     /// transient — and the two actions that verdict drives both put text in the field twice:
     /// re-pasting duplicates the expansion, and restoring the trigger appends it after text that
     /// did land. `nil`/unknown bundles stay trusted, so nothing outside the condemned set changes.
+    /// Clears a condemnation recorded against a build the app has since moved past.
+    ///
+    /// Returns true when the verdict was retired, so the caller answers `.unknown` and the next
+    /// expansion tries AX again and re-verifies it. A condemnation with no stamp (recorded by a
+    /// build before stamping existed, or where the build could not be read) is left alone —
+    /// absence of evidence is not evidence the app changed. The build lookup happens outside
+    /// the lock: it can touch the filesystem, and this is consulted from the inject path.
+    private func retireStaleCondemnation(key: String, bundleID: String) -> Bool {
+        lock.lock()
+        let stamped = condemnedBuild[key]
+        lock.unlock()
+        guard let stamped, let now = currentBuild(bundleID), now != stamped else { return false }
+
+        lock.lock()
+        // Re-check under the lock: another thread may have re-condemned since the read above.
+        guard condemnedBuild[key] == stamped, learned[key] == .falseSuccess else {
+            lock.unlock()
+            return false
+        }
+        learned.removeValue(forKey: key)
+        condemnedBuild.removeValue(forKey: key)
+        trustedStreak[key] = 0
+        // A new build's AX is unproven in both dimensions; read proof is re-earned too.
+        deliveryReadProven.remove(key)
+        // Re-open the door, but remember the record behind it. The two-strike ladder exists so
+        // that one transient (focus stolen mid-inject) cannot permanently condemn a *never-seen*
+        // app; an app with a prior conviction needs no such benefit of the doubt, and each strike
+        // costs the user a refused expansion. Seeding one strike makes the re-test single-shot:
+        // prove it works, or go straight back to the verdict it already had.
+        unverifiableStrikes[key] = max(unverifiableStrikes[key] ?? 0, Self.unverifiableStrikesToCondemn - 1)
+        lock.unlock()
+        DevTypeLog.inject.notice(
+            "[Inject] AX write condemnation retired for \(key, privacy: .public) — build changed \(stamped, privacy: .public) → \(now, privacy: .public); re-testing once"
+        )
+        scheduleSave()
+        return true
+    }
+
     public func canConfirmDelivery(bundleID: String?) -> Bool {
         canConfirmDelivery(bundleID: bundleID, role: nil)
     }
@@ -333,10 +406,16 @@ public final class AXWriteCapabilityStore {
     /// covers the host browser and every sibling web app instead of being relearned per install.
     public func recordFalseSuccess(bundleID: String, role: String?) {
         guard !bundleID.isEmpty else { return }
-        let key = Self.verdictKey(bundleID: Self.canonicalBundleID(bundleID), role: role)
+        let canonical = Self.canonicalBundleID(bundleID)
+        let key = Self.verdictKey(bundleID: canonical, role: role)
+        // Read the build before taking the lock — this can hit the filesystem.
+        let build = currentBuild(canonical)
         lock.lock()
         let previous = learned[key]
         learned[key] = .falseSuccess
+        // Stamp what we condemned, so a later version of this app is re-tested rather than
+        // inheriting a verdict earned by different code.
+        if let build { condemnedBuild[key] = build } else { condemnedBuild.removeValue(forKey: key) }
         trustedStreak[key] = 0
         // §8.4: fresh evidence that this AX lies revokes any earlier read proof — an app update
         // can regress a once-truthful mirror, and stale proof would re-arm the corrective ladder
@@ -418,6 +497,7 @@ public final class AXWriteCapabilityStore {
             if streak >= Self.trustedStreakToRehabilitate {
                 learned[key] = .trusted
                 trustedStreak[key] = 0
+                condemnedBuild.removeValue(forKey: key)
                 changed = true
             }
         } else {
@@ -440,6 +520,7 @@ public final class AXWriteCapabilityStore {
         trustedStreak.removeAll()
         unverifiableStrikes.removeAll()
         deliveryReadProven.removeAll()
+        condemnedBuild.removeAll()
         lock.unlock()
         scheduleSave()
     }
@@ -473,8 +554,11 @@ public final class AXWriteCapabilityStore {
             self.savePending = false
             let snapshot = self.learned
             let provenSnapshot = self.deliveryReadProven
+            let condemnedSnapshot = self.condemnedBuild
             self.lock.unlock()
-            Self.saveToDisk(snapshot, proven: provenSnapshot, fileURL: fileURL)
+            Self.saveToDisk(
+                snapshot, proven: provenSnapshot, condemnedBuild: condemnedSnapshot, fileURL: fileURL
+            )
         }
     }
 
@@ -489,6 +573,10 @@ public final class AXWriteCapabilityStore {
     /// §8.4: key namespace for persisted read-proof entries.
     private static let deliveryReadKeyPrefix = "deliveryRead|"
     private static let deliveryReadRawValue = "confirmed"
+    /// Key namespace for the build a condemnation was recorded against. Its raw value is the
+    /// build string, which no verdict parser accepts — so older builds skip these entries and
+    /// simply keep today's permanent-condemnation behaviour.
+    private static let condemnedBuildKeyPrefix = "condemnedBuild|"
 
     private static func rawValue(for verdict: Verdict) -> String? {
         switch verdict {
@@ -506,23 +594,35 @@ public final class AXWriteCapabilityStore {
         }
     }
 
-    private static func loadFromDisk(fileURL: URL) -> (verdicts: [String: Verdict], proven: Set<String>) {
+    private static func loadFromDisk(
+        fileURL: URL
+    ) -> (verdicts: [String: Verdict], proven: Set<String>, condemnedBuild: [String: String]) {
         guard FileManager.default.fileExists(atPath: fileURL.path),
               let data = try? Data(contentsOf: fileURL),
               let file = try? JSONDecoder().decode(PersistedFile.self, from: data) else {
-            return ([:], [])
+            return ([:], [], [:])
         }
         guard file.version <= persistenceSchemaVersion else {
             // Written by a newer build — do not guess at its semantics, just relearn.
             DevTypeLog.inject.notice(
                 "[Inject] AX write-capability file schema \(file.version, privacy: .public) is newer than \(persistenceSchemaVersion, privacy: .public) — ignoring"
             )
-            return ([:], [])
+            return ([:], [], [:])
         }
         var verdicts: [String: Verdict] = [:]
         var proven: Set<String> = []
+        var condemnedBuild: [String: String] = [:]
         for (key, raw) in file.entries {
             guard !key.isEmpty else { continue }
+            // Same rule as the read-proof namespace above, for the same reason: a *verdict*
+            // recorded for a (pathological) bundle ID that begins with this prefix must not be
+            // swallowed as a build stamp. A stamp's value is an arbitrary version string, which
+            // is never one of the verdict raw values — that asymmetry is what separates them.
+            if key.hasPrefix(condemnedBuildKeyPrefix), verdict(fromRaw: raw) == nil {
+                let bare = String(key.dropFirst(condemnedBuildKeyPrefix.count))
+                if !bare.isEmpty, !raw.isEmpty { condemnedBuild[bare] = raw }
+                continue
+            }
             // A proof entry is prefix AND marker value together. Matching on the prefix alone
             // would silently drop a *verdict* recorded for a (pathological) bundle ID that
             // happens to begin with the prefix — namespaces must never eat each other's data.
@@ -534,10 +634,17 @@ public final class AXWriteCapabilityStore {
             guard let verdict = verdict(fromRaw: raw) else { continue }
             verdicts[key] = verdict
         }
-        return (verdicts, proven)
+        // A stamp for a key that is no longer condemned is dead weight; drop it on load.
+        condemnedBuild = condemnedBuild.filter { verdicts[$0.key] == .falseSuccess }
+        return (verdicts, proven, condemnedBuild)
     }
 
-    private static func saveToDisk(_ verdicts: [String: Verdict], proven: Set<String>, fileURL: URL) {
+    private static func saveToDisk(
+        _ verdicts: [String: Verdict],
+        proven: Set<String>,
+        condemnedBuild: [String: String],
+        fileURL: URL
+    ) {
         var entries: [String: String] = [:]
         for (key, verdict) in verdicts {
             guard let raw = rawValue(for: verdict) else { continue }
@@ -545,6 +652,13 @@ public final class AXWriteCapabilityStore {
         }
         for key in proven {
             entries[deliveryReadKeyPrefix + key] = deliveryReadRawValue
+        }
+        for (key, build) in condemnedBuild where verdicts[key] == .falseSuccess && !build.isEmpty {
+            // A version string that happens to equal a verdict raw value would read back as a
+            // verdict. Dropping it costs one app one re-test opportunity; persisting it would
+            // corrupt the verdict namespace. Fail toward the old, safe behaviour.
+            guard verdict(fromRaw: build) == nil else { continue }
+            entries[condemnedBuildKeyPrefix + key] = build
         }
         let file = PersistedFile(version: persistenceSchemaVersion, entries: entries)
         do {
