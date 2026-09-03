@@ -91,7 +91,9 @@ public actor VoiceSessionCoordinator {
         let bag = SessionTaskBag(sessionID: snapshot.sessionID, generation: generation)
         self.taskBag = bag
 
-        await MainActor.run { VoiceInsertionService.shared.beginSession() }
+        await MainActor.run {
+            VoiceInsertionService.shared.beginSession(targetLease: snapshot.targetLease)
+        }
 
         let state = VoiceSessionState(snapshot: snapshot, phase: .preparing)
         self.activeState = state

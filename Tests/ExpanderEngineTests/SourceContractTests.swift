@@ -20,7 +20,12 @@ final class SourceContractTests: XCTestCase {
 
     func testEraseRecoveryCarriesEvidenceAndRechecksInputBeforePosting() throws {
         let pipeline = try source("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
-        let check = try XCTUnwrap(pipeline.range(of: "eraser.evaluateErasePrecondition(plan: erasePlan) { eraseCheck in"))
+        // Anchored on the flag too: both backstops must be told whether the caller can vouch
+        // for the caret. Voice dictation cannot, and a vouched erase downgrades a mismatch to
+        // "proceed best-effort" — which is how a moved caret came to eat the user's own text.
+        let check = try XCTUnwrap(pipeline.range(
+            of: "eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched) { eraseCheck in"
+        ))
         let next = try XCTUnwrap(pipeline.range(of: "private func performInject("))
         let gate = String(pipeline[check.lowerBound..<next.lowerBound])
         XCTAssertTrue(gate.contains("eraseContextIsCurrent("), "A stale AX retry must not erase after input/focus changes")
@@ -30,6 +35,10 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(gate.contains("eraseCheck: eraseCheck"), "The AX/HID choice needs the actual precondition result")
         let inject = String(pipeline[next.lowerBound...])
         XCTAssertTrue(inject.contains("eraseCheck.requiresHID ||"), "Unverified coordinates must not be sent back to AX")
+        XCTAssertTrue(
+            inject.contains("insertionPointFollowsExpectedText: context.eraseCaretVouched"),
+            "The last gate before backspaces must honour the caller's caret vouch, not assume it"
+        )
         XCTAssertEqual(inject.components(separatedBy: "canProceed: canProceed").count - 1, 2,
                        "Both image and text erases must keep the live input/focus guard")
         XCTAssertEqual(inject.components(separatedBy: "allowKeyReplay: canProceed()").count - 1, 2)

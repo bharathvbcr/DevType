@@ -7,6 +7,15 @@ public struct VoiceReconciledEdit: Equatable, Sendable {
     /// so it can never reach text behind the commit barrier.
     public let eraseCount: Int
 
+    /// The exact text this edit expects to remove — the volatile suffix being dropped.
+    ///
+    /// A count alone is only safe while the caret is still where dictation left it. Carrying
+    /// the text lets the injector build a *verified* `ErasePlan`, so a caret the user (or the
+    /// host app) moved is caught by the erase precondition instead of backspacing over
+    /// whatever now happens to sit left of the caret. `nil` means the producer cannot vouch
+    /// for the text and the erase degrades to count-only, as it did everywhere before.
+    public let erasedText: String?
+
     /// Text to type after erasing.
     public let textToInject: String
 
@@ -21,9 +30,11 @@ public struct VoiceReconciledEdit: Equatable, Sendable {
         eraseCount: Int,
         textToInject: String,
         resultingText: String,
-        suppressedCommittedRevision: Bool = false
+        suppressedCommittedRevision: Bool = false,
+        erasedText: String? = nil
     ) {
         self.eraseCount = eraseCount
+        self.erasedText = erasedText
         self.textToInject = textToInject
         self.resultingText = resultingText
         self.suppressedCommittedRevision = suppressedCommittedRevision
@@ -35,7 +46,8 @@ public struct VoiceReconciledEdit: Equatable, Sendable {
             eraseCount: 0,
             textToInject: "",
             resultingText: owned,
-            suppressedCommittedRevision: suppressed
+            suppressedCommittedRevision: suppressed,
+            erasedText: ""
         )
     }
 
@@ -130,7 +142,8 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
             }
 
             let common = Self.longestCommonPrefixCount(_volatile, newVolatile)
-            let erase = _volatile.count - common
+            let erased = String(_volatile.dropFirst(common))
+            let erase = erased.count
             let inject = String(newVolatile.dropFirst(common))
 
             if erase > maxEraseBudget {
@@ -144,7 +157,8 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
                 eraseCount: erase,
                 textToInject: inject,
                 resultingText: resulting,
-                suppressedCommittedRevision: suppressed
+                suppressedCommittedRevision: suppressed,
+                erasedText: erased
             )
         }
     }
@@ -202,9 +216,41 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
             return VoiceReconciledEdit(
                 eraseCount: owned.count,
                 textToInject: "",
-                resultingText: ""
+                resultingText: "",
+                erasedText: owned
             )
         }
+    }
+
+    /// Puts the volatile tail back after an edit the injector *refused* to apply.
+    ///
+    /// Without this the reconciler's model and the document diverge on a refusal: the model
+    /// believes the new tail is on screen, the document still holds the old one, and every
+    /// later diff compounds the error. Compare-and-swap on `expected` so a refusal that
+    /// arrives after newer segments already reconciled cannot clobber them.
+    @discardableResult
+    public func revertVolatile(from expected: String, to previous: String) -> Bool {
+        lock.withLock {
+            guard _volatile == expected else { return false }
+            _volatile = previous
+            return true
+        }
+    }
+
+    /// Repairs the model after the injector *refused* an edit, in one step.
+    ///
+    /// Two things must happen together and neither is optional. The tail goes back, because the
+    /// document never changed. Then the boundary is sealed, because a refusal means the caret is
+    /// no longer where this tail lives — and a reconciler still diffing against an unreachable
+    /// tail has every later edit refused too, which is dictation silently dying for the rest of
+    /// the session. Sealing retires the tail (it stays on screen, untouched) so the next segment
+    /// is a clean append wherever the caret now is.
+    ///
+    /// Deliberately one call rather than two at the call site: the pair *is* the policy, and
+    /// splitting it across a closure in the delivery layer is how half of it went missing.
+    public func recoverFromRefusedEdit(expected: String, previous: String) {
+        revertVolatile(from: expected, to: previous)
+        commitBoundary()
     }
 
     /// Drops all tracking without emitting an edit. Used when the document is no longer

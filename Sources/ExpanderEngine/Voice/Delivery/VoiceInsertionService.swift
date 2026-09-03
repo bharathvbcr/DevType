@@ -28,11 +28,34 @@ public final class VoiceInsertionService {
 
     // MARK: - Session lifecycle
 
+    /// The app+field this session is dictating into. Live typing refuses to write anywhere
+    /// else, exactly as `deliver` already does — see `applyLiveSegment`.
+    private var targetLease: TargetLease?
+
+    /// Pure policy: may this live segment be written?
+    ///
+    /// A segment that arrives after the user switched apps would be typed — and *erased from* —
+    /// a different document than the one this session owns. `deliver` has always had this gate;
+    /// live typing had none. Expressed as a static so the rule is table-testable rather than
+    /// buried in a `@MainActor` singleton that reaches the real injection pipeline.
+    ///
+    /// A lease with pid 0 is "no target claimed" (the tests' and the hotkey path's shape) and
+    /// withholds nothing; an unknown frontmost app is not evidence of a switch, so it also
+    /// proceeds — this gate refuses only on a *positive* mismatch.
+    nonisolated public static func shouldWithholdLiveSegment(
+        leasePID: pid_t?,
+        frontmostPID: pid_t?
+    ) -> Bool {
+        guard let leasePID, leasePID != 0, let frontmostPID else { return false }
+        return leasePID != frontmostPID
+    }
+
     /// Clears all ownership. Called when a dictation starts, so a new session never
     /// believes it owns text left over from the last one.
-    public func beginSession() {
+    public func beginSession(targetLease: TargetLease? = nil) {
         reconciler.reset()
         assembler.reset()
+        self.targetLease = targetLease
         DevTypeLog.voice.info("[Voice] session begin realTimeTyping=\(VoicePreferences.isRealTimeTypingEnabled)")
         VoiceDiagnosticsRecorder.shared.beginSession(
             engine: VoicePreferences.effectiveEngine.rawValue,
@@ -66,8 +89,26 @@ public final class VoiceInsertionService {
         guard VoicePreferences.isRealTimeTypingEnabled else { return }
         guard changed else { return }
 
+        // Same gate `deliver` has always had, which live typing was missing entirely: an
+        // erase is posted at whatever now has focus, so a segment that arrives after the user
+        // switched apps would revise a *different* document — backspacing over text this
+        // session never wrote. Skip the write and leave the model untouched, so returning to
+        // the real target resumes with one correct edit rather than a duplicated transcript.
+        if Self.shouldWithholdLiveSegment(
+            leasePID: targetLease?.processIdentifier,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier
+        ) {
+            DevTypeLog.voice.notice(
+                "[Voice] live segment withheld — target pid \(self.targetLease?.processIdentifier ?? 0, privacy: .public) is no longer frontmost"
+            )
+            VoiceDiagnosticsRecorder.shared.record("segment.withheldTargetMismatch", segment: segment)
+            return
+        }
+
         let target = assembler.cumulativeText
+        let tailBefore = reconciler.volatileText
         let edit = reconciler.reconcile(target: target)
+        let tailAfter = reconciler.volatileText
 
         // The line that matters when text disappears: it names the erase and the state that
         // produced it, so a report can be diagnosed without reproducing it locally.
@@ -93,7 +134,13 @@ public final class VoiceInsertionService {
             suppressed: edit.suppressedCommittedRevision
         )
 
-        inject(edit)
+        inject(edit) { [reconciler] in
+            // The whole repair is one call — see `recoverFromRefusedEdit`.
+            reconciler.recoverFromRefusedEdit(expected: tailAfter, previous: tailBefore)
+            DevTypeLog.voice.notice(
+                "[Voice] tail unreachable — sealed it and resuming at the current caret"
+            )
+        }
 
         // Seal exactly what the recognizer has moved past. Driven by the assembler rather
         // than by this segment's `finality` flag, because a superseded utterance is settled
@@ -159,7 +206,8 @@ public final class VoiceInsertionService {
             inject(VoiceReconciledEdit(
                 eraseCount: removed.eraseCount,
                 textToInject: trimmed,
-                resultingText: trimmed
+                resultingText: trimmed,
+                erasedText: removed.erasedText
             ))
             _ = reconciler.reconcile(target: trimmed)
             reconciler.commitBoundary()
@@ -233,7 +281,16 @@ public final class VoiceInsertionService {
 
     // MARK: - Injection
 
-    private func inject(_ edit: VoiceReconciledEdit) {
+    /// Applies one edit, and reports whether the pipeline refused it.
+    ///
+    /// The erase goes down as a **verified** `ErasePlan` whenever the reconciler can name the
+    /// text it expects to remove. A count-only plan (`expectedText: nil`) makes the erase
+    /// precondition degrade to "proceed best-effort", which is only sound while the caret is
+    /// still where dictation left it — with existing text in the field and a caret the user or
+    /// the host moved, those backspaces land on the user's own content. A verified plan lets
+    /// the precondition refuse instead, and `ErasePlan(text:)` also derives the UTF-16 width
+    /// from the text rather than reusing a grapheme count for both units.
+    private func inject(_ edit: VoiceReconciledEdit, onRefused: (() -> Void)? = nil) {
         guard !edit.isNoop else { return }
 
         let snippet = SnippetModel(
@@ -241,14 +298,24 @@ public final class VoiceInsertionService {
             triggerKeyword: "",
             replacementText: edit.textToInject
         )
+        let plan = edit.erasedText.map { ErasePlan(text: $0) }
         TextInjectionPipeline.shared.inject(
             snippet: snippet,
             triggerLength: 0,
             swallowed: .notSwallowed,
-            eraseCountOverride: edit.eraseCount,
+            eraseCountOverride: plan == nil ? edit.eraseCount : nil,
+            erasePlan: plan,
             preResolvedText: edit.textToInject,
-            secureClipboardPaste: false
-        )
+            secureClipboardPaste: false,
+            eraseCaretVouched: false
+        ) { outcome in
+            guard case .refused(let reason) = outcome else { return }
+            DevTypeLog.voice.notice(
+                "[Voice] edit refused (\(reason, privacy: .public)) — restoring the tracked tail so later diffs stay aligned"
+            )
+            VoiceDiagnosticsRecorder.shared.record("edit.refused", erase: edit.eraseCount)
+            Task { @MainActor in onRefused?() }
+        }
     }
 
     private func receipt(

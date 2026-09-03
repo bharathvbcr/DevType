@@ -370,6 +370,7 @@ public final class TextInjectionPipeline {
         trailingKeys: [String] = [],
         snippetLookup: ((String) -> String?)? = nil,
         secureClipboardPaste: Bool = false,
+        eraseCaretVouched: Bool = true,
         completion: InjectionCompletion? = nil
     ) {
         injectQueue.async {
@@ -412,7 +413,8 @@ public final class TextInjectionPipeline {
                     preResolvedCursorOffset: preResolvedCursorOffset,
                     trailingKeys: trailingKeys,
                     snippetLookup: snippetLookup,
-                    secureClipboardPaste: secureClipboardPaste
+                    secureClipboardPaste: secureClipboardPaste,
+                    eraseCaretVouched: eraseCaretVouched
                 ) { outcome in
                     let invocation = completionGuard.markCompleted(outcome)
                     if invocation == 1 {
@@ -974,6 +976,9 @@ public final class TextInjectionPipeline {
         let frontBundleID: String?
         let frontPID: pid_t?
         let deliveryInputUnits: Int
+        /// False when the caller cannot promise the caret still sits immediately after
+        /// `erasePlan.expectedText` — see `injectOnMain`.
+        let eraseCaretVouched: Bool
 
         var frontBundle: String { frontBundleID ?? "nil" }
     }
@@ -989,6 +994,11 @@ public final class TextInjectionPipeline {
         trailingKeys: [String],
         snippetLookup: ((String) -> String?)?,
         secureClipboardPaste: Bool,
+        /// False when the caller cannot promise the caret still sits immediately after
+        /// `erasePlan.expectedText`. The expand path can (the tap just watched the trigger keys
+        /// land); voice dictation cannot — segments arrive seconds apart and the user is free to
+        /// click elsewhere in between. See `ErasePreconditionChecker.evaluate`.
+        eraseCaretVouched: Bool = true,
         completion: @escaping InjectionCompletion
     ) {
         // Re-check Secure Input / IME / focus at inject time (may have changed since match).
@@ -1091,7 +1101,8 @@ public final class TextInjectionPipeline {
             snapshot: snapshot,
             frontBundleID: frontBundleID,
             frontPID: frontApp?.processIdentifier,
-            deliveryInputUnits: deliveryInputUnits
+            deliveryInputUnits: deliveryInputUnits,
+            eraseCaretVouched: eraseCaretVouched
         )
 
         // Backstop before anything destructive: if AX can read the field, the trigger must actually
@@ -1100,7 +1111,7 @@ public final class TextInjectionPipeline {
         //
         // §8.3: asynchronous, so the one-shot retry is available here (on main) without a 30 ms
         // `Thread.sleep` that would stall the event tap.
-        eraser.evaluateErasePrecondition(plan: erasePlan) { eraseCheck in
+        eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched) { eraseCheck in
             guard erasePlan.isEmpty || self.eraseContextIsCurrent(
                 inputUnits: context.deliveryInputUnits, targetPID: context.frontPID
             ) else {
@@ -1456,6 +1467,7 @@ public final class TextInjectionPipeline {
         eraser.performGuardedErase(
             plan: erasePlan,
             afterPossibleWrite: attemptedAXWrite,
+            insertionPointFollowsExpectedText: context.eraseCaretVouched,
             canProceed: canProceed,
             onUnverifiableAfterWrite: { why in
                 // Self-healing: an attempted AX write left the field unreadable even after the
