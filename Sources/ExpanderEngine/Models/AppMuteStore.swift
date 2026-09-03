@@ -80,6 +80,10 @@ public final class AppMuteStore {
     /// updated (a fresh instance reads back what was just written), and the
     /// payloads are tiny, so the wait is the cost the old synchronous write paid
     /// anyway — just off the lock and correctly ordered.
+    /// Ceiling on the synchronous wait for a mute write. Generous for a payload measured in
+    /// bytes: this exists to convert a hang into a logged degradation, not to police latency.
+    static let persistTimeout: TimeInterval = 2.0
+
     private func persistSynchronized(_ mutate: (inout Set<String>) -> Void) {
         let written = DispatchSemaphore(value: 0)
         lock.lock()
@@ -99,7 +103,17 @@ public final class AppMuteStore {
             written.signal()
         }
         lock.unlock()
-        written.wait()
+        // Bounded, for the same reason §1.3 bounded the inject queue's `group.wait()`: this is
+        // reached from menu actions on the main thread, and an untimed wait turns one stalled
+        // write — a full disk, a network-mounted home directory, a wedged persist override —
+        // into a permanently beachballed app with nothing in the log. The mutation is already
+        // live in memory, so on timeout the mute still takes effect and the listeners still
+        // fire; only the on-disk copy is late, and the next write supersedes it.
+        if written.wait(timeout: .now() + Self.persistTimeout) == .timedOut {
+            DevTypeLog.app.error(
+                "[Mute] persist did not land within \(Self.persistTimeout, privacy: .public)s — the in-memory change stands, the file is behind"
+            )
+        }
         currentListeners.forEach { $0() }
     }
 

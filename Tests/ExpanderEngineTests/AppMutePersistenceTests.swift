@@ -121,3 +121,40 @@ final class AppMutePersistenceTests: XCTestCase {
         }
     }
 }
+
+/// §1.3's lesson applied to the mute store: an untimed `wait()` on a path reachable from the
+/// main thread turns one stalled write into a permanently beachballed app with nothing logged.
+final class AppMutePersistBoundTests: XCTestCase {
+
+    func testAStalledWriteDegradesInsteadOfHangingTheCaller() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mute-bound-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = AppMuteStore(fileURL: directory.appendingPathComponent("mute.json"))
+        let released = DispatchSemaphore(value: 0)
+        // A write that never lands on its own — a full disk, a wedged network home directory.
+        store.persistOverride = { _, _ in released.wait() }
+
+        var listenerFired = false
+        store.addListener { listenerFired = true }
+
+        let started = Date()
+        store.mute("com.example.Wedged")
+        let elapsed = Date().timeIntervalSince(started)
+        released.signal() // let the stalled writer go, so the queue drains
+
+        XCTAssertLessThan(
+            elapsed, AppMuteStore.persistTimeout + 1.5,
+            "The caller must give up on a stalled write rather than block forever."
+        )
+        XCTAssertGreaterThanOrEqual(
+            elapsed, AppMuteStore.persistTimeout - 0.5,
+            "It must still wait for the write in the normal case — this is not a silent async."
+        )
+        // The mute took effect in memory and observers were told, even though the file is behind.
+        XCTAssertTrue(store.isMuted("com.example.Wedged"))
+        XCTAssertTrue(listenerFired, "Listeners must still fire; the in-memory change is real.")
+    }
+}
