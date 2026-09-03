@@ -636,12 +636,40 @@ final class SourceContractTests: XCTestCase {
     /// keychain dialog. Every `SecItemCopyMatching` in the store runs inside the UI-suppressed
     /// wrapper except exactly one — the interactive fetch inside `migrateLegacy`, which the UI
     /// reaches only through an alert that announces the dialogs first.
+    /// The one line a bug report shows for secrets is "Keychain last read". Synthesizing
+    /// `errSecInteractionNotAllowed` there reported the policy ("we refuse to prompt") instead
+    /// of the cause, making a re-partitioned ACL (`errSecAuthFailed` — repaired by the
+    /// authorization pass) indistinguishable from a locked keychain.
+    func testTheKeychainReadReportsItsCauseNotOurPolicy() throws {
+        let store = try source("Sources/ExpanderEngine/Models/SecretStore.swift")
+        guard let readResult = store.range(of: "private enum ReadResult"),
+              let silently = store.range(of: "private func readSilently(") else {
+            return XCTFail("SecretStore no longer has the shape this contract describes.")
+        }
+        XCTAssertTrue(
+            String(store[readResult.lowerBound..<silently.lowerBound]).contains("case needsUser(OSStatus)"),
+            "A read that needs the dialog must carry the status the keychain returned."
+        )
+        XCTAssertTrue(
+            store.contains("case .needsUser(let status):") && store.contains("diagnostics.record(.failed(status))"),
+            "The recorded outcome must be the keychain's own status, not a synthesized one."
+        )
+        // Exactly one synthesized status survives, and it is not a keychain refusal: the
+        // archive path reporting "sealed value, no master key to open it".
+        XCTAssertEqual(
+            store.components(separatedBy: "record(.failed(errSecInteractionNotAllowed))").count - 1, 1,
+            "A synthesized status on the keychain read hides the cause the report exists to surface."
+        )
+    }
+
     func testKeychainDialogIsReachableOnlyThroughMigration() throws {
         let store = try source("Sources/ExpanderEngine/Models/SecretStore.swift")
 
         // The one interactive fetch lives in migrateLegacy, after the allowInteraction guard.
+        // It is epoch-neutral now — a v2 item with a re-partitioned ACL needs the same dialog —
+        // but there must still be exactly one of it.
         guard let migrate = store.range(of: "public func migrateLegacy(allowInteraction:"),
-              let interactive = store.range(of: "legacy fetch with dialog") else {
+              let interactive = store.range(of: "fetch with dialog") else {
             return XCTFail("SecretStore no longer has the shape this contract describes.")
         }
         XCTAssertTrue(
@@ -649,8 +677,14 @@ final class SourceContractTests: XCTestCase {
             "The dialog-capable fetch must live inside migrateLegacy."
         )
         XCTAssertEqual(
-            store.components(separatedBy: "legacy fetch with dialog").count - 1, 1,
+            store.components(separatedBy: "fetch with dialog").count - 1, 1,
             "Exactly one dialog-capable fetch, so 'never surprise-prompts' stays checkable."
+        )
+        // And it must cover both epochs, or a current-epoch item stays a dead end.
+        let pass = String(store[migrate.lowerBound...])
+        XCTAssertTrue(
+            pass.contains("legacyAccounts.union(authorizationNeeded)"),
+            "The repair pass must consider current-epoch items that asked for a dialog"
         )
 
         // value() reports needsUser instead of ever falling through to a prompt.

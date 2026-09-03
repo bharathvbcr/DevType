@@ -92,7 +92,7 @@ public final class SecretStore {
     /// Snippet IDs whose secrets still live in the legacy service (§8.10). Non-empty means the
     /// one-time migration flow should be offered before those secrets are copied.
     public func snippetIDsPendingMigration() -> Set<UUID> {
-        Set(backing.legacyAccountsPendingMigration().compactMap(Self.snippetID(forAccount:)))
+        Set(backing.accountsNeedingAuthorization().compactMap(Self.snippetID(forAccount:)))
     }
 
     /// Run the migration batch. See `KeychainSecretBackingStore.migrateLegacy` for the dialog
@@ -173,6 +173,8 @@ public protocol SecretBackingStore: AnyObject {
     func accounts() -> Set<String>
     /// Legacy-service accounts that still need migrating (empty for stores with no legacy tier).
     func legacyAccountsPendingMigration() -> [String]
+    /// Accounts that need the one-time password dialog, in either epoch.
+    func accountsNeedingAuthorization() -> [String]
     /// Move every legacy item to the current service. `allowInteraction` is the ONE switch in
     /// this API that may put a system dialog on screen — callers own the moment it flips.
     func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary
@@ -191,6 +193,7 @@ public protocol SecretBackingStore: AnyObject {
 extension SecretBackingStore {
     /// Stores without a legacy tier (the in-memory test double) have nothing to migrate.
     public func legacyAccountsPendingMigration() -> [String] { [] }
+    public func accountsNeedingAuthorization() -> [String] { [] }
     public func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary {
         SecretMigrationSummary()
     }
@@ -440,6 +443,16 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     private let lock = UnfairLock()
     private let diagnostics: SecretAccessDiagnostics
 
+    /// Accounts whose last silent read ended in `.needsUser` — the item is there and this
+    /// identity cannot decrypt it without the system password dialog.
+    ///
+    /// Observed rather than probed: knowing this costs a keychain round trip per item, and the
+    /// only honest moment to learn it is a read that has already failed. Without it a v2 item
+    /// whose ACL was re-partitioned is a dead end — `value` cannot prompt, the repair pass only
+    /// looked at the legacy service, and the user is told "no secret stored" about a secret
+    /// that is stored and one dialog away.
+    private var authorizationNeeded: Set<String> = []
+
     public init(diagnostics: SecretAccessDiagnostics = .shared) {
         self.diagnostics = diagnostics
     }
@@ -546,6 +559,9 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
             // legacy copy can be destroyed without ever showing a dialog.
             if status == errSecSuccess {
                 _ = destroy(service: SecretStore.service, account: account)
+                // The value update re-partitions the item to this build, so whatever made the
+                // old copy unreadable no longer applies.
+                authorizationNeeded.remove(account)
             }
             return status
         }
@@ -554,7 +570,12 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     private enum ReadResult {
         case absent
         case value(String?, SecretReadOutcome)
-        case needsUser
+        /// Carries the status the keychain actually returned. The report used to synthesize
+        /// `errSecInteractionNotAllowed` here, which named the *policy* ("we refuse to
+        /// prompt") over the *cause* — so a re-partitioned ACL (`errSecAuthFailed`, fixed by
+        /// the authorization pass) was indistinguishable from a locked keychain in the one
+        /// line a bug report shows.
+        case needsUser(OSStatus)
         case failed(OSStatus)
     }
 
@@ -575,15 +596,21 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
             }
             switch KeychainReadPlan.step(after: result.status, phase: phase) {
             case .succeed:
+                authorizationNeeded.remove(account)
                 // A husk reads as "no secret", never as its placeholder value.
                 if result.tombstone { return .absent }
                 return .value(result.value, phase == .silent ? .ok : .healed)
             case .fail:
+                authorizationNeeded.remove(account)
                 // Absent is not a failure worth reporting; anything else is.
                 if result.status == errSecItemNotFound { return .absent }
                 return .failed(result.status)
             case .askUser, .heal:
-                return .needsUser
+                // A locked keychain reaches here too, and its fix is "unlock", not "authorize".
+                // Recording it would route the user into the wrong flow, so leave the lock to
+                // the lock diagnosis — it is transient and re-read on the next attempt.
+                if !keychainLocked() { authorizationNeeded.insert(account) }
+                return .needsUser(result.status)
             }
         }
     }
@@ -617,11 +644,12 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
                 }
                 diagnostics.record(outcome)
                 return value
-            case .needsUser:
-                // Structurally incapable of prompting: the answer here is "run the migration
-                // flow", reported through `legacyAccountsPendingMigration`, never a dialog in
-                // the middle of an ordinary copy.
-                diagnostics.record(.failed(errSecInteractionNotAllowed))
+            case .needsUser(let status):
+                // Structurally incapable of prompting: the answer here is "run the repair
+                // pass", reported through `accountsNeedingAuthorization`, never a dialog in
+                // the middle of an ordinary copy. Report the keychain's own status, not the
+                // policy — the cause is what a diagnosis needs.
+                diagnostics.record(.failed(status))
                 return nil
             case .failed(let status):
                 diagnostics.record(.failed(status))
@@ -635,6 +663,16 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
     public func legacyAccountsPendingMigration() -> [String] {
         lock.lock(); defer { lock.unlock() }
         return withoutKeychainUI { legacyAccountsLocked() }
+    }
+
+    /// Every account that cannot be read without the one-time system password dialog —
+    /// pre-§8.10 items *and* current-epoch items whose ACL was re-partitioned (a rebuild
+    /// under a development certificate does this, measured). Both are repaired by the same
+    /// pass; the epoch only decides which service the dialog fetch reads from.
+    public func accountsNeedingAuthorization() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let legacy = withoutKeychainUI { legacyAccountsLocked() }
+        return Array(Set(legacy).union(authorizationNeeded)).sorted()
     }
 
     private func legacyAccountsLocked() -> [String] {
@@ -674,16 +712,26 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
         return status == errSecSuccess
     }
 
-    /// The one-shot batch that finishes the §8.10 upgrade. Tries every legacy item silently
-    /// first (heal included); only with `allowInteraction` — granted by the UI *after telling
-    /// the user how many dialogs to expect* — does it fall through to the system prompt, one
-    /// item at a time. This function is the only interactive keychain path in the app.
+    /// The one-shot batch that repairs every secret needing the system password dialog. Tries
+    /// each item silently first (heal included); only with `allowInteraction` — granted by the
+    /// UI *after telling the user how many dialogs to expect* — does it fall through to the
+    /// system prompt, one item at a time. This function is the only interactive keychain path
+    /// in the app.
+    ///
+    /// Covers both epochs. It used to walk the legacy service only, which left a v2 item with
+    /// a re-partitioned ACL permanently unreadable: the silent read knew a dialog would fix it
+    /// and nothing in the app could ever show one.
     public func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary {
         lock.lock(); defer { lock.unlock() }
         var summary = SecretMigrationSummary()
 
-        for account in withoutKeychainUI({ legacyAccountsLocked() }) {
-            switch readSilently(epoch: .legacy, account: account) {
+        let legacyAccounts = Set(withoutKeychainUI { legacyAccountsLocked() })
+        let accounts = Array(legacyAccounts.union(authorizationNeeded)).sorted()
+
+        for account in accounts {
+            // A legacy husk is the migration case; anything else is a current-epoch repair.
+            let epoch: SecretServiceEpoch = legacyAccounts.contains(account) ? .legacy : .current
+            switch readSilently(epoch: epoch, account: account) {
             case .value(let value, _):
                 guard let value else { summary.failed += 1; continue }
                 migrate(value, account: account)
@@ -702,11 +750,14 @@ public final class KeychainSecretBackingStore: SecretBackingStore {
             }
 
             // The system password dialog, deliberately: the user was told it was coming.
-            // Answering it is the last time — the value moves to the current service right here.
-            let final = fetch(service: SecretStore.service, account: account)
-            diagnostics.note("legacy fetch with dialog", final.status, account: account)
+            // Answering it is the last time — `migrate` writes the value into the current
+            // service, and that value update re-partitions the item to this build, so the
+            // next read succeeds silently whichever epoch it came from.
+            let final = fetch(service: epoch.service, account: account)
+            diagnostics.note("\(epoch.trailName) fetch with dialog", final.status, account: account)
             if final.status == errSecSuccess, !final.tombstone, let value = final.value {
                 migrate(value, account: account)
+                authorizationNeeded.remove(account)
                 summary.migrated += 1
             } else if final.status == errSecUserCanceled {
                 summary.needsUser += 1
@@ -978,6 +1029,18 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
             return key
         }
         guard createIfNeeded else { return nil }
+
+        // An item that exists but did not read back above is unreadable, not absent — a
+        // rebuild re-partitioned its ACL (§8.10). Minting over it would destroy the only
+        // bytes that open every sealed entry, and the archive would stay unreadable even
+        // after the user answers "Always Allow" and the ACL heals. Metadata-only `contains`
+        // answers this without a decrypt. Refuse: keychain fallback loses nothing, an
+        // overwrite loses everything. Same conservative direction as "master key malformed".
+        if tier.contains(account: masterAccount) {
+            diagnostics.note("master key present but unreadable — refusing to overwrite")
+            return nil
+        }
+
         let key = SymmetricKey(size: .bits256)
         let encoded = key.withUnsafeBytes { Data($0) }.base64EncodedString()
         let status = tier.set(encoded, account: masterAccount)
@@ -1152,9 +1215,21 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         lock.lock(); defer { lock.unlock() }
         var summary = SecretConsolidationSummary()
 
-        for account in tier.accounts().sorted() where account != masterAccount {
-            // Snippet secrets only: anything else under the service is not ours to move.
-            guard SecretStore.snippetID(forAccount: account) != nil else { continue }
+        // Snippet secrets only: anything else under the service is not ours to move.
+        let candidates = tier.accounts().sorted().filter {
+            $0 != masterAccount && SecretStore.snippetID(forAccount: $0) != nil
+        }
+        // Settle the key once, before the loop. Without a usable one every candidate is
+        // *deferred*, which is `remaining` by its own definition — a lossless fallback, not a
+        // failure, and reporting it as `failed` puts a false alarm at the top of every
+        // diagnostic report. Hoisting it also stops each item from re-attempting creation.
+        let hasUsableKey = candidates.isEmpty || masterKey(createIfNeeded: true) != nil
+
+        for account in candidates {
+            guard hasUsableKey else {
+                summary.remaining += 1
+                continue
+            }
             guard let value = tier.value(account: account) else {
                 summary.remaining += 1
                 continue
@@ -1196,6 +1271,10 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
 
     public func legacyAccountsPendingMigration() -> [String] {
         tier.legacyAccountsPendingMigration()
+    }
+
+    public func accountsNeedingAuthorization() -> [String] {
+        tier.accountsNeedingAuthorization()
     }
 
     public func migrateLegacy(allowInteraction: Bool) -> SecretMigrationSummary {

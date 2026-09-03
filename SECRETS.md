@@ -101,6 +101,11 @@ launch**, at the moment it is most likely unlocked.
 - The master key is **never trusted without a read-back**: a keychain write can succeed
   against an item the app cannot read (open encrypt ACL, closed decrypt). No read-back → no
   key → per-item keychain fallback, which loses nothing.
+- The master key is **never overwritten**. If the item exists but this identity cannot read
+  it, creation refuses rather than minting a replacement over it: those bytes are the only
+  way back into every sealed secret, including after the user answers "Always Allow" and the
+  ACL heals. Refusing costs one launch on keychain fallback; overwriting costs every sealed
+  secret, permanently. (Existence is checked with a metadata-only query — no decrypt.)
 - A save that cannot reach the master key (locked keychain) falls back to a keychain item —
   and evicts any stale sealed copy so an edited value can never silently revert.
 - Deleting a secret removes it from both homes. Keychain items whose creating build is gone
@@ -117,7 +122,7 @@ which explains itself before anything happens:
 | Doorway | When | What you see |
 |---|---|---|
 | **Touch ID** | Every gated secret copy (30 s reuse) | The system biometry sheet naming the snippet |
-| **One-time migration** | Only if secrets from a pre-v2 install still exist | A DevType alert stating how many password dialogs follow (≤ 1 per old secret), then the batch, then never again |
+| **One-time repair** | Only if a secret cannot be read silently — a pre-v2 install, or a v2 item whose ACL a rebuild re-partitioned | A DevType alert stating how many password dialogs follow (≤ 1 per affected secret), then the batch, then never again |
 | **Keychain unlock** | Only if the login keychain is locked at first use | A DevType alert, then the system's own unlock prompt |
 
 ## Diagnostics
@@ -204,3 +209,11 @@ macOS update.
 Migration is automatic and lossless: legacy items move through the explained one-time batch
 (the only dialogs), v2 items consolidate silently at launch, and a keychain copy is deleted
 only after its sealed replacement is verified on disk.
+
+The batch is **epoch-neutral**. A v2 item can also become unreadable without the dialog — a
+rebuild under a development certificate re-partitions its ACL, and the silent read then ends
+in `errSecAuthFailed` no amount of healing clears. Walking only the legacy service left those
+items a dead end: the read knew a dialog would fix them, nothing in the app could show one,
+and the UI reported "no secret stored" about a secret that was stored and one dialog away.
+The repair pass now covers both epochs — still through exactly one dialog-capable call, still
+counted by the source contract — and the epoch only decides which service the fetch reads.

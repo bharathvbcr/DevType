@@ -338,6 +338,121 @@ final class SecretConsolidationTests: XCTestCase {
         XCTAssertEqual(store.delete(account: UUID().uuidString), errSecItemNotFound)
     }
 
+    // MARK: - An unreadable master key must never be overwritten
+
+    /// The shape from the field report: `master key created → 0` followed by `master key
+    /// read-back failed`, with `contains` still true — the item is present, this identity just
+    /// cannot decrypt it (a rebuild re-partitioned the ACL). The read-back guard correctly
+    /// refuses to *trust* such a key, but minting one writes over the item first, and those
+    /// overwritten bytes are the only way back into every sealed secret — including after the
+    /// user answers "Always Allow" and the ACL heals. Creation must never clobber.
+    func testUnreadableMasterKeyIsNotOverwrittenAndSealedSecretsSurviveTheHeal() {
+        /// Writes always succeed and `contains` always answers true; only the master key's
+        /// *decrypt* stops working. Exactly the foreign-ACL shape the report shows.
+        final class ReACLedTier: SecretBackingStore {
+            let inner = InMemorySecretBackingStore()
+            var readable = true
+            private func gated(_ account: String) -> Bool {
+                !readable && account == ConsolidatedSecretBackingStore.masterKeyAccount
+            }
+            func set(_ value: String, account: String) -> OSStatus {
+                inner.set(value, account: account)
+            }
+            func value(account: String) -> String? {
+                gated(account) ? nil : inner.value(account: account)
+            }
+            func contains(account: String) -> Bool { inner.contains(account: account) }
+            func delete(account: String) -> OSStatus { inner.delete(account: account) }
+            func accounts() -> Set<String> { inner.accounts() }
+        }
+
+        let tier = ReACLedTier()
+        let url = directory.appendingPathComponent(ConsolidatedSecretBackingStore.archiveFileName)
+        let id = UUID().uuidString
+        let keyAccount = ConsolidatedSecretBackingStore.masterKeyAccount
+
+        // Day 1: the key reads back, so the secret is sealed into the archive.
+        let day1 = ConsolidatedSecretBackingStore(
+            fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics()
+        )
+        XCTAssertEqual(day1.set("old-secret", account: id), errSecSuccess)
+        let originalKey = tier.inner.value(account: keyAccount)
+        XCTAssertNotNil(originalKey, "precondition: day 1 must have sealed under a stored key")
+
+        // Day 2: a rebuild re-partitions the ACL. The item is present but unreadable, and a
+        // fresh process (nothing cached) saves an unrelated secret and runs the launch sweep —
+        // both land on `masterKey(createIfNeeded: true)`.
+        tier.readable = false
+        let day2 = ConsolidatedSecretBackingStore(
+            fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics()
+        )
+        XCTAssertTrue(
+            day2.storageDescription().contains("UNREADABLE"),
+            "precondition: the reported state — \(day2.storageDescription())"
+        )
+        XCTAssertEqual(day2.set("unrelated", account: UUID().uuidString), errSecSuccess)
+        _ = day2.consolidateIntoFile()
+
+        XCTAssertEqual(
+            tier.inner.value(account: keyAccount), originalKey,
+            "A master key that exists but cannot be read must never be overwritten: those "
+                + "bytes are the only way back into every sealed secret."
+        )
+
+        // Day 3: the user answers Always Allow, the ACL heals, decrypt works again.
+        tier.readable = true
+        let day3 = ConsolidatedSecretBackingStore(
+            fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics()
+        )
+        XCTAssertEqual(
+            day3.value(account: id), "old-secret",
+            "The sealed secret must survive the unreadable window and return after the heal."
+        )
+    }
+
+    // MARK: - "Could not run" is not "failed"
+
+    /// `remaining` is documented as "keychain-resident secrets that could not be moved yet
+    /// (unreadable silently, **or no master key while the keychain is locked**)". Reporting
+    /// that state as `failed` is what turns a lossless, expected fallback into "4 failed" at
+    /// the top of a bug report. A pass with no usable key has deferred every item, not failed
+    /// on any of them.
+    func testNoUsableMasterKeyDefersConsolidationRatherThanFailingIt() {
+        final class WriteOnlyMasterTier: SecretBackingStore {
+            let inner = InMemorySecretBackingStore()
+            func set(_ value: String, account: String) -> OSStatus {
+                inner.set(value, account: account)
+            }
+            func value(account: String) -> String? {
+                account == ConsolidatedSecretBackingStore.masterKeyAccount
+                    ? nil // written, never readable — the foreign-ACL shape
+                    : inner.value(account: account)
+            }
+            func contains(account: String) -> Bool { inner.contains(account: account) }
+            func delete(account: String) -> OSStatus { inner.delete(account: account) }
+            func accounts() -> Set<String> { inner.accounts() }
+        }
+
+        let tier = WriteOnlyMasterTier()
+        let (store, _, _) = makeStore(tier: tier)
+        let residents = [UUID().uuidString, UUID().uuidString, UUID().uuidString]
+        for account in residents {
+            XCTAssertEqual(tier.set("resident-\(account.prefix(4))", account: account), errSecSuccess)
+        }
+
+        let summary = store.consolidateIntoFile()
+
+        XCTAssertEqual(
+            summary,
+            SecretConsolidationSummary(moved: 0, remaining: residents.count, failed: 0),
+            "No usable master key defers every item; nothing failed. Got \(summary)."
+        )
+        // And the fallback really is lossless — every value still reads through the tier.
+        for account in residents {
+            XCTAssertNotNil(store.value(account: account))
+        }
+    }
+
     // MARK: - The master key is not a purgeable orphan
 
     func testPurgeOrphansSparesTheMasterKey() {
