@@ -32,6 +32,35 @@ verify_remote_tag() {
 }
 verify_remote_tag
 
+# The Release workflow publishes on tag push and calls this same script. Running it by hand
+# while that workflow is in flight puts two publishers on one immutable release. The
+# already-published check below is the backstop, but it only fires *after* a draft has been
+# created and a DMG uploaded — and whichever publisher loses the race dies with a confusing
+# "already published" error on a release that is actually fine.
+#
+# Refuse early instead. Deliberately fail-open: a queued/in_progress run we can positively see
+# blocks, and anything else (no gh, no network, an unparseable answer) warns and proceeds,
+# because a guard that cannot read the truth must not be the thing that stops a release.
+concurrent_release_run() {
+  [[ -z "${GITHUB_ACTIONS:-}" ]] || return 1          # we ARE the workflow
+  [[ "${DEVTYPE_ALLOW_CONCURRENT_PUBLISH:-0}" != "1" ]] || return 1
+  local runs
+  runs="$(gh run list --repo "${GH_REPO}" --workflow Release --branch "${TAG}" \
+            --json status --jq '.[].status' 2>/dev/null)" || {
+    echo "warning: could not check for an in-flight Release workflow — proceeding" >&2
+    return 1
+  }
+  grep -qE '^(queued|in_progress|waiting|requested|pending)$' <<<"${runs}"
+}
+# Called only on the paths that are about to *mutate* the release. An already-published tag
+# must still refuse with its own clearer error, and must still do so having made nothing but
+# read-only API calls — `test_published_release_is_never_overwritten` pins that.
+require_no_concurrent_release_run() {
+  concurrent_release_run || return 0
+  die "a Release workflow run for ${TAG} is already in flight — it publishes this tag itself.
+       Wait for it, or set DEVTYPE_ALLOW_CONCURRENT_PUBLISH=1 to publish by hand anyway."
+}
+
 VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/devtype-release-verify.XXXXXX")"
 trap 'rm -rf "${VERIFY_DIR}"' EXIT
 
@@ -41,10 +70,12 @@ gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
   --jq ".[] | select(.tag_name == \"${TAG}\") | .draft" > "${VERIFY_DIR}/draft-state"
 case "$(cat "${VERIFY_DIR}/draft-state")" in
   '')
+    require_no_concurrent_release_run
     gh release create "${TAG}" --draft --verify-tag --target "${HEAD_COMMIT}" \
       --title "DevType ${TAG}" --notes-file "${NOTES}"
     ;;
   true)
+    require_no_concurrent_release_run
     gh release edit "${TAG}" --verify-tag --title "DevType ${TAG}" \
       --notes-file "${NOTES}" --prerelease=false
     ;;

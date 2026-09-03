@@ -60,8 +60,29 @@ final class SecureInputMonitorLifecycleTests: XCTestCase {
         }
         wait(for: [initial], timeout: 2)
         // Let multiple identical background samples accumulate while main is busy.
-        Thread.sleep(forTimeInterval: 0.2)
-        XCTAssertGreaterThanOrEqual(probe.readCount, 3)
+        //
+        // Wait for the *condition*, not for a fixed slice of wall clock. Sleeping 0.2 s and
+        // asserting three reads at a 0.05 s interval asserts a timer *rate*, and GCD coalesces
+        // timers under load: a quiet machine delivered four ticks, a loaded macOS 26 CI runner
+        // delivered two, and the release gate went red on a test with nothing to say about the
+        // change that triggered it. The property under test is that the poller keeps sampling
+        // while main is blocked — and that those identical samples are not delivered, which the
+        // `default:` branch above enforces. Neither depends on how fast the ticks arrive.
+        //
+        // `Thread.sleep` keeps main off the dispatch queue exactly as the fixed sleep did, so
+        // samples still accumulate undelivered while this loop runs.
+        let samplingDeadline = Date().addingTimeInterval(5)
+        while probe.readCount < 3, Date() < samplingDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertGreaterThanOrEqual(
+            probe.readCount, 3,
+            "the poller stopped sampling while main was blocked"
+        )
+        XCTAssertEqual(
+            delivered.count, 1,
+            "identical samples must accumulate undelivered while main is blocked"
+        )
         probe.set(true)
         wait(for: [secure], timeout: 2)
         probe.set(false)

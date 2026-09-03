@@ -63,6 +63,9 @@ elif a[:2] == ["release", "view"]:
     if mode == "no_assets": value["assets"] = []
     if mode == "malformed_metadata": print("not json")
     else: print(json.dumps(value))
+elif a[:2] == ["run", "list"]:
+    if mode == "run_list_failure": fail("gh run list unavailable")
+    for status in s.get("release_runs", []): print(status)
 elif a[:2] == ["release", "download"]:
     s["downloads"] += 1
     if mode == "download_failure" or (mode == "transient_download" and s["downloads"] < 3):
@@ -124,7 +127,7 @@ class PublicationTests(unittest.TestCase):
         (dist / DMG).write_bytes(b"valid fixture DMG")
         self.state_path = self.base / "state.json"
         self.state = dict(mode="ok", calls=[], downloads=0, exists=False, draft=True,
-                          body="old notes", assets=[])
+                          body="old notes", assets=[], release_runs=[])
         bin_dir = self.base / "bin"
         bin_dir.mkdir()
         for name, code in (("gh", GH_DOUBLE), ("sleep", "pass\n")):
@@ -138,11 +141,16 @@ class PublicationTests(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=self.repo, check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def publish(self, mode="ok", success=True):
+    def publish(self, mode="ok", success=True, release_runs=None, extra_env=None):
         self.state["mode"] = mode
+        if release_runs is not None:
+            self.state["release_runs"] = release_runs
         self.state_path.write_text(json.dumps(self.state))
+        env = dict(self.env, **(extra_env or {}))
+        # The guard must behave like a developer's shell, not like a workflow runner.
+        env.pop("GITHUB_ACTIONS", None)
         result = subprocess.run(["bash", "Scripts/publish-release.sh", TAG, "dist"],
-                                cwd=self.repo, env=self.env, capture_output=True,
+                                cwd=self.repo, env=env, capture_output=True,
                                 text=True, timeout=20)
         self.state = json.loads(self.state_path.read_text())
         output = result.stdout + result.stderr
@@ -169,6 +177,32 @@ class PublicationTests(unittest.TestCase):
         self.assert_not_published()
         self.publish()
         self.assertEqual(sum(c[:2] == ["release", "create"] for c in self.state["calls"]), 1)
+
+    def test_in_flight_release_workflow_blocks_a_manual_publish(self):
+        """The Release workflow publishes on tag push. A second publisher racing it leaves
+        whichever one loses dying on an immutable release that is actually fine."""
+        output = self.publish(release_runs=["in_progress"], success=False)
+        self.assertIn("already in flight", output)
+        self.assert_not_published()
+        # Refused before mutating anything: only read-only lookups may have happened.
+        self.assertTrue(all(c[0] in ("api", "run") for c in self.state["calls"]),
+                        self.state["calls"])
+
+    def test_a_finished_release_run_does_not_block_publishing(self):
+        self.publish(release_runs=["completed", "completed"])
+        self.assertFalse(self.state["draft"])
+
+    def test_concurrent_publish_can_be_overridden_explicitly(self):
+        self.publish(release_runs=["in_progress"],
+                     extra_env={"DEVTYPE_ALLOW_CONCURRENT_PUBLISH": "1"})
+        self.assertFalse(self.state["draft"])
+
+    def test_an_unreadable_run_list_never_blocks_a_release(self):
+        """Fail-open on purpose: a guard that cannot read the truth must not be the thing
+        that stops a release."""
+        output = self.publish(mode="run_list_failure")
+        self.assertIn("could not check for an in-flight Release workflow", output)
+        self.assertFalse(self.state["draft"])
 
     def test_published_release_is_never_overwritten(self):
         self.state.update(exists=True, draft=False)
