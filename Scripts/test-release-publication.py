@@ -44,8 +44,10 @@ elif a[:2] == ["release", "edit"]:
     else:
         s["body"] = pathlib.Path(option("--notes-file")).read_text()
 elif a[:2] == ["release", "upload"]:
+    s["uploads"] = s.get("uploads", 0) + 1
     if not s["draft"]: fail("attempted to overwrite a public asset")
-    if mode == "upload_failure": fail("upload failed")
+    if mode == "upload_failure" or (mode == "transient_upload" and s["uploads"] < 3):
+        fail("upload failed")
     s["assets"] = ["DevType-0.1.4.dmg"]
     if mode == "extra_asset": s["assets"].append("stale.zip")
 elif a[:2] == ["release", "view"]:
@@ -229,6 +231,11 @@ class PublicationTests(unittest.TestCase):
     def test_transient_download_recovers(self):
         self.publish("transient_download")
         self.assertEqual(self.state["downloads"], 4)
+
+    def test_transient_upload_recovers(self):
+        self.publish("transient_upload")
+        self.assertEqual(self.state.get("uploads"), 3)
+        self.assertFalse(self.state["draft"])
 
     def test_public_verification_failure_is_not_success(self):
         self.publish("corrupt_public_download", success=False)

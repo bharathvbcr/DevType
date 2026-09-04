@@ -18,9 +18,14 @@ NOTES="${ROOT}/docs/releases/${TAG}.md"
 HEAD_COMMIT="$(git -C "${ROOT}" rev-parse HEAD)"
 
 verify_remote_tag() {
-  local refs remote_commit
-  refs="$(git -C "${ROOT}" ls-remote --exit-code origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}")" \
-    || die "cannot resolve remote tag ${TAG}"
+  local refs="" remote_commit attempt
+  for attempt in 1 2 3 4 5; do
+    if refs="$(git -C "${ROOT}" ls-remote --exit-code origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" 2>/dev/null)"; then
+      break
+    fi
+    [[ "${attempt}" -lt 5 ]] || die "cannot resolve remote tag ${TAG} after bounded retries"
+    sleep "$((attempt * 2))"
+  done
   # Annotated tags peel to commits; lightweight tags already name the commit.
   remote_commit="$(awk -v tag="refs/tags/${TAG}" '
     $2 == tag { direct = $1 }
@@ -83,12 +88,29 @@ case "$(cat "${VERIFY_DIR}/draft-state")" in
   *) die "ambiguous release state for ${TAG}" ;;
 esac
 
-gh release upload "${TAG}" "${LOCAL_DMG}" --clobber
+uploaded=0
+for attempt in 1 2 3 4 5; do
+  if gh release upload "${TAG}" "${LOCAL_DMG}" --clobber; then
+    uploaded=1
+    break
+  fi
+  [[ "${attempt}" -lt 5 ]] || break
+  sleep "$((attempt * 2))"
+done
+[[ "${uploaded}" -eq 1 ]] || die "could not upload ${LOCAL_DMG} after bounded retries"
 
 verify_release() {
-  local expected_draft="$1" downloaded=0 attempt
-  gh release view "${TAG}" --json tagName,name,isDraft,isPrerelease,body,assets \
-    > "${VERIFY_DIR}/release.json"
+  local expected_draft="$1" downloaded=0 attempt view_ok=0
+  for attempt in 1 2 3 4 5; do
+    if gh release view "${TAG}" --json tagName,name,isDraft,isPrerelease,body,assets \
+      > "${VERIFY_DIR}/release.json"; then
+      view_ok=1
+      break
+    fi
+    [[ "${attempt}" -lt 5 ]] || break
+    sleep "$((attempt * 2))"
+  done
+  [[ "${view_ok}" -eq 1 ]] || die "could not retrieve release metadata for ${TAG} after bounded retries"
   # JSON parsing preserves trailing newlines and rejects missing/null booleans.
   # Shell command substitution silently strips newlines from both note bodies.
   python3 - "${VERIFY_DIR}/release.json" "${NOTES}" "${TAG}" "${expected_draft}" \
@@ -133,6 +155,15 @@ PY
 
 verify_release true
 verify_remote_tag
-gh release edit "${TAG}" --draft=false --verify-tag
+undraft_ok=0
+for attempt in 1 2 3 4 5; do
+  if gh release edit "${TAG}" --draft=false --verify-tag; then
+    undraft_ok=1
+    break
+  fi
+  [[ "${attempt}" -lt 5 ]] || break
+  sleep "$((attempt * 2))"
+done
+[[ "${undraft_ok}" -eq 1 ]] || die "could not undraft release ${TAG} after bounded retries"
 verify_release false
 echo "verified GitHub release ${TAG}: curated notes and ${EXPECTED_DMG} match"
