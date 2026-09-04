@@ -17,8 +17,9 @@ enum StatsTimePeriod: Int, CaseIterable, Hashable {
     }
 }
 
-/// Pure projection consumed by the Statistics view. Its cards, insights, lists,
-/// and sparkline all come from the same immutable period snapshot.
+/// Pure projection consumed by the Statistics view. Period metrics, lists, and the sparkline come
+/// from one immutable period snapshot; the unused insight comes from an immutable lifetime
+/// snapshot so changing the visible period cannot redefine "unused."
 struct StatsPresentationSnapshot {
     struct SnippetUsage: Equatable {
         let snippet: SnippetModel
@@ -30,7 +31,7 @@ struct StatsPresentationSnapshot {
     let totalUses: Int
     let charactersProduced: Int
     let keystrokesSaved: Int
-    let singleUseCount: Int
+    let unusedCount: Int
     let mostValuableSnippet: SnippetModel?
     let mostValuableKeystrokesSaved: Int
     let top: [SnippetUsage]
@@ -43,6 +44,7 @@ struct StatsPresentationSnapshot {
     static func make(
         snippets: [SnippetModel],
         usage: UsageStatsStore.PeriodSnapshot,
+        lifetimeUsage: UsageStatsStore.PeriodSnapshot,
         listLimit: Int = 8
     ) -> StatsPresentationSnapshot {
         var snippetsByID: [UUID: SnippetModel] = [:]
@@ -55,15 +57,16 @@ struct StatsPresentationSnapshot {
         var totalUses = 0
         var charactersProduced = 0
         var keystrokesSaved = 0
-        var singleUseCount = 0
+        var unusedCount = 0
         var mostValuableSnippet: SnippetModel?
         var mostValuableKeystrokesSaved = 0
 
         for snippet in orderedSnippets {
+            let lifetimeCount = max(snippet.usageCount, lifetimeUsage.usageCount(for: snippet.id))
+            if lifetimeCount == 0 { unusedCount += 1 }
             let count = usage.usageCount(for: snippet.id)
             guard count > 0 else { continue }
             totalUses = addingClamped(totalUses, count)
-            if count == 1 { singleUseCount += 1 }
 
             let producedPerUse = snippet.isImageSnippet ? 0 : snippet.replacementText.count
             let savedPerUse = max(0, producedPerUse - snippet.triggerKeyword.count)
@@ -102,7 +105,7 @@ struct StatsPresentationSnapshot {
             totalUses: totalUses,
             charactersProduced: charactersProduced,
             keystrokesSaved: keystrokesSaved,
-            singleUseCount: singleUseCount,
+            unusedCount: unusedCount,
             mostValuableSnippet: mostValuableSnippet,
             mostValuableKeystrokesSaved: mostValuableKeystrokesSaved,
             top: top,
@@ -209,7 +212,7 @@ struct StatsLocalizedFormatter {
 /// §2: Actionable Insights & Statistics Dashboard.
 ///
 /// Features time-period filtering (All Time, Today, 7D, 30D),
-/// visual activity sparkline/bar, actionable insight cards (single-use cleanup,
+/// visual activity sparkline/bar, actionable insight cards (unused-snippet cleanup,
 /// trigger conflict resolver, most valuable snippet), and auto-refresh.
 final class StatsViewController: NSViewController {
     private static let charactersPerMinute = 200.0
@@ -418,14 +421,25 @@ final class StatsViewController: NSViewController {
         updatePeriodControlLocalization()
         let groups = store.loadGroups()
         let snippets = groups.flatMap(\.snippets)
+        let snippetIDs = Set(snippets.map(\.id))
         let now = Date()
         let usage = store.usageStatsStore.snapshot(
             period: selectedPeriod.usagePeriod,
-            snippetIDs: Set(snippets.map(\.id)),
+            snippetIDs: snippetIDs,
             now: now,
             calendar: .current
         )
-        let presentation = StatsPresentationSnapshot.make(snippets: snippets, usage: usage)
+        let lifetimeUsage = selectedPeriod == .all ? usage : store.usageStatsStore.snapshot(
+            period: .all,
+            snippetIDs: snippetIDs,
+            now: now,
+            calendar: .current
+        )
+        let presentation = StatsPresentationSnapshot.make(
+            snippets: snippets,
+            usage: usage,
+            lifetimeUsage: lifetimeUsage
+        )
 
         expansionsValue.stringValue = formatter.number(presentation.totalUses)
         charactersValue.stringValue = formatter.number(presentation.charactersProduced)
@@ -445,7 +459,7 @@ final class StatsViewController: NSViewController {
 
         // Populate Actionable Insights
         populateInsights(
-            singleUseCount: presentation.singleUseCount,
+            unusedCount: presentation.unusedCount,
             mostValuable: presentation.mostValuableSnippet,
             maxSaved: presentation.mostValuableKeystrokesSaved
         )
@@ -468,7 +482,7 @@ final class StatsViewController: NSViewController {
         emptyLabel.isHidden = hasData
     }
 
-    private func populateInsights(singleUseCount: Int, mostValuable: SnippetModel?, maxSaved: Int) {
+    private func populateInsights(unusedCount: Int, mostValuable: SnippetModel?, maxSaved: Int) {
         insightsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         let conflicts = store.triggerConflicts()
@@ -499,16 +513,16 @@ final class StatsViewController: NSViewController {
             valCard.widthAnchor.constraint(equalTo: insightsStack.widthAnchor).isActive = true
         }
 
-        if singleUseCount > 2 {
-            let singleCard = makeInsightCard(
-                title: loc.s("stats.insight.singleUse.title"),
-                desc: loc.s("stats.insight.singleUse.desc", singleUseCount),
-                actionTitle: loc.s("stats.insight.singleUse.action"),
+        if unusedCount > 2 {
+            let unusedCard = makeInsightCard(
+                title: loc.s("stats.insight.unused.title"),
+                desc: loc.s("stats.insight.unused.desc", unusedCount),
+                actionTitle: loc.s("stats.insight.unused.action"),
                 tint: DevTypeTheme.accent,
                 action: #selector(reviewUnusedTapped)
             )
-            insightsStack.addArrangedSubview(singleCard)
-            singleCard.widthAnchor.constraint(equalTo: insightsStack.widthAnchor).isActive = true
+            insightsStack.addArrangedSubview(unusedCard)
+            unusedCard.widthAnchor.constraint(equalTo: insightsStack.widthAnchor).isActive = true
         }
     }
 
@@ -559,7 +573,7 @@ final class StatsViewController: NSViewController {
     }
 
     @objc private func reviewUnusedTapped() {
-        (NSApp.delegate as? AppDelegate)?.openSnippetManager(nil)
+        (NSApp.delegate as? AppDelegate)?.openSnippetManager(filteringBy: .unused)
     }
 
     private func fill(

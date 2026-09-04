@@ -27,6 +27,116 @@ final class StatsPeriodPresentationTests: XCTestCase {
         ])
     }
 
+    func testReviewUnusedActionOpensTheGlobalUnusedFilter() throws {
+        _ = NSApplication.shared
+        let storedLanguage = UserDefaults.standard.object(forKey: LocalizationManager.deviceKey)
+        let previousDelegate = NSApp.delegate
+        let localization = LocalizationManager()
+        localization.language = .en
+        let appDelegate = AppDelegate()
+        NSApp.delegate = appDelegate
+        defer {
+            NSApp.windows
+                .filter { $0.contentViewController is SnippetManagerViewController }
+                .forEach { $0.close() }
+            NSApp.delegate = previousDelegate
+            restoreStoredLanguage(storedLanguage)
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReviewUnusedAction-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SnippetStore(
+            location: .init(
+                fileURL: directory.appendingPathComponent("snippets.json"),
+                expectsExistingLibrary: false
+            ),
+            watcherFactory: { _ in nil },
+            secretPurgeEnabled: false
+        )
+        let usage = UsageStatsStore(
+            fileURL: directory.appendingPathComponent("usage.json"),
+            flushInterval: 3_600
+        )
+        store.usageStatsStore = usage
+
+        let unused = (0..<3).map {
+            SnippetModel(title: "Unused \($0)", triggerKeyword: ";unused\($0)", replacementText: "unused")
+        }
+        let singleUse = (0..<3).map {
+            SnippetModel(title: "Single use \($0)", triggerKeyword: ";once\($0)", replacementText: "once")
+        }
+        XCTAssertEqual(
+            store.saveGroups([SnippetGroup(name: "Statistics", snippets: unused + singleUse)]),
+            .saved
+        )
+        for snippet in singleUse {
+            usage.recordUsage(for: snippet.id, at: now, calendar: calendar)
+        }
+
+        let controller = StatsViewController(store: store, localization: localization)
+        _ = controller.view
+        controller.refresh()
+        let button = try XCTUnwrap(descendants(of: controller.view).compactMap { $0 as? NSButton }.first {
+            $0.title == localization.s("stats.insight.unused.action")
+        })
+
+        button.performClick(nil)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+
+        let manager = try XCTUnwrap(NSApp.windows.compactMap {
+            $0.contentViewController as? SnippetManagerViewController
+        }.last)
+        let state = manager.localizationState()
+        XCTAssertEqual(state.filterChip, .unused)
+        XCTAssertNil(state.selectedGroupID, "Review Unused must search the whole library.")
+        XCTAssertTrue(state.filterText.isEmpty, "A stale text query must not hide unused snippets.")
+    }
+
+    func testReviewUnusedInsightAppearsForZeroUseRatherThanSingleUseSnippets() throws {
+        _ = NSApplication.shared
+        let storedLanguage = UserDefaults.standard.object(forKey: LocalizationManager.deviceKey)
+        let localization = LocalizationManager()
+        localization.language = .en
+        defer { restoreStoredLanguage(storedLanguage) }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReviewUnusedInsight-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SnippetStore(
+            location: .init(
+                fileURL: directory.appendingPathComponent("snippets.json"),
+                expectsExistingLibrary: false
+            ),
+            watcherFactory: { _ in nil },
+            secretPurgeEnabled: false
+        )
+        store.usageStatsStore = UsageStatsStore(
+            fileURL: directory.appendingPathComponent("usage.json"),
+            flushInterval: 3_600
+        )
+        let snippets = (0..<3).map {
+            SnippetModel(title: "Unused \($0)", triggerKeyword: ";unused\($0)", replacementText: "unused")
+        }
+        XCTAssertEqual(store.saveGroups([SnippetGroup(name: "Unused", snippets: snippets)]), .saved)
+
+        let controller = StatsViewController(store: store, localization: localization)
+        _ = controller.view
+        controller.refresh()
+        let renderedButtons = descendants(of: controller.view).compactMap { $0 as? NSButton }
+
+        XCTAssertTrue(renderedButtons.contains {
+            $0.title == localization.s("stats.insight.unused.action")
+        })
+        XCTAssertTrue(
+            descendants(of: controller.view)
+                .compactMap { ($0 as? NSTextField)?.stringValue }
+                .contains(localization.s("stats.insight.unused.desc", 3))
+        )
+    }
+
     func testChartAndPeriodSelectorExposeLocalizedNativeAccessibility() throws {
         _ = NSApplication.shared
         let storedLanguage = UserDefaults.standard.object(forKey: LocalizationManager.deviceKey)
@@ -226,7 +336,11 @@ final class StatsPeriodPresentationTests: XCTestCase {
             now: now,
             calendar: calendar
         )
-        let presentation = StatsPresentationSnapshot.make(snippets: [snippet], usage: period)
+        let presentation = StatsPresentationSnapshot.make(
+            snippets: [snippet],
+            usage: period,
+            lifetimeUsage: period
+        )
         XCTAssertEqual(presentation.totalUses, count)
         XCTAssertEqual(presentation.unbucketedUsageCount, 1)
         XCTAssertEqual(presentation.sparklineCounts.reduce(0, +), count - 1)
@@ -319,9 +433,18 @@ final class StatsPeriodPresentationTests: XCTestCase {
         ]
         for period in StatsTimePeriod.allCases {
             let usage = store.snapshot(period: period.usagePeriod, now: now, calendar: calendar)
-            let presentation = StatsPresentationSnapshot.make(snippets: snippets, usage: usage)
+            let presentation = StatsPresentationSnapshot.make(
+                snippets: snippets,
+                usage: usage,
+                lifetimeUsage: store.snapshot(period: .all, now: now, calendar: calendar)
+            )
 
             XCTAssertEqual(presentation.totalUses, expectedTotals[period], "wrong cards for \(period)")
+            XCTAssertEqual(
+                presentation.unusedCount,
+                0,
+                "changing the statistics period must not redefine lifetime-unused snippets"
+            )
             XCTAssertEqual(presentation.top.reduce(0) { $0 + $1.usageCount }, expectedTotals[period])
             XCTAssertEqual(presentation.sparklineCounts.reduce(0, +), expectedTotals[period])
             XCTAssertEqual(Set(presentation.recent.map(\.snippet.id)), Set(presentation.top.map(\.snippet.id)))
@@ -343,7 +466,8 @@ final class StatsPeriodPresentationTests: XCTestCase {
 
         let today = StatsPresentationSnapshot.make(
             snippets: snippets,
-            usage: store.snapshot(period: .today, now: now, calendar: calendar)
+            usage: store.snapshot(period: .today, now: now, calendar: calendar),
+            lifetimeUsage: store.snapshot(period: .all, now: now, calendar: calendar)
         )
         XCTAssertEqual(today.top.map(\.snippet.id), [first.id])
         XCTAssertEqual(today.top.first?.usageCount, 2,
@@ -352,7 +476,8 @@ final class StatsPeriodPresentationTests: XCTestCase {
 
         let sevenDays = StatsPresentationSnapshot.make(
             snippets: snippets,
-            usage: store.snapshot(period: .sevenDays, now: now, calendar: calendar)
+            usage: store.snapshot(period: .sevenDays, now: now, calendar: calendar),
+            lifetimeUsage: store.snapshot(period: .all, now: now, calendar: calendar)
         )
         XCTAssertEqual(sevenDays.top.map(\.snippet.id), [second.id, first.id])
         XCTAssertEqual(sevenDays.recent.map(\.snippet.id), [first.id, second.id])

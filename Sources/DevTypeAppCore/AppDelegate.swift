@@ -2019,6 +2019,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func openSnippetManager(filteringBy filterChip: SnippetFilterChip) {
+        openSnippetManager(nil)
+        (snippetWindowController?.contentViewController as? SnippetManagerViewController)?
+            .showAllSnippets(filteredBy: filterChip)
+    }
+
     /// Rebuilds AppKit labels that were materialized in the previous language while carrying
     /// transient manager navigation and its undo stack forward. A visible editor sheet owns
     /// unsaved input, so replacement is deferred until the next show rather than dropping it.

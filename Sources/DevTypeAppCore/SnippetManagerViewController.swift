@@ -739,6 +739,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     private var isCompactDensity: Bool = false
     private let densityControl = NSSegmentedControl()
     private let filterChipsStack = NSStackView()
+    private let filterOverflow = NSScrollView()
     private var filterChipButtons: [SnippetFilterChip: CapsuleButton] = [:]
 
     // Bulk Operations Bar
@@ -1018,7 +1019,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             filterChipButtons[chip] = btn
             filterChipsStack.addArrangedSubview(btn)
         }
-        let filterOverflow = NSScrollView()
         filterOverflow.identifier = NSUserInterfaceItemIdentifier("manager.filterOverflow")
         filterOverflow.translatesAutoresizingMaskIntoConstraints = false
         filterOverflow.hasHorizontalScroller = true
@@ -1349,6 +1349,27 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             groupScrollOrigin: groupScroll.contentView.bounds.origin,
             snippetScrollOrigin: scrollView.contentView.bounds.origin
         )
+    }
+
+    /// Applies an app-level navigation request without inheriting stale local scope from a prior
+    /// manager session. Insight actions describe the whole library, so a selected group or search
+    /// query must not silently narrow their result set.
+    func showAllSnippets(filteredBy filterChip: SnippetFilterChip) {
+        _ = view
+        selectedGroupID = nil
+        hasResolvedInitialGroupSelection = true
+        pendingRestoredSnippetIDs.removeAll()
+        filterField.stringValue = ""
+        activeFilterChip = filterChip
+        tableView.deselectAll(nil)
+        groupOutline.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        for (chip, button) in filterChipButtons {
+            button.style = chip == filterChip ? .primary : .secondary
+        }
+        applyFilterAndReloadTable()
+        if let button = filterChipButtons[filterChip] {
+            button.scrollToVisible(button.bounds)
+        }
     }
 
     private func restoreLocalizationStateWhenLaidOut() {
