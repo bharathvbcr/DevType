@@ -1218,10 +1218,10 @@ public enum DiagnosticReport {
         }
 
         mutating func observe(_ record: LogRecord) {
-            observedEntryCount = saturatingAdd(observedEntryCount, 1)
+            observedEntryCount = Saturating.adding(observedEntryCount, 1)
             let nameMatches = currentProcessNames.contains(record.process)
             guard record.processIdentifier == currentProcessIdentifier, nameMatches else {
-                excludedForeignProcessCount = saturatingAdd(excludedForeignProcessCount, 1)
+                excludedForeignProcessCount = Saturating.adding(excludedForeignProcessCount, 1)
                 return
             }
 
@@ -1267,11 +1267,6 @@ public enum DiagnosticReport {
 
     static func osLogFailureLine(_ error: Error) -> String {
         "(OSLogStore unavailable — \(String(reflecting: type(of: error))))"
-    }
-
-    private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
-        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
-        return overflow ? Int.max : sum
     }
 
     /// Newest-last window over an oldest-first enumeration: keep the tail when the session

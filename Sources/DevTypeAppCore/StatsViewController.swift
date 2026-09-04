@@ -66,16 +66,16 @@ struct StatsPresentationSnapshot {
             if lifetimeCount == 0 { unusedCount += 1 }
             let count = usage.usageCount(for: snippet.id)
             guard count > 0 else { continue }
-            totalUses = addingClamped(totalUses, count)
+            totalUses = Saturating.adding(totalUses, count)
 
             let producedPerUse = snippet.isImageSnippet ? 0 : snippet.replacementText.count
             let savedPerUse = max(0, producedPerUse - snippet.triggerKeyword.count)
-            charactersProduced = addingClamped(
+            charactersProduced = Saturating.adding(
                 charactersProduced,
-                multiplyingClamped(count, producedPerUse)
+                Saturating.multiplying(count, producedPerUse)
             )
-            let saved = multiplyingClamped(count, savedPerUse)
-            keystrokesSaved = addingClamped(keystrokesSaved, saved)
+            let saved = Saturating.multiplying(count, savedPerUse)
+            keystrokesSaved = Saturating.adding(keystrokesSaved, saved)
             if saved > mostValuableKeystrokesSaved {
                 mostValuableSnippet = snippet
                 mostValuableKeystrokesSaved = saved
@@ -115,15 +115,6 @@ struct StatsPresentationSnapshot {
         )
     }
 
-    private static func addingClamped(_ lhs: Int, _ rhs: Int) -> Int {
-        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
-        return overflow ? Int.max : sum
-    }
-
-    private static func multiplyingClamped(_ lhs: Int, _ rhs: Int) -> Int {
-        let (product, overflow) = lhs.multipliedReportingOverflow(by: rhs)
-        return overflow ? Int.max : product
-    }
 }
 
 /// Locale-explicit formatting for every value projected by the Statistics screen. The formatter

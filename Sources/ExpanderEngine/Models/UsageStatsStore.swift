@@ -246,7 +246,7 @@ public final class UsageStatsStore {
         let bucketStart = calendar.dateInterval(of: .hour, for: date)?.start ?? date
         lock.lock()
         var stat = stats[snippetID] ?? Stat()
-        stat.usageCount = Self.addingClamped(stat.usageCount, 1)
+        stat.usageCount = Saturating.adding(stat.usageCount, 1)
         if let previous = stat.lastUsedAt {
             stat.lastUsedAt = max(previous, date)
         } else {
@@ -254,7 +254,7 @@ public final class UsageStatsStore {
         }
 
         if let index = stat.buckets.lastIndex(where: { $0.startedAt == bucketStart }) {
-            stat.buckets[index].usageCount = Self.addingClamped(
+            stat.buckets[index].usageCount = Saturating.adding(
                 stat.buckets[index].usageCount,
                 1
             )
@@ -364,16 +364,16 @@ public final class UsageStatsStore {
 
         for (id, stat) in selected {
             let retainedCount = stat.buckets.reduce(0) {
-                Self.addingClamped($0, max(0, $1.usageCount))
+                Saturating.adding($0, max(0, $1.usageCount))
             }
 
             if period == .all {
                 let count = max(0, stat.usageCount)
                 if count > 0 {
                     entries[id] = PeriodStat(usageCount: count, lastUsedAt: stat.lastUsedAt)
-                    totalUsage = Self.addingClamped(totalUsage, count)
+                    totalUsage = Saturating.adding(totalUsage, count)
                 }
-                unbucketedUsage = Self.addingClamped(
+                unbucketedUsage = Saturating.adding(
                     unbucketedUsage,
                     max(0, count - retainedCount)
                 )
@@ -386,12 +386,12 @@ public final class UsageStatsStore {
                 return bucket.lastUsedAt >= start && bucket.lastUsedAt <= now
             }
             let count = buckets.reduce(0) {
-                Self.addingClamped($0, max(0, $1.usageCount))
+                Saturating.adding($0, max(0, $1.usageCount))
             }
             guard count > 0 else { continue }
             let lastUsedAt = buckets.map(\.lastUsedAt).max()
             entries[id] = PeriodStat(usageCount: count, lastUsedAt: lastUsedAt)
-            totalUsage = Self.addingClamped(totalUsage, count)
+            totalUsage = Saturating.adding(totalUsage, count)
             selectedBuckets.append(contentsOf: buckets)
         }
 
@@ -503,7 +503,7 @@ public final class UsageStatsStore {
                 lastUsedAt: max(bucket.startedAt, bucket.lastUsedAt)
             )
             if var existing = merged[bucket.startedAt] {
-                existing.usageCount = addingClamped(existing.usageCount, sanitized.usageCount)
+                existing.usageCount = Saturating.adding(existing.usageCount, sanitized.usageCount)
                 existing.lastUsedAt = max(existing.lastUsedAt, sanitized.lastUsedAt)
                 merged[bucket.startedAt] = existing
             } else {
@@ -516,7 +516,7 @@ public final class UsageStatsStore {
             buckets.removeFirst(buckets.count - maximumBucketsPerSnippet)
         }
         let retainedCount = buckets.reduce(0) {
-            addingClamped($0, max(0, $1.usageCount))
+            Saturating.adding($0, max(0, $1.usageCount))
         }
         let latestBucketDate = buckets.map(\.lastUsedAt).max()
         let lastUsedAt: Date?
@@ -567,7 +567,7 @@ public final class UsageStatsStore {
             } else {
                 start = calendar.startOfDay(for: bucket.lastUsedAt)
             }
-            counts[start] = addingClamped(counts[start] ?? 0, bucket.usageCount)
+            counts[start] = Saturating.adding(counts[start] ?? 0, bucket.usageCount)
         }
 
         if period == .all {
@@ -599,10 +599,6 @@ public final class UsageStatsStore {
         return points
     }
 
-    private static func addingClamped(_ lhs: Int, _ rhs: Int) -> Int {
-        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
-        return overflow ? Int.max : sum
-    }
 }
 
 extension UsageStatsStore: SidecarPayloadSource {

@@ -376,7 +376,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             // append at or below the cap even when the old file is exactly at the boundary.
             if projected.overflow || projected.partialValue > UInt64(Self.maxBytes) {
                 let previouslyDropped = persistedTraceDroppedByteCount()
-                let cumulativeDropped = Self.saturatingAdd(previouslyDropped, currentBytes)
+                let cumulativeDropped = Saturating.adding(previouslyDropped, currentBytes)
                 do {
                     data = try encoder.encode(
                         event.markingRollover(droppedBytes: cumulativeDropped)
@@ -452,11 +452,6 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             return 0
         }
         return event.droppedBytes ?? 0
-    }
-
-    private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
-        let sum = lhs.addingReportingOverflow(rhs)
-        return sum.overflow ? UInt64.max : sum.partialValue
     }
 
     private func recordWriteFailure(_ failure: IOFailure) {
@@ -535,7 +530,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             volatileTerminalEntryIDs.insert(diagnostic.id)
             volatileTerminalEntryIDs.formIntersection(Set(candidate.map(\.id)))
             if isNewObservation {
-                terminalObservedCount = Self.saturatingAdd(terminalObservedCount, 1)
+                terminalObservedCount = Saturating.adding(terminalObservedCount, 1)
             }
             return recordTerminalWriteFailure(loadFailure)
         }
@@ -749,7 +744,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             }
             let duplicatedVolatileCount = volatileEntries.reduce(into: UInt64(0)) { count, entry in
                 if persistedIDs.contains(entry.id) {
-                    count = Self.saturatingAdd(count, 1)
+                    count = Saturating.adding(count, 1)
                 }
             }
             var combined = persistedEntries
@@ -766,7 +761,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             let novelVolatileObserved = terminalObservedCount >= duplicatedVolatileCount
                 ? terminalObservedCount - duplicatedVolatileCount
                 : 0
-            terminalObservedCount = Self.saturatingAdd(
+            terminalObservedCount = Saturating.adding(
                 persistedObserved,
                 novelVolatileObserved
             )
@@ -919,7 +914,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
 
             let droppedByteCount = Self.persistedDroppedByteCount(in: data)
             traceReadCoverage = TraceReadCoverage(
-                observedByteCount: Self.saturatingAdd(
+                observedByteCount: Saturating.adding(
                     droppedByteCount,
                     UInt64(data.count)
                 ),
