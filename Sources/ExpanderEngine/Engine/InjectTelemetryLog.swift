@@ -322,23 +322,6 @@ public final class InjectTelemetryLog {
         return Int(scaled.rounded())
     }
 
-    public func refuseReasonHistogram() -> [String: Int] {
-        var result: [String: Int] = [:]
-        for entry in recentEntries() {
-            guard case .refused(let reason) = entry.outcome else { continue }
-            result[reason, default: 0] += 1
-        }
-        return result
-    }
-
-    public func outcomeHistogram() -> [String: Int] {
-        var result: [String: Int] = [:]
-        for entry in recentEntries() {
-            result[Self.label(for: entry.outcome), default: 0] += 1
-        }
-        return result
-    }
-
     /// Stable short label for an outcome (no associated value).
     public static func label(for outcome: PermissionCoordinator.InjectOutcome) -> String {
         switch outcome {

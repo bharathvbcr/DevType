@@ -652,20 +652,6 @@ public enum DiagnosticReport {
         + trailLines
     }
 
-    /// Renders `AXWriteCapabilityStore`'s learned per-app verdicts for the report.
-    ///
-    /// `unknown` entries are omitted: they mean "not yet observed", which is the state every
-    /// app starts in and says nothing. The two that matter are `trusted` (AX writes verified)
-    /// and `falseSuccess` (AX claimed a write it did not make — DevType pastes there forever
-    /// after), and `falseSuccess` is the one a confused bug report is usually about.
-    static func captureAXWriteVerdictLines(
-        store: AXWriteCapabilityStore = .shared
-    ) -> [String] {
-        let interesting = store.learnedVerdicts().filter { $0.verdict != .unknown }
-        guard !interesting.isEmpty else { return [] }
-        return interesting.map(axWriteVerdictLine)
-    }
-
     /// Production report path: the store counts all learned entries while selecting only the
     /// bounded lexicographic prefix. Formatting then applies the independent byte cap and carries
     /// the store's complete observed count into the rendered projection metadata.
