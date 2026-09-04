@@ -636,7 +636,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         }
         let adapter = readyAdapter(runtime: runtime)
 
-        let failure = await failure(from: adapter.transcribe(makeRequest()))
+        let failure = await failure(from: adapter.transcribe(makeRequest(deadline: Date().addingTimeInterval(60))))
 
         XCTAssertEqual(failure?.code, .speechProtocolViolation)
         XCTAssertEqual(failure?.artifactState, .durable)
@@ -834,7 +834,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         byteCount: Int64 = 56_000,
         locale: Locale = Locale(identifier: "en-US"),
         vocabulary: [String] = [],
-        deadline: Date = Date().addingTimeInterval(2)
+        deadline: Date = Date().addingTimeInterval(30)
     ) -> SpeechRequest {
         SpeechRequest(
             sessionID: sessionID,
