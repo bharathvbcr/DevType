@@ -268,7 +268,7 @@ public enum EspansoImporter {
 
         // Import files are untrusted input: skip absurdly large sources instead of
         // ballooning memory in the YAML parser. Counted so the user is told.
-        guard let sourceData = try boundedSourceData(at: standardized) else {
+        guard let sourceData = try SnippetImporter.SnippetImportLimits.boundedSourceData(at: standardized) else {
             accumulator.skippedOversized += 1
             return
         }
@@ -666,19 +666,6 @@ public enum EspansoImporter {
         return ext == "yml" || ext == "yaml"
     }
 
-    private static func boundedSourceData(at url: URL) throws -> Data? {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        guard attributes?[.type] as? FileAttributeType == .typeRegular else { return nil }
-        let byteCount = (attributes?[.size] as? Int64) ?? 0
-        guard byteCount <= SnippetImporter.SnippetImportLimits.maxSourceFileBytes else { return nil }
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        let data = try handle.read(
-            upToCount: SnippetImporter.SnippetImportLimits.maxSourceFileBytes + 1
-        ) ?? Data()
-        return data.count > SnippetImporter.SnippetImportLimits.maxSourceFileBytes ? nil : data
-    }
-
     private static func looksLikePackageDirectory(_ url: URL) -> Bool {
         let fm = FileManager.default
         let manifest = url.appendingPathComponent("_manifest.yml")
@@ -746,7 +733,7 @@ public enum EspansoImporter {
             return nil
         }
         try accumulator.budget.registerFile(manifest)
-        guard let data = try boundedSourceData(at: manifest) else {
+        guard let data = try SnippetImporter.SnippetImportLimits.boundedSourceData(at: manifest) else {
             accumulator.skippedOversized += 1
             return nil
         }

@@ -112,9 +112,7 @@ public final class VoiceRecoveryService: Sendable {
     }
 
     public func scanReport(baseDirectory: URL? = nil) -> ScanReport {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        let baseDir = baseDirectory ?? appSupport.appendingPathComponent("DevType/VoiceSessions", isDirectory: true)
+        let baseDir = baseDirectory ?? SupportDirectory.voiceSessions
         let enumeration = boundedCandidateDirectories(at: baseDir)
         var results: [RecoverableVoiceSession] = []
         results.reserveCapacity(enumeration.candidates.count)
@@ -191,12 +189,7 @@ public final class VoiceRecoveryService: Sendable {
         baseDirectory: URL? = nil,
         now: Date = Date()
     ) -> Int {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.temporaryDirectory
-        let baseDir = baseDirectory
-            ?? appSupport.appendingPathComponent("DevType/VoiceSessions", isDirectory: true)
+        let baseDir = baseDirectory ?? SupportDirectory.voiceSessions
         let boundedLimit = max(0, limit)
         var retained: [RetentionCandidate] = []
         retained.reserveCapacity(min(boundedLimit, ScanLimits.standard.maximumCandidateDirectories))

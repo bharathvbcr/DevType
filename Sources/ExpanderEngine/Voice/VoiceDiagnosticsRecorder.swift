@@ -59,7 +59,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         beforeAppendForTesting = nil
         afterAppendForTesting = nil
         afterTerminalManifestSizeCheckForTesting = nil
-        permissionSetter = Self.setPOSIXPermissions
+        permissionSetter = FilePermissions.setPOSIX
     }
 
     /// Isolated file seam for deterministic queue, retention, and I/O-failure tests.
@@ -77,7 +77,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         self.beforeAppendForTesting = beforeAppendForTesting
         self.afterAppendForTesting = afterAppendForTesting
         self.afterTerminalManifestSizeCheckForTesting = afterTerminalManifestSizeCheckForTesting
-        self.permissionSetter = permissionSetter ?? Self.setPOSIXPermissions
+        self.permissionSetter = permissionSetter ?? FilePermissions.setPOSIX
     }
 
     // MARK: - Location
@@ -90,12 +90,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         supportDirectory.appendingPathComponent("voice-terminal-manifest.json")
     }
 
-    private static var supportDirectory: URL {
-        (FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("DevType", isDirectory: true)
-    }
+    private static var supportDirectory: URL { SupportDirectory.devType }
 
     /// Whether tracing is on. Off by default — this records what the user dictated.
     public var isEnabled: Bool {
@@ -475,13 +470,6 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             return .directoryCreation
         }
         return enforcePermissions(at: directory, mode: 0o700) ? nil : .directoryPermissions
-    }
-
-    private static func setPOSIXPermissions(_ url: URL, _ mode: Int) throws {
-        try FileManager.default.setAttributes(
-            [.posixPermissions: mode],
-            ofItemAtPath: url.path
-        )
     }
 
     /// Applies and verifies the requested owner-only mode. A setter that returns without changing

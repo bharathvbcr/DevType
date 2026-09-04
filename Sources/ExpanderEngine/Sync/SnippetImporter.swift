@@ -49,6 +49,24 @@ public enum SnippetImporter {
         public static func isOversized(trigger: String, replacement: String) -> Bool {
             trigger.count > maxTriggerCharacters || replacement.count > maxReplacementCharacters
         }
+
+        /// Reads `url` only if it is a regular file within `maxSourceFileBytes`; `nil`
+        /// otherwise. Both importers carried a byte-identical private copy of this.
+        ///
+        /// The stat is checked first so an oversized file is refused without reading it,
+        /// and the read still asks for one byte past the cap: a file that grows between
+        /// the stat and the read must be refused too, not silently truncated into a
+        /// half-parsed library.
+        public static func boundedSourceData(at url: URL) throws -> Data? {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            guard attributes?[.type] as? FileAttributeType == .typeRegular else { return nil }
+            let byteCount = (attributes?[.size] as? Int64) ?? 0
+            guard byteCount <= maxSourceFileBytes else { return nil }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: maxSourceFileBytes + 1) ?? Data()
+            return data.count > maxSourceFileBytes ? nil : data
+        }
     }
 
     public enum SourceKind: String, Equatable {

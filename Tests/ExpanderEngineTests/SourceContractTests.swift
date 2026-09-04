@@ -1059,9 +1059,42 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(body.contains(".cleanupResources"))
     }
 
-    func testVoiceDiagnosticsPathDoesNotAssumeApplicationSupportURLExists() throws {
-        let recorder = try source("Sources/ExpanderEngine/Voice/VoiceDiagnosticsRecorder.swift")
-        XCTAssertTrue(recorder.contains(".first ?? FileManager.default.temporaryDirectory"))
+    /// The invariant these used to check per-file — never index an empty
+    /// `applicationSupportDirectory` result — now has one owner, so it is checked there and
+    /// the whole tree is checked for a second resolution that could reintroduce the unsafe
+    /// form. That is strictly more than the three named files this replaces
+    /// (`VoiceDiagnosticsRecorder`, `AppMuteStore`, `SnippetStore`), which between them
+    /// covered three of the seven places that resolved the directory.
+    func testDefaultSupportPathsDoNotIndexAnEmptyApplicationSupportResult() throws {
+        let owner = try source("Sources/ExpanderEngine/Models/SupportDirectory.swift")
+
+        XCTAssertTrue(owner.contains(".first ?? FileManager.default.temporaryDirectory"),
+                      "an empty search result must fall back, never be indexed")
+        XCTAssertFalse(owner.contains(".first!"))
+        XCTAssertFalse(owner.contains("[0]"))
+    }
+
+    func testOnlySupportDirectoryResolvesTheApplicationSupportPath() throws {
+        let sourcesRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Sources", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(at: sourcesRoot, includingPropertiesForKeys: nil) else {
+            return XCTFail("Could not enumerate Sources.")
+        }
+
+        var offenders: [String] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            if url.lastPathComponent == "SupportDirectory.swift" { continue }
+            let body = try String(contentsOf: url, encoding: .utf8)
+            if body.contains("applicationSupportDirectory") {
+                offenders.append(url.lastPathComponent)
+            }
+        }
+
+        XCTAssertEqual(
+            offenders, [],
+            "resolve the support directory through SupportDirectory; a second copy is how "
+            + "the unsafe `.first!` form comes back"
+        )
     }
 
     func testAudioBufferPoolBoundsExternalConfigurationBeforeAllocating() throws {
@@ -1069,14 +1102,6 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(pool.contains("let requestedCapacity = min(max(Self.minimumCapacity, capacity), Self.maximumCapacity)"))
         XCTAssertTrue(pool.contains("multipliedReportingOverflow"))
         XCTAssertTrue(pool.contains("Self.maximumChunkByteSize"))
-    }
-
-    func testDefaultSupportPathsDoNotIndexAnEmptyApplicationSupportResult() throws {
-        let muteStore = try source("Sources/ExpanderEngine/Models/AppMuteStore.swift")
-        let snippetStore = try source("Sources/ExpanderEngine/Models/SnippetStore.swift")
-
-        XCTAssertTrue(muteStore.contains(".first ?? FileManager.default.temporaryDirectory"))
-        XCTAssertTrue(snippetStore.contains(".first ?? FileManager.default.temporaryDirectory"))
     }
 
     func testVoiceHUDPlacementSurvivesAHeadlessDisplayState() throws {

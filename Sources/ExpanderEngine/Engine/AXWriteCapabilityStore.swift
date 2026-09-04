@@ -95,14 +95,9 @@ public final class AXWriteCapabilityStore {
         }
     }
 
-    /// `~/Library/Application Support/DevType/ax-write-capability.json` (AppMuteStore's pattern).
+    /// `~/Library/Application Support/DevType/ax-write-capability.json`.
     public static func defaultFileURL() -> URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        let dir = base.appendingPathComponent("DevType", isDirectory: true)
-        return dir.appendingPathComponent(persistenceFileName)
+        SupportDirectory.file(persistenceFileName)
     }
 
     // MARK: - Keys
