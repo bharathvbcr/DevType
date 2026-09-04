@@ -510,6 +510,10 @@ public final class VoiceHUDPanel: NSPanel {
         dismissWorkItem?.cancel()
         dismissWorkItem = nil
         if isVisible {
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            animator().alphaValue = 1
+            NSAnimationContext.endGrouping()
             alphaValue = 1
         }
     }

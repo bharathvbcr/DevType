@@ -73,7 +73,8 @@ struct AppleSpeechAnalyzerRuntime: Sendable {
     }
 
     static func system() -> AppleSpeechAnalyzerRuntime {
-        AppleSpeechAnalyzerRuntime(
+        #if compiler(>=6.0)
+        return AppleSpeechAnalyzerRuntime(
             isPlatformSupported: {
                 if #available(macOS 26.0, *) { return true }
                 return false
@@ -91,9 +92,18 @@ struct AppleSpeechAnalyzerRuntime: Sendable {
                 try await SystemAppleSpeechAnalyzerRuntime.installAssets(for: locale)
             }
         )
+        #else
+        return AppleSpeechAnalyzerRuntime(
+            isPlatformSupported: { false },
+            assetState: { _ in .unsupported },
+            transcribe: { _, _ in throw RuntimeError.unsupported },
+            installAssets: { _ in throw RuntimeError.unsupported }
+        )
+        #endif
     }
 }
 
+#if compiler(>=6.0)
 @available(macOS 26.0, *)
 private enum SystemAppleSpeechAnalyzerRuntime {
     static func assetState(for locale: Locale) async -> AppleSpeechAnalyzerRuntime.AssetState {
@@ -238,6 +248,7 @@ private enum SystemAppleSpeechAnalyzerRuntime {
         value.isFinite ? max(0, value) : 0
     }
 }
+#endif
 
 /// On-device, locale-aware batch transcription through macOS 26 SpeechAnalyzer.
 ///

@@ -1,3 +1,4 @@
+import AppKit
 import Cocoa
 import Foundation
 
@@ -29,7 +30,11 @@ public final class SettingsDeepLinker {
 
     private let openURL: (URL) -> Bool
 
-    public init(openURL: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
+    public convenience init() {
+        self.init(openURL: { NSWorkspace.shared.open($0) })
+    }
+
+    public init(openURL: @escaping (URL) -> Bool) {
         self.openURL = openURL
     }
 

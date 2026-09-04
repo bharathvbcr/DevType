@@ -188,6 +188,12 @@ final class CoreUXRegressionTests: XCTestCase {
 
     func testPinningDuringTerminalFadeInvalidatesItsCompletion() throws {
         _ = NSApplication.shared
+        VoiceHUDPresentationTiming.successHoldDuration = 0.05
+        VoiceHUDPresentationTiming.fadeOutDuration = 2.0
+        defer {
+            VoiceHUDPresentationTiming.resetToDefaults()
+        }
+
         let hud = VoiceHUDPanel()
         defer { hud.hide() }
         let pin = try XCTUnwrap(descendants(of: try XCTUnwrap(hud.contentView))
@@ -195,14 +201,9 @@ final class CoreUXRegressionTests: XCTestCase {
             .first { $0.action == NSSelectorFromString("togglePin") })
 
         hud.updateState(.success(text: "complete"))
-        RunLoop.main.run(until: Date().addingTimeInterval(
-            VoiceHUDPresentationTiming.successHoldDuration
-                + VoiceHUDPresentationTiming.fadeOutDuration / 2
-        ))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
         pin.performClick(nil)
-        RunLoop.main.run(until: Date().addingTimeInterval(
-            VoiceHUDPresentationTiming.fadeOutDuration + 0.2
-        ))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
 
         XCTAssertTrue(hud.isVisible, "Pinning during the fade must invalidate its pending orderOut")
         XCTAssertEqual(hud.alphaValue, 1, accuracy: 0.001)
