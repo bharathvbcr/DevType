@@ -216,6 +216,10 @@ public final class VoiceHUDPanel: NSPanel {
         pinBtn.setAccessibilityLabel(pinTitle)
         if isPinned {
             cancelAutoDismiss()
+            if !isVisible {
+                showOnScreen()
+            }
+            alphaValue = 1
         } else if let terminalDismissDelay {
             scheduleAutoDismiss(after: terminalDismissDelay)
         }

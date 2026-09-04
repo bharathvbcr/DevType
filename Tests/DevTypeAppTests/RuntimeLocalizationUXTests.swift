@@ -198,7 +198,7 @@ final class RuntimeLocalizationUXTests: XCTestCase {
             localLLMEndpoint: "http://127.0.0.1:1234/v1/chat/completions",
             localLLMModel: "draft-model",
             scrollOrigins: Dictionary(
-                uniqueKeysWithValues: PreferencesTab.allCases.map { ($0, NSPoint.zero) }
+                uniqueKeysWithValues: PreferencesTab.visibleCases.map { ($0, NSPoint.zero) }
             )
         )
         let controller = PreferencesViewController(
