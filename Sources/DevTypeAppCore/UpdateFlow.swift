@@ -100,14 +100,16 @@ enum UpdateFlow {
 
     private static func presentUpdateAvailable(_ release: ReleaseInfo, window: NSWindow?) {
         let currentDescription = AppVersion.current()?.rawValue ?? "—"
-        var message = loc.s("updates.available.message", currentDescription)
-        if !release.notes.isEmpty {
-            message += "\n\n" + release.notes
-        }
+        let message = loc.s("updates.available.message", currentDescription)
+        let releaseNotes = release.notes.isEmpty
+            ? loc.s("updates.releaseNotes.empty")
+            : release.notes
 
-        DevTypeAlert.present(
+        DevTypeAlert.presentScrollable(
             title: loc.s("updates.available.title", release.version.releaseCore),
             message: message,
+            scrollTitle: loc.s("updates.releaseNotes.title"),
+            scrollableText: releaseNotes,
             style: .informational,
             buttons: [
                 loc.s("updates.button.viewRelease"),
