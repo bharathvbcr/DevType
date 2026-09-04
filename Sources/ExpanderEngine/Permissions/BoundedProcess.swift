@@ -82,7 +82,7 @@ public enum BoundedProcess {
             try process.run()
         } catch {
             DevTypeLog.identity.error(
-                "[Identity] spawn failed tool=\(executable, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                "[Identity] spawn failed tool=\(executable, privacy: .public) \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             // The reader is parked on a pipe whose write end never opened; close it so the
             // dispatched block can finish instead of leaking a thread for the process lifetime.

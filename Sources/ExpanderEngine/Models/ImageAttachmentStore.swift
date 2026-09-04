@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 
 /// Persistent storage for snippet image attachments.
 ///
@@ -22,13 +23,14 @@ public final class ImageAttachmentStore {
     /// `userInfo["directory"]` holds the new `URL`.
     public static let didChangeDirectoryNotification = Notification.Name("devtype.imageStore.didChangeDirectory")
 
-    public enum StoreError: LocalizedError {
+    public enum StoreError: LocalizedError, Equatable {
         case unreadableImage(String)
         case unsupportedImageType(String)
         /// §hardening: the payload exceeded `maxImportedImageBytes`. Sources come
         /// from untrusted imports (Espanso `image_path`), so a multi-GB "image" is
         /// refused before it is decoded or copied.
         case oversizedImage(String)
+        case oversizedImageDimensions
         case saveFailed(String)
 
         public var errorDescription: String? {
@@ -36,6 +38,8 @@ public final class ImageAttachmentStore {
             case .unreadableImage(let p): return "Could not read image: \(p)"
             case .unsupportedImageType(let ext): return "Unsupported image type: \(ext)"
             case .oversizedImage(let p): return "Image exceeds the \(maxImportedImageBytes / 1_000_000) MB attachment limit: \(p)"
+            case .oversizedImageDimensions:
+                return "Image dimensions, frames, or decode work exceed the attachment limits."
             case .saveFailed(let p): return "Could not save image to: \(p)"
             }
         }
@@ -53,6 +57,29 @@ public final class ImageAttachmentStore {
     /// it as a constant; only tests lower it (`@testable`) to exercise the
     /// refusal path without writing multi-GB fixtures.
     internal static var maxImportedImageBytes = 25 * 1024 * 1024
+    /// Metadata-first decode bounds. Compressed byte size alone is insufficient:
+    /// a tiny PNG/TIFF header can claim a bitmap large enough to exhaust memory
+    /// when AppKit decodes it.
+    internal static let maxImportedImageDimension = 16_384
+    /// Mutable only so tests can exercise the pixel branch with a tiny valid
+    /// image; production treats this as a constant like the byte ceiling above.
+    internal static var maxImportedImagePixels = 64 * 1024 * 1024
+    /// Multi-image containers are parsed by AppKit as one attachment. Bound both
+    /// their metadata walk and their aggregate decoded pixel work. The aggregate
+    /// budget is twice the per-frame ceiling: 128 megapixels in production.
+    internal static let maxImportedImageFrameCount = 512
+    internal static var maxImportedImageAggregatePixels: Int {
+        guard maxImportedImagePixels <= Int.max / 2 else { return Int.max }
+        return maxImportedImagePixels * 2
+    }
+
+    /// Validated, value-semantic attachment payload used by import previews.
+    /// Holding this value performs no persistent write; a confirmed library
+    /// commit promotes it with `save(prepared:)` and can roll that write back.
+    internal struct PreparedImage: Equatable {
+        let data: Data
+        let preferredExtension: String
+    }
 
     /// §3.7: returned by `url(forImagePath:)` when the path fails containment
     /// validation. Deterministic, inside the store, and can never exist — callers
@@ -63,6 +90,7 @@ public final class ImageAttachmentStore {
     /// Pinned at construction (tests, importers). When set, the store never
     /// follows the library location.
     private let explicitDirectory: URL?
+    private let removeItemAtURL: (URL) throws -> Void
     /// Last directory adopted via `adoptLibraryLocation`.
     private var overrideDirectory: URL?
 
@@ -70,6 +98,17 @@ public final class ImageAttachmentStore {
     ///   beside the active snippet store (or `DEVTYPE_STORE_DIR/Images`).
     public init(directory: URL? = nil) {
         self.explicitDirectory = directory
+        self.removeItemAtURL = { try FileManager.default.removeItem(at: $0) }
+    }
+
+    /// Fault-injection seam for transactional import cleanup tests. Production
+    /// callers keep using the source-compatible public initializer above.
+    internal init(
+        directory: URL? = nil,
+        removeItemAtURL: @escaping (URL) throws -> Void
+    ) {
+        self.explicitDirectory = directory
+        self.removeItemAtURL = removeItemAtURL
     }
 
     public var imagesDirectory: URL { resolvedDirectory() }
@@ -135,7 +174,7 @@ public final class ImageAttachmentStore {
             try fm.createDirectory(at: target, withIntermediateDirectories: true)
         } catch {
             DevTypeLog.store.error(
-                "[Store] Could not create image directory \(target.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                "[Store] Could not create image directory \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             return
         }
@@ -148,12 +187,12 @@ public final class ImageAttachmentStore {
                 copied += 1
             } catch {
                 DevTypeLog.store.error(
-                    "[Store] Could not migrate image \(name, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    "[Store] Could not migrate image \(DevTypeLog.errorMetadata(error), privacy: .public)"
                 )
             }
         }
         DevTypeLog.store.notice(
-            "[Store] Migrated \(copied, privacy: .public) image attachment(s) to \(target.path, privacy: .public)"
+            "[Store] Migrated \(copied, privacy: .public) image attachment(s) \(DevTypeLog.publicPathMetadata(target.path), privacy: .public)"
         )
     }
 
@@ -164,28 +203,47 @@ public final class ImageAttachmentStore {
     /// untrusted `image_path` cannot make the importer read a payload bomb.
     @discardableResult
     public func importImage(from sourceURL: URL) throws -> String {
+        try save(prepared: prepareImage(from: sourceURL))
+    }
+
+    /// Reads and validates an attachment without touching the persistent image
+    /// directory. The bounded read closes the stat/read race in which a source
+    /// could grow after the initial size check.
+    internal func prepareImage(from sourceURL: URL) throws -> PreparedImage {
         let ext = sourceURL.pathExtension.lowercased()
         guard Self.supportedExtensions.contains(ext) else {
             throw StoreError.unsupportedImageType(ext.isEmpty ? sourceURL.lastPathComponent : ext)
         }
         let attributes = try? FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        guard attributes?[.type] as? FileAttributeType == .typeRegular else {
+            throw StoreError.unreadableImage(sourceURL.path)
+        }
         let byteCount = (attributes?[.size] as? Int64) ?? 0
         guard byteCount <= Self.maxImportedImageBytes else {
             throw StoreError.oversizedImage(sourceURL.path)
         }
-        guard NSImage(contentsOf: sourceURL) != nil else {
+
+        let data: Data
+        do {
+            let handle = try FileHandle(forReadingFrom: sourceURL)
+            defer { try? handle.close() }
+            data = try handle.read(upToCount: Self.maxImportedImageBytes + 1) ?? Data()
+        } catch {
             throw StoreError.unreadableImage(sourceURL.path)
         }
-        let directory = resolvedDirectory()
-        try ensureDirectory(directory)
-        let fileName = "\(UUID().uuidString).\(ext)"
-        let target = directory.appendingPathComponent(fileName)
-        do {
-            try FileManager.default.copyItem(at: sourceURL, to: target)
-        } catch {
-            throw StoreError.saveFailed(target.path)
+        guard data.count <= Self.maxImportedImageBytes else {
+            throw StoreError.oversizedImage(sourceURL.path)
         }
-        return fileName
+        try Self.validateDecodedImageSize(data, sourceDescription: sourceURL.path)
+        guard NSImage(data: data) != nil else {
+            throw StoreError.unreadableImage(sourceURL.path)
+        }
+        return PreparedImage(data: data, preferredExtension: ext)
+    }
+
+    @discardableResult
+    internal func save(prepared: PreparedImage) throws -> String {
+        try save(data: prepared.data, preferredExtension: prepared.preferredExtension)
     }
 
     /// Writes raw image data into the store. Returns the stored file name.
@@ -199,6 +257,7 @@ public final class ImageAttachmentStore {
         guard data.count <= Self.maxImportedImageBytes else {
             throw StoreError.oversizedImage("\(data.count) bytes")
         }
+        try Self.validateDecodedImageSize(data, sourceDescription: "\(data.count) bytes")
         guard NSImage(data: data) != nil else {
             throw StoreError.unreadableImage("\(data.count) bytes")
         }
@@ -244,16 +303,34 @@ public final class ImageAttachmentStore {
     }
 
     public func deleteImage(path: String) {
-        guard !path.isEmpty, !path.hasPrefix("/") else { return }
+        _ = deleteImageReportingResult(path: path)
+    }
+
+    internal enum DeletionResult: Equatable {
+        case removed
+        case failed
+    }
+
+    /// Result-bearing variant used by import transactions. It deliberately does
+    /// not log the path or filesystem error: the transaction emits aggregate,
+    /// content-free attempted/removed/failed counts instead.
+    @discardableResult
+    internal func deleteImageReportingResult(path: String) -> DeletionResult {
+        guard !path.isEmpty, !path.hasPrefix("/") else { return .failed }
         guard let url = resolvedURL(forImagePath: path) else {
             // §3.7: `hasPrefix("/")` alone was the only guard here, so a relative
             // traversal deleted files outside the store.
             DevTypeLog.store.error(
-                "[Store] Refused to delete image outside the attachment store: \(path, privacy: .public)"
+                "[Store] Refused to delete image outside the attachment store \(DevTypeLog.publicPathMetadata(path), privacy: .public)"
             )
-            return
+            return .failed
         }
-        try? FileManager.default.removeItem(at: url)
+        do {
+            try removeItemAtURL(url)
+            return .removed
+        } catch {
+            return .failed
+        }
     }
 
     // MARK: - Orphan collection (§3.7)
@@ -303,5 +380,61 @@ public final class ImageAttachmentStore {
 
     private func ensureDirectory(_ directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    /// Reads every frame's width/height from ImageIO without constructing an
+    /// AppKit image. A first-frame-only check lets a later TIFF/GIF/HEIC frame
+    /// carry the decompression bomb. Division guards attacker-controlled
+    /// multiplication, and the aggregate ceiling bounds multi-frame decode work.
+    private static func validateDecodedImageSize(
+        _ data: Data,
+        sourceDescription: String
+    ) throws {
+        let metadataOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, metadataOptions) else {
+            throw StoreError.unreadableImage(sourceDescription)
+        }
+
+        let frameCount = CGImageSourceGetCount(source)
+        guard frameCount > 0 else {
+            throw StoreError.unreadableImage(sourceDescription)
+        }
+        guard maxImportedImageFrameCount > 0,
+              maxImportedImagePixels > 0,
+              maxImportedImageAggregatePixels > 0,
+              frameCount <= maxImportedImageFrameCount else {
+            throw StoreError.oversizedImageDimensions
+        }
+
+        let maxDimension = UInt64(maxImportedImageDimension)
+        let maxPixels = UInt64(maxImportedImagePixels)
+        var remainingAggregatePixels = UInt64(maxImportedImageAggregatePixels)
+
+        for frameIndex in 0 ..< frameCount {
+            guard let properties = CGImageSourceCopyPropertiesAtIndex(
+                source,
+                frameIndex,
+                metadataOptions
+            ) as NSDictionary?,
+                let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.uint64Value,
+                let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.uint64Value,
+                width > 0,
+                height > 0 else {
+                throw StoreError.unreadableImage(sourceDescription)
+            }
+
+            guard width <= maxDimension,
+                  height <= maxDimension,
+                  width <= maxPixels,
+                  height <= maxPixels / width else {
+                throw StoreError.oversizedImageDimensions
+            }
+
+            let framePixels = width * height
+            guard framePixels <= remainingAggregatePixels else {
+                throw StoreError.oversizedImageDimensions
+            }
+            remainingAggregatePixels -= framePixels
+        }
     }
 }

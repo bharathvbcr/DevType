@@ -365,8 +365,12 @@ public final class AXWriteCapabilityStore {
         let inserted = deliveryReadProven.insert(key).inserted
         lock.unlock()
         if inserted {
+            let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
+            let safeRole = role.map {
+                DevTypeLog.boundedPublicIdentifier($0, label: "axRole")
+            }
             DevTypeLog.inject.info(
-                "[Inject] delivery reads proven for \(bundleID, privacy: .public)\(role.map { " role=\($0)" } ?? "", privacy: .public) — confirmed-miss corrections enabled"
+                "[Inject] delivery reads proven for \(safeBundleID, privacy: .public)\(safeRole.map { " role=\($0)" } ?? "", privacy: .public) — confirmed-miss corrections enabled"
             )
             scheduleSave()
         }
@@ -424,9 +428,13 @@ public final class AXWriteCapabilityStore {
         let changed = previous != .falseSuccess
         lock.unlock()
         if changed {
-            let roleLabel = (role?.isEmpty == false) ? " role=\(role ?? "")" : ""
+            let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
+            let safeRole = role.map {
+                DevTypeLog.boundedPublicIdentifier($0, label: "axRole")
+            }
+            let roleLabel = (safeRole?.isEmpty == false) ? " role=\(safeRole ?? "")" : ""
             DevTypeLog.inject.notice(
-                "[Inject] AX selected-text write condemned for \(bundleID, privacy: .public)\(roleLabel, privacy: .public) — HID paste from now on"
+                "[Inject] AX selected-text write condemned for \(safeBundleID, privacy: .public)\(roleLabel, privacy: .public) — HID paste from now on"
             )
             scheduleSave()
         }
@@ -533,6 +541,36 @@ public final class AXWriteCapabilityStore {
         return snapshot
             .map { (key: $0.key, verdict: $0.value) }
             .sorted { $0.key < $1.key }
+    }
+
+    /// Bounded diagnostic view selected while the dictionary is locked. It counts every
+    /// non-unknown verdict but keeps only the lexicographically earliest `limit`, avoiding the
+    /// unbounded dictionary copy + full sort used by the unrestricted debugging API above.
+    func learnedVerdictProjection(
+        limit: Int
+    ) -> (entries: [(key: String, verdict: Verdict)], observedCount: Int) {
+        let resolvedLimit = max(0, limit)
+        var retained: [(key: String, verdict: Verdict)] = []
+        retained.reserveCapacity(min(resolvedLimit, 64))
+        var observedCount = 0
+
+        lock.lock()
+        for (key, verdict) in learned where verdict != .unknown {
+            if observedCount < Int.max { observedCount += 1 }
+            guard resolvedLimit > 0 else { continue }
+            if retained.count < resolvedLimit {
+                retained.append((key: key, verdict: verdict))
+                continue
+            }
+            guard let greatestIndex = retained.indices.max(by: {
+                retained[$0].key < retained[$1].key
+            }), key < retained[greatestIndex].key else { continue }
+            retained[greatestIndex] = (key: key, verdict: verdict)
+        }
+        lock.unlock()
+
+        retained.sort { $0.key < $1.key }
+        return (retained, observedCount)
     }
 
     // MARK: - Persistence
@@ -668,7 +706,7 @@ public final class AXWriteCapabilityStore {
             try data.write(to: fileURL, options: .atomic)
         } catch {
             DevTypeLog.inject.error(
-                "[Inject] Failed to persist AX write-capability verdicts: \(error.localizedDescription, privacy: .public)"
+                "[Inject] Failed to persist AX write-capability verdicts \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
         }
     }

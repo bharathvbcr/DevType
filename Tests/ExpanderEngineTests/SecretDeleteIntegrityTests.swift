@@ -68,6 +68,33 @@ final class SecretDeleteIntegrityTests: XCTestCase {
         XCTAssertNil(store.value(account: id))
     }
 
+    /// The converse two-phase failure matters too: consolidation can leave a duplicate tier
+    /// copy when its post-verify Keychain delete is refused. Removing the archive copy must not
+    /// then mask another refusal from that tier and clear the cleanup-debt signal.
+    func testFailedTierDeleteAfterArchiveRemovalReportsFailureAndLeavesRetryableCopy() {
+        let tier = InMemorySecretBackingStore()
+        let id = UUID().uuidString
+        let (store, _) = makeStore(tier: tier)
+
+        XCTAssertEqual(store.set("sealed", account: id), errSecSuccess)
+        XCTAssertEqual(tier.set("surviving-tier-copy", account: id), errSecSuccess)
+        tier.forcedStatus = errSecInteractionNotAllowed
+
+        let secrets = SecretStore(backing: store)
+        XCTAssertEqual(
+            secrets.purgeOrphans(keeping: []),
+            .init(attempted: 1, removed: 0, failed: 1)
+        )
+        XCTAssertTrue(store.contains(account: id))
+
+        tier.forcedStatus = nil
+        XCTAssertEqual(
+            secrets.purgeOrphans(keeping: []),
+            .init(attempted: 1, removed: 1, failed: 0)
+        )
+        XCTAssertFalse(store.contains(account: id))
+    }
+
     /// An archive holding bytes this build cannot vouch for may still hold the
     /// account's sealed copy. Delete must refuse honestly (`errSecIO`), leave the
     /// tier copy — and therefore a resolvable secret — in place, and neither

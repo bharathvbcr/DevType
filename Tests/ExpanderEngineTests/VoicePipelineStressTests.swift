@@ -43,10 +43,14 @@ final class VoicePipelineStressTests: XCTestCase {
             StubSpeechRecognizer(id: "apple.speech.legacy", privacyRoute: .onDeviceOnly),
         ])
 
-        let resolved = await registry.resolveActiveRecognizer(
+        let resolution = await registry.resolveActiveRecognizer(
             preferredID: "stub.cloud",
             privacyRoute: .onDeviceOnly
         )
+        guard let resolved = resolution.recognizer else {
+            XCTFail("Expected the ready on-device floor, got \(String(describing: resolution.failure))")
+            return
+        }
 
         XCTAssertNotEqual(resolved.descriptor.id, "stub.cloud",
             "An on-device-only session must never resolve a cloud provider")
@@ -81,25 +85,125 @@ final class VoicePipelineStressTests: XCTestCase {
             StubSpeechRecognizer(id: "apple.speech.legacy", privacyRoute: .onDeviceOnly),
         ])
 
-        let resolved = await registry.resolveActiveRecognizer(
+        let resolution = await registry.resolveActiveRecognizer(
             preferredID: "stub.down",
             privacyRoute: .onDeviceOnly
         )
+        guard let resolved = resolution.recognizer else {
+            XCTFail("Expected the ready on-device floor, got \(String(describing: resolution.failure))")
+            return
+        }
         XCTAssertNotEqual(resolved.descriptor.id, "stub.down",
             "A provider that is not ready must not be selected")
     }
 
-    /// The unimplemented SpeechAnalyzer adapter must never be handed out.
-    func testUnimplementedAnalyzerAdapterIsNeverResolved() async {
+    func testUnreadyPreferredProviderCannotBypassAnUnreadyAppleFloor() async {
+        let unavailableAppleStates: [ProviderReadiness] = [
+            .requiresPermission(.speechRecognition),
+            .incompatible(reason: .modelNotFound),
+        ]
+
+        for appleReadiness in unavailableAppleStates {
+            let preferred = StubSpeechRecognizer(
+                id: "whisper.cpp.server",
+                privacyRoute: .localNetworkOnly,
+                readiness: .temporarilyUnavailable(
+                    retryAfterSeconds: 5,
+                    reason: .endpointUnreachable
+                )
+            )
+            let apple = StubSpeechRecognizer(
+                id: "apple.speech.legacy",
+                privacyRoute: .onDeviceOnly,
+                readiness: appleReadiness
+            )
+            let registry = SpeechProviderRegistry(providers: [preferred, apple])
+
+            let resolution = await registry.resolveActiveRecognizer(
+                preferredID: preferred.descriptor.id,
+                privacyRoute: .localNetworkOnly
+            )
+
+            XCTAssertNil(resolution.recognizer)
+            XCTAssertEqual(resolution.failure?.code, .noReadyProvider)
+            XCTAssertEqual(preferred.transcribeCallCount, 0)
+            XCTAssertEqual(apple.transcribeCallCount, 0)
+        }
+    }
+
+    func testUnreadyPreferredProviderFallsBackOnlyToReadyOnDeviceFloor() async {
+        let apple = StubSpeechRecognizer(
+            id: "apple.speech.legacy",
+            privacyRoute: .onDeviceOnly
+        )
         let registry = SpeechProviderRegistry(providers: [
-            AppleSpeechAnalyzerAdapter(),
+            StubSpeechRecognizer(
+                id: "whisper.cpp.server",
+                privacyRoute: .localNetworkOnly,
+                readiness: .temporarilyUnavailable(
+                    retryAfterSeconds: 5,
+                    reason: .endpointUnreachable
+                )
+            ),
+            apple,
+        ])
+
+        let resolution = await registry.resolveActiveRecognizer(
+            preferredID: "whisper.cpp.server",
+            privacyRoute: .localNetworkOnly
+        )
+
+        XCTAssertEqual(resolution.recognizer?.descriptor.id, apple.descriptor.id)
+        XCTAssertNil(resolution.failure)
+    }
+
+    func testUnreadyCloudPreferredProviderDoesNotFallBackToReadyApple() async {
+        let gemini = StubSpeechRecognizer(
+            id: VoiceSessionSnapshotFactory.ProviderID.gemini,
+            privacyRoute: .cloudPermitted,
+            readiness: .temporarilyUnavailable(
+                retryAfterSeconds: nil,
+                reason: .credentialUnavailable
+            )
+        )
+        let apple = StubSpeechRecognizer(
+            id: VoiceSessionSnapshotFactory.ProviderID.appleSpeechLegacy,
+            privacyRoute: .onDeviceOnly
+        )
+        let registry = SpeechProviderRegistry(providers: [gemini, apple])
+
+        let resolution = await registry.resolveActiveRecognizer(
+            preferredID: gemini.descriptor.id,
+            privacyRoute: .cloudPermitted
+        )
+
+        XCTAssertNil(
+            resolution.recognizer,
+            "A selected cloud provider must fail closed when its prerequisite disappears"
+        )
+        XCTAssertEqual(resolution.failure?.code, .noReadyProvider)
+        XCTAssertEqual(gemini.transcribeCallCount, 0)
+        XCTAssertEqual(apple.transcribeCallCount, 0)
+    }
+
+    func testAnalyzerThatNeedsAssetsFallsBackToLegacyAppleSpeech() async {
+        let registry = SpeechProviderRegistry(providers: [
+            StubSpeechRecognizer(
+                id: VoiceSessionSnapshotFactory.ProviderID.appleSpeechAnalyzer,
+                privacyRoute: .onDeviceOnly,
+                readiness: .requiresConfiguration(.missingModelDownload)
+            ),
             StubSpeechRecognizer(id: "apple.speech.legacy", privacyRoute: .onDeviceOnly),
         ])
-        let resolved = await registry.resolveActiveRecognizer(
+        let resolution = await registry.resolveActiveRecognizer(
             preferredID: "apple.speech.analyzer",
             privacyRoute: .onDeviceOnly
         )
-        XCTAssertNotEqual(resolved.descriptor.id, "apple.speech.analyzer")
+        guard let resolved = resolution.recognizer else {
+            XCTFail("Expected the ready legacy floor, got \(String(describing: resolution.failure))")
+            return
+        }
+        XCTAssertEqual(resolved.descriptor.id, "apple.speech.legacy")
     }
 
     func testCorrectionAlwaysResolvesOrIsExplicitlyDisabled() async {
@@ -124,6 +228,32 @@ final class VoicePipelineStressTests: XCTestCase {
             )
             XCTAssertNotNil(resolved, "No corrector resolved for \(id)")
         }
+    }
+
+    func testUnreadyAppleCorrectionFallsThroughToConfiguredLoopbackBeforeDeterministic() async {
+        let apple = StubCorrector(
+            id: VoiceSessionSnapshotFactory.ProviderID.appleFoundationModels,
+            readiness: .temporarilyUnavailable(retryAfterSeconds: nil, reason: .modelNotFound)
+        )
+        let loopback = StubCorrector(
+            id: VoiceSessionSnapshotFactory.ProviderID.openAICompatibleCorrector,
+            privacyRoute: .localNetworkOnly
+        )
+        let registry = CorrectionProviderRegistry(providers: [
+            apple,
+            loopback,
+            DeterministicCorrector(),
+        ])
+
+        let resolved = await registry.resolveActiveCorrector(
+            preferredID: apple.descriptor.id,
+            fallbackIDs: [loopback.descriptor.id],
+            privacyRoute: .localNetworkOnly
+        )
+
+        XCTAssertEqual(resolved?.descriptor.id, loopback.descriptor.id)
+        XCTAssertEqual(apple.correctCallCount, 0)
+        XCTAssertEqual(loopback.correctCallCount, 0)
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -488,6 +618,25 @@ final class VoicePipelineStressTests: XCTestCase {
         }
     }
 
+    /// Permission and consent prompts are asynchronous. The provider selected before a prompt
+    /// must be the provider in the eventual immutable snapshot even if Preferences changes while
+    /// the system sheet is open.
+    func testFactoryUsesTheExplicitAttemptEngineInsteadOfRereadingPreferences() {
+        let originalEngine = VoicePreferences.transcriptionEngine
+        defer { VoicePreferences.transcriptionEngine = originalEngine }
+
+        VoicePreferences.transcriptionEngine = .appleSpeech
+        let snapshot = VoiceSessionSnapshotFactory.make(
+            bundleIdentifier: "com.test",
+            processIdentifier: 1,
+            generation: SessionGeneration(rawValue: 9),
+            engine: .whisperLocal
+        )
+
+        XCTAssertEqual(snapshot.speechProvider.id, VoiceSessionSnapshotFactory.ProviderID.whisperServer)
+        XCTAssertEqual(snapshot.privacyRoute, .localNetworkOnly)
+    }
+
     /// Verbatim mode must disable every rewriting permission, whatever the tone.
     func testVerbatimPreferenceDisablesAllRewrites() {
         let original = VoicePreferences.isVerbatimModeEnabled
@@ -561,6 +710,38 @@ final class VoicePipelineStressTests: XCTestCase {
 
         XCTAssertEqual(service.scanRecoverableSessions(baseDirectory: base).count, 10,
             "Even undelivered sessions are bounded")
+    }
+
+    /// Delivered sessions already reached their destination. An undelivered transcript is the
+    /// user's only copy, so a newer delivered artifact must not displace it at the hard cap.
+    func testPrunePrioritizesUndeliveredSessionsBeforeDeliveredArtifacts() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceRecoveryPriority_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let now = Date()
+        try writeSession(in: base, age: 5, delivered: false, now: now, text: "")
+        try writeSession(in: base, age: 10, delivered: true, now: now, text: "new delivered")
+        try writeSession(in: base, age: 20, delivered: true, now: now, text: "older delivered")
+        try writeSession(in: base, age: 10_000, delivered: false, now: now, text: "old recovery one")
+        try writeSession(in: base, age: 20_000, delivered: false, now: now, text: "old recovery two")
+
+        let service = VoiceRecoveryService()
+        _ = service.prune(
+            olderThan: 365 * 86400,
+            keepingAtMost: 2,
+            baseDirectory: base,
+            now: now
+        )
+
+        let remaining = service.scanRecoverableSessions(baseDirectory: base)
+        XCTAssertEqual(remaining.count, 2)
+        XCTAssertEqual(Set(remaining.map(VoiceRecoveryService.recoveredText)), [
+            "old recovery one",
+            "old recovery two",
+        ])
+        XCTAssertTrue(remaining.allSatisfy { !$0.isDelivered })
     }
 
     func testPruneClampsNegativeHardCapWithoutCrashing() throws {
@@ -650,11 +831,11 @@ final class VoicePipelineStressTests: XCTestCase {
                     await registry.register(StubSpeechRecognizer(id: "stub.\(index)"))
                 }
                 group.addTask {
-                    let resolved = await registry.resolveActiveRecognizer(
+                    let resolution = await registry.resolveActiveRecognizer(
                         preferredID: "stub.\(index)",
                         privacyRoute: .onDeviceOnly
                     )
-                    XCTAssertEqual(resolved.descriptor.privacyRoute, .onDeviceOnly)
+                    XCTAssertEqual(resolution.recognizer?.descriptor.privacyRoute, .onDeviceOnly)
                 }
             }
         }

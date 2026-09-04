@@ -183,8 +183,12 @@ public enum FailureCode: String, Codable, Sendable {
     case diskFull
     case audioEncodingFailed
     case missingAPIKey
+    case credentialUnavailable
+    case cloudAudioConsentRequired
+    case speechRecognitionPermissionDenied
     case authFailed
     case endpointUnreachable
+    case noReadyProvider
     case modelNotFound
     case modelDigestMismatch
     case modelLoadFailed
@@ -465,6 +469,13 @@ public struct CorrectionPolicy: Codable, Sendable, Equatable {
     public let maxAdditionRatio: Double
     public let maxDeletionRatio: Double
 
+    /// The most of a transcript a correction may remove and still be called a correction.
+    ///
+    /// Named because two components enforce it: `CorrectionValidator`, against the raw
+    /// transcript, and `VoiceInsertionService`, against the text already on the user's
+    /// screen. Both must mean the same thing by "this is a proofread, not a loss".
+    public static let defaultMaxDeletionRatio = 0.40
+
     public init(
         tone: CorrectionTone = .standard,
         allowDisfluencyRemoval: Bool = true,
@@ -473,7 +484,7 @@ public struct CorrectionPolicy: Codable, Sendable, Equatable {
         allowNumberFormatting: Bool = true,
         preserveProtectedSpans: Bool = true,
         maxAdditionRatio: Double = 0.25,
-        maxDeletionRatio: Double = 0.40
+        maxDeletionRatio: Double = CorrectionPolicy.defaultMaxDeletionRatio
     ) {
         self.tone = tone
         self.allowDisfluencyRemoval = allowDisfluencyRemoval

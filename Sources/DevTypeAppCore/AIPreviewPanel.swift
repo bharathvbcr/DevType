@@ -36,6 +36,9 @@ enum AIPreviewPanel {
         customInstructions: String? = nil,
         restoreOnCancel: String? = nil,
         loc: LocalizationManager = .shared,
+        clipboardWriter: @escaping (String) -> Bool = {
+            PasteboardBroker.shared.writeUserClipboardString($0)
+        },
         onReplace: @escaping (String, NSRunningApplication?) -> Void
     ) {
         if isOpen { close(discard: true) }
@@ -46,6 +49,7 @@ enum AIPreviewPanel {
             customInstructions: customInstructions,
             restoreOnCancel: restoreOnCancel,
             loc: loc,
+            clipboardWriter: clipboardWriter,
             onReplace: onReplace
         )
     }
@@ -71,6 +75,7 @@ enum AIPreviewPanel {
         customInstructions: String?,
         restoreOnCancel: String?,
         loc: LocalizationManager,
+        clipboardWriter: @escaping (String) -> Bool,
         onReplace: @escaping (String, NSRunningApplication?) -> Void
     ) {
         suspension = EventTapEngine.shared.suspendMatching(reason: "AIPreviewPanel")
@@ -100,6 +105,7 @@ enum AIPreviewPanel {
             customInstructions: customInstructions,
             loc: loc,
             isCurrent: { token == Self.generationToken && Self.panel != nil },
+            clipboardWriter: clipboardWriter,
             onReplace: { text, app in
                 // Successful replace — do not reinject the typed trigger.
                 pendingRestoreOnCancel = nil
@@ -116,15 +122,17 @@ enum AIPreviewPanel {
         panel.contentView = controller.view
         positionNearTop(panel)
 
+        // Publish the session before starting work. Local transforms complete synchronously;
+        // `isCurrent` must already recognize this panel when their completion is delivered.
+        self.panel = panel
+        self.controller = controller
+        installDismissWatchers(for: panel)
+
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         animateIn(panel)
         controller.startGeneration()
-
-        self.panel = panel
-        self.controller = controller
-        installDismissWatchers(for: panel)
     }
 
     /// Cancel / outside-dismiss: reinject the erased typed trigger via `erasePlan: .empty`.
@@ -231,6 +239,7 @@ private final class AIPreviewController: NSViewController {
     }
     private let loc: LocalizationManager
     private let isCurrent: () -> Bool
+    private let clipboardWriter: (String) -> Bool
     private let onReplace: (String, NSRunningApplication?) -> Void
     private let onCancel: () -> Void
 
@@ -263,6 +272,7 @@ private final class AIPreviewController: NSViewController {
         customInstructions: String?,
         loc: LocalizationManager,
         isCurrent: @escaping () -> Bool,
+        clipboardWriter: @escaping (String) -> Bool,
         onReplace: @escaping (String, NSRunningApplication?) -> Void,
         onCancel: @escaping () -> Void
     ) {
@@ -272,6 +282,7 @@ private final class AIPreviewController: NSViewController {
         self.authoredInstructions = customInstructions
         self.loc = loc
         self.isCurrent = isCurrent
+        self.clipboardWriter = clipboardWriter
         self.onReplace = onReplace
         self.onCancel = onCancel
         super.init(nibName: nil, bundle: nil)
@@ -343,6 +354,7 @@ private final class AIPreviewController: NSViewController {
         tonePopup.addItem(withTitle: loc.s("ai.preview.tone.concise"))
         tonePopup.target = self
         tonePopup.action = #selector(toneChanged)
+        tonePopup.setAccessibilityLabel(loc.s("ai.preview.tone.label"))
 
         kindPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         kindPopup.translatesAutoresizingMaskIntoConstraints = false
@@ -455,12 +467,24 @@ private final class AIPreviewController: NSViewController {
         replaceButton.keyEquivalent = "\r"
         replaceButton.isEnabled = false
 
+        // The fixed 560pt panel cannot contain all six localized actions on one
+        // baseline. Keep every action visible at full intrinsic width by placing
+        // secondary review commands on a row above the commit/cancel row.
+        let secondaryActions = NSStackView(views: [diffButton, retryButton, copyButton])
+        secondaryActions.orientation = .horizontal
+        secondaryActions.alignment = .centerY
+        secondaryActions.spacing = 8
+        secondaryActions.translatesAutoresizingMaskIntoConstraints = false
+
+        let primaryActions = NSStackView(views: [replaceAndCopyButton, replaceButton])
+        primaryActions.orientation = .horizontal
+        primaryActions.alignment = .centerY
+        primaryActions.spacing = 8
+        primaryActions.translatesAutoresizingMaskIntoConstraints = false
+
         root.addSubview(cancel)
-        root.addSubview(diffButton)
-        root.addSubview(retryButton)
-        root.addSubview(copyButton)
-        root.addSubview(replaceAndCopyButton)
-        root.addSubview(replaceButton)
+        root.addSubview(secondaryActions)
+        root.addSubview(primaryActions)
 
         NSLayoutConstraint.activate([
             badge.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
@@ -487,21 +511,19 @@ private final class AIPreviewController: NSViewController {
 
             hairline.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             hairline.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
-            hairline.bottomAnchor.constraint(equalTo: cancel.topAnchor, constant: -12),
+            hairline.bottomAnchor.constraint(equalTo: secondaryActions.topAnchor, constant: -12),
 
             cancel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
             cancel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            cancel.trailingAnchor.constraint(lessThanOrEqualTo: primaryActions.leadingAnchor, constant: -12),
 
-            replaceButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
-            replaceButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
-            replaceAndCopyButton.trailingAnchor.constraint(equalTo: replaceButton.leadingAnchor, constant: -8),
-            replaceAndCopyButton.bottomAnchor.constraint(equalTo: replaceButton.bottomAnchor),
-            copyButton.trailingAnchor.constraint(equalTo: replaceAndCopyButton.leadingAnchor, constant: -8),
-            copyButton.bottomAnchor.constraint(equalTo: replaceButton.bottomAnchor),
-            retryButton.trailingAnchor.constraint(equalTo: copyButton.leadingAnchor, constant: -8),
-            retryButton.bottomAnchor.constraint(equalTo: replaceButton.bottomAnchor),
-            diffButton.trailingAnchor.constraint(equalTo: retryButton.leadingAnchor, constant: -8),
-            diffButton.bottomAnchor.constraint(equalTo: replaceButton.bottomAnchor)
+            primaryActions.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            primaryActions.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            cancel.centerYAnchor.constraint(equalTo: primaryActions.centerYAnchor),
+
+            secondaryActions.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            secondaryActions.leadingAnchor.constraint(greaterThanOrEqualTo: root.leadingAnchor, constant: 18),
+            secondaryActions.bottomAnchor.constraint(equalTo: primaryActions.topAnchor, constant: -8)
         ])
 
         view = glass
@@ -716,14 +738,20 @@ private final class AIPreviewController: NSViewController {
 
     @objc private func replaceAndCopyTapped() {
         guard !resultText.isEmpty else { return }
-        PasteboardBroker.shared.writeUserClipboardString(resultText)
+        let didWrite = clipboardWriter(resultText)
         onReplace(resultText, sourceApp)
+        if !didWrite {
+            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill")
+        }
     }
 
     @objc private func copyTapped() {
         guard !resultText.isEmpty else { return }
-        PasteboardBroker.shared.writeUserClipboardString(resultText)
-        ToastPanel.show(loc.s("ai.preview.copy"), symbol: "doc.on.doc.fill")
+        if clipboardWriter(resultText) {
+            ToastPanel.show(loc.s("ai.preview.copy"), symbol: "doc.on.doc.fill")
+        } else {
+            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill")
+        }
     }
 
     @objc private func retryTapped() {

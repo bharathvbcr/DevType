@@ -29,10 +29,12 @@ public enum TranscriptionEngine: String, Sendable, Codable, CaseIterable, Identi
     /// Google Gemini 3.5 Transcribe — cloud-based, high accuracy, handles disfluency
     /// removal, self-correction collapse, punctuation, and formatting natively.
     case gemini = "gemini"
-    /// Apple SFSpeechRecognizer with Local LLM (Apple Intelligence or Ollama/LM Studio) post-processing.
+    /// Apple's newest ready on-device recognizer, with legacy Apple Speech as a compatibility
+    /// fallback, plus Local LLM (Apple Intelligence or Ollama/LM Studio) post-processing.
     /// 100% private, on-device, zero API key required.
     case localLLM = "local_llm"
-    /// Apple SFSpeechRecognizer with deterministic rule-based cleanup. On-device, free.
+    /// Apple's newest ready on-device recognizer, with legacy Apple Speech as a compatibility
+    /// fallback, plus deterministic cleanup. On-device and free.
     case appleSpeech = "apple_speech"
     /// A local `whisper.cpp` server on loopback. Higher accuracy than Apple Speech, fully
     /// offline, but requires the user to run the server themselves.
@@ -40,12 +42,21 @@ public enum TranscriptionEngine: String, Sendable, Codable, CaseIterable, Identi
 
     public var id: String { rawValue }
 
+    public var localizationKey: String {
+        switch self {
+        case .gemini: return "prefs.voice.engine.gemini"
+        case .localLLM: return "prefs.voice.engine.localAI"
+        case .appleSpeech: return "prefs.voice.engine.appleSpeech"
+        case .whisperLocal: return "prefs.voice.engine.whisper"
+        }
+    }
+
     /// Human-readable name for UI display.
     public var displayName: String {
         switch self {
         case .gemini: return "Gemini 3.5 Transcribe"
         case .localLLM: return "Local AI (On-Device)"
-        case .appleSpeech: return "Apple Speech (Rule-based)"
+        case .appleSpeech: return "Apple Speech"
         case .whisperLocal: return "Local Whisper (whisper.cpp)"
         }
     }
@@ -56,6 +67,70 @@ public enum TranscriptionEngine: String, Sendable, Codable, CaseIterable, Identi
         case .gemini: return true
         case .localLLM, .appleSpeech, .whisperLocal: return false
         }
+    }
+
+    /// Whether the final transcript provider itself is Apple's Speech framework.
+    public var usesAppleSpeechForFinalTranscript: Bool {
+        switch self {
+        case .localLLM, .appleSpeech: return true
+        case .gemini, .whisperLocal: return false
+        }
+    }
+
+    /// Whether the selected final provider sends recorded audio off this Mac.
+    public var uploadsRecordedAudio: Bool { self == .gemini }
+}
+
+/// Provider-aware decision for the separate Speech Recognition grant.
+///
+/// Gemini and Local Whisper can finish without Apple Speech. When progressive typing is enabled,
+/// they may use Apple Speech for a live preview, but denial degrades that preview instead of
+/// disabling an otherwise-ready final provider.
+public enum VoicePermissionPolicy {
+    public enum Decision: Sendable, Equatable {
+        case proceed(enableLiveRecognition: Bool)
+        case requestAuthorization
+        case blocked
+    }
+
+    /// - Parameter liveRecognitionRequested: whether the user's live-delivery mode wants the
+    ///   recognizer running during capture. Both `typeAsYouSpeak` and `previewInHUD` do; only
+    ///   `insertAtEnd` does not. Named for the capability, not for typing, because a preview
+    ///   needs Apple Speech just as much as typing does.
+    public static func decision(
+        engine: TranscriptionEngine,
+        liveRecognitionRequested: Bool,
+        speechStatus: SpeechAuthorization.Status
+    ) -> Decision {
+        switch speechStatus {
+        case .authorized:
+            return .proceed(enableLiveRecognition: liveRecognitionRequested)
+        case .notDetermined:
+            return engine.usesAppleSpeechForFinalTranscript || liveRecognitionRequested
+                ? .requestAuthorization
+                : .proceed(enableLiveRecognition: false)
+        case .denied, .restricted:
+            return engine.usesAppleSpeechForFinalTranscript
+                ? .blocked
+                : .proceed(enableLiveRecognition: false)
+        }
+    }
+
+    /// Cloud-capable sessions fail closed in the engine even if an app-layer entry point
+    /// accidentally bypasses the disclosure UI.
+    public static func mayStartCloudAudio(
+        privacyRoute: PrivacyRoute,
+        consentGranted: Bool
+    ) -> Bool {
+        privacyRoute != .cloudPermitted || consentGranted
+    }
+}
+
+public struct CloudAudioConsentRequiredError: LocalizedError, Sendable {
+    public init() {}
+
+    public var errorDescription: String? {
+        "Cloud audio consent is required before recording with this voice engine."
     }
 }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-/// §3.2: Bounded ring of inject outcomes.
+/// §3.2: Bounded inject outcomes and per-app delivery aggregates.
 ///
 /// Inject telemetry used to be a single overwritten variable
 /// (`PermissionCoordinator.lastInjectOutcome`), so five outcomes and a dozen refuse reasons all
@@ -126,10 +126,18 @@ public final class InjectTelemetryLog {
     private var entries: [Entry] = []
     private var duplicateRisk: [String: DuplicateRiskCounters] = [:]
     private var clipboardHolds: [String: ClipboardHoldCounters] = [:]
+    /// Shared LRU across both aggregate families. Sharing the key budget prevents two independent
+    /// maps from retaining twice as many hostile/one-off application identities.
+    private var aggregateRecency: [String] = []
+    /// Number of admissions into the bounded aggregate set. A key that returns after eviction is
+    /// a new admission; exact lifetime uniqueness would itself require an unbounded seen-key set.
+    private var aggregateObservedCount = 0
+    private var aggregateDroppedCount = 0
 
     public init(capacity: Int = InjectTelemetryLog.defaultCapacity) {
         self.capacity = max(1, capacity)
         entries.reserveCapacity(self.capacity)
+        aggregateRecency.reserveCapacity(self.capacity)
     }
 
     public func record(_ entry: Entry) {
@@ -192,21 +200,30 @@ public final class InjectTelemetryLog {
     // MARK: - Duplicate risk
 
     public func recordPasteRetry(bundleID: String?) {
-        mutateDuplicateRisk(bundleID: bundleID) { $0.pasteRetries += 1 }
+        mutateDuplicateRisk(bundleID: bundleID) {
+            $0.pasteRetries = Self.incrementClamped($0.pasteRetries)
+        }
     }
 
     public func recordTriggerRestore(bundleID: String?) {
-        mutateDuplicateRisk(bundleID: bundleID) { $0.triggerRestores += 1 }
+        mutateDuplicateRisk(bundleID: bundleID) {
+            $0.triggerRestores = Self.incrementClamped($0.triggerRestores)
+        }
     }
 
     public func recordSuppressedMissVerdict(bundleID: String?) {
-        mutateDuplicateRisk(bundleID: bundleID) { $0.suppressedMissVerdicts += 1 }
+        mutateDuplicateRisk(bundleID: bundleID) {
+            $0.suppressedMissVerdicts = Self.incrementClamped($0.suppressedMissVerdicts)
+        }
     }
 
     public func recordTypeAheadReplay(bundleID: String?, characters: Int) {
         mutateDuplicateRisk(bundleID: bundleID) {
-            $0.typeAheadReplays += 1
-            $0.typeAheadCharacters += max(0, characters)
+            $0.typeAheadReplays = Self.incrementClamped($0.typeAheadReplays)
+            $0.typeAheadCharacters = Self.addingClamped(
+                $0.typeAheadCharacters,
+                max(0, characters)
+            )
         }
     }
 
@@ -219,15 +236,17 @@ public final class InjectTelemetryLog {
     // MARK: - Clipboard residency (§8.12)
 
     public func recordUnverifiedClipboardHold(bundleID: String?, heldFor seconds: TimeInterval) {
-        let millis = Int((max(0, seconds) * 1000).rounded())
+        let millis = Self.boundedMilliseconds(seconds)
         mutateClipboardHold(bundleID: bundleID) {
-            $0.unverifiedHolds += 1
+            $0.unverifiedHolds = Self.incrementClamped($0.unverifiedHolds)
             $0.maxHeldMillis = max($0.maxHeldMillis, millis)
         }
     }
 
     public func recordClipboardHoldExtension(bundleID: String?) {
-        mutateClipboardHold(bundleID: bundleID) { $0.stallExtensions += 1 }
+        mutateClipboardHold(bundleID: bundleID) {
+            $0.stallExtensions = Self.incrementClamped($0.stallExtensions)
+        }
     }
 
     public func clipboardHoldsByBundle() -> [String: ClipboardHoldCounters] {
@@ -237,8 +256,9 @@ public final class InjectTelemetryLog {
     }
 
     private func mutateClipboardHold(bundleID: String?, _ body: (inout ClipboardHoldCounters) -> Void) {
-        let key = bundleID?.isEmpty == false ? bundleID! : "(unknown)"
+        let key = Self.aggregateKey(bundleID)
         lock.lock()
+        admitAggregateKeyLocked(key)
         var counters = clipboardHolds[key] ?? ClipboardHoldCounters()
         body(&counters)
         clipboardHolds[key] = counters
@@ -246,12 +266,60 @@ public final class InjectTelemetryLog {
     }
 
     private func mutateDuplicateRisk(bundleID: String?, _ body: (inout DuplicateRiskCounters) -> Void) {
-        let key = bundleID?.isEmpty == false ? bundleID! : "(unknown)"
+        let key = Self.aggregateKey(bundleID)
         lock.lock()
+        admitAggregateKeyLocked(key)
         var counters = duplicateRisk[key] ?? DuplicateRiskCounters()
         body(&counters)
         duplicateRisk[key] = counters
         lock.unlock()
+    }
+
+    private static func aggregateKey(_ bundleID: String?) -> String {
+        guard let bundleID, !bundleID.isEmpty else { return "(unknown)" }
+        return DiagnosticPrivacy.boundedIdentifier(
+            bundleID,
+            label: "injectBundleID",
+            domain: "inject-telemetry-bundle-id"
+        )
+    }
+
+    /// Must be called with `lock` held. Existing keys become most-recently used; a new key evicts
+    /// the least-recently used identity from both counter families so the union stays bounded.
+    private func admitAggregateKeyLocked(_ key: String) {
+        if let existingIndex = aggregateRecency.firstIndex(of: key) {
+            aggregateRecency.remove(at: existingIndex)
+            aggregateRecency.append(key)
+            return
+        }
+
+        aggregateObservedCount = Self.incrementClamped(aggregateObservedCount)
+        if aggregateRecency.count >= capacity {
+            let evicted = aggregateRecency.removeFirst()
+            duplicateRisk.removeValue(forKey: evicted)
+            clipboardHolds.removeValue(forKey: evicted)
+            aggregateDroppedCount = Self.incrementClamped(aggregateDroppedCount)
+        }
+        aggregateRecency.append(key)
+    }
+
+    private static func incrementClamped(_ value: Int) -> Int {
+        value == Int.max ? Int.max : value + 1
+    }
+
+    private static func addingClamped(_ value: Int, _ nonnegativeDelta: Int) -> Int {
+        guard nonnegativeDelta > 0 else { return value }
+        return value > Int.max - nonnegativeDelta ? Int.max : value + nonnegativeDelta
+    }
+
+    /// A diagnostic duration can arrive from a stalled clock or injected test seam. Converting
+    /// NaN/infinity, or a finite value that rounds above `Int.max`, traps in Swift; represent those
+    /// boundaries as zero (invalid/non-positive) or a truthful saturated maximum instead.
+    private static func boundedMilliseconds(_ seconds: TimeInterval) -> Int {
+        guard !seconds.isNaN, seconds > 0 else { return 0 }
+        let scaled = seconds * 1_000
+        guard scaled.isFinite, scaled < Double(Int.max) else { return Int.max }
+        return Int(scaled.rounded())
     }
 
     public func refuseReasonHistogram() -> [String: Int] {
@@ -284,43 +352,83 @@ public final class InjectTelemetryLog {
 
     /// Human-readable block for `DiagnosticReport`.
     public func summaryLines(topRefuseReasons: Int = 8) -> [String] {
-        let all = recentEntries()
-        guard !all.isEmpty else { return ["(no inject attempts recorded)"] }
+        let projection = diagnosticSummaryProjection(topRefuseReasons: topRefuseReasons)
+        var lines = [projection.summaryLine(label: "inject-telemetry")]
+        lines.append(contentsOf: projection.retainedLines)
+        return lines
+    }
 
-        var lines: [String] = ["Recorded inject attempts: \(all.count) (ring capacity \(capacity))"]
+    /// Canonical bounded view for both the production report and Preferences. Storage eviction and
+    /// projection truncation are reported separately: the retention line covers aggregate keys
+    /// already evicted, while `HeaderProjection` covers report lines omitted by item/byte ceilings.
+    func diagnosticSummaryProjection(
+        topRefuseReasons: Int = 8,
+        itemLimit: Int = DiagnosticReport.headerProjectionItemLimit,
+        byteLimit: Int = DiagnosticReport.headerProjectionByteLimit
+    ) -> DiagnosticReport.HeaderProjection {
+        var builder = DiagnosticReport.HeaderProjectionBuilder(
+            itemLimit: itemLimit,
+            byteLimit: byteLimit
+        )
+        var independentlyOmittedLineCount = 0
 
-        let outcomes = outcomeHistogram().sorted { lhs, rhs in
-            lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+        lock.lock()
+        let all = entries
+        var byBundle: [String: BundleStats] = [:]
+        var outcomes: [String: Int] = [:]
+        var refusals: [String: Int] = [:]
+        for entry in all {
+            let bundle = entry.bundleID?.isEmpty == false ? entry.bundleID! : "(unknown)"
+            var stats = byBundle[bundle] ?? BundleStats()
+            stats.total += 1
+            switch entry.outcome {
+            case .succeeded: stats.succeeded += 1
+            case .postedUnverified, .degradedAXOnly: stats.deliveredUnverified += 1
+            case .refused(let reason):
+                stats.refused += 1
+                refusals[reason, default: 0] += 1
+            case .failedSilent: stats.failed += 1
+            }
+            byBundle[bundle] = stats
+            outcomes[Self.label(for: entry.outcome), default: 0] += 1
         }
-        lines.append("Outcomes: " + outcomes.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
 
-        let byBundle = statsByBundle().sorted { lhs, rhs in
-            lhs.value.total == rhs.value.total ? lhs.key < rhs.key : lhs.value.total > rhs.value.total
+        if all.isEmpty {
+            builder.observe("(no inject attempts recorded)")
+        } else {
+            builder.observe("Recorded inject attempts: \(all.count) (ring capacity \(capacity))")
+            let outcomeLine = outcomes.sorted { lhs, rhs in
+                lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+            }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+            builder.observe("Outcomes: \(outcomeLine)")
         }
-        if !byBundle.isEmpty {
-            lines.append("Per-app delivery:")
-            for (bundle, stats) in byBundle {
-                let percent = Int((stats.successRatio * 100).rounded())
-                lines.append(
-                    "  \(bundle): \(percent)% delivered "
-                        + "(ok=\(stats.succeeded) unverified=\(stats.deliveredUnverified) "
-                        + "refused=\(stats.refused) failed=\(stats.failed) of \(stats.total))"
+
+        builder.observe(
+            "Per-app aggregate retention: observed=\(aggregateObservedCount); "
+                + "retained=\(aggregateRecency.count)/\(capacity); "
+                + "dropped=\(aggregateDroppedCount)"
+        )
+
+        let riskyCount = duplicateRisk.values.lazy.filter { !$0.isEmpty }.count
+        if riskyCount > 0 {
+            builder.observe(
+                "Duplicate risk (text written twice for one expansion; apps=\(riskyCount)):"
+            )
+            let rankedRisk = duplicateRisk.lazy
+                .filter { !$0.value.isEmpty }
+                .sorted { lhs, rhs in
+                    lhs.value.pasteRetries == rhs.value.pasteRetries
+                        ? lhs.key < rhs.key
+                        : lhs.value.pasteRetries > rhs.value.pasteRetries
+                }
+            for (bundle, counters) in rankedRisk {
+                let safeBundle = DiagnosticPrivacy.boundedIdentifier(
+                    bundle,
+                    label: "injectBundleID",
+                    domain: "inject-telemetry-bundle-id"
                 )
-            }
-        }
-
-        let risky = duplicateRiskByBundle()
-            .filter { !$0.value.isEmpty }
-            .sorted { lhs, rhs in
-                lhs.value.pasteRetries == rhs.value.pasteRetries
-                    ? lhs.key < rhs.key
-                    : lhs.value.pasteRetries > rhs.value.pasteRetries
-            }
-        if !risky.isEmpty {
-            lines.append("Duplicate risk (text written twice for one expansion):")
-            for (bundle, counters) in risky {
-                lines.append(
-                    "  \(bundle): re-pastes=\(counters.pasteRetries) "
+                builder.observe(
+                    "  \(safeBundle): re-pastes=\(counters.pasteRetries) "
                         + "trigger-restores=\(counters.triggerRestores) "
                         + "suppressed-AX-misses=\(counters.suppressedMissVerdicts) "
                         + "type-ahead-replays=\(counters.typeAheadReplays)"
@@ -329,34 +437,76 @@ public final class InjectTelemetryLog {
             }
         }
 
-        let holds = clipboardHoldsByBundle()
-            .filter { !$0.value.isEmpty }
-            .sorted { lhs, rhs in
-                lhs.value.maxHeldMillis == rhs.value.maxHeldMillis
-                    ? lhs.key < rhs.key
-                    : lhs.value.maxHeldMillis > rhs.value.maxHeldMillis
-            }
-        if !holds.isEmpty {
-            lines.append("Clipboard residency (payload held with no proof the app read it):")
-            for (bundle, counters) in holds {
-                lines.append(
-                    "  \(bundle): unverified-holds=\(counters.unverifiedHolds) "
+        let holdCount = clipboardHolds.values.lazy.filter { !$0.isEmpty }.count
+        if holdCount > 0 {
+            builder.observe(
+                "Clipboard residency (payload held with no proof the app read it; apps=\(holdCount)):"
+            )
+            let rankedHolds = clipboardHolds.lazy
+                .filter { !$0.value.isEmpty }
+                .sorted { lhs, rhs in
+                    lhs.value.maxHeldMillis == rhs.value.maxHeldMillis
+                        ? lhs.key < rhs.key
+                        : lhs.value.maxHeldMillis > rhs.value.maxHeldMillis
+                }
+            for (bundle, counters) in rankedHolds {
+                let safeBundle = DiagnosticPrivacy.boundedIdentifier(
+                    bundle,
+                    label: "injectBundleID",
+                    domain: "inject-telemetry-bundle-id"
+                )
+                builder.observe(
+                    "  \(safeBundle): unverified-holds=\(counters.unverifiedHolds) "
                         + "stall-extensions=\(counters.stallExtensions) "
                         + "longest=\(counters.maxHeldMillis)ms"
                 )
             }
         }
 
-        let refusals = refuseReasonHistogram().sorted { lhs, rhs in
-            lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
-        }
-        if !refusals.isEmpty {
-            lines.append("Refuse reasons:")
-            for (reason, count) in refusals.prefix(max(0, topRefuseReasons)) {
-                lines.append("  \(count)× \(reason)")
+        if !byBundle.isEmpty {
+            builder.observe("Per-app delivery:")
+            // At most the bounded outcome-ring capacity (256) distinct entries; sorting this map
+            // cannot grow with the lifetime aggregate maps above.
+            for (bundle, stats) in byBundle.sorted(by: {
+                $0.value.total == $1.value.total ? $0.key < $1.key : $0.value.total > $1.value.total
+            }) {
+                let safeBundle = DiagnosticPrivacy.boundedIdentifier(
+                    bundle,
+                    label: "injectBundleID",
+                    domain: "inject-telemetry-bundle-id"
+                )
+                let percent = Int((stats.successRatio * 100).rounded())
+                builder.observe(
+                    "  \(safeBundle): \(percent)% delivered "
+                        + "(ok=\(stats.succeeded) unverified=\(stats.deliveredUnverified) "
+                        + "refused=\(stats.refused) failed=\(stats.failed) of \(stats.total))"
+                )
             }
         }
-        return lines
+
+        if !refusals.isEmpty {
+            builder.observe("Refuse reasons:")
+            let rankedRefusals = refusals.sorted(by: {
+                $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value
+            })
+            let visibleRefusals = rankedRefusals.prefix(max(0, topRefuseReasons))
+            independentlyOmittedLineCount = rankedRefusals.count - visibleRefusals.count
+            for (reason, count) in visibleRefusals {
+                let safeReason = DiagnosticPrivacy.boundedIdentifier(
+                    reason,
+                    label: "refuseReason",
+                    domain: "inject-refuse-reason"
+                )
+                builder.observe("  \(count)× \(safeReason)")
+            }
+        }
+        lock.unlock()
+        let visibleProjection = builder.finish()
+        let completeObservedCount = visibleProjection.observedCount
+            > Int.max - independentlyOmittedLineCount
+            ? Int.max
+            : visibleProjection.observedCount + independentlyOmittedLineCount
+        return builder.finish(totalObservedCount: completeObservedCount)
     }
 
     /// Test / recovery hook.
@@ -365,6 +515,9 @@ public final class InjectTelemetryLog {
         entries.removeAll(keepingCapacity: true)
         duplicateRisk.removeAll(keepingCapacity: true)
         clipboardHolds.removeAll(keepingCapacity: true)
+        aggregateRecency.removeAll(keepingCapacity: true)
+        aggregateObservedCount = 0
+        aggregateDroppedCount = 0
         lock.unlock()
     }
 }

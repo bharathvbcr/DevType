@@ -300,6 +300,14 @@ public enum SelectionReader {
         let label = describe(outcome)
         let resolvedBundleID = outcome.result?.bundleID ?? frontmostBundleID
         let via = outcome.result?.via ?? .unknown
+        let safeBundleID = DevTypeLog.boundedPublicIdentifier(
+            resolvedBundleID,
+            label: "bundleID"
+        )
+        let safeProbeSummary = DevTypeLog.boundedPublicIdentifier(
+            probeSummary,
+            label: "selectionProbes"
+        )
 
         diagnostics?.recordSelectionRead(
             outcome: label,
@@ -315,12 +323,12 @@ public enum SelectionReader {
         // Privacy: outcome, app, attribute, and length. Never the text.
         let logLine = """
             [Selection] read outcome=\(label) \
-            app=\(resolvedBundleID ?? "(unknown)") \
+            app=\(safeBundleID) \
             via=\(via.rawValue) \
             candidates=\(candidates.count) \
             chars=\(outcome.result?.text.count ?? 0) \
             elapsedMs=\(elapsedMilliseconds) \
-            probes=\(probeSummary)
+            probes=\(safeProbeSummary)
             """
         if outcome.result == nil {
             DevTypeLog.selection.error("\(logLine, privacy: .public)")

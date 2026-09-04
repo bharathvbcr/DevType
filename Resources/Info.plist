@@ -29,7 +29,7 @@
          both in the packaged bundle from `git describe`, so shipped builds carry a
          real version and DiagnosticReport output can be mapped back to a commit. -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1.1</string>
+    <string>0.1.6</string>
     <key>CFBundleVersion</key>
     <string>2</string>
     <!-- §7.5: update checking is DevType's own (Sources/ExpanderEngine/Updates/), not Sparkle.
@@ -43,6 +43,13 @@
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <!-- DevType's local Whisper and OpenAI-compatible providers use loopback HTTP.
+         Declare that narrow ATS intent without disabling ATS for remote traffic. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 DevType. All rights reserved.</string>
     <key>NSAccessibilityUsageDescription</key>
@@ -50,8 +57,8 @@
     <key>NSInputMonitoringUsageDescription</key>
     <string>DevType requires Input Monitoring access to detect trigger keywords as you type.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>DevType requires Microphone access for on-device Smart Speech-to-Text and Dictation.</string>
+    <string>DevType requires Microphone access to capture audio for Smart Dictation. Your selected voice engine determines whether audio stays on this Mac or is sent to a cloud service.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>DevType requires Speech Recognition access for local on-device voice transcription.</string>
+    <string>DevType uses Apple Speech Recognition for Apple-based transcription and optional live previews.</string>
 </dict>
 </plist>

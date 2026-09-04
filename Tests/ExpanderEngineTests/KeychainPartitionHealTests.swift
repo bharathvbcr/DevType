@@ -173,10 +173,12 @@ final class KeychainPartitionHealTests: XCTestCase {
             availability: .biometry("Touch ID"),
             defaults: store,
             accessDiagnostics: diagnostics,
-            pendingMigrationCount: { 2 }
+            pendingMigrationCount: { 2 },
+            pendingCleanupCount: { 1 }
         ).joined(separator: "\n")
 
         XCTAssertTrue(text.contains("Secrets pending migration: 2"))
+        XCTAssertTrue(text.contains("Secret cleanup pending: 1"))
         XCTAssertTrue(text.contains("trail: item A: legacy fetch → -25293"),
                       "The trail is the log that turns 'it prompted again' into a diagnosis.")
     }

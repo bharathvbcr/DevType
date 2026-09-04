@@ -11,9 +11,9 @@
       not the Mac App Store.
 
       Notarization requires the Hardened Runtime (codesign option "runtime").
-      Under Hardened Runtime, Apple Events access is needed because
-      SettingsDeepLinker opens System Settings panes and the relaunch flow talks
-      to other processes.
+      Opening System Settings URLs and relaunching DevType do not send Apple
+      Events. DevType has no Automation entitlement because it does not automate
+      another application through Apple Events.
 
       Input Monitoring and Accessibility are TCC services, not entitlements. They
       are granted by the user at runtime and must NOT be declared here. Do not add
@@ -22,12 +22,11 @@
 
       Deliberately absent:
         com.apple.security.app-sandbox (incompatible, see above)
+        Automation / Apple Events entitlement (no Apple Events API usage)
         com.apple.security.cs.allow-unsigned-executable-memory
         com.apple.security.cs.disable-library-validation
       Add the latter two only if a future dependency genuinely requires them. Each
       one materially weakens the runtime and invites notarization scrutiny.
     -->
-    <key>com.apple.security.automation.apple-events</key>
-    <true/>
 </dict>
 </plist>

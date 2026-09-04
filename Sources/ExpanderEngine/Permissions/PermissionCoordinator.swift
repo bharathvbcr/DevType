@@ -1,6 +1,135 @@
 import AppKit
 import Foundation
 
+/// Capability-specific relaunch nudges. A successful live preflight clears only the capability
+/// that caused the nudge, so an Input Monitoring refusal cannot get stuck behind AX state.
+/// Lock-owned relaunch latch shared by permission request completions, observer callbacks, and
+/// status rendering. Those paths deliberately run on different queues; keeping synchronization
+/// beside the state makes every caller safe without exposing the coordinator's broader outcome
+/// lock or requiring a fragile external lock-taking convention.
+final class PermissionRelaunchState: @unchecked Sendable {
+    private let lock = UnfairLock()
+    private var accessibilityRequestStillDenied = false
+    private var inputMonitoringRequestStillDenied = false
+
+    func noteRequestResult(for kind: PermissionKind, preflightGranted: Bool) {
+        lock.withLock {
+            switch kind {
+            case .accessibility:
+                accessibilityRequestStillDenied = !preflightGranted
+            case .inputMonitoring:
+                inputMonitoringRequestStillDenied = !preflightGranted
+            case .postEvent, .microphone, .speechRecognition:
+                break
+            }
+        }
+    }
+
+    func observe(_ snapshot: PermissionSnapshot) {
+        lock.withLock {
+            if snapshot.canUseAX { accessibilityRequestStillDenied = false }
+            if snapshot.canListenTap { inputMonitoringRequestStillDenied = false }
+        }
+    }
+
+    func recommendsRelaunch(for snapshot: PermissionSnapshot) -> Bool {
+        lock.withLock {
+            (accessibilityRequestStillDenied && !snapshot.canUseAX)
+                || (inputMonitoringRequestStillDenied && !snapshot.canListenTap)
+        }
+    }
+}
+
+/// Owns the coordinator callback lifecycle. Status can be emitted from the main, inject, and
+/// processing queues, while `stop()` runs during app termination. Keeping admission, generation,
+/// deduplication, and invocation under one recursive lock prevents a copied callback from starting
+/// after `stop()` returns without forbidding a callback from re-entering coordinator lifecycle APIs.
+final class PermissionCallbackState: @unchecked Sendable {
+    typealias StatusCallback = (PermissionCoordinator.Status) -> Void
+    typealias IdentityCallback = (String?) -> Void
+
+    private let lock = NSRecursiveLock()
+    private var generation: UInt64 = 0
+    private var activeGeneration: UInt64?
+    private var onStatus: StatusCallback?
+    private var onTapStartFailed: (() -> Void)?
+    private var onIdentityResolved: IdentityCallback?
+    private var lastStatus: PermissionCoordinator.Status?
+    private var tapStartFailureDelivered = false
+
+    @discardableResult
+    func start(
+        onStatusChanged: @escaping StatusCallback,
+        onTapStartFailed: (() -> Void)?,
+        onIdentityResolved: IdentityCallback?
+    ) -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        activeGeneration = generation
+        onStatus = onStatusChanged
+        self.onTapStartFailed = onTapStartFailed
+        self.onIdentityResolved = onIdentityResolved
+        lastStatus = nil
+        tapStartFailureDelivered = false
+        return generation
+    }
+
+    func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        activeGeneration = nil
+        onStatus = nil
+        onTapStartFailed = nil
+        onIdentityResolved = nil
+        lastStatus = nil
+        tapStartFailureDelivered = false
+    }
+
+    var lastEmittedStatus: PermissionCoordinator.Status? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastStatus
+    }
+
+    /// Returns whether this active lifecycle observed a changed status. The callback still runs for
+    /// duplicate statuses, preserving the coordinator's existing synchronous refresh contract.
+    @discardableResult
+    func deliverStatus(_ status: PermissionCoordinator.Status) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeGeneration != nil, let onStatus else { return false }
+        let changed = status != lastStatus
+        lastStatus = status
+        onStatus(status)
+        return changed
+    }
+
+    func deliverTapStartFailure() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeGeneration != nil, !tapStartFailureDelivered else { return }
+        tapStartFailureDelivered = true
+        onTapStartFailed?()
+    }
+
+    func resetTapStartFailureEpisode() {
+        lock.lock()
+        defer { lock.unlock() }
+        tapStartFailureDelivered = false
+    }
+
+    func deliverIdentity(_ hash: String?, generation: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeGeneration == generation else { return }
+        onIdentityResolved?(hash)
+    }
+}
+
 /// Coordinates tap lifecycle (Listen + Accessibility for `.defaultTap`), inject degradation, and status emission.
 public final class PermissionCoordinator {
     public static let shared = PermissionCoordinator()
@@ -100,23 +229,20 @@ public final class PermissionCoordinator {
     private let observer = PermissionObserver.shared
     private let identity = ProcessIdentity.shared
 
-    private var onStatus: ((Status) -> Void)?
-    /// Fired when Listen+AX are granted but `engine.start()` fails and the caller asked for an alert.
-    private var onTapStartFailed: (() -> Void)?
-    private var onIdentityResolved: ((String?) -> Void)?
-    private var sawAXGrantedWhileUntrusted = false
+    private let callbackState = PermissionCallbackState()
+    private let relaunchState = PermissionRelaunchState()
 
-    /// §1.11: `lastInjectOutcome` / `lastInjectRefuseProvenance` / `lastEmittedStatus` are written
-    /// from `injectQueue`, `processingQueue` **and** main while `_cachedSnapshot` right beside them
-    /// was carefully guarded. `InjectOutcome.refused(String)` carries a `String`, so a torn write
-    /// is an over-release risk, not just a stale read. All three now live behind `outcomeLock`.
+    /// §1.11: `lastInjectOutcome` / `lastInjectRefuseProvenance` are written from `injectQueue`,
+    /// `processingQueue` **and** main while `_cachedSnapshot` right beside them was carefully
+    /// guarded. `InjectOutcome.refused(String)` carries a `String`, so a torn write is an
+    /// over-release risk, not just a stale read. Both live behind `outcomeLock`; callback and
+    /// last-emitted-status lifecycle lives atomically in `callbackState`.
     ///
     /// §2.4: `os_unfair_lock` (not `NSLock`) so the userInteractive tap callback reading
     /// `cachedSnapshot` cannot be blocked behind a utility-QoS writer without priority donation.
     private let outcomeLock = UnfairLock()
     private var _lastInjectOutcome: InjectOutcome?
     private var _lastInjectRefuseProvenance: InjectRefuseProvenance?
-    private var _lastEmittedStatus: Status?
 
     private var axWasFalse = true
 
@@ -166,13 +292,13 @@ public final class PermissionCoordinator {
     }
 
     private var lastEmittedStatus: Status? {
-        get { outcomeLock.withLock { _lastEmittedStatus } }
-        set { outcomeLock.withLock { _lastEmittedStatus = newValue } }
+        callbackState.lastEmittedStatus
     }
 
     /// True when UI should prominently offer Relaunch (Settings flip may not apply until restart).
     public var recommendsRelaunch: Bool {
-        lastEmittedStatus?.recommendsRelaunchForAX == true || sawAXGrantedWhileUntrusted
+        let snapshot = lastEmittedStatus?.snapshot ?? cachedSnapshot
+        return relaunchState.recommendsRelaunch(for: snapshot)
     }
 
     /// True when the last inject definitively failed — menu/Recovery should not stay quiet Active.
@@ -197,25 +323,33 @@ public final class PermissionCoordinator {
         onTapStartFailed: (() -> Void)? = nil,
         onIdentityResolved: ((String?) -> Void)? = nil
     ) {
-        onStatus = onStatusChanged
-        self.onTapStartFailed = onTapStartFailed
-        self.onIdentityResolved = onIdentityResolved
+        let lifecycleGeneration = callbackState.start(
+            onStatusChanged: onStatusChanged,
+            onTapStartFailed: onTapStartFailed,
+            onIdentityResolved: onIdentityResolved
+        )
         identity.refreshCDHashAsync { [weak self] hash in
             DevTypeLog.identity.info(
-                "[Identity] CDHash resolved=\(hash ?? "nil", privacy: .public) path=\(ProcessIdentity.shared.bundlePath, privacy: .public)"
+                "[Identity] CDHash resolved=\(hash ?? "nil", privacy: .public) \(DevTypeLog.publicPathMetadata(ProcessIdentity.shared.bundlePath), privacy: .public)"
             )
-            self?.onIdentityResolved?(hash)
+            self?.callbackState.deliverIdentity(hash, generation: lifecycleGeneration)
         }
 
         DevTypeLog.permission.info(
-            "[Permission] coordinator start identity bundleID=\(self.identity.bundleIdentifier, privacy: .public) packaged=\(self.identity.isPackaged, privacy: .public) path=\(self.identity.bundlePath, privacy: .public)"
+            "[Permission] coordinator start identity bundleID=\(DevTypeLog.boundedPublicIdentifier(self.identity.bundleIdentifier, label: "bundleID"), privacy: .public) packaged=\(self.identity.isPackaged, privacy: .public) \(DevTypeLog.publicPathMetadata(self.identity.bundlePath), privacy: .public)"
         )
         if let unpackaged = ProcessIdentity.unpackagedBinaryWarning(bundlePath: identity.bundlePath) {
-            DevTypeLog.identity.notice("[Identity] \(unpackaged, privacy: .public)")
+            _ = unpackaged
+            DevTypeLog.identity.notice(
+                "[Identity] unpackaged binary detected \(DevTypeLog.publicPathMetadata(self.identity.bundlePath), privacy: .public)"
+            )
         }
         let siblings = identity.siblingPaths()
         if let dup = ProcessIdentity.duplicateProcessWarning(siblingPaths: siblings) {
-            DevTypeLog.identity.notice("[Identity] \(dup, privacy: .public)")
+            _ = dup
+            DevTypeLog.identity.notice(
+                "[Identity] other DevType processes detected count=\(siblings.count, privacy: .public)"
+            )
         }
 
         // Prime tap BEFORE starting the observer so the first status emission cannot
@@ -235,12 +369,11 @@ public final class PermissionCoordinator {
 
     public func stop() {
         DevTypeLog.permission.info("[Permission] coordinator stop")
+        // Revoke callback admission first. A callback already inside its synchronous invocation
+        // finishes before this returns; observer/inject emissions arriving later see no lifecycle.
+        callbackState.stop()
         observer.stop()
         SettingsDeepLinker.shared.cancelPendingOpen()
-        onStatus = nil
-        onTapStartFailed = nil
-        onIdentityResolved = nil
-        lastEmittedStatus = nil
         snapshotLock.lock()
         _cachedSnapshot = nil
         snapshotLock.unlock()
@@ -297,24 +430,34 @@ public final class PermissionCoordinator {
     ) {
         var reason: String? = nil
         var provenance: InjectRefuseProvenance? = nil
+        let recordedOutcome: InjectOutcome
 
         switch outcome {
         case .succeeded:
+            recordedOutcome = .succeeded
             DevTypeLog.inject.info("[Inject] outcome=succeeded")
         case .postedUnverified:
+            recordedOutcome = .postedUnverified
             DevTypeLog.inject.notice("[Inject] outcome=postedUnverified")
         case .refused(let refuseReason):
-            reason = refuseReason
-            provenance = refuseContext ?? InjectRefuseProvenance.capture(reason: refuseReason)
-            DevTypeLog.inject.notice("[Inject] outcome=refused reason=\(refuseReason, privacy: .public)")
+            let safeReason = Self.sanitizedRefusalReason(refuseReason, path: path)
+            reason = safeReason
+            var safeProvenance = refuseContext
+                ?? InjectRefuseProvenance.capture(reason: safeReason)
+            safeProvenance.reason = safeReason
+            provenance = safeProvenance
+            recordedOutcome = .refused(safeReason)
+            DevTypeLog.inject.notice("[Inject] outcome=refused reason=\(safeReason, privacy: .public)")
         case .degradedAXOnly:
+            recordedOutcome = .degradedAXOnly
             DevTypeLog.inject.info("[Inject] outcome=degradedAXOnly (Post Events missing)")
         case .failedSilent:
+            recordedOutcome = .failedSilent
             DevTypeLog.inject.error("[Inject] outcome=failedSilent")
         }
 
         outcomeLock.lock()
-        _lastInjectOutcome = outcome
+        _lastInjectOutcome = recordedOutcome
         if let provenance {
             _lastInjectRefuseProvenance = provenance
         }
@@ -331,13 +474,70 @@ public final class PermissionCoordinator {
             bundleID = captured
         }
         injectTelemetry.record(
-            outcome: outcome,
+            outcome: recordedOutcome,
             bundleID: bundleID,
             path: path,
             reason: reason
         )
 
         emitStatus(snapshot: probe.snapshot())
+    }
+
+    /// Reduces free-form refusal prose to a finite, actionable vocabulary before it reaches
+    /// public OSLog, the telemetry ring, status UI, or a copied diagnostic report. `path` is the
+    /// pipeline's internal branch identifier; raw details can contain attachment paths or text
+    /// mismatch evidence and therefore must never survive this boundary.
+    static func sanitizedRefusalReason(_ reason: String, path: String?) -> String {
+        switch path {
+        case "imagePaste":
+            return reason.contains("missing or unreadable")
+                ? "Image attachment missing or unreadable"
+                : "Image paste unavailable"
+        case "fillInRequired":
+            return "Fill-in values are required before insertion"
+        case "shellNoPostEvents":
+            return "Post Events permission is required for multi-line shell insertion"
+        case "eraseContextChanged":
+            return "Input or target application changed before insertion"
+        case "erasePrecondition", "guardedErase":
+            return "Erase precondition failed — the target text changed"
+        case "axOnlyRange":
+            return "AX insertion failed — Post Events permission is required for fallback"
+        case "secureClipboardPaste":
+            return reason.contains("image")
+                ? "Secure clipboard insertion does not support images"
+                : "Secure clipboard insertion unavailable"
+        case "undo", "undoAXRange", "undoAXDirect", "undoPaste":
+            return "Undo refused — the target text changed"
+        default:
+            break
+        }
+
+        if reason.localizedCaseInsensitiveContains("secure input") {
+            return "Secure Input is active — expansion blocked"
+        }
+        if reason.localizedCaseInsensitiveContains("ime") {
+            return "Active IME marked text — expansion blocked"
+        }
+        if reason.localizedCaseInsensitiveContains("accessibility")
+            || reason.contains("AXIsProcessTrusted") {
+            return "Accessibility unavailable — expansion blocked"
+        }
+        if reason.localizedCaseInsensitiveContains("post events") {
+            return "Post Events permission is required for insertion"
+        }
+        if reason.localizedCaseInsensitiveContains("focused")
+            || reason.localizedCaseInsensitiveContains("focus") {
+            return "Focused text field unavailable — expansion blocked"
+        }
+        if reason.localizedCaseInsensitiveContains("erase precondition") {
+            return "Erase precondition failed — the target text changed"
+        }
+        if reason.localizedCaseInsensitiveContains("target application changed")
+            || reason.localizedCaseInsensitiveContains("input or target") {
+            return "Input or target application changed before insertion"
+        }
+        return "Injection refused"
     }
 
     /// §3.2 / §2.10: diagnostic block for `DiagnosticReport` — per-app delivery ratios, refuse
@@ -350,7 +550,31 @@ public final class PermissionCoordinator {
         return lines
     }
 
+    /// Bounded counterpart used by production report capture. Carries the telemetry store's full
+    /// observed-line count through composition with the tap-health footer.
+    func injectTelemetryDiagnosticProjection(
+        itemLimit: Int = DiagnosticReport.headerProjectionItemLimit,
+        byteLimit: Int = DiagnosticReport.headerProjectionByteLimit
+    ) -> DiagnosticReport.HeaderProjection {
+        let source = injectTelemetry.diagnosticSummaryProjection(
+            itemLimit: itemLimit,
+            byteLimit: byteLimit
+        )
+        var builder = DiagnosticReport.HeaderProjectionBuilder(
+            itemLimit: itemLimit,
+            byteLimit: byteLimit
+        )
+        for line in source.retainedLines { builder.observe(line) }
+        builder.observe("")
+        builder.observe(EventTapEngine.shared.tapDisableCounters.summaryLine)
+        let composedObserved = source.observedCount > Int.max - 2
+            ? Int.max
+            : source.observedCount + 2
+        return builder.finish(totalObservedCount: composedObserved)
+    }
+
     private func handleSnapshotChange(_ snapshot: PermissionSnapshot) {
+        relaunchState.observe(snapshot)
         if snapshot.canUseAX {
             ProcessIdentity.rememberAccessibilityGranted(
                 true,
@@ -360,7 +584,6 @@ public final class PermissionCoordinator {
             if axWasFalse {
                 // Newly trusted — clear relaunch nudge once AX preflight is true.
                 DevTypeLog.permission.info("[Permission] Accessibility became granted")
-                sawAXGrantedWhileUntrusted = false
             }
             axWasFalse = false
         } else {
@@ -380,6 +603,7 @@ public final class PermissionCoordinator {
     private func applyTapLifecycle(for snapshot: PermissionSnapshot, presentFailureAlert: Bool) {
         let engine = EventTapEngine.shared
         if snapshot.blocksDefaultEventTap {
+            callbackState.resetTapStartFailureEpisode()
             if engine.isTapRunning {
                 DevTypeLog.permission.notice(
                     "[Permission] Listen or Accessibility denied — stopping event tap (\(DevTypeLog.snapshotSummary(snapshot), privacy: .public))"
@@ -389,7 +613,12 @@ public final class PermissionCoordinator {
             return
         }
 
-        if !engine.isTapRunning && engine.isEnabled {
+        if engine.isTapRunning {
+            callbackState.resetTapStartFailureEpisode()
+            return
+        }
+
+        if engine.isEnabled {
             DevTypeLog.permission.info(
                 "[Permission] Listen+AX granted — attempting event tap start"
             )
@@ -399,28 +628,30 @@ public final class PermissionCoordinator {
                     "[Permission] event tap start failed despite listen+ax granted — check duplicate processes / binary identity"
                 )
                 if presentFailureAlert {
-                    onTapStartFailed?()
+                    callbackState.deliverTapStartFailure()
                 }
+            } else {
+                callbackState.resetTapStartFailureEpisode()
             }
         }
     }
 
     private func emitStatus(snapshot: PermissionSnapshot) {
         storeCachedSnapshot(snapshot)
-        let recommendsRelaunch = sawAXGrantedWhileUntrusted && !snapshot.canUseAX
+        relaunchState.observe(snapshot)
+        let recommendsRelaunch = relaunchState.recommendsRelaunch(for: snapshot)
         let status = Status(
             snapshot: snapshot,
             tapRunning: EventTapEngine.shared.isTapRunning,
             recommendsRelaunchForAX: recommendsRelaunch,
             lastInjectOutcome: lastRecordedInjectOutcome
         )
-        if status != lastEmittedStatus {
+        let changed = callbackState.deliverStatus(status)
+        if changed {
             DevTypeLog.permission.info(
-                "[Permission] status tapRunning=\(status.tapRunning, privacy: .public) relaunchAX=\(recommendsRelaunch, privacy: .public) \(DevTypeLog.snapshotSummary(snapshot), privacy: .public)"
+                "[Permission] status tapRunning=\(status.tapRunning, privacy: .public) relaunch=\(recommendsRelaunch, privacy: .public) \(DevTypeLog.snapshotSummary(snapshot), privacy: .public)"
             )
-            lastEmittedStatus = status
         }
-        onStatus?(status)
     }
 
     /// Call after Request Accessibility when preflight is still false (user may need relaunch).
@@ -429,12 +660,12 @@ public final class PermissionCoordinator {
             DevTypeLog.permission.notice(
                 "[Permission] Accessibility request returned; preflight still denied — relaunch may be required after enabling in Settings"
             )
-            sawAXGrantedWhileUntrusted = true
+            relaunchState.noteRequestResult(for: .accessibility, preflightGranted: false)
         } else {
             DevTypeLog.permission.info(
                 "[Permission] Accessibility request returned; preflight granted"
             )
-            sawAXGrantedWhileUntrusted = false
+            relaunchState.noteRequestResult(for: .accessibility, preflightGranted: true)
         }
         refresh(presentTapFailureAlert: false)
     }
@@ -445,12 +676,12 @@ public final class PermissionCoordinator {
             DevTypeLog.permission.notice(
                 "[Permission] Input Monitoring request returned; preflight still denied — enable in Settings for THIS path, then Relaunch if needed"
             )
-            // Reuse relaunch nudge; Listen flips also often need process restart.
-            sawAXGrantedWhileUntrusted = true
+            relaunchState.noteRequestResult(for: .inputMonitoring, preflightGranted: false)
         } else {
             DevTypeLog.permission.info(
                 "[Permission] Input Monitoring request returned; preflight granted"
             )
+            relaunchState.noteRequestResult(for: .inputMonitoring, preflightGranted: true)
         }
         refresh(presentTapFailureAlert: true)
     }

@@ -24,7 +24,8 @@ All common workflows are automated via shell scripts in the `Scripts/` directory
 | **Run Unit Tests** | `./Scripts/test.sh [-v]` | Runs the SwiftPM engine and AppKit-core tests (`ExpanderEngineTests`, `DevTypeAppTests`). Pins `DEVELOPER_DIR` to full Xcode — Command Line Tools-only toolchains break `swift test`. |
 | **Package Application** | `./Scripts/package-app.sh [release\|debug]` | Compiles binaries, bundles resources, stamps version from Git, and signs `.build/DevType.app`. Skips wipe+resign when nothing changed to preserve the CDHash. |
 | **Build Application** | `./Scripts/build_app.sh [release\|debug]` | Thin wrapper delegating to `package-app.sh`. |
-| **Install Application** | `./Scripts/install-app.sh [release\|debug]` | Packages if needed, installs one daily-driver copy into `/Applications` (falls back to `~/Applications`), quits other DevType processes, and quarantines stale `build/` artifacts. |
+| **Install Application** | `./Scripts/install-app.sh [release\|debug]` | Packages if needed, validates and recoverably swaps the canonical copy into `/Applications` (falls back to `~/Applications`), then quarantines stale build artifacts and a same-bundle copy at the other canonical path. |
+| **Installer Regression** | `./Scripts/test-install-app.sh` | Hermetically exercises staged-bundle validation, rollback, quarantine uniqueness, and canonical-path cleanup entirely under a temporary directory. |
 | **Local CI Verification** | `./Scripts/ci-local.sh` | Full validation pipeline: script syntax lint, plist lint, script self-tests, unit tests, debug + release builds, packaging, bundle-ID/version verification (fails if placeholder versions survive), and codesign verification. Mirrors GitHub CI. |
 | **Reset Permissions** | `./Scripts/reset-tcc.sh` | Resets the macOS TCC database for `com.devtype.app` to test fresh onboarding flows. |
 | **Release & Notarize** | `./Scripts/release.sh` | Build → Developer ID sign → notarize → staple → DMG. Takes no positional arguments; see configuration below. |
@@ -62,7 +63,7 @@ DevType maintains **2,000 unit, fuzz, and stress tests** across `Tests/ExpanderE
 ./Scripts/test.sh --filter 'EraseSafetyTests|BackspaceIntegrityTests|DoubleInjectGuardTests|EraseUndoStressTests|WhitespaceFoldingStressTests|SourceContractTests'
 
 # Show synthetic AppKit UI to check direct secret search and native status-button events
-DEVTYPE_RUN_APPKIT_SMOKE=1 ./Scripts/test.sh --filter SecretSearchWindowTests
+./Scripts/test.sh --filter SecretSearchWindowTests
 
 # Check secure-input monitor lifecycle races with Thread Sanitizer
 ./Scripts/test.sh --scratch-path /tmp/devtype-secure-input-tsan --sanitize thread \
@@ -85,7 +86,7 @@ Continuous integration (`.github/workflows/ci.yml`) runs `swift build` + `swift 
 DevType logs important runtime events using `os.Logger`:
 
 - **Subsystem**: `com.devtype.app`
-- **Categories**: `Permission`, `EventTap`, `SecureInput`, `Inject`, `Identity`, `App`, `Store`, `Debounce`, `Selection`
+- **Categories**: `Permission`, `EventTap`, `SecureInput`, `Inject`, `Identity`, `App`, `Store`, `Debounce`, `Voice`, `Selection`, `Updates`
 
 Filter logs in Terminal:
 ```bash
@@ -95,7 +96,7 @@ log stream --predicate 'subsystem == "com.devtype.app"' --level debug
 
 Two retention aids exist beyond logd, which evicts aggressively:
 
-- **`DevLogMirror`** keeps an in-process ring (4,000 lines) of the app's own log output so a diagnostic report generated later still contains the story; it is embedded in diagnostics.
+- **`DevLogMirror`** keeps an in-process ring of the app's own log output, capped independently at 4,000 lines and 1 MiB, so a diagnostic report generated later still contains the story; it is embedded in diagnostics and reports observed/retained/evicted counts.
 - **`DebugTrace`** is opt-in JSONL tracing (UserDefaults keys `DevTypeDebugTrace`, `DevTypeDebugTracePath`) for deep inject-path debugging; it is off in normal use and size-capped.
 
 ### Debugging with LLDB
@@ -130,8 +131,12 @@ packaged version with `Scripts/verify-release-version.sh` before installation.
 Before removing old build outputs, inventory the ignored `.build/`, `build/`, and `dist/`
 directories and preserve a recoverable copy of the installed app. `install-app.sh` packages
 again, so carry the same configuration, Xcode toolchain, and signing identity into installation.
-Compare the old and new designated requirements before replacing the app: the installer
-resets TCC if those requirements differ. Verify deep/strict codesign and Gatekeeper separately.
+It validates the staged signature and both identifiers before displacing the destination, keeps the
+old bundle available for rollback until the replacement verifies in place, and archives displaced
+copies under unique quarantine paths. It checks the two canonical Applications paths only; it does
+not claim to discover every DevType copy elsewhere on the machine. Compare the old and new
+designated requirements before replacing the app: the installer resets TCC if those requirements
+differ. Verify deep/strict codesign and Gatekeeper separately.
 
 ### Update Checking
 

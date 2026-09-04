@@ -17,12 +17,14 @@ Pick the recognizer in **Preferences $\to$ Voice**. Each engine reports its own 
   - The same on-device Apple Speech recognition, with the transcript polished by a local language model.
   - Apple Intelligence Foundation Models on macOS 26+; otherwise a loopback endpoint — Ollama at `http://localhost:11434/v1/chat/completions` by default, or any OpenAI-compatible local server you point it at.
   - Audio never leaves the Mac; only the recognized text is handed to the local model.
+  - Endpoint validation is enforced for local correction paths (loopback hosts only, no redirect fan-out, and operation-specific response-size limits).
 * **Local Whisper (whisper.cpp)**:
   - A `whisper-server` on loopback (`http://127.0.0.1:8080/inference` by default), noticeably stronger than Apple Speech on technical vocabulary and fully offline.
   - DevType detects an installed binary, can fetch the default `ggml-base.en.bin` (~148 MB) into `~/.cache/whisper.cpp`, and can start the server for you — or defer to one you already have running and leave it under your control.
+  - The local server path is guarded by the same transport policy used by other local providers.
 * **Gemini 3.5 Transcribe (Cloud, opt-in)**:
   - Cloud transcription that handles disfluency removal, self-correction collapse, punctuation, and formatting natively in a single pass.
-  - Requires a Google API key that you supply; it is held in the login keychain. With no key stored the engine cannot run and dictation resolves to Apple Speech instead.
+  - Requires a Google API key that you supply; it is held in the login keychain. With no key stored, Gemini remains selected and dictation fails closed with an actionable credential prompt rather than silently changing providers.
 
 ### 2. Jot Inspirations & Thought-Revision Polish
 Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS), DevType runs post-processing speech intelligence:
@@ -39,12 +41,37 @@ Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-tr
   - **Code**: Automatic identifier and operator formatting (e.g. *"user profile manager"* $\to$ `userProfileManager`, *"fat arrow"* $\to$ `=>`, *"strict equal"* $\to$ `===`, *"constant case api url"* $\to$ `API_URL`).
   - **Verbatim**: Exact transcription without styling.
 
-### 3. Hardened Audio Pipeline & Crash Journaling
+### 3. What Happens While You Speak
+
+Recognizing speech and typing it into your document are separate decisions, chosen in
+**Preferences → Voice → "While you speak"**:
+
+* **Type into the document as I speak** (default) — recognized words are typed progressively and
+  reconciled against the corrected transcript when the session ends. Fastest to read back, but the
+  document is rewritten under the caret mid-sentence.
+* **Show words in the bubble, insert at the end** — the dictation HUD shows the running transcript
+  while your document is left untouched; the finished, proofread text arrives in a single insertion.
+* **Show nothing, insert at the end** — no live recognition at all. The HUD shows only that it is
+  listening, and the finished text arrives in one insertion. This is the only mode that does not
+  need the Speech Recognition grant for a preview.
+
+Insertion is automatic in every mode — there is no confirm step. Delivery goes through
+`TextInjectionPipeline`, which writes via the Accessibility API and a synthetic paste, snapshotting
+and restoring your clipboard around it. The one exception is a password field under macOS Secure
+Input, where a synthetic paste can be dropped; DevType holds the text on the clipboard longer there
+so you can paste it yourself.
+
+Whatever the mode, a finished transcript may only *replace* on-screen dictated text while it stays
+inside the same deletion ceiling the correction policy declares (`maxDeletionRatio`). A transcript
+that accounts for materially less than what you can see is refused, and the words already on screen
+are kept — losing formatting is recoverable, losing the sentences is not.
+
+### 4. Hardened Audio Pipeline & Crash Journaling
 * **Audio Interruption Resilience**: Listens to `AVAudioEngineConfigurationChange` to handle headphones / AirPods switching without dropped taps or leaks.
 * **Millisecond-1 Audio Journaling**: 16kHz mono 16-bit PCM capture written continuously to `capture.caf` in a per-session directory under `~/Library/Application Support/DevType/VoiceSessions/`, so a crash mid-sentence leaves a recoverable recording rather than nothing.
 * **Single-Shot Watchdog Transcription**: Each session is armed with a watchdog sized from the snapshot it started with (the configured local-model timeout plus headroom, never under 5 seconds), so a wedged recognizer or corrector ends the session instead of stalling dictation.
 
-### 4. Voice Dictation HUD (`VoiceHUDPanel`)
+### 5. Voice Dictation HUD (`VoiceHUDPanel`)
 * Floating non-activating AppKit HUD that never steals key focus from the target field:
   - **Legible Liquid Glass on macOS 26+**: runtime `NSGlassEffectView` regular style with a restrained crimson tint; `NSVisualEffectView` material fallback with a crimson hairline on older macOS.
   - **Minimal content hierarchy**: one small SF Symbol/status line and the live transcript — no duplicate title, badge, cursor, or decorative waveform row.
@@ -67,7 +94,7 @@ Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-tr
 ## 🔒 Privacy & Security
 
 * **Local by default**: With **Apple Speech**, **Local AI**, or **Local Whisper** selected, no audio leaves your Mac — Apple Speech and Local AI recognize on-device, and Local Whisper talks only to a `whisper.cpp` server on loopback. Local AI additionally sends the *recognized text* (never the audio) to your local model endpoint.
-* **Cloud is opt-in and inert without your key**: **Gemini 3.5 Transcribe** is the one engine that uploads audio, to Google, and only after you store your own API key in the login keychain. Until then the engine cannot run and dictation resolves to Apple Speech.
+* **Cloud requires two explicit choices**: **Gemini 3.5 Transcribe** is the one engine that uploads audio, to Google. It remains inert until you both store your own API key in the login keychain and grant the separate cloud-audio consent in Preferences. If either prerequisite is missing, DevType refuses before capture rather than silently changing providers or routes.
 * **Routes are enforced, not merely documented**: every session is stamped with the privacy route its engine implies (`onDeviceOnly`, `localNetworkOnly`, `cloudPermitted`), and the speech provider registry will not hand back a provider whose own route that session does not permit.
 
 ---

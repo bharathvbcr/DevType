@@ -263,7 +263,8 @@ final class VoiceSubsystemHardeningStressTests: XCTestCase {
                 mimeType: "audio/flac",
                 audioDurationSeconds: 10.0,
                 steeringPrompt: "Test",
-                apiKey: "dummy-key"
+                apiKey: "dummy-key",
+                uploadAuthorized: { true }
             )
             XCTFail("Expected payloadTooLarge error")
         } catch let error as GeminiTranscriptionError {
@@ -281,7 +282,8 @@ final class VoiceSubsystemHardeningStressTests: XCTestCase {
                 mimeType: "audio/flac",
                 audioDurationSeconds: 1.0,
                 steeringPrompt: "Test",
-                apiKey: "dummy-key"
+                apiKey: "dummy-key",
+                uploadAuthorized: { true }
             )
             XCTFail("Expected emptyTranscript error")
         } catch let error as GeminiTranscriptionError {

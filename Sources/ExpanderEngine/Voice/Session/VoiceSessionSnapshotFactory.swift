@@ -29,21 +29,25 @@ public enum VoiceSessionSnapshotFactory {
     ///   - processIdentifier: target app pid, used as the delivery lease.
     ///   - generation: monotonic session generation, so late callbacks from a previous
     ///     dictation are rejected rather than applied to this one.
+    ///   - engine: provider choice captured before any asynchronous permission or consent prompt.
+    ///     Callers that do not have an asynchronous preflight may use the current effective engine.
     public static func make(
         bundleIdentifier: String?,
         processIdentifier: Int32,
         generation: SessionGeneration,
+        engine: TranscriptionEngine = VoicePreferences.effectiveEngine,
         locale: Locale = Locale.current
     ) -> VoiceSessionSnapshot {
-        let engine = VoicePreferences.effectiveEngine
         let route = privacyRoute(for: engine)
         let tone = VoicePreferences.effectiveToneCategory(forBundleID: bundleIdentifier)
+        let correctionPlan = correctionProviderPlan(for: engine, route: route)
 
         return VoiceSessionSnapshot(
             generation: generation,
             localeIdentifier: locale.identifier,
             speechProvider: speechProvider(for: engine, route: route),
-            correctionProvider: correctionProvider(for: engine, route: route),
+            correctionProvider: correctionPlan.preferred,
+            correctionFallbackProviderIDs: correctionPlan.fallbackIDs,
             privacyRoute: route,
             vocabularySnapshot: VocabularySnapshot(
                 terms: Array(VoicePreferences.customDictionary.values).sorted()
@@ -79,6 +83,27 @@ public enum VoiceSessionSnapshotFactory {
         for engine: TranscriptionEngine,
         route: PrivacyRoute
     ) -> SpeechProviderDescriptor {
+        let supportsSpeechAnalyzer: Bool
+        if #available(macOS 26.0, *) {
+            supportsSpeechAnalyzer = true
+        } else {
+            supportsSpeechAnalyzer = false
+        }
+        return speechProvider(
+            for: engine,
+            route: route,
+            supportsSpeechAnalyzer: supportsSpeechAnalyzer
+        )
+    }
+
+    /// Injectable platform decision used by the snapshot contract tests. Runtime readiness is
+    /// still resolved later by `SpeechProviderRegistry`; this chooses only the preferred provider
+    /// that the immutable session manifest records before asynchronous preflight.
+    static func speechProvider(
+        for engine: TranscriptionEngine,
+        route: PrivacyRoute,
+        supportsSpeechAnalyzer: Bool
+    ) -> SpeechProviderDescriptor {
         switch engine {
         case .gemini:
             return SpeechProviderDescriptor(
@@ -99,30 +124,39 @@ public enum VoiceSessionSnapshotFactory {
                 supportsContextualStrings: false
             )
         case .localLLM, .appleSpeech:
+            let usesAnalyzer = supportsSpeechAnalyzer
             return SpeechProviderDescriptor(
-                id: ProviderID.appleSpeechLegacy,
+                id: usesAnalyzer ? ProviderID.appleSpeechAnalyzer : ProviderID.appleSpeechLegacy,
                 displayName: engine.displayName,
-                modelVersion: "sfspeech",
+                modelVersion: usesAnalyzer ? "system" : "sfspeech",
                 privacyRoute: .onDeviceOnly,
-                supportsStreaming: true,
+                supportsStreaming: !usesAnalyzer,
                 supportsContextualStrings: true
             )
         }
     }
 
-    private static func correctionProvider(
+    private struct CorrectionProviderPlan {
+        let preferred: CorrectionProviderDescriptor
+        let fallbackIDs: [String]
+    }
+
+    private static func correctionProviderPlan(
         for engine: TranscriptionEngine,
         route: PrivacyRoute
-    ) -> CorrectionProviderDescriptor {
+    ) -> CorrectionProviderPlan {
         // Proofread-before-insert replaces the correction stage for every engine, including
         // Gemini: the user asked for their words to be proofread, and which recognizer
         // produced them does not change that. The registry probes it and falls back on its
         // own if Apple Intelligence is unavailable.
         if VoicePreferences.isProofreadBeforeInsertEnabled, #available(macOS 26.0, *) {
-            return descriptor(
-                id: ProviderID.proofreadCorrector,
-                name: "Apple Intelligence (proofread)",
-                route: .onDeviceOnly
+            return CorrectionProviderPlan(
+                preferred: descriptor(
+                    id: ProviderID.proofreadCorrector,
+                    name: "Apple Intelligence (proofread)",
+                    route: .onDeviceOnly
+                ),
+                fallbackIDs: []
             )
         }
 
@@ -130,31 +164,68 @@ public enum VoiceSessionSnapshotFactory {
         case .gemini:
             // Gemini punctuates and formats during transcription; a second correction
             // pass would only add latency and a chance to make it worse.
-            return descriptor(id: ProviderID.deterministicCorrector, name: "Built-in", route: .onDeviceOnly)
+            return CorrectionProviderPlan(
+                preferred: descriptor(id: ProviderID.deterministicCorrector, name: "Built-in", route: .onDeviceOnly),
+                fallbackIDs: []
+            )
 
         case .localLLM:
-            // Apple Intelligence is the better default when it is actually usable: no
-            // server to run, nothing on the network. The registry probes it and falls back
-            // on its own, so an optimistic choice here is safe.
+            let preferAppleFoundationModels: Bool
             if #available(macOS 26.0, *) {
-                return descriptor(
-                    id: ProviderID.appleFoundationModels,
-                    name: "Apple Intelligence",
-                    route: .onDeviceOnly
-                )
+                preferAppleFoundationModels = true
+            } else {
+                preferAppleFoundationModels = false
             }
-            let endpoint = VoicePreferences.localLLMEndpoint.absoluteString
-            if endpoint.contains("11434") {
-                return descriptor(id: ProviderID.ollamaCorrector, name: "Ollama", route: .localNetworkOnly)
-            }
-            return descriptor(
-                id: ProviderID.openAICompatibleCorrector,
-                name: "Local endpoint",
-                route: .localNetworkOnly
+            let providerIDs = localCorrectionProviderIDs(
+                for: VoicePreferences.localLLMEndpoint,
+                preferAppleFoundationModels: preferAppleFoundationModels
+            )
+            let preferredID = providerIDs[0]
+            return CorrectionProviderPlan(
+                preferred: descriptor(
+                    id: preferredID,
+                    name: correctionProviderName(for: preferredID),
+                    route: preferredID == ProviderID.appleFoundationModels ? .onDeviceOnly : .localNetworkOnly
+                ),
+                fallbackIDs: Array(providerIDs.dropFirst())
             )
 
         case .whisperLocal, .appleSpeech:
-            return descriptor(id: ProviderID.deterministicCorrector, name: "Built-in", route: .onDeviceOnly)
+            return CorrectionProviderPlan(
+                preferred: descriptor(id: ProviderID.deterministicCorrector, name: "Built-in", route: .onDeviceOnly),
+                fallbackIDs: []
+            )
+        }
+    }
+
+    /// Selects the wire contract from the endpoint's API path. Ollama serves both contracts on
+    /// port 11434, so port-based routing can pair an OpenAI path with an incompatible native body.
+    static func localCorrectionProviderID(for endpoint: URL) -> String {
+        guard let route = try? LocalCorrectionEndpointRoute.resolve(endpoint) else {
+            // Preferences accepts custom OpenAI-compatible paths; retain that general-purpose
+            // provider as the safe default and let its readiness probe report a bad route.
+            return ProviderID.openAICompatibleCorrector
+        }
+        return route.isOllamaNative ? ProviderID.ollamaCorrector : ProviderID.openAICompatibleCorrector
+    }
+
+    /// Ordered model-backed providers for Local AI. The deterministic corrector is the registry's
+    /// universal final floor and is intentionally not duplicated in every snapshot.
+    public static func localCorrectionProviderIDs(
+        for endpoint: URL,
+        preferAppleFoundationModels: Bool
+    ) -> [String] {
+        let loopbackID = localCorrectionProviderID(for: endpoint)
+        return preferAppleFoundationModels
+            ? [ProviderID.appleFoundationModels, loopbackID]
+            : [loopbackID]
+    }
+
+    private static func correctionProviderName(for providerID: String) -> String {
+        switch providerID {
+        case ProviderID.appleFoundationModels: return "Apple Intelligence"
+        case ProviderID.ollamaCorrector: return "Ollama"
+        default: return "Local endpoint"
         }
     }
 

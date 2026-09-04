@@ -2,6 +2,76 @@ import AppKit
 import Carbon.HIToolbox
 import ExpanderEngine
 
+/// User-facing action metadata shared by palette rendering and filtering.
+///
+/// Keeping this mapping outside the controller prevents the row label and the search corpus from
+/// drifting apart. Descriptions are keys derived from the action's canonical title key; behavior
+/// remains an explicit semantic classification because it also drives the badge tint.
+enum AIActionBehavior: CaseIterable, Equatable {
+    case preserves
+    case shortens
+    case expands
+    case rewrites
+
+    var localizationKey: String {
+        switch self {
+        case .preserves: return "ai.badge.preserves"
+        case .shortens: return "ai.badge.shortens"
+        case .expands: return "ai.badge.expands"
+        case .rewrites: return "ai.badge.rewrites"
+        }
+    }
+}
+
+struct AIActionPresentation: Equatable {
+    let kind: AITransformKind
+
+    var descriptionKey: String { "\(kind.localizationKey).description" }
+
+    var behavior: AIActionBehavior {
+        switch kind {
+        case .proofread, .translate, .translateTelugu, .translateHindi:
+            return .preserves
+        case .condense, .mergeRewrite, .gitCommitMessage, .removeMarkdown:
+            return .shortens
+        case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
+            return .expands
+        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance,
+             .toJson, .sqlQuery, .fixCode, .custom, .toMarkdown:
+            return .rewrites
+        }
+    }
+}
+
+/// Immutable filter result so zero matches is a first-class presentation state rather than an
+/// accidental empty table. `localize` is injected to make every searchable field testable.
+struct AIActionPaletteProjection: Equatable {
+    let actions: [AITransformKind]
+
+    init(
+        actions candidates: [AITransformKind],
+        query: String,
+        localize: (String) -> String
+    ) {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else {
+            actions = candidates
+            return
+        }
+        actions = candidates.filter { kind in
+            let presentation = AIActionPresentation(kind: kind)
+            return TokenizedFilter.matches(query: needle, fields: [
+                localize(kind.localizationKey),
+                localize(presentation.descriptionKey),
+                localize(presentation.behavior.localizationKey)
+            ])
+        }
+    }
+
+    var showsEmptyState: Bool { actions.isEmpty }
+    var initialSelection: Int? { actions.isEmpty ? nil : 0 }
+}
+
 /// Spotlight-style action picker for on-device AI transforms (hotkey path).
 ///
 /// Modeled on `InlineSearchPanel`: suspend matching on open, resume on close,
@@ -204,6 +274,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
     private let customField = NSTextField()
     private let tableView = NSTableView()
     private var scrollView = NSScrollView()
+    private let emptyState = NSView()
 
     init(
         input: String,
@@ -305,7 +376,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         root.addSubview(previewBox)
 
         // Search Field
-        searchField.placeholderString = loc.s("manager.filter") + "…"
+        searchField.placeholderString = loc.s("ai.panel.searchPlaceholder")
         searchField.font = DevTypeTheme.font(12)
         searchField.focusRingType = .none
         searchField.delegate = self
@@ -335,10 +406,11 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         tableView.setAccessibilityLabel(loc.s("ai.palette.title"))
         scrollView.documentView = tableView
         root.addSubview(scrollView)
+        setupEmptyState(in: root)
 
         // Custom Instruction Field
         customField.placeholderString = modelUnavailable == nil
-            ? loc.s("ai.palette.hint.pick") + " / Custom instruction…"
+            ? loc.s("ai.palette.hint.pick") + " / " + loc.s("ai.panel.customPrompt")
             : loc.s("ai.palette.customUnavailable")
         customField.isEnabled = modelUnavailable == nil
         customField.font = DevTypeTheme.font(12)
@@ -352,7 +424,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
 
         let quickCap = KeyCapView("1-9")
         let quickLabel = DevTypeTheme.makeLabel(
-            "Quick",
+            loc.s("ai.palette.quick"),
             font: DevTypeTheme.font(10.5, .medium),
             color: DevTypeTheme.textTertiary
         )
@@ -423,12 +495,62 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         view = glass
     }
 
+    private func setupEmptyState(in root: NSView) {
+        emptyState.translatesAutoresizingMaskIntoConstraints = false
+        emptyState.isHidden = true
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = DevTypeTheme.symbol(
+            "text.magnifyingglass",
+            size: 26,
+            weight: .light,
+            color: DevTypeTheme.accent.withAlphaComponent(0.7)
+        )
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.setAccessibilityElement(false)
+
+        let title = DevTypeTheme.makeLabel(
+            loc.s("ai.palette.empty"),
+            font: DevTypeTheme.font(13, .semibold),
+            color: DevTypeTheme.textSecondary
+        )
+        title.translatesAutoresizingMaskIntoConstraints = false
+        let subtitle = DevTypeTheme.makeLabel(
+            loc.s("ai.palette.emptyHint"),
+            font: DevTypeTheme.font(11),
+            color: DevTypeTheme.textTertiary
+        )
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [icon, title, subtitle])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        emptyState.addSubview(stack)
+        emptyState.setAccessibilityElement(true)
+        emptyState.setAccessibilityRole(.group)
+        emptyState.setAccessibilityLabel(loc.s("ai.palette.empty"))
+        root.addSubview(emptyState)
+
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: emptyState.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: emptyState.centerYAnchor),
+            emptyState.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            emptyState.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            emptyState.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            emptyState.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor)
+        ])
+    }
+
     override func viewDidAppear() {
         super.viewDidAppear()
-        tableView.reloadData()
-        if !filteredActions.isEmpty {
-            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        }
+        applyProjection(AIActionPaletteProjection(
+            actions: allActions,
+            query: searchField.stringValue,
+            localize: { loc.s($0) }
+        ))
         installKeyMonitor()
     }
 
@@ -501,23 +623,23 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
 
     func controlTextDidChange(_ obj: Notification) {
         if (obj.object as? NSSearchField) === searchField {
-            let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if query.isEmpty {
-                filteredActions = allActions
-            } else {
-                filteredActions = allActions.filter { kind in
-                    TokenizedFilter.matches(query: query, fields: [
-                        loc.s(kind.localizationKey),
-                        description(for: kind),
-                        behaviorTag(for: kind)
-                    ])
-                }
-            }
-            selection = 0
-            tableView.reloadData()
-            if !filteredActions.isEmpty {
-                tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-            }
+            applyProjection(AIActionPaletteProjection(
+                actions: allActions,
+                query: searchField.stringValue,
+                localize: { loc.s($0) }
+            ))
+        }
+    }
+
+    private func applyProjection(_ projection: AIActionPaletteProjection) {
+        filteredActions = projection.actions
+        selection = projection.initialSelection ?? -1
+        tableView.reloadData()
+        emptyState.isHidden = !projection.showsEmptyState
+        if let selected = projection.initialSelection {
+            tableView.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
+        } else {
+            tableView.deselectAll(nil)
         }
     }
 
@@ -568,12 +690,13 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         }
 
         let numStr = row < 9 ? "\(row + 1)" : nil
+        let presentation = AIActionPresentation(kind: kind)
         cell.configure(
             shortcut: numStr,
             title: loc.s(kind.localizationKey),
-            detail: description(for: kind),
-            tag: behaviorTag(for: kind),
-            tagTint: behaviorTint(for: kind)
+            detail: loc.s(presentation.descriptionKey),
+            tag: loc.s(presentation.behavior.localizationKey),
+            tagTint: behaviorTint(for: presentation.behavior)
         )
         return cell
     }
@@ -588,57 +711,15 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         }
     }
 
-    private func description(for kind: AITransformKind) -> String {
-        switch kind {
-        case .proofread: return "Fix grammar, spelling, and typos"
-        case .rewrite: return "Improve clarity, flow, and tone"
-        case .paraphrase: return "Rephrase with alternative words"
-        case .expand: return "Flesh out thoughts and add detail"
-        case .condense: return "Make concise and remove fluff"
-        case .mergeRewrite: return "Fold overlapping notes into one"
-        case .formal: return "Professional and polished tone"
-        case .friendly: return "Warm and approachable tone"
-        case .bulletize: return "Convert into structured bullets"
-        case .promptEnhance: return "Structure into an effective prompt"
-        case .explainCode: return "Explain code logic line by line"
-        case .generateDocstring: return "Generate documentation docstrings"
-        case .fixCode: return "Identify and repair code bugs"
-        case .toJson: return "Convert unstructured text to JSON"
-        case .generateUnitTests: return "Write test cases for code"
-        case .gitCommitMessage: return "Write conventional commit message"
-        case .explainRegex: return "Break down regular expressions"
-        case .sqlQuery: return "Generate SQL from plain English"
-        case .translate: return "Translate text into English"
-        case .translateTelugu: return "Translate into Romanized Telugu"
-        case .translateHindi: return "Translate into Romanized Hindi"
-        case .removeMarkdown: return "Strip Markdown down to plain text"
-        case .toMarkdown: return "Structure plain text as Markdown"
-        case .custom: return "Apply custom instructions"
-        }
-    }
-
-    private func behaviorTag(for kind: AITransformKind) -> String {
-        switch kind {
-        case .proofread, .translate, .translateTelugu, .translateHindi:
-            return "Preserves length"
-        case .condense, .mergeRewrite, .gitCommitMessage, .removeMarkdown:
-            return "Shortens"
-        case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
-            return "Expands"
-        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance, .toJson, .sqlQuery, .fixCode, .custom, .toMarkdown:
-            return "Rewrites"
-        }
-    }
-
-    private func behaviorTint(for kind: AITransformKind) -> NSColor {
-        switch kind {
-        case .proofread, .translate, .translateTelugu, .translateHindi:
+    private func behaviorTint(for behavior: AIActionBehavior) -> NSColor {
+        switch behavior {
+        case .preserves:
             return DevTypeTheme.statusGreen
-        case .condense, .mergeRewrite, .gitCommitMessage, .removeMarkdown:
+        case .shortens:
             return DevTypeTheme.statusOrange
-        case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
+        case .expands:
             return DevTypeTheme.statusBlue
-        case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance, .toJson, .sqlQuery, .fixCode, .custom, .toMarkdown:
+        case .rewrites:
             return DevTypeTheme.accent
         }
     }

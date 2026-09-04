@@ -10,6 +10,8 @@ import ExpanderEngine
 final class HomeViewController: NSViewController {
     private let loc = LocalizationManager.shared
     private let store: SnippetStore
+    private let engine: EventTapEngine
+    private let resumeTap: () -> Void
     private weak var hotkeyManager: HotkeyManager?
 
     // UI Elements
@@ -20,12 +22,33 @@ final class HomeViewController: NSViewController {
     private let recentStack = NSStackView()
     private let warningBanner = NSView()
     private let warningLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11.5), color: DevTypeTheme.statusOrange, wrapping: true)
+    private let searchShortcutPill = PillBadgeView(
+        text: HotkeyPreferences.inlineSearchShortcut.keyCaps.joined(separator: " "),
+        tint: DevTypeTheme.accent
+    )
+    private let aiShortcutPill = PillBadgeView(
+        text: HotkeyPreferences.aiPaletteShortcut.keyCaps.joined(separator: " "),
+        tint: DevTypeTheme.accent
+    )
+    private let voiceShortcutPill = PillBadgeView(
+        text: HotkeyPreferences.voiceShortcut.keyCaps.joined(separator: " "),
+        tint: DevTypeTheme.accent
+    )
 
     private var statusObserver: NSObjectProtocol?
 
-    init(store: SnippetStore = .shared, hotkeyManager: HotkeyManager? = nil) {
+    init(
+        store: SnippetStore = .shared,
+        hotkeyManager: HotkeyManager? = nil,
+        engine: EventTapEngine = .shared,
+        resumeTap: @escaping () -> Void = {
+            PermissionCoordinator.shared.refresh(presentTapFailureAlert: true)
+        }
+    ) {
         self.store = store
         self.hotkeyManager = hotkeyManager
+        self.engine = engine
+        self.resumeTap = resumeTap
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -62,24 +85,6 @@ final class HomeViewController: NSViewController {
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(mainStack)
 
-        // Header Title
-        let headerLabel = DevTypeTheme.makeLabel(
-            loc.s("prefs.tab.home"),
-            font: DevTypeTheme.font(20, .bold),
-            color: DevTypeTheme.textPrimary
-        )
-        let subtitleLabel = DevTypeTheme.makeLabel(
-            loc.s("prefs.tab.home.subtitle"),
-            font: DevTypeTheme.font(12),
-            color: DevTypeTheme.textSecondary
-        )
-        let headerStack = NSStackView(views: [headerLabel, subtitleLabel])
-        headerStack.orientation = .vertical
-        headerStack.alignment = .leading
-        headerStack.spacing = 2
-        headerStack.translatesAutoresizingMaskIntoConstraints = false
-        mainStack.addArrangedSubview(headerStack)
-
         // 1. Engine Status Card
         let statusCard = makeStatusCard()
         mainStack.addArrangedSubview(statusCard)
@@ -104,12 +109,15 @@ final class HomeViewController: NSViewController {
         let snippetsDualCard = makeSnippetsDualCard()
         mainStack.addArrangedSubview(snippetsDualCard)
 
+        scroll.documentView = root
+
         // Constraints
         NSLayoutConstraint.activate([
             mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
             mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
             mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20),
+            root.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
 
             statusCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             warningBanner.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
@@ -119,7 +127,6 @@ final class HomeViewController: NSViewController {
             snippetsDualCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor)
         ])
 
-        scroll.documentView = root
         view = scroll
 
         installObservers()
@@ -340,21 +347,18 @@ final class HomeViewController: NSViewController {
         )
         title.translatesAutoresizingMaskIntoConstraints = false
 
-        let searchPill = PillBadgeView(text: "⌘ /", tint: DevTypeTheme.accent)
         let searchLabel = DevTypeTheme.makeLabel(loc.s("home.hotkeys.search"), font: DevTypeTheme.font(12), color: DevTypeTheme.textSecondary)
-        let searchStack = NSStackView(views: [searchPill, searchLabel])
+        let searchStack = NSStackView(views: [searchShortcutPill, searchLabel])
         searchStack.orientation = .horizontal
         searchStack.spacing = 6
 
-        let aiPill = PillBadgeView(text: "⌥ ⌘ /", tint: DevTypeTheme.accent)
         let aiLabel = DevTypeTheme.makeLabel(loc.s("home.hotkeys.ai"), font: DevTypeTheme.font(12), color: DevTypeTheme.textSecondary)
-        let aiStack = NSStackView(views: [aiPill, aiLabel])
+        let aiStack = NSStackView(views: [aiShortcutPill, aiLabel])
         aiStack.orientation = .horizontal
         aiStack.spacing = 6
 
-        let voicePill = PillBadgeView(text: "⌥ Space", tint: DevTypeTheme.accent)
         let voiceLabel = DevTypeTheme.makeLabel(loc.s("home.hotkeys.dictation"), font: DevTypeTheme.font(12), color: DevTypeTheme.textSecondary)
-        let voiceStack = NSStackView(views: [voicePill, voiceLabel])
+        let voiceStack = NSStackView(views: [voiceShortcutPill, voiceLabel])
         voiceStack.orientation = .horizontal
         voiceStack.spacing = 6
 
@@ -455,18 +459,31 @@ final class HomeViewController: NSViewController {
     // MARK: - Actions
 
     @objc private func statusActionTapped() {
-        let isPaused = UserDefaults.standard.bool(forKey: "devtype.expansionPaused")
-        if isPaused {
-            UserDefaults.standard.set(false, forKey: "devtype.expansionPaused")
-            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
-            DevTypeAccessibility.announce(loc.s("home.status.active"))
-        } else if !PermissionProbe().canListenTap() {
+        let snapshot = PermissionProbe().snapshot()
+        if !engine.isEnabled {
+            engine.isEnabled = true
+            if !engine.isTapRunning {
+                if snapshot.blocksDefaultEventTap {
+                    (NSApp.delegate as? AppDelegate)?.openPermissionRecovery(nil)
+                } else {
+                    resumeTap()
+                }
+            }
+            if engine.isTapRunning {
+                DevTypeAccessibility.announce(loc.s("home.status.active"))
+            }
+        } else if EngineDisplayStatus.resolve(
+            snapshot: snapshot,
+            isTapRunning: engine.isTapRunning,
+            isEnabled: engine.isEnabled,
+            isSecureInputActive: engine.isSecureInputActive
+        ).requiresAction {
             (NSApp.delegate as? AppDelegate)?.openPermissionRecovery(nil)
         } else {
-            UserDefaults.standard.set(true, forKey: "devtype.expansionPaused")
-            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+            engine.isEnabled = false
             DevTypeAccessibility.announce(loc.s("home.status.paused"))
         }
+        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         refresh()
     }
 
@@ -481,16 +498,23 @@ final class HomeViewController: NSViewController {
             draft: nil,
             groups: store.loadGroups(),
             currentGroupID: store.loadGroups().first?.id,
-            validate: { _, _ in nil },
-            completion: { [weak self] result, chosenGroupID in
-                guard let self, let snippet = result else { return }
-                var groups = self.store.loadGroups()
-                let targetGroupID = chosenGroupID ?? groups.first?.id
-                if let targetGroupID, let index = groups.firstIndex(where: { $0.id == targetGroupID }) {
-                    groups[index].snippets.append(snippet)
-                    _ = self.store.saveGroups(groups)
-                    self.refresh()
-                }
+            completion: { [weak self] snippet, chosenGroupID in
+                guard let self else { return .refused(.failed("Home is unavailable")) }
+                return .mutating(
+                    store: self.store,
+                    mutation: { latest in
+                        guard let after = SnippetLibraryEdit.applying(
+                            snippet: snippet,
+                            existingID: nil,
+                            chosenGroupID: chosenGroupID,
+                            fallbackGroupID: latest.first?.id,
+                            to: latest
+                        ) else { return false }
+                        latest = after
+                        return true
+                    },
+                    finalize: { [weak self] _, _ in self?.refresh() }
+                )
             }
         )
     }
@@ -505,16 +529,23 @@ final class HomeViewController: NSViewController {
                 draft: draft,
                 groups: self.store.loadGroups(),
                 currentGroupID: self.store.loadGroups().first?.id,
-                validate: { _, _ in nil },
-                completion: { [weak self] result, chosenGroupID in
-                    guard let self, let snippet = result else { return }
-                    var groups = self.store.loadGroups()
-                    let targetGroupID = chosenGroupID ?? groups.first?.id
-                    if let targetGroupID, let index = groups.firstIndex(where: { $0.id == targetGroupID }) {
-                        groups[index].snippets.append(snippet)
-                        _ = self.store.saveGroups(groups)
-                        self.refresh()
-                    }
+                completion: { [weak self] snippet, chosenGroupID in
+                    guard let self else { return .refused(.failed("Home is unavailable")) }
+                    return .mutating(
+                        store: self.store,
+                        mutation: { latest in
+                            guard let after = SnippetLibraryEdit.applying(
+                                snippet: snippet,
+                                existingID: nil,
+                                chosenGroupID: chosenGroupID,
+                                fallbackGroupID: latest.first?.id,
+                                to: latest
+                            ) else { return false }
+                            latest = after
+                            return true
+                        },
+                        finalize: { [weak self] _, _ in self?.refresh() }
+                    )
                 }
             )
         }
@@ -529,19 +560,29 @@ final class HomeViewController: NSViewController {
     // MARK: - Refresh
 
     func refresh() {
-        let isPaused = UserDefaults.standard.bool(forKey: "devtype.expansionPaused")
+        refreshShortcutPresentation()
         let snapshot = PermissionProbe().snapshot()
+        let display = EngineDisplayStatus.resolve(
+            snapshot: snapshot,
+            isTapRunning: engine.isTapRunning,
+            isEnabled: engine.isEnabled,
+            isSecureInputActive: engine.isSecureInputActive
+        )
 
-        if !snapshot.canListenTap || !snapshot.canUseAX {
+        switch display {
+        case .needsPermissions:
             statusPill.update(text: loc.s("home.status.needsPermissions"), tint: DevTypeTheme.accent)
             statusActionBtn.title = loc.s("home.action.fixPermissions")
-        } else if isPaused {
+        case .tapFailed:
+            statusPill.update(text: loc.s("status.tapFailed"), tint: DevTypeTheme.accent)
+            statusActionBtn.title = loc.s("home.action.fixPermissions")
+        case .paused:
             statusPill.update(text: loc.s("home.status.paused"), tint: DevTypeTheme.statusOrange)
             statusActionBtn.title = loc.s("home.action.resume")
-        } else if SecureInputMonitor.shared.checkLockStatus().isLocked {
+        case .secure:
             statusPill.update(text: loc.s("home.status.secureInput"), tint: DevTypeTheme.statusOrange)
             statusActionBtn.title = loc.s("home.action.pause")
-        } else {
+        case .active:
             statusPill.update(text: loc.s("home.status.active"), tint: DevTypeTheme.statusGreen)
             statusActionBtn.title = loc.s("home.action.pause")
         }
@@ -558,6 +599,24 @@ final class HomeViewController: NSViewController {
         // Snippets lists
         populateSnippetsList(topStack, snippets: store.topUsedSnippets(limit: 4))
         populateSnippetsList(recentStack, snippets: store.recentlyUsedSnippets(limit: 4))
+    }
+
+    private func refreshShortcutPresentation() {
+        let tint = HotkeyPreferences.shortcutsDisabled
+            ? DevTypeTheme.textTertiary
+            : DevTypeTheme.accent
+        searchShortcutPill.update(
+            text: HotkeyPreferences.inlineSearchShortcut.keyCaps.joined(separator: " "),
+            tint: tint
+        )
+        aiShortcutPill.update(
+            text: HotkeyPreferences.aiPaletteShortcut.keyCaps.joined(separator: " "),
+            tint: tint
+        )
+        voiceShortcutPill.update(
+            text: HotkeyPreferences.voiceShortcut.keyCaps.joined(separator: " "),
+            tint: tint
+        )
     }
 
     private func populateSnippetsList(_ stack: NSStackView, snippets: [SnippetModel]) {

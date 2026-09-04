@@ -463,8 +463,8 @@ final class SecretConsolidationTests: XCTestCase {
         _ = store.store("keep", for: live)
         _ = store.store("orphan", for: UUID())
 
-        let removed = store.purgeOrphans(keeping: [live])
-        XCTAssertEqual(removed, 1)
+        let summary = store.purgeOrphans(keeping: [live])
+        XCTAssertEqual(summary, .init(attempted: 1, removed: 1, failed: 0))
         XCTAssertEqual(store.secret(for: live), "keep")
         XCTAssertTrue(
             tier.contains(account: ConsolidatedSecretBackingStore.masterKeyAccount),

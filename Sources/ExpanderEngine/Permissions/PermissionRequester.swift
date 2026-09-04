@@ -40,8 +40,31 @@ public final class PermissionRequester {
     private var setupHoldsRegular = false
     private var restoreWorkItem: DispatchWorkItem?
     private var resignObserver: NSObjectProtocol?
+    private let microphoneRequest: @Sendable () async -> Bool
+    private let microphonePreflight: @Sendable () -> Bool
+    private let speechRequest: @Sendable () async -> SpeechAuthorization.Status
+    private let speechStatus: @Sendable () -> SpeechAuthorization.Status
 
-    public init() {}
+    public convenience init() {
+        self.init(
+            microphoneRequest: { await DurableVoiceCapture.requestMicrophonePermission() },
+            microphonePreflight: { DurableVoiceCapture.checkMicrophonePermission() },
+            speechRequest: { await SpeechAuthorization.request() },
+            speechStatus: { SpeechAuthorization.status() }
+        )
+    }
+
+    init(
+        microphoneRequest: @escaping @Sendable () async -> Bool,
+        microphonePreflight: @escaping @Sendable () -> Bool,
+        speechRequest: @escaping @Sendable () async -> SpeechAuthorization.Status,
+        speechStatus: @escaping @Sendable () -> SpeechAuthorization.Status
+    ) {
+        self.microphoneRequest = microphoneRequest
+        self.microphonePreflight = microphonePreflight
+        self.speechRequest = speechRequest
+        self.speechStatus = speechStatus
+    }
 
     /// Hold `.regular` for the Setup window lifetime (SnipKey-style Dock prompts without accessory-only Request dance).
     public func beginSetupActivation() {
@@ -293,7 +316,11 @@ public final class PermissionRequester {
     }
 
     @discardableResult
-    public func request(kind: PermissionKind) -> RequestResult {
+    /// Generic request entry point for callers that operate on a `PermissionKind` value.
+    /// Voice permissions are asynchronous system APIs; keeping this method async prevents a
+    /// semaphore wait from freezing AppKit while the permission sheet itself needs the main run
+    /// loop. The dedicated CG/AX request methods remain synchronous.
+    public func request(kind: PermissionKind) async -> RequestResult {
         switch kind {
         case .accessibility:
             return requestAccessibility()
@@ -302,24 +329,19 @@ public final class PermissionRequester {
         case .postEvent:
             return requestPostEvent()
         case .microphone:
-            final class GrantBox: @unchecked Sendable { var granted = false }
-            let box = GrantBox()
-            let sem = DispatchSemaphore(value: 0)
-            DurableVoiceCapture.requestMicrophonePermission { result in
-                box.granted = result
-                sem.signal()
-            }
-            _ = sem.wait(timeout: .now() + 2.0)
+            let apiGranted = await microphoneRequest()
             return RequestResult(
                 kind: .microphone,
-                apiReturnedTrue: box.granted,
-                preflightGranted: DurableVoiceCapture.checkMicrophonePermission()
+                apiReturnedTrue: apiGranted,
+                preflightGranted: microphonePreflight()
             )
         case .speechRecognition:
+            let initial = speechStatus()
+            let resolved = initial == .notDetermined ? await speechRequest() : initial
             return RequestResult(
                 kind: .speechRecognition,
-                apiReturnedTrue: true,
-                preflightGranted: true
+                apiReturnedTrue: resolved == .authorized,
+                preflightGranted: speechStatus() == .authorized
             )
         }
     }

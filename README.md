@@ -193,8 +193,8 @@ Run Apple Foundation Models text transformations on-device with zero cloud telem
 
 Hold `⌘⌥V` to talk and DevType types what you said into the frontmost app, resolving self-corrections ("no wait, make that Tuesday") and stripping fillers along the way.
 
-- **Choose your recognizer** in **Preferences → Voice**: Apple Speech, an on-device local model, or a local `whisper.cpp` server. Each engine reports its own readiness so you know what is actually installed.
-- **Cloud is opt-in**: the cloud engine is inert until you add your own API key, and it is never the default.
+- **Choose your recognizer** in **Preferences → Voice**: Apple Speech, Local AI, a loopback `whisper.cpp` server, or the opt-in Gemini cloud engine. Each engine reports its own readiness so you know what is actually installed or reachable.
+- **Cloud requires explicit consent**: the cloud engine is inert until you add your own API key and separately grant cloud-audio consent in Preferences; it is never the default, and a missing prerequisite is refused before recording.
 - **Custom vocabulary** teaches DevType the names, products, and jargon that generic recognizers get wrong.
 
 Full detail in [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).

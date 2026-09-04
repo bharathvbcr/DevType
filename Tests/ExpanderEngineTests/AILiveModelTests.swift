@@ -1,10 +1,16 @@
 import XCTest
 @testable import ExpanderEngine
 
-/// Live checks against the real on-device model. Skipped unless `DEVTYPE_LIVE_AI=1`,
-/// so ordinary `swift test` runs (and CI) never depend on Apple Intelligence.
+/// Live checks against the real on-device model.
 ///
-///     DEVTYPE_LIVE_AI=1 swift test --filter AILiveModelTests
+/// These run wherever the model is genuinely usable, and skip with the actual reason when it
+/// is not — no compile-time `FoundationModels`, macOS below 26, or a model that reports itself
+/// unavailable. They were previously behind an opt-in `DEVTYPE_LIVE_AI=1` that nothing set, so
+/// on every machine and in both CI jobs they silently never ran: seven passing tests that
+/// proved nothing. A check that could not run must not look like a check that ran and passed.
+///
+/// Set `DEVTYPE_SKIP_LIVE_AI=1` to opt out — for a machine where Apple Intelligence is
+/// downloading, or to bisect a suspected model-side flake without editing this file.
 ///
 /// These exist because the proofread bug — English selections coming back in Hindi —
 /// is invisible to every offline test. Prompt wording only proves out against the
@@ -17,8 +23,8 @@ import XCTest
 final class AILiveModelTests: XCTestCase {
 
     private func requireLiveModel() throws {
-        guard ProcessInfo.processInfo.environment["DEVTYPE_LIVE_AI"] == "1" else {
-            throw XCTSkip("live model test — set DEVTYPE_LIVE_AI=1 to run")
+        if ProcessInfo.processInfo.environment["DEVTYPE_SKIP_LIVE_AI"] == "1" {
+            throw XCTSkip("live model tests disabled by DEVTYPE_SKIP_LIVE_AI=1")
         }
         #if canImport(FoundationModels)
         guard #available(macOS 26.0, *) else { throw XCTSkip("needs macOS 26+") }

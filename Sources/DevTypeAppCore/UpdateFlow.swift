@@ -84,7 +84,9 @@ enum UpdateFlow {
             )
 
         case .failed(let error):
-            DevTypeLog.updates.error("check failed: \(String(describing: error), privacy: .public)")
+            DevTypeLog.updates.error(
+                "check failed \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
             guard !silentWhenNothingToReport else { return }
             // Distinct title and copy from `upToDate` — a check that could not run must never
             // look like one that ran and found nothing.

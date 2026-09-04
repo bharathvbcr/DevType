@@ -389,6 +389,16 @@ final class PermissionOnboardingController: NSViewController {
         render()
     }
 
+    /// Re-render in the selected app language without restarting setup or dropping request state.
+    func refreshLocalization() {
+        guard isViewLoaded else { return }
+        if let window = view.window {
+            DevTypeTheme.styleWindow(window, title: loc.s("window.setup"))
+        }
+        transientHint = nil
+        render()
+    }
+
     private func updateStepIndicator() {
         stepPill?.update(
             text: loc.s("onboarding.step", step.rawValue + 1, Step.allCases.count),
@@ -425,25 +435,25 @@ final class PermissionOnboardingController: NSViewController {
             loc.s("onboarding.identity.cdHash", hashText),
             permissionCopy.livePreflightSummary(snapshot: snapshot)
         ]
-        if let unpackaged = ProcessIdentity.unpackagedBinaryWarning(bundlePath: identity.bundlePath) {
+        if let unpackaged = permissionCopy.unpackagedBinaryWarning(bundlePath: identity.bundlePath) {
             identityLines.append(unpackaged)
         }
-        if let dual = ProcessIdentity.dualInstallWarning(
+        if let dual = permissionCopy.dualInstallWarning(
             runningPath: identity.bundlePath,
             applicationsExists: appsExists,
             buildBundleExists: buildPresent
         ) {
             identityLines.append(dual)
         }
-        if let dup = ProcessIdentity.duplicateProcessWarning(siblingPaths: siblings) {
+        if let dup = permissionCopy.duplicateProcessWarning(siblingPaths: siblings) {
             identityLines.append(dup)
         }
-        if let stale = ProcessIdentity.staleLegacyBundleWarning(runningBundleIDs: runningIDs) {
+        if let stale = permissionCopy.staleLegacyBundleWarning(runningBundleIDs: runningIDs) {
             identityLines.append(stale)
         }
         if !snapshot.isFullyCapable {
             identityLines.append(
-                ProcessIdentity.settingsToggleMismatchGuidance(
+                permissionCopy.settingsToggleMismatchGuidance(
                     executablePath: identity.executablePath,
                     cdHash: cdHash
                 )

@@ -3,6 +3,706 @@ import Carbon
 import ExpanderEngine
 import ServiceManagement
 
+/// Typed presentation keeps a temporarily unreadable Keychain distinct from an absent API key.
+/// Neither state carries the credential value into UI state.
+enum GeminiCredentialDisplayState: Equatable {
+    enum TintRole: Equatable { case success, warning, failure }
+
+    case configured
+    case missing
+    case unavailable
+
+    static func resolve(_ state: GeminiAPIKeyStore.ReadState) -> Self {
+        switch state {
+        case .available(let key):
+            return key.isEmpty ? .missing : .configured
+        case .missing:
+            return .missing
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    var statusKey: String {
+        switch self {
+        case .configured: return "prefs.voice.gemini.keyConfigured"
+        case .missing: return "prefs.voice.gemini.noKey"
+        case .unavailable: return "prefs.voice.keychain.unavailable.pill"
+        }
+    }
+
+    var placeholderKey: String {
+        switch self {
+        case .configured: return "prefs.voice.gemini.placeholder.saved"
+        case .missing: return "prefs.voice.gemini.placeholder.paste"
+        case .unavailable: return "prefs.voice.gemini.placeholder.unavailable"
+        }
+    }
+
+    var tintRole: TintRole {
+        switch self {
+        case .configured: return .success
+        case .missing: return .warning
+        case .unavailable: return .failure
+        }
+    }
+
+    var tint: NSColor {
+        switch tintRole {
+        case .success: return DevTypeTheme.statusGreen
+        case .warning: return DevTypeTheme.statusOrange
+        case .failure: return DevTypeTheme.accentBright
+        }
+    }
+}
+
+/// Provider responses can include English or endpoint-specific detail. Preferences presents a
+/// bounded localized verdict instead of passing that transport text into the UI.
+enum GeminiValidationDisplayState: CaseIterable, Equatable {
+    case valid
+    case invalid
+    case rateLimited
+    case quotaExhausted
+    case networkError
+
+    static func resolve(_ result: APIKeyValidationResult) -> Self {
+        switch result {
+        case .valid: return .valid
+        case .invalidKey: return .invalid
+        case .rateLimited: return .rateLimited
+        case .quotaExhausted: return .quotaExhausted
+        case .networkError: return .networkError
+        }
+    }
+
+    var localizationKey: String {
+        switch self {
+        case .valid: return "prefs.voice.gemini.validation.valid"
+        case .invalid: return "prefs.voice.gemini.validation.invalid"
+        case .rateLimited: return "prefs.voice.gemini.validation.rateLimited"
+        case .quotaExhausted: return "prefs.voice.gemini.validation.quotaExhausted"
+        case .networkError: return "prefs.voice.gemini.validation.networkError"
+        }
+    }
+}
+
+/// Preferences may render Apple-backed speech as ready only after the same capability probe used
+/// by the runtime confirms that the current recognizer can stay on device. Authorization alone is
+/// insufficient: some locales require Apple's network service even when TCC is granted.
+enum AppleSpeechReadinessDisplayState: Equatable {
+    enum TintRole: Equatable { case checking, ready, attention }
+
+    case checking
+    case ready
+    case needsPermission
+    case denied
+    case restricted
+    case onDeviceUnavailable
+
+    static func resolve(
+        authorization: SpeechAuthorization.Status,
+        providerReadiness: ProviderReadiness?
+    ) -> AppleSpeechReadinessDisplayState {
+        switch authorization {
+        case .notDetermined: return .needsPermission
+        case .denied: return .denied
+        case .restricted: return .restricted
+        case .authorized: break
+        }
+
+        guard let providerReadiness else { return .checking }
+        switch providerReadiness {
+        case .ready: return .ready
+        case .requiresPermission: return .needsPermission
+        case .downloading, .requiresConfiguration, .temporarilyUnavailable,
+             .incompatible, .corrupt, .unsupported:
+            return .onDeviceUnavailable
+        }
+    }
+
+    var statusKey: String {
+        switch self {
+        case .checking: return "status.checking"
+        case .ready: return "prefs.voice.speechModels.status.ready"
+        case .needsPermission: return "prefs.voice.speechModels.status.needsSpeech"
+        case .denied: return "prefs.voice.speechModels.status.speechDenied"
+        case .restricted: return "prefs.voice.speechModels.status.speechRestricted"
+        case .onDeviceUnavailable:
+            return "prefs.voice.speechModels.status.onDeviceUnavailable"
+        }
+    }
+
+    var tintRole: TintRole {
+        switch self {
+        case .checking: return .checking
+        case .ready: return .ready
+        case .needsPermission, .denied, .restricted, .onDeviceUnavailable: return .attention
+        }
+    }
+}
+
+/// Local AI is a two-stage engine: Apple speech recognition plus the first ready model-backed
+/// correction provider in the snapshot's ordered chain. A deterministic-only floor remains usable,
+/// but is shown distinctly so Preferences never calls basic rules "Local AI ready".
+enum LocalAIReadinessDisplayState: Equatable {
+    case checking
+    case ready
+    case basicCleanup
+    case needsPermission
+    case denied
+    case restricted
+    case onDeviceUnavailable
+
+    static func resolve(
+        authorization: SpeechAuthorization.Status,
+        speechReadiness: ProviderReadiness?,
+        selectedCorrectionProviderID: String?
+    ) -> LocalAIReadinessDisplayState {
+        switch AppleSpeechReadinessDisplayState.resolve(
+            authorization: authorization,
+            providerReadiness: speechReadiness
+        ) {
+        case .checking: return .checking
+        case .needsPermission: return .needsPermission
+        case .denied: return .denied
+        case .restricted: return .restricted
+        case .onDeviceUnavailable: return .onDeviceUnavailable
+        case .ready: break
+        }
+
+        guard let selectedCorrectionProviderID else { return .checking }
+        return selectedCorrectionProviderID == VoiceSessionSnapshotFactory.ProviderID.deterministicCorrector
+            ? .basicCleanup
+            : .ready
+    }
+
+    var statusKey: String {
+        switch self {
+        case .checking: return "status.checking"
+        case .ready: return "prefs.voice.speechModels.status.ready"
+        case .basicCleanup: return "prefs.voice.speechModels.status.basicCleanup"
+        case .needsPermission: return "prefs.voice.speechModels.status.needsSpeech"
+        case .denied: return "prefs.voice.speechModels.status.speechDenied"
+        case .restricted: return "prefs.voice.speechModels.status.speechRestricted"
+        case .onDeviceUnavailable: return "prefs.voice.speechModels.status.onDeviceUnavailable"
+        }
+    }
+
+    var tintRole: AppleSpeechReadinessDisplayState.TintRole {
+        switch self {
+        case .checking: return .checking
+        case .ready: return .ready
+        case .basicCleanup, .needsPermission, .denied, .restricted, .onDeviceUnavailable:
+            return .attention
+        }
+    }
+}
+
+/// A cancelled probe can still return from Speech.framework. Only the latest generation may
+/// update the long-lived Preferences labels, and each completion is consumed once.
+struct AppleSpeechReadinessRefreshLifecycle {
+    typealias Generation = UInt64
+
+    private var nextGeneration: Generation = 0
+    private var activeGeneration: Generation?
+
+    mutating func begin() -> Generation {
+        nextGeneration &+= 1
+        if nextGeneration == 0 { nextGeneration = 1 }
+        activeGeneration = nextGeneration
+        return nextGeneration
+    }
+
+    mutating func claim(_ generation: Generation) -> Bool {
+        guard activeGeneration == generation else { return false }
+        activeGeneration = nil
+        return true
+    }
+
+    mutating func invalidate() {
+        activeGeneration = nil
+    }
+}
+
+/// Single-flight ownership for the user-initiated SpeechAnalyzer asset installation. Asset
+/// installation is intentionally separate from readiness probing: merely opening Preferences may
+/// observe system state, but only this explicit action is allowed to request a download.
+struct AppleSpeechAssetInstallLifecycle {
+    enum CancellationDisposition: Equatable {
+        /// The request was invalidated or superseded, so another path already retired its UI.
+        case ignore
+        /// The owning task was cancelled while this request was current. Release without an alert.
+        case retireSilently
+        /// A dependency threw CancellationError while the owning task remained active.
+        case reportFailure
+    }
+
+    struct Request: Equatable {
+        fileprivate let generation: UInt64
+    }
+
+    private var nextGeneration: UInt64 = 0
+    private var activeRequest: Request?
+
+    var isActive: Bool { activeRequest != nil }
+
+    mutating func begin() -> Request? {
+        guard activeRequest == nil else { return nil }
+        nextGeneration &+= 1
+        if nextGeneration == 0 { nextGeneration = 1 }
+        let request = Request(generation: nextGeneration)
+        activeRequest = request
+        return request
+    }
+
+    mutating func claimCompletion(_ request: Request) -> Bool {
+        guard activeRequest == request else { return false }
+        activeRequest = nil
+        return true
+    }
+
+    mutating func claimCancellation(
+        _ request: Request,
+        taskIsCancelled: Bool
+    ) -> CancellationDisposition {
+        guard activeRequest == request else { return .ignore }
+        activeRequest = nil
+        return taskIsCancelled ? .retireSilently : .reportFailure
+    }
+
+    mutating func invalidate() {
+        activeRequest = nil
+    }
+}
+
+struct AppleSpeechAssetControlsPresentation: Equatable {
+    let titleKey: String
+    let isHidden: Bool
+    let isEnabled: Bool
+
+    static func resolve(
+        platformSupportsAnalyzer: Bool,
+        analyzerReadiness: ProviderReadiness?,
+        isInstalling: Bool
+    ) -> AppleSpeechAssetControlsPresentation {
+        guard platformSupportsAnalyzer else {
+            return AppleSpeechAssetControlsPresentation(
+                titleKey: "prefs.voice.appleAssets.unavailable",
+                isHidden: true,
+                isEnabled: false
+            )
+        }
+        if isInstalling {
+            return AppleSpeechAssetControlsPresentation(
+                titleKey: "prefs.voice.appleAssets.installing",
+                isHidden: false,
+                isEnabled: false
+            )
+        }
+        guard let analyzerReadiness else {
+            return AppleSpeechAssetControlsPresentation(
+                titleKey: "status.checking",
+                isHidden: false,
+                isEnabled: false
+            )
+        }
+        switch analyzerReadiness {
+        case .ready:
+            return AppleSpeechAssetControlsPresentation(
+                titleKey: "prefs.voice.appleAssets.installed",
+                isHidden: false,
+                isEnabled: false
+            )
+        case .requiresConfiguration(.missingModelDownload):
+            return AppleSpeechAssetControlsPresentation(
+                titleKey: "prefs.voice.appleAssets.install",
+                isHidden: false,
+                isEnabled: true
+            )
+        case .downloading:
+            return AppleSpeechAssetControlsPresentation(
+                titleKey: "prefs.voice.appleAssets.installing",
+                isHidden: false,
+                isEnabled: false
+            )
+        case .requiresPermission, .temporarilyUnavailable, .incompatible, .corrupt,
+             .unsupported, .requiresConfiguration:
+            return AppleSpeechAssetControlsPresentation(
+                titleKey: "prefs.voice.appleAssets.unavailable",
+                isHidden: false,
+                isEnabled: false
+            )
+        }
+    }
+}
+
+/// Mirrors production provider resolution while preserving the analyzer's independent setup state.
+/// The engine status reports the provider that can actually run; the asset control may still offer
+/// an analyzer download when the independently-ready legacy recognizer is the current fallback.
+struct AppleSpeechPreferencesResolution: Equatable {
+    let readiness: ProviderReadiness
+    let providerID: String?
+
+    static func resolve(
+        platformSupportsAnalyzer: Bool,
+        analyzerReadiness: ProviderReadiness,
+        legacyReadiness: ProviderReadiness
+    ) -> AppleSpeechPreferencesResolution {
+        if platformSupportsAnalyzer, analyzerReadiness.isReady {
+            return AppleSpeechPreferencesResolution(
+                readiness: analyzerReadiness,
+                providerID: VoiceSessionSnapshotFactory.ProviderID.appleSpeechAnalyzer
+            )
+        }
+        if legacyReadiness.isReady {
+            return AppleSpeechPreferencesResolution(
+                readiness: legacyReadiness,
+                providerID: VoiceSessionSnapshotFactory.ProviderID.appleSpeechLegacy
+            )
+        }
+        return AppleSpeechPreferencesResolution(
+            readiness: platformSupportsAnalyzer ? analyzerReadiness : legacyReadiness,
+            providerID: nil
+        )
+    }
+}
+
+/// Latest-wins ownership for Preferences operations whose result is meaningful only for the
+/// endpoint captured when work began. Claiming consumes the request even when its endpoint is no
+/// longer current, so changing a field away and back cannot revive a completion that arrived stale.
+struct EndpointBoundRefreshLifecycle {
+    struct Request: Equatable {
+        fileprivate let generation: UInt64
+        let endpoint: URL
+    }
+
+    private var nextGeneration: UInt64 = 0
+    private var activeRequest: Request?
+
+    mutating func begin(endpoint: URL) -> Request {
+        nextGeneration &+= 1
+        if nextGeneration == 0 { nextGeneration = 1 }
+        let request = Request(generation: nextGeneration, endpoint: endpoint)
+        activeRequest = request
+        return request
+    }
+
+    mutating func claim(_ request: Request, currentEndpoint: URL) -> Bool {
+        guard activeRequest == request else { return false }
+        activeRequest = nil
+        return request.endpoint == currentEndpoint
+    }
+
+    mutating func invalidate() {
+        activeRequest = nil
+    }
+}
+
+/// Latest-wins ownership for API-key validation. The request deliberately carries no key bytes:
+/// the task already owns the submitted value for the duration of the network request, and keeping
+/// another credential copy in controller state would extend its lifetime unnecessarily.
+///
+/// `draftMatches` is evaluated only when the current request claims its completion. A field edit,
+/// explicit delete, or view teardown invalidates the active generation, so a transport that ignores
+/// cancellation still cannot save a revoked key or update detached UI.
+struct GeminiKeyValidationLifecycle {
+    struct Request: Equatable {
+        fileprivate let generation: UInt64
+    }
+
+    private var nextGeneration: UInt64 = 0
+    private var activeRequest: Request?
+
+    var isActive: Bool { activeRequest != nil }
+
+    mutating func begin() -> Request {
+        nextGeneration &+= 1
+        if nextGeneration == 0 { nextGeneration = 1 }
+        let request = Request(generation: nextGeneration)
+        activeRequest = request
+        return request
+    }
+
+    mutating func claim(_ request: Request, draftMatches: Bool) -> Bool {
+        guard activeRequest == request else { return false }
+        activeRequest = nil
+        return draftMatches
+    }
+
+    mutating func invalidate() {
+        activeRequest = nil
+    }
+}
+
+enum WhisperActionKind: Equatable, Sendable {
+    case modelDownload
+    case serverStart
+}
+
+/// View-scoped ownership for a long-running Whisper button action. Only one action is admitted at
+/// a time, so a readiness refresh cannot make two backend operations race. Progress checks are
+/// non-consuming because URLSession may enqueue many of them; completion consumes ownership once
+/// so a late progress block or closed window cannot repaint controls that no longer represent the
+/// operation. Localization replacement waits until this owner retires.
+struct WhisperActionLifecycle {
+    struct Request: Equatable, Sendable {
+        fileprivate let generation: UInt64
+        let kind: WhisperActionKind
+    }
+
+    private var nextGeneration: UInt64 = 0
+    private var activeRequest: Request?
+
+    var activeAction: WhisperActionKind? { activeRequest?.kind }
+
+    mutating func begin(_ kind: WhisperActionKind) -> Request? {
+        guard activeRequest == nil else { return nil }
+        nextGeneration &+= 1
+        if nextGeneration == 0 { nextGeneration = 1 }
+        let request = Request(generation: nextGeneration, kind: kind)
+        activeRequest = request
+        return request
+    }
+
+    func allowsProgress(_ request: Request) -> Bool {
+        request.kind == .modelDownload && activeRequest == request
+    }
+
+    mutating func claimCompletion(_ request: Request) -> Bool {
+        guard activeRequest == request else { return false }
+        activeRequest = nil
+        return true
+    }
+
+    mutating func cancel(_ kind: WhisperActionKind) -> Bool {
+        guard activeRequest?.kind == kind else { return false }
+        activeRequest = nil
+        return true
+    }
+
+    mutating func invalidate() {
+        activeRequest = nil
+    }
+}
+
+/// The readiness probe owns the baseline labels, while an active action owns whether its controls
+/// can be used. Keeping that precedence in a pure projection prevents reloads from erasing download
+/// progress or exposing a second Start/Get Model action before the first one has retired.
+struct WhisperControlsPresentation: Equatable {
+    let serverButtonTitleKey: String
+    let isServerButtonEnabled: Bool
+    let isModelButtonHidden: Bool
+    let isModelButtonEnabled: Bool
+    /// `nil` preserves the current percentage/download title while progress callbacks are active.
+    let modelButtonTitleKey: String?
+
+    static func resolve(
+        readiness: WhisperReadinessPresentation,
+        activeAction: WhisperActionKind?
+    ) -> WhisperControlsPresentation {
+        switch activeAction {
+        case .modelDownload:
+            return WhisperControlsPresentation(
+                serverButtonTitleKey: readiness.serverButtonTitleKey,
+                isServerButtonEnabled: false,
+                isModelButtonHidden: false,
+                isModelButtonEnabled: false,
+                modelButtonTitleKey: nil
+            )
+        case .serverStart:
+            return WhisperControlsPresentation(
+                serverButtonTitleKey: "common.cancel",
+                isServerButtonEnabled: true,
+                isModelButtonHidden: readiness.isModelButtonHidden,
+                isModelButtonEnabled: false,
+                modelButtonTitleKey: readiness.isModelButtonHidden
+                    ? nil
+                    : "prefs.voice.whisper.getModel"
+            )
+        case nil:
+            return WhisperControlsPresentation(
+                serverButtonTitleKey: readiness.serverButtonTitleKey,
+                isServerButtonEnabled: readiness.isServerButtonEnabled,
+                isModelButtonHidden: readiness.isModelButtonHidden,
+                isModelButtonEnabled: readiness.isModelButtonEnabled,
+                modelButtonTitleKey: readiness.isModelButtonHidden
+                    ? nil
+                    : "prefs.voice.whisper.getModel"
+            )
+        }
+    }
+}
+
+enum WhisperServerToggleDecision: Equatable {
+    case cancelPendingStart
+    case ignoreWhileDownloading
+    case stopManagedServer
+    case startServer
+
+    static func resolve(
+        activeAction: WhisperActionKind?,
+        isManagedByApp: Bool
+    ) -> WhisperServerToggleDecision {
+        switch activeAction {
+        case .serverStart: return .cancelPendingStart
+        case .modelDownload: return .ignoreWhileDownloading
+        case nil: return isManagedByApp ? .stopManagedServer : .startServer
+        }
+    }
+}
+
+/// One immutable projection drives both the Whisper inventory row and its server button. A
+/// reachable configured endpoint wins over local installation state because it may be an external
+/// server that DevType must use but must not attempt to stop.
+struct WhisperReadinessPresentation: Equatable {
+    enum TintRole: Equatable { case checking, ready, attention }
+
+    let statusKey: String
+    let tintRole: TintRole
+    let detailState: WhisperServerSetup.State?
+    let serverButtonTitleKey: String
+    let isServerButtonEnabled: Bool
+    let isModelButtonHidden: Bool
+    let isModelButtonEnabled: Bool
+
+    static func resolve(
+        setupState: WhisperServerSetup.State?,
+        isManagedByApp: Bool,
+        hasLocalModel: Bool
+    ) -> WhisperReadinessPresentation {
+        // Do not advertise a local download until the endpoint probe establishes that the
+        // configured server is unavailable. A reachable external server needs no local artifact.
+        let shouldOfferModelDownload = setupState != nil
+            && setupState != .running
+            && !hasLocalModel
+
+        guard let setupState else {
+            return WhisperReadinessPresentation(
+                statusKey: "status.checking",
+                tintRole: .checking,
+                detailState: nil,
+                serverButtonTitleKey: "status.checking",
+                isServerButtonEnabled: false,
+                isModelButtonHidden: !shouldOfferModelDownload,
+                isModelButtonEnabled: shouldOfferModelDownload
+            )
+        }
+
+        let buttonTitleKey: String
+        let buttonEnabled: Bool
+        if isManagedByApp {
+            buttonTitleKey = "prefs.voice.whisper.stop"
+            buttonEnabled = true
+        } else if setupState == .running {
+            buttonTitleKey = "prefs.voice.whisper.external"
+            buttonEnabled = false
+        } else {
+            buttonTitleKey = "prefs.voice.whisper.start"
+            buttonEnabled = true
+        }
+
+        switch setupState {
+        case .running:
+            return WhisperReadinessPresentation(
+                statusKey: "prefs.voice.speechModels.status.ready",
+                tintRole: .ready,
+                detailState: nil,
+                serverButtonTitleKey: buttonTitleKey,
+                isServerButtonEnabled: buttonEnabled,
+                isModelButtonHidden: !shouldOfferModelDownload,
+                isModelButtonEnabled: shouldOfferModelDownload
+            )
+        case .installedNotRunning:
+            return WhisperReadinessPresentation(
+                statusKey: "prefs.voice.speechModels.status.needsServer",
+                tintRole: .attention,
+                detailState: setupState,
+                serverButtonTitleKey: buttonTitleKey,
+                isServerButtonEnabled: buttonEnabled,
+                isModelButtonHidden: !shouldOfferModelDownload,
+                isModelButtonEnabled: shouldOfferModelDownload
+            )
+        case .notInstalled:
+            return WhisperReadinessPresentation(
+                statusKey: "prefs.voice.speechModels.status.needsSetup",
+                tintRole: .attention,
+                detailState: setupState,
+                serverButtonTitleKey: buttonTitleKey,
+                isServerButtonEnabled: buttonEnabled,
+                isModelButtonHidden: !shouldOfferModelDownload,
+                isModelButtonEnabled: shouldOfferModelDownload
+            )
+        }
+    }
+}
+
+/// Typed UI projection for clearing the always-on, content-free voice outcome history. Keeping
+/// the recorder operation injectable makes the button's one-shot behavior testable without
+/// touching the user's real Application Support files.
+struct VoiceTerminalDiagnosticsDeletionPresentation: Equatable {
+    let statusKey: String
+    let isWarning: Bool
+    let alertTitleKey: String?
+    let alertMessageKey: String?
+    let failure: VoiceDiagnosticsRecorder.IOFailure?
+
+    static func perform(
+        delete: () -> VoiceDiagnosticsRecorder.IOStatus
+    ) -> VoiceTerminalDiagnosticsDeletionPresentation {
+        switch delete() {
+        case .succeeded:
+            return VoiceTerminalDiagnosticsDeletionPresentation(
+                statusKey: "prefs.voice.terminalDiagnostics.status.deleted",
+                isWarning: false,
+                alertTitleKey: nil,
+                alertMessageKey: nil,
+                failure: nil
+            )
+        case .failed(let failure):
+            return VoiceTerminalDiagnosticsDeletionPresentation(
+                statusKey: "prefs.voice.terminalDiagnostics.status.deleteFailed",
+                isWarning: true,
+                alertTitleKey: "prefs.voice.terminalDiagnostics.deleteFailed.title",
+                alertMessageKey: "prefs.voice.terminalDiagnostics.deleteFailed.message",
+                failure: failure
+            )
+        case .notAttempted:
+            return VoiceTerminalDiagnosticsDeletionPresentation(
+                statusKey: "prefs.voice.terminalDiagnostics.status.deleteFailed",
+                isWarning: true,
+                alertTitleKey: "prefs.voice.terminalDiagnostics.deleteFailed.title",
+                alertMessageKey: "prefs.voice.terminalDiagnostics.deleteFailed.message",
+                failure: nil
+            )
+        }
+    }
+}
+
+/// Canonical Advanced-pane projection for deferred Keychain cleanup debt. Reloading the pane must
+/// render both branches: otherwise a successful automatic retry leaves an earlier red failure (or
+/// unrelated maintenance result) on screen even though the store has returned to a healthy state.
+struct SecretCleanupMaintenancePresentation: Equatable {
+    let text: String
+    let isWarning: Bool
+
+    static func resolve(
+        pendingCount: Int,
+        localization: LocalizationManager = .shared
+    ) -> SecretCleanupMaintenancePresentation {
+        let pending = max(0, pendingCount)
+        guard pending > 0 else {
+            return SecretCleanupMaintenancePresentation(
+                text: localization.s("prefs.advanced.secretCleanup.none"),
+                isWarning: false
+            )
+        }
+        return SecretCleanupMaintenancePresentation(
+            text: localization.s("prefs.advanced.secretCleanup.failed", pending),
+            isWarning: true
+        )
+    }
+}
+
 // MARK: - §4.1 — a real Preferences window
 //
 // Configuration used to be scattered across `AppDelegate.buildMenu()`: Open at
@@ -76,13 +776,79 @@ enum PreferencesTab: Int, CaseIterable {
 
 // MARK: - Window controller
 
+/// Transient UI state carried across a language-driven controller rebuild.
+///
+/// Preferences writes switches and popups immediately, but editor rows intentionally keep text
+/// unsaved until their Add/Save action is used. Rebuilding without these values silently discarded
+/// a partially entered macro, dictionary item, trigger, provider endpoint, or credential.
+struct PreferencesLocalizationState: Equatable {
+    let selectedTab: PreferencesTab
+    let macroArgument: String
+    let aiAllowlistBundleID: String
+    let voiceDictionarySpoken: String
+    let voiceDictionaryReplacement: String
+    let voiceTriggerPhrase: String
+    let geminiAPIKey: String
+    let localLLMEndpoint: String
+    let localLLMModel: String
+    let scrollOrigins: [PreferencesTab: NSPoint]
+}
+
+/// One policy owns whether a language change can replace the current Preferences controller.
+/// Sheets own unsaved modal state, while the current controller owns its live async operations.
+enum PreferencesLocalizationRefreshDecision: Equatable {
+    case upToDate
+    case deferRefresh
+    case rebuild
+
+    static func resolve(
+        needsRefresh: Bool,
+        hasAttachedSheet: Bool,
+        hasBlockingOperation: Bool
+    ) -> Self {
+        guard needsRefresh else { return .upToDate }
+        return hasAttachedSheet || hasBlockingOperation ? .deferRefresh : .rebuild
+    }
+}
+
+/// Keeps the pasteboard's Boolean result attached to the visible status and semantic tint.
+struct AdvancedDiagnosticsCopyPresentation: Equatable {
+    enum TintRole: Equatable { case success, failure }
+
+    let statusKey: String
+    let tintRole: TintRole
+
+    static func resolve(didWrite: Bool) -> Self {
+        didWrite
+            ? Self(statusKey: "prefs.advanced.copied", tintRole: .success)
+            : Self(statusKey: "prefs.advanced.copyFailed", tintRole: .failure)
+    }
+}
+
 final class PreferencesWindowController: NSWindowController {
     static let shared = PreferencesWindowController()
 
     private var preferences: PreferencesViewController?
+    private weak var hotkeyManager: HotkeyManager?
+    private var renderedLanguage: AppLanguage?
+    private var localizationRefreshDeferred = false
+    private var sheetEndObserver: NSObjectProtocol?
 
     private init() {
         super.init(window: nil)
+        sheetEndObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didEndSheetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.retryDeferredLocalizationRefresh()
+        }
+    }
+
+    deinit {
+        if let sheetEndObserver {
+            NotificationCenter.default.removeObserver(sheetEndObserver)
+        }
     }
 
     @available(*, unavailable)
@@ -96,8 +862,9 @@ final class PreferencesWindowController: NSWindowController {
     /// on nil forever — macro edits then went to defaults instead of the live
     /// registration. Nil-safe: callers without a manager keep today's behaviour.
     func show(tab: PreferencesTab? = nil, hotkeyManager: HotkeyManager?) {
+        self.hotkeyManager = hotkeyManager
         if window == nil {
-            let controller = PreferencesViewController(hotkeyManager: hotkeyManager)
+            let controller = makePreferencesController()
             preferences = controller
             let newWindow = NSWindow(contentViewController: controller)
             newWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -107,6 +874,9 @@ final class PreferencesWindowController: NSWindowController {
             newWindow.center()
             newWindow.isReleasedWhenClosed = false
             self.window = newWindow
+            renderedLanguage = LocalizationManager.shared.language
+        } else if renderedLanguage != LocalizationManager.shared.language {
+            performLocalizationRefresh()
         }
         preferences?.refreshHotkeyManager(hotkeyManager)
         if let tab { preferences?.select(tab) }
@@ -123,6 +893,76 @@ final class PreferencesWindowController: NSWindowController {
     /// nothing, twice.
     func refreshSecretsCard() {
         preferences?.refreshSecretsCard()
+    }
+
+    /// Refreshes live TCC and provider readiness after DevType returns from System Settings.
+    func refreshPermissionState() {
+        preferences?.refreshPermissionState()
+    }
+
+    /// Refreshes the maintenance debt after an asynchronous Keychain cleanup pass completes.
+    func refreshMaintenanceState() {
+        preferences?.refreshMaintenanceState()
+    }
+
+    /// Rebuilds the long-lived Preferences controller after the string table changes. AppKit
+    /// labels are values, not bindings, so reloading settings alone cannot translate an already
+    /// visible window. The rebuild is deferred out of the language popup's action and carries all
+    /// transient editor text and scroll positions forward.
+    func refreshLocalization() {
+        DispatchQueue.main.async { [weak self] in
+            self?.performLocalizationRefresh()
+        }
+    }
+
+    private func performLocalizationRefresh() {
+        guard let window else { return }
+        DevTypeTheme.styleWindow(window, title: LocalizationManager.shared.s("window.preferences"))
+        guard let current = preferences else { return }
+
+        switch PreferencesLocalizationRefreshDecision.resolve(
+            needsRefresh: renderedLanguage != LocalizationManager.shared.language,
+            hasAttachedSheet: window.attachedSheet != nil,
+            hasBlockingOperation: current.blocksLocalizationReplacement
+        ) {
+        case .upToDate:
+            localizationRefreshDeferred = false
+            return
+        case .deferRefresh:
+            localizationRefreshDeferred = true
+            return
+        case .rebuild:
+            localizationRefreshDeferred = false
+        }
+
+        let state = current.localizationState()
+        current.prepareForLocalizationReplacement()
+        let replacement = makePreferencesController(restorationState: state)
+        preferences = replacement
+        window.contentViewController = replacement
+        renderedLanguage = LocalizationManager.shared.language
+    }
+
+    private func makePreferencesController(
+        restorationState: PreferencesLocalizationState? = nil
+    ) -> PreferencesViewController {
+        PreferencesViewController(
+            hotkeyManager: hotkeyManager,
+            restorationState: restorationState,
+            onLocalizationBlockingOperationDidEnd: { [weak self] in
+                self?.retryDeferredLocalizationRefresh()
+            }
+        )
+    }
+
+    private func retryDeferredLocalizationRefresh() {
+        guard localizationRefreshDeferred else { return }
+        // Sheet-end notifications and async completions can arrive while AppKit is still unwinding
+        // their callbacks. Rebuild on the next main-loop turn, after ownership has been released.
+        DispatchQueue.main.async { [weak self] in
+            guard self?.localizationRefreshDeferred == true else { return }
+            self?.performLocalizationRefresh()
+        }
     }
 }
 
@@ -225,7 +1065,8 @@ private final class SidebarNavRow: NSButton {
 
 final class PreferencesViewController: NSViewController,
                                        NSTableViewDataSource,
-                                       NSTableViewDelegate {
+                                       NSTableViewDelegate,
+                                       NSTextFieldDelegate {
 
     private let loc = LocalizationManager.shared
     private let store = SnippetStore.shared
@@ -254,6 +1095,7 @@ final class PreferencesViewController: NSViewController,
         color: DevTypeTheme.textTertiary,
         wrapping: true
     )
+    private var updateStatusObserver: NSObjectProtocol?
     private let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let mutedTable = NSTableView()
     private let mutedEmptyLabel = DevTypeTheme.makeLabel(
@@ -311,6 +1153,7 @@ final class PreferencesViewController: NSViewController,
         color: DevTypeTheme.statusGreen,
         wrapping: true
     )
+    private var secretCleanupButton: NSButton?
 
     // AI
     private let aiEnabledSwitch = NSSwitch()
@@ -340,9 +1183,17 @@ final class PreferencesViewController: NSViewController,
     private let voiceModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let voiceEngines = TranscriptionEngine.allCases
     private let voiceTonePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let voiceRealTimeTypingSwitch = NSSwitch()
+    private let voiceLiveDeliveryPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let voiceTracingSwitch = NSSwitch()
+    private let voiceTraceStatusLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(10.5),
+        color: DevTypeTheme.textTertiary,
+        wrapping: true
+    )
     private let voiceProofreadSwitch = NSSwitch()
+    private let appleSpeechAssetButton = NSButton()
+    private weak var appleSpeechAssetRow: NSView?
     private let whisperServerButton = NSButton()
     private let whisperModelButton = NSButton()
     private let voiceAutoPunctuateSwitch = NSSwitch()
@@ -368,12 +1219,36 @@ final class PreferencesViewController: NSViewController,
     private let voiceTriggerActionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private var voiceTriggerEntries: [(phrase: String, action: String)] = []
     private var voiceMicPermissionPill: PillBadgeView?
+    private var voiceSpeechPermissionPill: PillBadgeView?
+    private var voiceEngineStatusLabels: [TranscriptionEngine: NSTextField] = [:]
+    private var appleSpeechReadiness: ProviderReadiness?
+    private var appleSpeechAnalyzerReadiness: ProviderReadiness?
+    private var resolvedAppleSpeechProviderID: String?
+    private var localAICorrectionProviderID: String?
+    private var appleSpeechReadinessRefresh = AppleSpeechReadinessRefreshLifecycle()
+    private var appleSpeechReadinessTask: Task<Void, Never>?
+    private var appleSpeechAssetInstallLifecycle = AppleSpeechAssetInstallLifecycle()
+    private var appleSpeechAssetInstallTask: Task<Void, Never>?
+    private var whisperReadinessState: WhisperServerSetup.State?
+    private var whisperModelStatus: WhisperModelStatus?
+    private var whisperReadinessRefresh = EndpointBoundRefreshLifecycle()
+    private var whisperReadinessTask: Task<Void, Never>?
+    private var whisperActionLifecycle = WhisperActionLifecycle()
+    private var whisperModelDownloadTask: Task<Void, Never>?
+    private var whisperServerStartTask: Task<Void, Never>?
+    private let onLocalizationBlockingOperationDidEnd: (() -> Void)?
+    /// Cleared immediately after first view load so an unsaved credential draft is not retained
+    /// in a second long-lived String after it has been restored to the secure field.
+    private var restorationState: PreferencesLocalizationState?
 
     // Voice Engine & API Settings
     private let geminiAPIKeyField = NSSecureTextField()
+    private let geminiCloudConsentSwitch = NSSwitch()
     private var geminiKeyStatusPill: PillBadgeView?
     private var geminiKeySaveButton: CapsuleButton?
     private var geminiKeyDeleteButton: CapsuleButton?
+    private var geminiKeyValidationLifecycle = GeminiKeyValidationLifecycle()
+    private var geminiKeyValidationTask: Task<Void, Never>?
     private let geminiConfigContainer = NSStackView()
     private let localLLMEndpointField = NSTextField()
     private let localLLMModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -381,10 +1256,38 @@ final class PreferencesViewController: NSViewController,
     private var localLLMScanButton: CapsuleButton?
     private var localLLMStatusPill: PillBadgeView?
     private let localLLMConfigContainer = NSStackView()
+    private var localModelScanRefresh = EndpointBoundRefreshLifecycle()
+    private var localModelScanTask: Task<Void, Never>?
 
-    init(hotkeyManager: HotkeyManager?) {
+    init(
+        hotkeyManager: HotkeyManager?,
+        restorationState: PreferencesLocalizationState? = nil,
+        onLocalizationBlockingOperationDidEnd: (() -> Void)? = nil
+    ) {
         self.hotkeyManager = hotkeyManager
+        self.restorationState = restorationState
+        self.onLocalizationBlockingOperationDidEnd = onLocalizationBlockingOperationDidEnd
         super.init(nibName: nil, bundle: nil)
+        updateStatusObserver = NotificationCenter.default.addObserver(
+            forName: UpdatePreferences.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshUpdateStatusLabel()
+        }
+    }
+
+    deinit {
+        appleSpeechReadinessTask?.cancel()
+        appleSpeechAssetInstallTask?.cancel()
+        whisperReadinessTask?.cancel()
+        whisperModelDownloadTask?.cancel()
+        whisperServerStartTask?.cancel()
+        localModelScanTask?.cancel()
+        geminiKeyValidationTask?.cancel()
+        if let updateStatusObserver {
+            NotificationCenter.default.removeObserver(updateStatusObserver)
+        }
     }
 
     /// Re-point at the live manager. Called by `PreferencesWindowController.show`
@@ -395,8 +1298,39 @@ final class PreferencesViewController: NSViewController,
         homeViewController?.refreshHotkeyManager(manager)
     }
 
+    var blocksLocalizationReplacement: Bool {
+        geminiKeyValidationLifecycle.isActive
+            || appleSpeechAssetInstallLifecycle.isActive
+            || whisperActionLifecycle.activeAction != nil
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        appleSpeechReadinessTask?.cancel()
+        appleSpeechReadinessTask = nil
+        appleSpeechReadinessRefresh.invalidate()
+        invalidateAppleSpeechAssetInstall()
+        invalidateGeminiKeyValidation(resetPresentation: false)
+        invalidateLocalModelScan(resetPresentation: true)
+        whisperReadinessTask?.cancel()
+        whisperReadinessTask = nil
+        whisperReadinessRefresh.invalidate()
+        whisperModelStatus = nil
+        invalidateWhisperActions()
+    }
+
+    /// The window controller gates replacement until every view-owned operation has retired.
+    /// Keep the assertion here so future replacement call sites cannot silently bypass that gate;
+    /// normal window teardown still invalidates through `viewWillDisappear`.
+    func prepareForLocalizationReplacement() {
+        precondition(
+            !blocksLocalizationReplacement,
+            "Preferences localization replacement cannot detach live async operations"
+        )
+    }
 
     // MARK: Layout
 
@@ -572,6 +1506,10 @@ final class PreferencesViewController: NSViewController,
     override func viewDidLoad() {
         super.viewDidLoad()
         reloadAll()
+        if let restorationState {
+            self.restorationState = nil
+            restoreLocalizationState(restorationState)
+        }
     }
 
     override func viewWillAppear() {
@@ -682,6 +1620,69 @@ final class PreferencesViewController: NSViewController,
         reloadAI()
         reloadAdvanced()
         refreshEngineStatus()
+    }
+
+    /// Snapshot only state that is not already committed to a canonical preference store.
+    func localizationState() -> PreferencesLocalizationState {
+        var scrollOrigins: [PreferencesTab: NSPoint] = [:]
+        for (tab, pane) in panes {
+            guard let scroll = pane as? NSScrollView else { continue }
+            scrollOrigins[tab] = scroll.contentView.bounds.origin
+        }
+        return PreferencesLocalizationState(
+            selectedTab: selectedTab,
+            macroArgument: transientValue(of: macroArgumentField),
+            aiAllowlistBundleID: transientValue(of: aiAllowlistField),
+            voiceDictionarySpoken: transientValue(of: voiceDictSpokenField),
+            voiceDictionaryReplacement: transientValue(of: voiceDictReplacementField),
+            voiceTriggerPhrase: transientValue(of: voiceTriggerPhraseField),
+            geminiAPIKey: transientValue(of: geminiAPIKeyField),
+            localLLMEndpoint: transientValue(of: localLLMEndpointField),
+            localLLMModel: transientValue(of: localLLMModelField),
+            scrollOrigins: scrollOrigins
+        )
+    }
+
+    /// The field editor owns keystrokes while a text field is active. Reading only the control's
+    /// cell can lag that editor, which would drop the last uncommitted characters during a rebuild.
+    private func transientValue(of field: NSTextField) -> String {
+        field.currentEditor()?.string ?? field.stringValue
+    }
+
+    private func restoreLocalizationState(_ state: PreferencesLocalizationState) {
+        macroArgumentField.stringValue = state.macroArgument
+        aiAllowlistField.stringValue = state.aiAllowlistBundleID
+        voiceDictSpokenField.stringValue = state.voiceDictionarySpoken
+        voiceDictReplacementField.stringValue = state.voiceDictionaryReplacement
+        voiceTriggerPhraseField.stringValue = state.voiceTriggerPhrase
+        geminiAPIKeyField.stringValue = state.geminiAPIKey
+        localLLMEndpointField.stringValue = state.localLLMEndpoint
+        localLLMModelField.stringValue = state.localLLMModel
+        select(state.selectedTab)
+
+        let scrollOrigins = state.scrollOrigins
+        let restoreScrollPositions = { [weak self] in
+            guard let self else { return }
+            self.view.layoutSubtreeIfNeeded()
+            for (tab, origin) in scrollOrigins {
+                guard let scroll = self.panes[tab] as? NSScrollView else { continue }
+                scroll.contentView.scroll(to: origin)
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
+        restoreScrollPositions()
+        DispatchQueue.main.async(execute: restoreScrollPositions)
+    }
+
+    func refreshPermissionState() {
+        guard isViewLoaded else { return }
+        reloadVoice()
+        refreshEngineStatus()
+    }
+
+    func refreshMaintenanceState() {
+        guard isViewLoaded else { return }
+        reloadAdvanced()
     }
 
     // MARK: Pane construction
@@ -972,10 +1973,6 @@ final class PreferencesViewController: NSViewController,
     @objc private func checkForUpdatesNow() {
         // Reports every outcome, including failures — the user asked.
         UpdateFlow.checkManually(window: view.window)
-        // The check is async; refresh once it has had a chance to write its timestamp.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.refreshUpdateStatusLabel()
-        }
     }
 
     /// Shows the running version plus when a check last *succeeded*.
@@ -1029,7 +2026,9 @@ final class PreferencesViewController: NSViewController,
             )
             return
         }
-        DevTypeLog.app.info("[Prefs] muted \(bundleID, privacy: .public)")
+        DevTypeLog.app.info(
+            "[Prefs] muted \(DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID"), privacy: .public)"
+        )
         reloadGeneral()
     }
 
@@ -1446,7 +2445,7 @@ final class PreferencesViewController: NSViewController,
 
     private func buildVoice(into stack: NSStackView) {
         // 0. Permission Card
-        let permCard = makeCard(title: loc.s("prefs.voice.permission.card"), symbol: "mic.badge.shield")
+        let permCard = makeCard(title: loc.s("prefs.voice.permission.card"), symbol: "mic.fill")
         let permHint = DevTypeTheme.makeLabel(
             loc.s("prefs.voice.permission.hint"),
             font: DevTypeTheme.font(10.5),
@@ -1455,10 +2454,10 @@ final class PreferencesViewController: NSViewController,
         )
         permHint.translatesAutoresizingMaskIntoConstraints = false
 
-        let micPill = PillBadgeView(text: "Checking...", tint: DevTypeTheme.statusGray, showsDot: true)
+        let micPill = PillBadgeView(text: loc.s("status.checking"), tint: DevTypeTheme.statusGray, showsDot: true)
         voiceMicPermissionPill = micPill
 
-        let permActionsRow = NSStackView(views: [
+        let micActions = NSStackView(views: [
             micPill,
             CapsuleButton(
                 title: loc.s("prefs.voice.requestMic"),
@@ -1475,12 +2474,48 @@ final class PreferencesViewController: NSViewController,
                 action: #selector(openMicrophoneSettingsClicked)
             )
         ])
-        permActionsRow.orientation = .horizontal
-        permActionsRow.spacing = 10
-        permActionsRow.alignment = .centerY
-        permActionsRow.translatesAutoresizingMaskIntoConstraints = false
+        micActions.orientation = .horizontal
+        micActions.spacing = 10
+        micActions.alignment = .centerY
+        let micRow = makeLabeledControlRow(
+            title: loc.s("prefs.voice.permission.microphone"),
+            control: micActions,
+            font: DevTypeTheme.font(11.5, .medium)
+        )
 
-        stackInCard(permCard, views: [permHint, permActionsRow])
+        let speechPill = PillBadgeView(
+            text: loc.s("status.checking"),
+            tint: DevTypeTheme.statusGray,
+            showsDot: true
+        )
+        voiceSpeechPermissionPill = speechPill
+        let speechActions = NSStackView(views: [
+            speechPill,
+            CapsuleButton(
+                title: loc.s("prefs.voice.requestSpeech"),
+                symbol: "waveform",
+                style: .primary,
+                target: self,
+                action: #selector(requestSpeechRecognitionAccessClicked)
+            ),
+            CapsuleButton(
+                title: loc.s("prefs.voice.openSpeechSettings"),
+                symbol: "gearshape",
+                style: .secondary,
+                target: self,
+                action: #selector(openSpeechRecognitionSettingsClicked)
+            )
+        ])
+        speechActions.orientation = .horizontal
+        speechActions.spacing = 10
+        speechActions.alignment = .centerY
+        let speechRow = makeLabeledControlRow(
+            title: loc.s("prefs.voice.permission.speechRecognition"),
+            control: speechActions,
+            font: DevTypeTheme.font(11.5, .medium)
+        )
+
+        stackInCard(permCard, views: [permHint, micRow, speechRow])
 
         // 1. Models Card / Engine Configuration Card
         let modelsCard = makeCard(title: loc.s("prefs.voice.models.card"), symbol: "waveform.and.mic")
@@ -1496,7 +2531,7 @@ final class PreferencesViewController: NSViewController,
         voiceModelPopup.translatesAutoresizingMaskIntoConstraints = false
         voiceModelPopup.removeAllItems()
         for engine in TranscriptionEngine.allCases {
-            voiceModelPopup.addItem(withTitle: engine.displayName)
+            voiceModelPopup.addItem(withTitle: loc.s(engine.localizationKey))
             voiceModelPopup.lastItem?.representedObject = engine.rawValue
         }
         voiceModelPopup.target = self
@@ -1516,6 +2551,20 @@ final class PreferencesViewController: NSViewController,
         )
         let speechModelsInventory = makeVoiceRecognitionModelInventory()
 
+        appleSpeechAssetButton.title = loc.s("status.checking")
+        appleSpeechAssetButton.bezelStyle = .rounded
+        appleSpeechAssetButton.controlSize = .small
+        appleSpeechAssetButton.target = self
+        appleSpeechAssetButton.action = #selector(installAppleSpeechAssets)
+        appleSpeechAssetButton.translatesAutoresizingMaskIntoConstraints = false
+        appleSpeechAssetButton.setAccessibilityLabel(loc.s("prefs.voice.appleAssets.install"))
+        let appleAssetRow = makeLabeledControlRow(
+            title: loc.s("prefs.voice.appleAssets.label"),
+            control: appleSpeechAssetButton,
+            font: DevTypeTheme.font(11.5, .medium)
+        )
+        appleSpeechAssetRow = appleAssetRow
+
         let speechModelsHint = DevTypeTheme.makeLabel(
             loc.s("prefs.voice.speechModels.hint"),
             font: DevTypeTheme.font(10),
@@ -1529,19 +2578,31 @@ final class PreferencesViewController: NSViewController,
         geminiConfigContainer.spacing = 6
         geminiConfigContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        let geminiLabel = DevTypeTheme.makeLabel("Gemini API Key (Securely stored in macOS Keychain):", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+        let initialCredential = GeminiCredentialDisplayState.resolve(GeminiAPIKeyStore.readState())
+        let geminiLabel = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.gemini.keyLabel"),
+            font: DevTypeTheme.font(11.5, .medium),
+            color: DevTypeTheme.textPrimary
+        )
 
         geminiAPIKeyField.translatesAutoresizingMaskIntoConstraints = false
         geminiAPIKeyField.font = DevTypeTheme.font(12)
-        geminiAPIKeyField.placeholderString = GeminiAPIKeyStore.hasKey ? "Key Saved (••••••••••••••••)" : "Paste Gemini API Key (AIzaSy...)"
+        geminiAPIKeyField.placeholderString = loc.s(initialCredential.placeholderKey)
+        geminiAPIKeyField.delegate = self
         geminiAPIKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        geminiAPIKeyField.setAccessibilityLabel(loc.s("prefs.voice.gemini.keyLabel"))
+        geminiAPIKeyField.setAccessibilityTitleUIElement(geminiLabel)
 
-        let keyPill = PillBadgeView(text: GeminiAPIKeyStore.hasKey ? "Key Configured" : "No Key Set", tint: GeminiAPIKeyStore.hasKey ? DevTypeTheme.statusGreen : DevTypeTheme.statusOrange, showsDot: true)
+        let keyPill = PillBadgeView(
+            text: loc.s(initialCredential.statusKey),
+            tint: initialCredential.tint,
+            showsDot: true
+        )
         keyPill.translatesAutoresizingMaskIntoConstraints = false
         geminiKeyStatusPill = keyPill
 
         let saveBtn = CapsuleButton(
-            title: "Save & Validate",
+            title: loc.s("prefs.voice.gemini.saveValidate"),
             symbol: "key.fill",
             style: .primary,
             target: self,
@@ -1550,7 +2611,7 @@ final class PreferencesViewController: NSViewController,
         geminiKeySaveButton = saveBtn
 
         let deleteBtn = CapsuleButton(
-            title: "Delete",
+            title: loc.s("prefs.voice.gemini.delete"),
             symbol: "trash",
             style: .destructive,
             target: self,
@@ -1565,15 +2626,31 @@ final class PreferencesViewController: NSViewController,
         geminiActionsRow.translatesAutoresizingMaskIntoConstraints = false
 
         let geminiSubHint = DevTypeTheme.makeLabel(
-            "Uses gemini-3.5-transcribe via streaming URLSession. Get an API key from Google AI Studio (aistudio.google.com).",
+            loc.s("prefs.voice.gemini.hint"),
             font: DevTypeTheme.font(10),
             color: DevTypeTheme.textTertiary,
             wrapping: true
         )
 
+        let cloudDisclosure = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.cloudDisclosure"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.statusOrange,
+            wrapping: true
+        )
+        let cloudConsentRow = makeToggleRow(
+            title: loc.s("prefs.voice.cloudConsent"),
+            toggle: geminiCloudConsentSwitch,
+            action: #selector(geminiCloudConsentChanged)
+        )
+
         geminiConfigContainer.addArrangedSubview(geminiLabel)
         geminiConfigContainer.addArrangedSubview(geminiActionsRow)
         geminiConfigContainer.addArrangedSubview(geminiSubHint)
+        geminiConfigContainer.addArrangedSubview(cloudDisclosure)
+        geminiConfigContainer.addArrangedSubview(cloudConsentRow)
+        cloudDisclosure.widthAnchor.constraint(equalTo: geminiConfigContainer.widthAnchor).isActive = true
+        cloudConsentRow.widthAnchor.constraint(equalTo: geminiConfigContainer.widthAnchor).isActive = true
 
         // Local LLM Configuration Box
         localLLMConfigContainer.orientation = .vertical
@@ -1581,14 +2658,21 @@ final class PreferencesViewController: NSViewController,
         localLLMConfigContainer.spacing = 6
         localLLMConfigContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        let localEndpointLabel = DevTypeTheme.makeLabel("Local LLM Server Endpoint:", font: DevTypeTheme.font(11.5, .medium), color: DevTypeTheme.textPrimary)
+        let localEndpointLabel = DevTypeTheme.makeLabel(
+            loc.s("prefs.voice.localLLM.endpointLabel"),
+            font: DevTypeTheme.font(11.5, .medium),
+            color: DevTypeTheme.textPrimary
+        )
 
         localLLMEndpointField.translatesAutoresizingMaskIntoConstraints = false
         localLLMEndpointField.font = DevTypeTheme.font(12)
         localLLMEndpointField.placeholderString = "http://localhost:11434/v1/chat/completions"
         localLLMEndpointField.target = self
         localLLMEndpointField.action = #selector(localLLMEndpointChanged)
+        localLLMEndpointField.delegate = self
         localLLMEndpointField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        localLLMEndpointField.setAccessibilityLabel(loc.s("prefs.voice.localLLM.endpointLabel"))
+        localLLMEndpointField.setAccessibilityTitleUIElement(localEndpointLabel)
 
         let scanBtn = CapsuleButton(
             title: loc.s("prefs.voice.cleanupModels.scan"),
@@ -1599,7 +2683,11 @@ final class PreferencesViewController: NSViewController,
         )
         localLLMScanButton = scanBtn
 
-        let statusPill = PillBadgeView(text: "Local Endpoint", tint: DevTypeTheme.statusGray, showsDot: false)
+        let statusPill = PillBadgeView(
+            text: loc.s("prefs.voice.localLLM.endpointStatus"),
+            tint: DevTypeTheme.statusGray,
+            showsDot: false
+        )
         statusPill.translatesAutoresizingMaskIntoConstraints = false
         localLLMStatusPill = statusPill
 
@@ -1619,14 +2707,18 @@ final class PreferencesViewController: NSViewController,
         localLLMModelPopup.target = self
         localLLMModelPopup.action = #selector(localLLMModelPopupChanged(_:))
         localLLMModelPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+        localLLMModelPopup.setAccessibilityLabel(loc.s("prefs.voice.cleanupModels"))
+        localLLMModelPopup.setAccessibilityTitleUIElement(localModelLabel)
 
         localLLMModelField.translatesAutoresizingMaskIntoConstraints = false
         localLLMModelField.font = DevTypeTheme.font(12)
-        localLLMModelField.placeholderString = "Custom model identifier"
+        localLLMModelField.placeholderString = loc.s("prefs.voice.localLLM.customPlaceholder")
         localLLMModelField.target = self
         localLLMModelField.action = #selector(localLLMModelChanged)
         localLLMModelField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
         localLLMModelField.isHidden = true
+        localLLMModelField.setAccessibilityLabel(loc.s("prefs.voice.cleanupModels"))
+        localLLMModelField.setAccessibilityTitleUIElement(localModelLabel)
 
         let modelPickerRow = NSStackView(views: [localLLMModelPopup, localLLMModelField])
         modelPickerRow.orientation = .horizontal
@@ -1652,6 +2744,7 @@ final class PreferencesViewController: NSViewController,
             activeModelRow,
             speechModelsLabel,
             speechModelsInventory,
+            appleAssetRow,
             speechModelsHint,
             DevTypeTheme.makeHairline(),
             geminiConfigContainer,
@@ -1678,10 +2771,19 @@ final class PreferencesViewController: NSViewController,
             font: DevTypeTheme.font(12, .semibold)
         )
 
-        let realTimeTypingRow = makeToggleRow(
-            title: loc.s("prefs.voice.realTimeTyping"),
-            toggle: voiceRealTimeTypingSwitch,
-            action: #selector(voiceRealTimeTypingChanged)
+        voiceLiveDeliveryPopup.translatesAutoresizingMaskIntoConstraints = false
+        voiceLiveDeliveryPopup.removeAllItems()
+        for mode in VoicePreferences.LiveDeliveryMode.allCases {
+            voiceLiveDeliveryPopup.addItem(withTitle: loc.s(mode.localizationKey))
+            voiceLiveDeliveryPopup.lastItem?.representedObject = mode.rawValue
+        }
+        voiceLiveDeliveryPopup.target = self
+        voiceLiveDeliveryPopup.action = #selector(voiceLiveDeliveryModeChanged(_:))
+        voiceLiveDeliveryPopup.setAccessibilityLabel(loc.s("prefs.voice.liveDelivery"))
+        let realTimeTypingRow = makeLabeledControlRow(
+            title: loc.s("prefs.voice.liveDelivery"),
+            control: voiceLiveDeliveryPopup,
+            font: DevTypeTheme.font(12, .semibold)
         )
         let disfluencyRow = makeToggleRow(
             title: loc.s("prefs.voice.removeDisfluencies"),
@@ -1760,21 +2862,55 @@ final class PreferencesViewController: NSViewController,
         revealTraceButton.controlSize = .small
         revealTraceButton.translatesAutoresizingMaskIntoConstraints = false
 
+        let deleteTraceButton = NSButton(
+            title: loc.s("prefs.voice.tracing.delete"),
+            target: self,
+            action: #selector(deleteVoiceTrace)
+        )
+        deleteTraceButton.bezelStyle = .rounded
+        deleteTraceButton.controlSize = .small
+        deleteTraceButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let deleteTerminalDiagnosticsButton = NSButton(
+            title: loc.s("prefs.voice.terminalDiagnostics.delete"),
+            target: self,
+            action: #selector(deleteVoiceTerminalDiagnostics)
+        )
+        deleteTerminalDiagnosticsButton.bezelStyle = .rounded
+        deleteTerminalDiagnosticsButton.controlSize = .small
+        deleteTerminalDiagnosticsButton.translatesAutoresizingMaskIntoConstraints = false
+        let terminalDiagnosticsHint = loc.s("prefs.voice.terminalDiagnostics.hint")
+        deleteTerminalDiagnosticsButton.toolTip = terminalDiagnosticsHint
+        deleteTerminalDiagnosticsButton.setAccessibilityHelp(terminalDiagnosticsHint)
+
         let revealRow = PreferenceRowView()
         revealRow.translatesAutoresizingMaskIntoConstraints = false
         revealRow.addSubview(revealTraceButton)
+        revealRow.addSubview(deleteTraceButton)
+        revealRow.addSubview(deleteTerminalDiagnosticsButton)
+        voiceTraceStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        revealRow.addSubview(voiceTraceStatusLabel)
         NSLayoutConstraint.activate([
             revealTraceButton.leadingAnchor.constraint(equalTo: revealRow.leadingAnchor),
             revealTraceButton.topAnchor.constraint(equalTo: revealRow.topAnchor, constant: 2),
-            revealTraceButton.bottomAnchor.constraint(equalTo: revealRow.bottomAnchor, constant: -2)
+            deleteTraceButton.leadingAnchor.constraint(equalTo: revealTraceButton.trailingAnchor, constant: 8),
+            deleteTraceButton.centerYAnchor.constraint(equalTo: revealTraceButton.centerYAnchor),
+            deleteTerminalDiagnosticsButton.leadingAnchor.constraint(
+                equalTo: deleteTraceButton.trailingAnchor,
+                constant: 8
+            ),
+            deleteTerminalDiagnosticsButton.centerYAnchor.constraint(equalTo: revealTraceButton.centerYAnchor),
+            deleteTerminalDiagnosticsButton.trailingAnchor.constraint(lessThanOrEqualTo: revealRow.trailingAnchor),
+            voiceTraceStatusLabel.leadingAnchor.constraint(equalTo: revealRow.leadingAnchor),
+            voiceTraceStatusLabel.trailingAnchor.constraint(equalTo: revealRow.trailingAnchor),
+            voiceTraceStatusLabel.topAnchor.constraint(equalTo: revealTraceButton.bottomAnchor, constant: 6),
+            voiceTraceStatusLabel.bottomAnchor.constraint(equalTo: revealRow.bottomAnchor, constant: -2)
         ])
 
         stackInCard(optionsCard, views: [
             toneRow, realTimeTypingRow, disfluencyRow, autoPunctuateRow, proofreadRow,
             soundFeedbackRow, whisperRow, tracingRow, revealRow
         ])
-        refreshWhisperServerButton()
-
         // 3. Hotkey Card
         let hotkeyCard = makeCard(title: loc.s("prefs.voice.hotkey.card"), symbol: "keyboard")
         let hotkeyHint = DevTypeTheme.makeLabel(
@@ -1827,11 +2963,13 @@ final class PreferencesViewController: NSViewController,
         voiceDictSpokenField.placeholderString = loc.s("prefs.voice.dict.spokenPlaceholder")
         voiceDictSpokenField.font = DevTypeTheme.font(12)
         voiceDictSpokenField.widthAnchor.constraint(greaterThanOrEqualToConstant: 130).isActive = true
+        voiceDictSpokenField.setAccessibilityLabel(loc.s("prefs.voice.dict.column.spoken"))
 
         voiceDictReplacementField.translatesAutoresizingMaskIntoConstraints = false
         voiceDictReplacementField.placeholderString = loc.s("prefs.voice.dict.replacementPlaceholder")
         voiceDictReplacementField.font = DevTypeTheme.font(12)
         voiceDictReplacementField.widthAnchor.constraint(greaterThanOrEqualToConstant: 130).isActive = true
+        voiceDictReplacementField.setAccessibilityLabel(loc.s("prefs.voice.dict.column.replacement"))
 
         let addDictionaryButton = CapsuleButton(
             title: loc.s("common.add"),
@@ -1901,6 +3039,7 @@ final class PreferencesViewController: NSViewController,
         voiceTriggerPhraseField.placeholderString = loc.s("prefs.voice.triggers.phrasePlaceholder")
         voiceTriggerPhraseField.font = DevTypeTheme.font(12)
         voiceTriggerPhraseField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        voiceTriggerPhraseField.setAccessibilityLabel(loc.s("prefs.voice.triggers.column.phrase"))
 
         voiceTriggerActionPopup.translatesAutoresizingMaskIntoConstraints = false
         voiceTriggerActionPopup.removeAllItems()
@@ -1908,6 +3047,7 @@ final class PreferencesViewController: NSViewController,
             voiceTriggerActionPopup.addItem(withTitle: loc.s(kind.localizationKey))
             voiceTriggerActionPopup.lastItem?.representedObject = kind.rawValue
         }
+        voiceTriggerActionPopup.setAccessibilityLabel(loc.s("prefs.voice.triggers.column.action"))
 
         let addTriggerButton = CapsuleButton(
             title: loc.s("common.add"),
@@ -2001,7 +3141,7 @@ final class PreferencesViewController: NSViewController,
         for (index, engine) in voiceEngines.enumerated() {
             let presentation = voiceEngineStatus(for: engine)
             let name = DevTypeTheme.makeLabel(
-                engine.displayName,
+                loc.s(engine.localizationKey),
                 font: DevTypeTheme.font(11, .medium),
                 color: DevTypeTheme.textPrimary
             )
@@ -2022,6 +3162,7 @@ final class PreferencesViewController: NSViewController,
             status.lineBreakMode = .byTruncatingTail
             status.toolTip = presentation.detail
             status.widthAnchor.constraint(greaterThanOrEqualToConstant: 176).isActive = true
+            voiceEngineStatusLabels[engine] = status
 
             let row = NSStackView(views: [name, source, status])
             row.orientation = .horizontal
@@ -2056,10 +3197,18 @@ final class PreferencesViewController: NSViewController,
     private func reloadVoice() {
         guard panes[.voice] != nil else { return }
 
-        let micGranted = DurableVoiceCapture.checkMicrophonePermission()
+        let micStatus = DurableVoiceCapture.microphonePermissionStatus()
+        let micPresentation = voicePermissionPresentation(for: micStatus)
         voiceMicPermissionPill?.update(
-            text: micGranted ? loc.s("status.active") : loc.s("status.needsPermissions"),
-            tint: micGranted ? DevTypeTheme.statusGreen : DevTypeTheme.accent
+            text: micPresentation.text,
+            tint: micPresentation.color
+        )
+
+        let speechAuthorization = SpeechAuthorization.status()
+        let speechPresentation = voicePermissionPresentation(for: speechAuthorization)
+        voiceSpeechPermissionPill?.update(
+            text: speechPresentation.text,
+            tint: speechPresentation.color
         )
 
         let currentEngine = VoicePreferences.transcriptionEngine
@@ -2067,16 +3216,27 @@ final class PreferencesViewController: NSViewController,
             voiceModelPopup.selectItem(at: index)
         }
 
-        let hasGeminiKey = GeminiAPIKeyStore.hasKey
-        geminiKeyStatusPill?.update(
-            text: hasGeminiKey ? "Key Configured" : "No Key Set",
-            tint: hasGeminiKey ? DevTypeTheme.statusGreen : DevTypeTheme.statusOrange
-        )
-        if hasGeminiKey && geminiAPIKeyField.stringValue.isEmpty {
-            geminiAPIKeyField.placeholderString = "Key Saved (••••••••••••••••)"
-        } else if !hasGeminiKey {
-            geminiAPIKeyField.placeholderString = "Paste Gemini API Key (AIzaSy...)"
+        refreshGeminiCredentialPresentation()
+        geminiCloudConsentSwitch.state = VoicePreferences.hasCloudAudioConsent ? .on : .off
+
+        // A previous capability result may be stale after a locale/TCC/system-resource change.
+        // Show Checking until this refresh's probe earns Ready again.
+        appleSpeechReadiness = nil
+        localAICorrectionProviderID = nil
+        whisperReadinessState = nil
+        whisperModelStatus = nil
+        for engine in voiceEngines {
+            let presentation = voiceEngineStatus(
+                for: engine,
+                speechAuthorization: speechAuthorization
+            )
+            voiceEngineStatusLabels[engine]?.stringValue = presentation.text
+            voiceEngineStatusLabels[engine]?.textColor = presentation.color
+            voiceEngineStatusLabels[engine]?.toolTip = presentation.detail
+            voiceEngineStatusLabels[engine]?.setAccessibilityLabel(presentation.text)
         }
+        refreshAppleSpeechReadiness()
+        refreshWhisperReadiness()
 
         geminiConfigContainer.isHidden = currentEngine != .gemini
         localLLMConfigContainer.isHidden = currentEngine != .localLLM
@@ -2091,8 +3251,30 @@ final class PreferencesViewController: NSViewController,
             voiceTonePopup.selectItem(at: index)
         }
 
-        voiceRealTimeTypingSwitch.state = VoicePreferences.isRealTimeTypingEnabled ? .on : .off
-        voiceTracingSwitch.state = VoicePreferences.isVoiceTracingEnabled ? .on : .off
+        if let index = VoicePreferences.LiveDeliveryMode.allCases
+            .firstIndex(of: VoicePreferences.liveDeliveryMode) {
+            voiceLiveDeliveryPopup.selectItem(at: index)
+        }
+        let traceRecorder = VoiceDiagnosticsRecorder.shared
+        voiceTracingSwitch.state = traceRecorder.isEnabled ? .on : .off
+        let traceHealth = traceRecorder.ioHealth
+        if case .failed = traceHealth.terminalDelete {
+            updateVoiceTraceStatus(
+                "prefs.voice.terminalDiagnostics.status.deleteFailed",
+                warning: true
+            )
+        } else if case .failed = traceHealth.delete {
+            updateVoiceTraceStatus("prefs.voice.tracing.status.deleteFailed", warning: true)
+        } else if traceRecorder.isEnabled, case .failed = traceHealth.write {
+            updateVoiceTraceStatus("prefs.voice.tracing.status.incomplete", warning: true)
+        } else {
+            updateVoiceTraceStatus(
+                traceRecorder.isEnabled
+                    ? "prefs.voice.tracing.status.on"
+                    : "prefs.voice.tracing.status.off",
+                warning: false
+            )
+        }
         voiceProofreadSwitch.state = VoicePreferences.isProofreadBeforeInsertEnabled ? .on : .off
         voiceAutoPunctuateSwitch.state = VoicePreferences.isAutoPunctuateEnabled ? .on : .off
         voiceDisfluenciesSwitch.state = VoicePreferences.isRemoveDisfluenciesEnabled ? .on : .off
@@ -2118,42 +3300,89 @@ final class PreferencesViewController: NSViewController,
     /// Reflects who owns the running server, if anyone. Three states, because they need
     /// three different actions: ours (stop it), someone else's (leave it alone), none
     /// (start one).
-    private func refreshWhisperServerButton() {
-        // The model is the prerequisite: without it Start can only report why it failed.
-        let hasModel = WhisperServerSetup.hasModel()
-        whisperModelButton.isHidden = hasModel
-        whisperModelButton.isEnabled = !hasModel
-        if !hasModel { whisperModelButton.title = loc.s("prefs.voice.whisper.getModel") }
+    private func refreshWhisperReadiness() {
+        let endpoint = VoicePreferences.whisperEndpoint
+        let request = whisperReadinessRefresh.begin(endpoint: endpoint)
+        whisperReadinessTask?.cancel()
+        whisperReadinessState = nil
+        whisperModelStatus = nil
+        applyWhisperReadinessPresentation()
 
-        if WhisperServerController.shared.isManagedByApp {
-            whisperServerButton.title = loc.s("prefs.voice.whisper.stop")
-            whisperServerButton.isEnabled = true
-            return
-        }
-        whisperServerButton.title = loc.s("prefs.voice.whisper.start")
-        whisperServerButton.isEnabled = true
-
-        Task { @MainActor in
-            let external = await WhisperServerSetup.isReachable()
-            guard !WhisperServerController.shared.isManagedByApp else { return }
-            if external {
-                // Started outside DevType — usable, but not ours to stop.
-                self.whisperServerButton.title = self.loc.s("prefs.voice.whisper.external")
-                self.whisperServerButton.isEnabled = false
+        whisperReadinessTask = Task { [weak self] in
+            async let state = WhisperServerSetup.detect(endpoint: endpoint)
+            async let modelStatus = WhisperServerSetup.inspectModel()
+            let (resolvedState, resolvedModelStatus) = await (state, modelStatus)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.whisperReadinessRefresh.claim(
+                          request,
+                          currentEndpoint: VoicePreferences.whisperEndpoint
+                      ) else { return }
+                self.whisperReadinessState = resolvedState
+                self.whisperModelStatus = resolvedModelStatus
+                self.whisperReadinessTask = nil
+                self.applyWhisperReadinessPresentation()
             }
         }
     }
 
+    private func applyWhisperReadinessPresentation() {
+        let presentation = WhisperReadinessPresentation.resolve(
+            setupState: whisperReadinessState,
+            isManagedByApp: WhisperServerController.shared.isManagedByApp,
+            hasLocalModel: whisperModelStatus?.isVerified == true
+        )
+        let controls = WhisperControlsPresentation.resolve(
+            readiness: presentation,
+            activeAction: whisperActionLifecycle.activeAction
+        )
+        let tint: NSColor
+        switch presentation.tintRole {
+        case .checking: tint = DevTypeTheme.statusGray
+        case .ready: tint = DevTypeTheme.statusGreen
+        case .attention: tint = DevTypeTheme.statusOrange
+        }
+        let detail = presentation.detailState.map {
+            WhisperServerSetup.pendingCommands(
+                for: $0,
+                modelStatus: whisperModelStatus,
+                endpoint: VoicePreferences.whisperEndpoint
+            )
+        }
+        let statusText = loc.s(presentation.statusKey)
+        voiceEngineStatusLabels[.whisperLocal]?.stringValue = statusText
+        voiceEngineStatusLabels[.whisperLocal]?.textColor = tint
+        voiceEngineStatusLabels[.whisperLocal]?.toolTip = detail
+        voiceEngineStatusLabels[.whisperLocal]?.setAccessibilityLabel(statusText)
+        whisperServerButton.title = loc.s(controls.serverButtonTitleKey)
+        whisperServerButton.isEnabled = controls.isServerButtonEnabled
+        whisperModelButton.isHidden = controls.isModelButtonHidden
+        whisperModelButton.isEnabled = controls.isModelButtonEnabled
+        if let modelButtonTitleKey = controls.modelButtonTitleKey {
+            whisperModelButton.title = loc.s(modelButtonTitleKey)
+        }
+    }
+
     @objc private func downloadWhisperModel() {
+        guard let request = whisperActionLifecycle.begin(.modelDownload) else { return }
         whisperModelButton.isEnabled = false
         whisperModelButton.title = loc.s("prefs.voice.whisper.downloading")
 
-        Task { @MainActor in
-            let result = await WhisperServerController.shared.downloadModel { fraction in
-                DispatchQueue.main.async {
+        let controller = WhisperServerController.shared
+        whisperModelDownloadTask = Task { @MainActor [weak self] in
+            let result = await controller.downloadModel { [weak self] fraction in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          self.whisperActionLifecycle.allowsProgress(request) else { return }
                     self.whisperModelButton.title = "\(Int(fraction * 100))%"
                 }
             }
+            guard !Task.isCancelled,
+                  let self,
+                  self.whisperActionLifecycle.claimCompletion(request) else { return }
+            self.whisperModelDownloadTask = nil
+            defer { self.onLocalizationBlockingOperationDidEnd?() }
             switch result {
             case .success:
                 break
@@ -2164,22 +3393,41 @@ final class PreferencesViewController: NSViewController,
                     window: self.view.window
                 )
             }
-            self.refreshWhisperServerButton()
+            self.refreshWhisperReadiness()
         }
     }
 
     @objc private func toggleWhisperServer() {
-        if WhisperServerController.shared.isManagedByApp {
-            WhisperServerController.shared.stop()
-            refreshWhisperServerButton()
+        let controller = WhisperServerController.shared
+        switch WhisperServerToggleDecision.resolve(
+            activeAction: whisperActionLifecycle.activeAction,
+            isManagedByApp: controller.isManagedByApp
+        ) {
+        case .cancelPendingStart:
+            cancelPendingWhisperServerStart()
+            controller.stop()
+            refreshWhisperReadiness()
             return
+        case .ignoreWhileDownloading:
+            return
+        case .stopManagedServer:
+            controller.stop()
+            refreshWhisperReadiness()
+            return
+        case .startServer:
+            break
         }
 
-        whisperServerButton.isEnabled = false
-        whisperServerButton.title = loc.s("prefs.voice.whisper.starting")
+        guard let request = whisperActionLifecycle.begin(.serverStart) else { return }
+        applyWhisperReadinessPresentation()
 
-        Task { @MainActor in
-            let result = await WhisperServerController.shared.start()
+        whisperServerStartTask = Task { @MainActor [weak self] in
+            let result = await controller.start()
+            guard !Task.isCancelled,
+                  let self,
+                  self.whisperActionLifecycle.claimCompletion(request) else { return }
+            self.whisperServerStartTask = nil
+            defer { self.onLocalizationBlockingOperationDidEnd?() }
             switch result {
             case .success:
                 break
@@ -2190,7 +3438,27 @@ final class PreferencesViewController: NSViewController,
                     window: self.view.window
                 )
             }
-            self.refreshWhisperServerButton()
+            self.refreshWhisperReadiness()
+        }
+    }
+
+    private func cancelPendingWhisperServerStart() {
+        whisperServerStartTask?.cancel()
+        whisperServerStartTask = nil
+        if whisperActionLifecycle.cancel(.serverStart) {
+            onLocalizationBlockingOperationDidEnd?()
+        }
+    }
+
+    private func invalidateWhisperActions() {
+        let hadActiveAction = whisperActionLifecycle.activeAction != nil
+        whisperModelDownloadTask?.cancel()
+        whisperModelDownloadTask = nil
+        whisperServerStartTask?.cancel()
+        whisperServerStartTask = nil
+        whisperActionLifecycle.invalidate()
+        if hadActiveAction {
+            onLocalizationBlockingOperationDidEnd?()
         }
     }
 
@@ -2198,17 +3466,166 @@ final class PreferencesViewController: NSViewController,
         VoicePreferences.isProofreadBeforeInsertEnabled = voiceProofreadSwitch.state == .on
     }
 
+    private func updateVoiceTraceStatus(_ key: String, warning: Bool) {
+        voiceTraceStatusLabel.stringValue = loc.s(key)
+        voiceTraceStatusLabel.textColor = warning ? DevTypeTheme.statusOrange : DevTypeTheme.textTertiary
+    }
+
+    private func presentVoiceDiagnosticsFailure(
+        titleKey: String,
+        messageKey: String,
+        action: String,
+        failure: VoiceDiagnosticsRecorder.IOFailure?
+    ) {
+        DevTypeLog.voice.error(
+            "[VoiceDiagnostics] preferences action=\(action, privacy: .public) failure=\(failure?.rawValue ?? "notAttempted", privacy: .public)"
+        )
+        DevTypeAlert.warn(
+            title: loc.s(titleKey),
+            message: loc.s(messageKey),
+            window: view.window
+        )
+    }
+
+    @objc private func deleteVoiceTrace() {
+        let recorder = VoiceDiagnosticsRecorder.shared
+        switch recorder.deleteTrace() {
+        case .succeeded:
+            updateVoiceTraceStatus(
+                recorder.isEnabled
+                    ? "prefs.voice.tracing.status.deletedCapturing"
+                    : "prefs.voice.tracing.status.deleted",
+                warning: false
+            )
+        case .failed(let failure):
+            updateVoiceTraceStatus("prefs.voice.tracing.status.deleteFailed", warning: true)
+            presentVoiceDiagnosticsFailure(
+                titleKey: "prefs.voice.tracing.deleteFailed.title",
+                messageKey: "prefs.voice.tracing.deleteFailed.message",
+                action: "delete",
+                failure: failure
+            )
+        case .notAttempted:
+            updateVoiceTraceStatus("prefs.voice.tracing.status.deleteFailed", warning: true)
+            presentVoiceDiagnosticsFailure(
+                titleKey: "prefs.voice.tracing.deleteFailed.title",
+                messageKey: "prefs.voice.tracing.deleteFailed.message",
+                action: "delete",
+                failure: nil
+            )
+        }
+    }
+
+    @objc private func deleteVoiceTerminalDiagnostics() {
+        let presentation = VoiceTerminalDiagnosticsDeletionPresentation.perform {
+            VoiceDiagnosticsRecorder.shared.deleteTerminalDiagnostics()
+        }
+        updateVoiceTraceStatus(presentation.statusKey, warning: presentation.isWarning)
+        guard let titleKey = presentation.alertTitleKey,
+              let messageKey = presentation.alertMessageKey else {
+            DevTypeLog.voice.info(
+                "[VoiceDiagnostics] preferences action=delete-terminal outcome=succeeded"
+            )
+            return
+        }
+        presentVoiceDiagnosticsFailure(
+            titleKey: titleKey,
+            messageKey: messageKey,
+            action: "delete-terminal",
+            failure: presentation.failure
+        )
+    }
+
     @objc private func voiceTracingChanged() {
-        let enabled = voiceTracingSwitch.state == .on
-        VoicePreferences.isVoiceTracingEnabled = enabled
-        // Starting a fresh capture is the point; a trace mixed with an earlier run is far
-        // harder to read.
-        if enabled { VoiceDiagnosticsRecorder.shared.clear() }
+        let recorder = VoiceDiagnosticsRecorder.shared
+        if voiceTracingSwitch.state == .on {
+            // Keep acceptance off until the previous trace is definitely gone. Otherwise a failed
+            // delete silently mixes old dictated text into what the UI calls a fresh capture.
+            recorder.isEnabled = false
+            switch recorder.deleteTrace() {
+            case .succeeded:
+                recorder.isEnabled = true
+                updateVoiceTraceStatus("prefs.voice.tracing.status.on", warning: false)
+            case .failed(let failure):
+                recorder.isEnabled = false
+                voiceTracingSwitch.state = .off
+                updateVoiceTraceStatus("prefs.voice.tracing.status.startFailed", warning: true)
+                presentVoiceDiagnosticsFailure(
+                    titleKey: "prefs.voice.tracing.startFailed.title",
+                    messageKey: "prefs.voice.tracing.startFailed.message",
+                    action: "enable",
+                    failure: failure
+                )
+            case .notAttempted:
+                recorder.isEnabled = false
+                voiceTracingSwitch.state = .off
+                updateVoiceTraceStatus("prefs.voice.tracing.status.startFailed", warning: true)
+                presentVoiceDiagnosticsFailure(
+                    titleKey: "prefs.voice.tracing.startFailed.title",
+                    messageKey: "prefs.voice.tracing.startFailed.message",
+                    action: "enable",
+                    failure: nil
+                )
+            }
+            return
+        }
+
+        // This operation first blocks new submissions, drains accepted writes, and then deletes.
+        // A failed delete still leaves tracing off; the warning is about retained local data only.
+        switch recorder.disableAndDelete() {
+        case .succeeded:
+            updateVoiceTraceStatus("prefs.voice.tracing.status.off", warning: false)
+        case .failed(let failure):
+            voiceTracingSwitch.state = .off
+            updateVoiceTraceStatus("prefs.voice.tracing.status.deleteFailed", warning: true)
+            presentVoiceDiagnosticsFailure(
+                titleKey: "prefs.voice.tracing.disableDeleteFailed.title",
+                messageKey: "prefs.voice.tracing.disableDeleteFailed.message",
+                action: "disable",
+                failure: failure
+            )
+        case .notAttempted:
+            voiceTracingSwitch.state = .off
+            updateVoiceTraceStatus("prefs.voice.tracing.status.deleteFailed", warning: true)
+            presentVoiceDiagnosticsFailure(
+                titleKey: "prefs.voice.tracing.disableDeleteFailed.title",
+                messageKey: "prefs.voice.tracing.disableDeleteFailed.message",
+                action: "disable",
+                failure: nil
+            )
+        }
     }
 
     @objc private func revealVoiceTrace() {
-        let url = VoiceDiagnosticsRecorder.traceURL
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        let recorder = VoiceDiagnosticsRecorder.shared
+        // read() is a queue barrier: it waits for every accepted append before the file is opened.
+        let trace = recorder.read()
+        let health = recorder.ioHealth
+        switch health.read {
+        case .failed(let failure):
+            updateVoiceTraceStatus("prefs.voice.tracing.status.readFailed", warning: true)
+            presentVoiceDiagnosticsFailure(
+                titleKey: "prefs.voice.tracing.readFailed.title",
+                messageKey: "prefs.voice.tracing.readFailed.message",
+                action: "reveal",
+                failure: failure
+            )
+            return
+        case .notAttempted:
+            updateVoiceTraceStatus("prefs.voice.tracing.status.readFailed", warning: true)
+            presentVoiceDiagnosticsFailure(
+                titleKey: "prefs.voice.tracing.readFailed.title",
+                messageKey: "prefs.voice.tracing.readFailed.message",
+                action: "reveal",
+                failure: nil
+            )
+            return
+        case .succeeded:
+            break
+        }
+
+        guard let trace, !trace.isEmpty else {
+            updateVoiceTraceStatus("prefs.voice.tracing.status.empty", warning: false)
             DevTypeAlert.info(
                 title: loc.s("prefs.voice.tracing.empty.title"),
                 message: loc.s("prefs.voice.tracing.empty.message"),
@@ -2216,11 +3633,24 @@ final class PreferencesViewController: NSViewController,
             )
             return
         }
+
+        if case .failed(let failure) = health.write {
+            updateVoiceTraceStatus("prefs.voice.tracing.status.incomplete", warning: true)
+            presentVoiceDiagnosticsFailure(
+                titleKey: "prefs.voice.tracing.incomplete.title",
+                messageKey: "prefs.voice.tracing.incomplete.message",
+                action: "reveal-incomplete",
+                failure: failure
+            )
+        }
+        let url = VoiceDiagnosticsRecorder.traceURL
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    @objc private func voiceRealTimeTypingChanged() {
-        VoicePreferences.isRealTimeTypingEnabled = voiceRealTimeTypingSwitch.state == .on
+    @objc private func voiceLiveDeliveryModeChanged(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String,
+              let mode = VoicePreferences.LiveDeliveryMode(rawValue: raw) else { return }
+        VoicePreferences.liveDeliveryMode = mode
     }
 
     @objc private func voiceTriggerAddEntry() {
@@ -2253,6 +3683,23 @@ final class PreferencesViewController: NSViewController,
         SettingsDeepLinker.shared.open(for: .microphone)
     }
 
+    @objc private func requestSpeechRecognitionAccessClicked() {
+        Task { [weak self] in
+            _ = await SpeechAuthorization.request()
+            await MainActor.run { self?.reloadVoice() }
+        }
+    }
+
+    @objc private func openSpeechRecognitionSettingsClicked() {
+        SettingsDeepLinker.shared.open(for: .speechRecognition)
+    }
+
+    @objc private func geminiCloudConsentChanged() {
+        VoicePreferences.hasCloudAudioConsent = geminiCloudConsentSwitch.state == .on
+        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+        reloadVoice()
+    }
+
     @objc private func voiceModelPopupChanged(_ sender: NSPopUpButton) {
         guard let raw = sender.selectedItem?.representedObject as? String,
               let engine = TranscriptionEngine(rawValue: raw) else { return }
@@ -2264,46 +3711,162 @@ final class PreferencesViewController: NSViewController,
         let key = geminiAPIKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
 
+        geminiKeyValidationTask?.cancel()
+        let request = geminiKeyValidationLifecycle.begin()
         geminiKeySaveButton?.isEnabled = false
-        geminiKeySaveButton?.title = "Validating..."
-        geminiKeyStatusPill?.update(text: "Validating Key...", tint: DevTypeTheme.accent)
+        geminiKeySaveButton?.title = loc.s("prefs.voice.gemini.validating")
+        geminiKeyStatusPill?.update(
+            text: loc.s("prefs.voice.gemini.validatingKey"),
+            tint: DevTypeTheme.accent
+        )
 
-        Task {
+        geminiKeyValidationTask = Task { [weak self] in
             let result = await GeminiTranscriptionClient.shared.validateAPIKeyDetailed(key)
-            await MainActor.run {
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.geminiKeyValidationLifecycle.claim(
+                          request,
+                          draftMatches: self.transientValue(of: self.geminiAPIKeyField)
+                              .trimmingCharacters(in: .whitespacesAndNewlines) == key
+                      ) else { return }
+                self.geminiKeyValidationTask = nil
+                defer { self.onLocalizationBlockingOperationDidEnd?() }
+
                 if result.isValid {
-                    try? GeminiAPIKeyStore.save(key)
-                    self.geminiAPIKeyField.stringValue = ""
-                    self.geminiAPIKeyField.placeholderString = "Key Saved (••••••••••••••••)"
-                    self.geminiKeyStatusPill?.update(text: result.userMessage, tint: DevTypeTheme.statusGreen)
+                    do {
+                        try GeminiAPIKeyStore.save(key)
+                        self.geminiAPIKeyField.stringValue = ""
+                        self.geminiAPIKeyField.placeholderString = self.loc.s("prefs.voice.gemini.placeholder.saved")
+                        self.reloadVoice()
+                        let validation = GeminiValidationDisplayState.resolve(result)
+                        self.geminiKeyStatusPill?.update(
+                            text: self.loc.s(validation.localizationKey),
+                            tint: DevTypeTheme.statusGreen
+                        )
+                    } catch {
+                        self.presentGeminiKeychainFailure(action: .save, error: error)
+                        self.finishGeminiKeyValidationControls()
+                        return
+                    }
                 } else {
-                    self.geminiKeyStatusPill?.update(text: result.userMessage, tint: DevTypeTheme.statusOrange)
+                    let validation = GeminiValidationDisplayState.resolve(result)
+                    self.geminiKeyStatusPill?.update(
+                        text: self.loc.s(validation.localizationKey),
+                        tint: DevTypeTheme.statusOrange
+                    )
                 }
-                self.geminiKeySaveButton?.title = "Save & Validate"
-                self.geminiKeySaveButton?.isEnabled = true
-                self.reloadVoice()
+                self.finishGeminiKeyValidationControls()
             }
         }
     }
 
     @objc private func geminiKeyDeleteClicked() {
-        try? GeminiAPIKeyStore.delete()
-        geminiAPIKeyField.stringValue = ""
-        geminiAPIKeyField.placeholderString = "Paste Gemini API Key (AIzaSy...)"
-        reloadVoice()
+        // Delete is an explicit revocation and therefore wins over every older validation, even
+        // when URLSession has already received a response and ignores task cancellation.
+        invalidateGeminiKeyValidation(resetPresentation: true)
+        do {
+            try GeminiAPIKeyStore.delete()
+            geminiAPIKeyField.stringValue = ""
+            geminiAPIKeyField.placeholderString = loc.s("prefs.voice.gemini.placeholder.paste")
+            reloadVoice()
+        } catch {
+            presentGeminiKeychainFailure(action: .delete, error: error)
+        }
+    }
+
+    private func finishGeminiKeyValidationControls() {
+        geminiKeySaveButton?.title = loc.s("prefs.voice.gemini.saveValidate")
+        geminiKeySaveButton?.isEnabled = true
+    }
+
+    private func invalidateGeminiKeyValidation(resetPresentation: Bool) {
+        let wasValidating = geminiKeyValidationLifecycle.isActive
+        geminiKeyValidationTask?.cancel()
+        geminiKeyValidationTask = nil
+        geminiKeyValidationLifecycle.invalidate()
+        if wasValidating {
+            onLocalizationBlockingOperationDidEnd?()
+        }
+        guard resetPresentation, wasValidating else { return }
+        finishGeminiKeyValidationControls()
+        refreshGeminiCredentialPresentation()
+    }
+
+    private func refreshGeminiCredentialPresentation() {
+        guard !geminiKeyValidationLifecycle.isActive else { return }
+        let credential = GeminiCredentialDisplayState.resolve(GeminiAPIKeyStore.readState())
+        geminiKeyStatusPill?.update(
+            text: loc.s(credential.statusKey),
+            tint: credential.tint
+        )
+        if geminiAPIKeyField.stringValue.isEmpty {
+            geminiAPIKeyField.placeholderString = loc.s(credential.placeholderKey)
+        }
+    }
+
+    private enum GeminiKeychainAction { case save, delete }
+
+    private func presentGeminiKeychainFailure(action: GeminiKeychainAction, error: Error) {
+        let nsError = error as NSError
+        let titleKey: String
+        let messageKey: String
+        let pillKey: String
+        switch action {
+        case .save:
+            titleKey = "prefs.voice.keychain.saveFailed.title"
+            messageKey = "prefs.voice.keychain.saveFailed.message"
+            pillKey = "prefs.voice.keychain.saveFailed.pill"
+        case .delete:
+            titleKey = "prefs.voice.keychain.deleteFailed.title"
+            messageKey = "prefs.voice.keychain.deleteFailed.message"
+            pillKey = "prefs.voice.keychain.deleteFailed.pill"
+        }
+        DevTypeLog.voice.error(
+            "[Voice] Gemini Keychain operation failed domain=\(nsError.domain, privacy: .public) code=\(nsError.code, privacy: .public)"
+        )
+        geminiKeyStatusPill?.update(text: loc.s(pillKey), tint: DevTypeTheme.statusOrange)
+        DevTypeAlert.warn(title: loc.s(titleKey), message: loc.s(messageKey), window: view.window)
     }
 
     @objc private func localLLMEndpointChanged() {
-        let text = localLLMEndpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty, let url = URL(string: text) {
-            VoicePreferences.localLLMEndpoint = url
+        invalidateLocalModelScan(resetPresentation: true)
+        if commitLocalLLMEndpointField() {
+            refreshLocalAIReadinessAfterConfigurationChange()
         }
+    }
+
+    @discardableResult
+    private func commitLocalLLMEndpointField() -> Bool {
+        let text = localLLMEndpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty,
+              let url = URL(string: text),
+              VoicePreferences.setLocalLLMEndpoint(url) else {
+            localLLMEndpointField.stringValue = VoicePreferences.localLLMEndpoint.absoluteString
+            localLLMStatusPill?.update(
+                text: loc.s("prefs.voice.localLLM.endpointInvalid.pill"),
+                tint: DevTypeTheme.statusOrange
+            )
+            DevTypeAlert.warn(
+                title: loc.s("prefs.voice.localLLM.endpointInvalid.title"),
+                message: loc.s("prefs.voice.localLLM.endpointInvalid.message"),
+                window: view.window
+            )
+            return false
+        }
+        localLLMEndpointField.stringValue = url.absoluteString
+        localLLMStatusPill?.update(
+            text: loc.s("prefs.voice.localLLM.endpointStatus"),
+            tint: DevTypeTheme.statusGray
+        )
+        return true
     }
 
     @objc private func localLLMModelChanged() {
         let text = localLLMModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty {
             VoicePreferences.localLLMModel = text
+            refreshLocalAIReadinessAfterConfigurationChange()
         }
     }
 
@@ -2316,10 +3879,22 @@ final class PreferencesViewController: NSViewController,
             localLLMModelField.isHidden = true
             VoicePreferences.localLLMModel = raw
             localLLMModelField.stringValue = raw
+            refreshLocalAIReadinessAfterConfigurationChange()
         }
     }
 
+    private func refreshLocalAIReadinessAfterConfigurationChange() {
+        localAICorrectionProviderID = nil
+        let presentation = voiceEngineStatus(for: .localLLM)
+        voiceEngineStatusLabels[.localLLM]?.stringValue = presentation.text
+        voiceEngineStatusLabels[.localLLM]?.textColor = presentation.color
+        voiceEngineStatusLabels[.localLLM]?.toolTip = presentation.detail
+        voiceEngineStatusLabels[.localLLM]?.setAccessibilityLabel(presentation.text)
+        refreshAppleSpeechReadiness()
+    }
+
     @objc private func scanLocalModelsClicked() {
+        guard commitLocalLLMEndpointField() else { return }
         localLLMScanButton?.isEnabled = false
         localLLMScanButton?.title = loc.s("prefs.voice.cleanupModels.scanning")
         localLLMStatusPill?.update(
@@ -2328,9 +3903,18 @@ final class PreferencesViewController: NSViewController,
         )
 
         let endpoint = VoicePreferences.localLLMEndpoint
-        Task {
+        let request = localModelScanRefresh.begin(endpoint: endpoint)
+        localModelScanTask?.cancel()
+        localModelScanTask = Task { [weak self] in
             let discovered = await LocalLLMModelCatalog.shared.fetchAvailableLocalModels(endpoint: endpoint)
-            await MainActor.run {
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.localModelScanRefresh.claim(
+                          request,
+                          currentEndpoint: VoicePreferences.localLLMEndpoint
+                      ) else { return }
+                self.localModelScanTask = nil
                 self.localLLMScanButton?.isEnabled = true
                 self.localLLMScanButton?.title = self.loc.s("prefs.voice.cleanupModels.scan")
                 if discovered.isEmpty {
@@ -2349,14 +3933,38 @@ final class PreferencesViewController: NSViewController,
         }
     }
 
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField else { return }
+        if field === geminiAPIKeyField {
+            // Editing the submitted draft is a newer user action. Cancellation is advisory; the
+            // generation gate is what prevents the old response from saving or repainting later.
+            invalidateGeminiKeyValidation(resetPresentation: true)
+        } else if field === localLLMEndpointField {
+            invalidateLocalModelScan(resetPresentation: true)
+        }
+    }
+
+    private func invalidateLocalModelScan(resetPresentation: Bool) {
+        localModelScanTask?.cancel()
+        localModelScanTask = nil
+        localModelScanRefresh.invalidate()
+        guard resetPresentation else { return }
+        localLLMScanButton?.isEnabled = true
+        localLLMScanButton?.title = loc.s("prefs.voice.cleanupModels.scan")
+        localLLMStatusPill?.update(
+            text: loc.s("prefs.voice.localLLM.endpointStatus"),
+            tint: DevTypeTheme.statusGray
+        )
+    }
+
     private func refreshLocalLLMModelsPopup(additionalDiscoveredModels: [String] = []) {
         let currentSelectedModel = VoicePreferences.localLLMModel
         localLLMModelPopup.removeAllItems()
 
         // 1. Preset recommended models
         let presets: [(title: String, id: String)] = [
-            ("Llama 3.2 (3B - Fast & Recommended)", "llama3.2"),
-            ("Llama 3.2 1B (1B - Ultra Fast)", "llama3.2:1b"),
+            (loc.s("prefs.voice.localLLM.fastRecommended", "Llama 3.2"), "llama3.2"),
+            (loc.s("prefs.voice.localLLM.ultraFast", "Llama 3.2 1B"), "llama3.2:1b"),
             ("Qwen 2.5 (3B)", "qwen2.5:3b"),
             ("Qwen 2.5 (7B)", "qwen2.5:7b"),
             ("Phi-3.5 (3.8B)", "phi3.5"),
@@ -2379,14 +3987,14 @@ final class PreferencesViewController: NSViewController,
                     localLLMModelPopup.menu?.addItem(NSMenuItem.separator())
                     addedSeparator = true
                 }
-                localLLMModelPopup.addItem(withTitle: "\(modelName) (Installed)")
+                localLLMModelPopup.addItem(withTitle: loc.s("prefs.voice.localLLM.installed", modelName))
                 localLLMModelPopup.lastItem?.representedObject = modelName
             }
         }
 
         // 3. Custom model option
         localLLMModelPopup.menu?.addItem(NSMenuItem.separator())
-        localLLMModelPopup.addItem(withTitle: "Custom Model Identifier...")
+        localLLMModelPopup.addItem(withTitle: loc.s("prefs.voice.localLLM.customOption"))
         localLLMModelPopup.lastItem?.representedObject = "__custom__"
 
         // Select the active model
@@ -2888,6 +4496,14 @@ final class PreferencesViewController: NSViewController,
 
         let maintenanceCard = makeCard(title: loc.s("prefs.advanced.maintenance"), symbol: "arrow.counterclockwise")
         maintenanceStatus.translatesAutoresizingMaskIntoConstraints = false
+        let retrySecretCleanupButton = CapsuleButton(
+            title: loc.s("prefs.advanced.secretCleanup.retry"),
+            symbol: "key",
+            style: .secondary,
+            target: self,
+            action: #selector(retrySecretCleanup)
+        )
+        secretCleanupButton = retrySecretCleanupButton
         let maintenanceButtons = NSStackView(views: [
             CapsuleButton(
                 title: loc.s("prefs.advanced.orphans"),
@@ -2896,6 +4512,7 @@ final class PreferencesViewController: NSViewController,
                 target: self,
                 action: #selector(collectOrphans)
             ),
+            retrySecretCleanupButton,
             CapsuleButton(
                 title: loc.s("prefs.advanced.reset"),
                 symbol: "arrow.counterclockwise",
@@ -2928,6 +4545,14 @@ final class PreferencesViewController: NSViewController,
             lines.append(contentsOf: overlong)
         }
         advancedReadout.stringValue = lines.joined(separator: "\n")
+        let cleanup = SecretCleanupMaintenancePresentation.resolve(
+            pendingCount: store.pendingSecretCleanupCount,
+            localization: loc
+        )
+        maintenanceStatus.stringValue = cleanup.text
+        maintenanceStatus.textColor = cleanup.isWarning
+            ? DevTypeTheme.accentBright
+            : DevTypeTheme.statusGreen
     }
 
     @objc private func tapThreadChanged() {
@@ -2938,10 +4563,12 @@ final class PreferencesViewController: NSViewController,
     }
 
     @objc private func copyAdvancedDiagnostics() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(advancedReadout.stringValue, forType: .string)
-        maintenanceStatus.stringValue = loc.s("prefs.advanced.copied")
-        maintenanceStatus.textColor = DevTypeTheme.statusGreen
+        let didWrite = DiagnosticReport.copyToPasteboard(advancedReadout.stringValue)
+        let presentation = AdvancedDiagnosticsCopyPresentation.resolve(didWrite: didWrite)
+        maintenanceStatus.stringValue = loc.s(presentation.statusKey)
+        maintenanceStatus.textColor = presentation.tintRole == .success
+            ? DevTypeTheme.statusGreen
+            : DevTypeTheme.accentBright
     }
 
     @objc private func collectOrphans() {
@@ -2950,6 +4577,37 @@ final class PreferencesViewController: NSViewController,
             ? loc.s("prefs.advanced.orphans.none")
             : loc.s("prefs.advanced.orphans.result", removed.count)
         maintenanceStatus.textColor = DevTypeTheme.statusGreen
+    }
+
+    @objc private func retrySecretCleanup() {
+        secretCleanupButton?.isEnabled = false
+        maintenanceStatus.stringValue = loc.s("prefs.advanced.secretCleanup.running")
+        maintenanceStatus.textColor = DevTypeTheme.textSecondary
+        let store = self.store
+        store.requestOrphanSecretCleanupRetry { [weak self] summary in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.secretCleanupButton?.isEnabled = true
+                if summary.failed > 0 {
+                    self.maintenanceStatus.stringValue = self.loc.s(
+                        "prefs.advanced.secretCleanup.failed",
+                        summary.failed
+                    )
+                    self.maintenanceStatus.textColor = DevTypeTheme.accentBright
+                } else if summary.removed > 0 {
+                    self.maintenanceStatus.stringValue = self.loc.s(
+                        "prefs.advanced.secretCleanup.result",
+                        summary.removed
+                    )
+                    self.maintenanceStatus.textColor = DevTypeTheme.statusGreen
+                } else {
+                    self.maintenanceStatus.stringValue = self.loc.s(
+                        "prefs.advanced.secretCleanup.none"
+                    )
+                    self.maintenanceStatus.textColor = DevTypeTheme.statusGreen
+                }
+            }
+        }
     }
 
     @objc private func resetLibrary() {
@@ -2961,7 +4619,42 @@ final class PreferencesViewController: NSViewController,
             window: view.window
         ) { [weak self] in
             guard let self else { return }
-            self.store.saveSnippets(self.store.defaultSnippets())
+            let result = self.store.resetToDefaults()
+            let completion = SnippetManagerMutationCommitter.finish(
+                result,
+                deleteImage: { path in
+                    let cleanup = self.store.deleteImageIfUnreferenced(path) { candidate in
+                        if case .success = SnippetEditResourceAccess.live.deleteImage(candidate) {
+                            return true
+                        }
+                        return false
+                    }
+                    return cleanup == .removed || cleanup == .retainedReferenced
+                }
+            )
+            switch completion {
+            case .committed(_, let cleanupFailures):
+                if cleanupFailures == 0 {
+                    self.maintenanceStatus.stringValue = self.loc.s("prefs.advanced.reset.done")
+                    self.maintenanceStatus.textColor = DevTypeTheme.statusGreen
+                } else {
+                    self.maintenanceStatus.stringValue = self.loc.s(
+                        "manager.resources.cleanupFailed.message",
+                        cleanupFailures
+                    )
+                    self.maintenanceStatus.textColor = DevTypeTheme.accentBright
+                }
+            case .refused:
+                LibraryHealthMonitor.shared.refresh()
+                self.maintenanceStatus.stringValue = self.loc.s("library.save.banner")
+                self.maintenanceStatus.textColor = DevTypeTheme.accentBright
+            case .unchanged:
+                self.maintenanceStatus.stringValue = self.loc.s("prefs.advanced.reset.done")
+                self.maintenanceStatus.textColor = DevTypeTheme.statusGreen
+            case .stale:
+                self.maintenanceStatus.stringValue = self.loc.s("manager.action.stale.message")
+                self.maintenanceStatus.textColor = DevTypeTheme.accentBright
+            }
             self.reloadSnippets()
         }
     }
@@ -3039,36 +4732,271 @@ final class PreferencesViewController: NSViewController,
     /// and whose download URLs no longer resolve. This reports something the user can act
     /// on: whether the selected engine will work, and what is missing if it will not.
     private func voiceEngineStatus(
-        for engine: TranscriptionEngine
+        for engine: TranscriptionEngine,
+        speechAuthorization: SpeechAuthorization.Status = SpeechAuthorization.status()
     ) -> (text: String, color: NSColor, detail: String?) {
         switch engine {
         case .gemini:
-            return GeminiAPIKeyStore.hasKey
+            switch GeminiAPIKeyStore.readState() {
+            case .unavailable:
+                return (
+                    loc.s("prefs.voice.keychain.unavailable.pill"),
+                    DevTypeTheme.accentBright,
+                    loc.s("prefs.voice.keychain.unavailable.message")
+                )
+            case .missing, .available(""):
+                return (loc.s("prefs.voice.speechModels.status.needsKey"), DevTypeTheme.statusOrange, nil)
+            case .available:
+                break
+            }
+            return VoicePreferences.hasCloudAudioConsent
                 ? (loc.s("prefs.voice.speechModels.status.ready"), DevTypeTheme.statusGreen, nil)
-                : (loc.s("prefs.voice.speechModels.status.needsKey"), DevTypeTheme.statusOrange, nil)
+                : (loc.s("prefs.voice.speechModels.status.needsConsent"), DevTypeTheme.statusOrange, nil)
 
         case .whisperLocal:
-            // Detection is filesystem-only and synchronous here; the reachability probe is
-            // async and runs when the user opens the setup sheet. Distinguishing "not
-            // installed" from "installed but not started" is what makes the next step
-            // obvious rather than leaving the user with a dead endpoint field.
-            if let binaryPath = WhisperServerSetup.installedBinaryPath() {
-                return (
-                    loc.s("prefs.voice.speechModels.status.needsServer"),
-                    DevTypeTheme.statusOrange,
-                    WhisperServerSetup.pendingCommands(for: .installedNotRunning(binaryPath: binaryPath))
+            let state = WhisperReadinessPresentation.resolve(
+                setupState: whisperReadinessState,
+                isManagedByApp: WhisperServerController.shared.isManagedByApp,
+                hasLocalModel: whisperModelStatus?.isVerified == true
+            )
+            let color: NSColor
+            switch state.tintRole {
+            case .checking: color = DevTypeTheme.statusGray
+            case .ready: color = DevTypeTheme.statusGreen
+            case .attention: color = DevTypeTheme.statusOrange
+            }
+            let detail = state.detailState.map {
+                WhisperServerSetup.pendingCommands(
+                    for: $0,
+                    modelStatus: whisperModelStatus,
+                    endpoint: VoicePreferences.whisperEndpoint
                 )
             }
-            return (
-                loc.s("prefs.voice.speechModels.status.needsSetup"),
-                DevTypeTheme.textTertiary,
-                WhisperServerSetup.pendingCommands(for: .notInstalled)
-            )
+            return (loc.s(state.statusKey), color, detail)
 
-        case .localLLM, .appleSpeech:
-            // On-device recognition needs no configuration; correction degrades to
-            // deterministic rules on its own when no model is reachable.
-            return (loc.s("prefs.voice.speechModels.status.ready"), DevTypeTheme.statusGreen, nil)
+        case .localLLM:
+            let state = LocalAIReadinessDisplayState.resolve(
+                authorization: speechAuthorization,
+                speechReadiness: appleSpeechReadiness,
+                selectedCorrectionProviderID: localAICorrectionProviderID
+            )
+            let color: NSColor
+            switch state.tintRole {
+            case .checking: color = DevTypeTheme.statusGray
+            case .ready: color = DevTypeTheme.statusGreen
+            case .attention: color = DevTypeTheme.statusOrange
+            }
+            let statusKey = state == .ready
+                ? resolvedAppleSpeechStatusKey(default: state.statusKey)
+                : state.statusKey
+            return (loc.s(statusKey), color, nil)
+
+        case .appleSpeech:
+            let state = AppleSpeechReadinessDisplayState.resolve(
+                authorization: speechAuthorization,
+                providerReadiness: appleSpeechReadiness
+            )
+            let color: NSColor
+            switch state.tintRole {
+            case .checking: color = DevTypeTheme.statusGray
+            case .ready: color = DevTypeTheme.statusGreen
+            case .attention: color = DevTypeTheme.statusOrange
+            }
+            let statusKey = state == .ready
+                ? resolvedAppleSpeechStatusKey(default: state.statusKey)
+                : state.statusKey
+            return (loc.s(statusKey), color, nil)
+        }
+    }
+
+    private func refreshAppleSpeechReadiness() {
+        let generation = appleSpeechReadinessRefresh.begin()
+        appleSpeechReadinessTask?.cancel()
+        appleSpeechReadiness = nil
+        appleSpeechAnalyzerReadiness = nil
+        resolvedAppleSpeechProviderID = nil
+        applyAppleSpeechAssetPresentation()
+
+        let locale = Locale.current
+        let analyzer = AppleSpeechAnalyzerAdapter(locale: locale)
+        let legacy = LegacyAppleSpeechAdapter(locale: locale)
+        let platformSupportsAnalyzer: Bool
+        if #available(macOS 26.0, *) {
+            platformSupportsAnalyzer = true
+        } else {
+            platformSupportsAnalyzer = false
+        }
+        let endpoint = VoicePreferences.localLLMEndpoint
+        let model = VoicePreferences.localLLMModel
+        let preferAppleFoundationModels: Bool
+        if #available(macOS 26.0, *) {
+            preferAppleFoundationModels = true
+        } else {
+            preferAppleFoundationModels = false
+        }
+        let correctionIDs = VoiceSessionSnapshotFactory.localCorrectionProviderIDs(
+            for: endpoint,
+            preferAppleFoundationModels: preferAppleFoundationModels
+        )
+        let correctionRegistry = CorrectionProviderRegistry(providers: [
+            FoundationLanguageModelCorrector(),
+            OllamaCorrector(endpointURL: endpoint, modelName: model),
+            OpenAICompatibleCorrector(endpointURL: endpoint, modelName: model),
+            DeterministicCorrector(),
+        ])
+        appleSpeechReadinessTask = Task { [weak self] in
+            async let analyzerProbe = analyzer.probe()
+            async let legacyProbe = legacy.probe()
+            async let correctionProbe = correctionRegistry.resolveActiveCorrector(
+                preferredID: correctionIDs.first,
+                fallbackIDs: Array(correctionIDs.dropFirst()),
+                privacyRoute: .localNetworkOnly
+            )
+            let (analyzerReadiness, legacyReadiness, correction) = await (
+                analyzerProbe,
+                legacyProbe,
+                correctionProbe
+            )
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.appleSpeechReadinessRefresh.claim(generation) else { return }
+                let resolution = AppleSpeechPreferencesResolution.resolve(
+                    platformSupportsAnalyzer: platformSupportsAnalyzer,
+                    analyzerReadiness: analyzerReadiness,
+                    legacyReadiness: legacyReadiness
+                )
+                self.appleSpeechReadiness = resolution.readiness
+                self.appleSpeechAnalyzerReadiness = analyzerReadiness
+                self.resolvedAppleSpeechProviderID = resolution.providerID
+                self.localAICorrectionProviderID = correction?.descriptor.id
+                self.appleSpeechReadinessTask = nil
+                self.applyAppleSpeechAssetPresentation()
+                let authorization = SpeechAuthorization.status()
+                for engine in [TranscriptionEngine.localLLM, .appleSpeech] {
+                    let presentation = self.voiceEngineStatus(
+                        for: engine,
+                        speechAuthorization: authorization
+                    )
+                    self.voiceEngineStatusLabels[engine]?.stringValue = presentation.text
+                    self.voiceEngineStatusLabels[engine]?.textColor = presentation.color
+                    self.voiceEngineStatusLabels[engine]?.toolTip = presentation.detail
+                    self.voiceEngineStatusLabels[engine]?.setAccessibilityLabel(presentation.text)
+                }
+            }
+        }
+    }
+
+    private func resolvedAppleSpeechStatusKey(default defaultKey: String) -> String {
+        switch resolvedAppleSpeechProviderID {
+        case VoiceSessionSnapshotFactory.ProviderID.appleSpeechAnalyzer:
+            return "prefs.voice.speechModels.status.readyAnalyzer"
+        case VoiceSessionSnapshotFactory.ProviderID.appleSpeechLegacy:
+            return "prefs.voice.speechModels.status.readyLegacy"
+        default:
+            return defaultKey
+        }
+    }
+
+    private var platformSupportsAppleSpeechAnalyzer: Bool {
+        if #available(macOS 26.0, *) { return true }
+        return false
+    }
+
+    private func applyAppleSpeechAssetPresentation() {
+        let presentation = AppleSpeechAssetControlsPresentation.resolve(
+            platformSupportsAnalyzer: platformSupportsAppleSpeechAnalyzer,
+            analyzerReadiness: appleSpeechAnalyzerReadiness,
+            isInstalling: appleSpeechAssetInstallLifecycle.isActive
+        )
+        appleSpeechAssetRow?.isHidden = presentation.isHidden
+        appleSpeechAssetButton.title = loc.s(presentation.titleKey)
+        appleSpeechAssetButton.isEnabled = presentation.isEnabled
+        appleSpeechAssetButton.setAccessibilityLabel(loc.s(presentation.titleKey))
+    }
+
+    @objc private func installAppleSpeechAssets() {
+        guard platformSupportsAppleSpeechAnalyzer,
+              let request = appleSpeechAssetInstallLifecycle.begin() else { return }
+        applyAppleSpeechAssetPresentation()
+
+        let locale = Locale.current
+        let adapter = AppleSpeechAnalyzerAdapter(locale: locale)
+        appleSpeechAssetInstallTask = Task { @MainActor [weak self] in
+            let succeeded: Bool
+            do {
+                _ = try await adapter.installAssets(
+                    for: locale,
+                    deadline: Date().addingTimeInterval(15 * 60)
+                )
+                succeeded = true
+            } catch is CancellationError {
+                guard let self else { return }
+                switch self.appleSpeechAssetInstallLifecycle.claimCancellation(
+                    request,
+                    taskIsCancelled: Task.isCancelled
+                ) {
+                case .ignore:
+                    return
+                case .retireSilently:
+                    self.finishAppleSpeechAssetInstall(showFailure: false)
+                case .reportFailure:
+                    self.finishAppleSpeechAssetInstall(showFailure: true)
+                }
+                return
+            } catch {
+                succeeded = false
+            }
+
+            guard !Task.isCancelled,
+                  let self,
+                  self.appleSpeechAssetInstallLifecycle.claimCompletion(request) else { return }
+            self.finishAppleSpeechAssetInstall(showFailure: !succeeded)
+        }
+    }
+
+    private func finishAppleSpeechAssetInstall(showFailure: Bool) {
+        appleSpeechAssetInstallTask = nil
+        defer { onLocalizationBlockingOperationDidEnd?() }
+        if showFailure {
+            DevTypeAlert.warn(
+                title: loc.s("prefs.voice.appleAssets.failed.title"),
+                message: loc.s("prefs.voice.appleAssets.failed.message"),
+                window: view.window
+            )
+        }
+        refreshAppleSpeechReadiness()
+    }
+
+    private func invalidateAppleSpeechAssetInstall() {
+        let wasActive = appleSpeechAssetInstallLifecycle.isActive
+        appleSpeechAssetInstallTask?.cancel()
+        appleSpeechAssetInstallTask = nil
+        appleSpeechAssetInstallLifecycle.invalidate()
+        if wasActive {
+            onLocalizationBlockingOperationDidEnd?()
+        }
+    }
+
+    private func voicePermissionPresentation(
+        for status: DurableVoiceCapture.MicrophonePermissionStatus
+    ) -> (text: String, color: NSColor) {
+        switch status {
+        case .authorized: return (loc.s("status.authorized"), DevTypeTheme.statusGreen)
+        case .notDetermined: return (loc.s("status.notRequested"), DevTypeTheme.statusOrange)
+        case .denied: return (loc.s("status.denied"), DevTypeTheme.statusOrange)
+        case .restricted: return (loc.s("status.restricted"), DevTypeTheme.statusOrange)
+        }
+    }
+
+    private func voicePermissionPresentation(
+        for status: SpeechAuthorization.Status
+    ) -> (text: String, color: NSColor) {
+        switch status {
+        case .authorized: return (loc.s("status.authorized"), DevTypeTheme.statusGreen)
+        case .notDetermined: return (loc.s("status.notRequested"), DevTypeTheme.statusOrange)
+        case .denied: return (loc.s("status.denied"), DevTypeTheme.statusOrange)
+        case .restricted: return (loc.s("status.restricted"), DevTypeTheme.statusOrange)
         }
     }
 

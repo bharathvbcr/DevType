@@ -44,10 +44,22 @@ public enum WhisperServerSetup {
     /// on Apple Silicon, and noticeably better than Apple Speech on technical vocabulary.
     public static let defaultModel = "base.en"
 
+    /// Immutable repository revision whose default model bytes match the digest enforced by
+    /// `WhisperModelDownloadPolicy`. A moving `main` URL would make a legitimate upstream update
+    /// indistinguishable from a corrupted or substituted download.
+    static let verifiedModelRevision = "80da2d8bfee42b0e836fc3a9890373e5defc00a6"
+
     /// Where the model is suggested to live. Kept out of the app container so it survives
     /// reinstalling DevType and can be shared with other whisper.cpp tools.
     public static var suggestedModelDirectory: String {
         "~/.cache/whisper.cpp"
+    }
+
+    public static var suggestedModelDirectoryURL: URL {
+        URL(
+            fileURLWithPath: (suggestedModelDirectory as NSString).expandingTildeInPath,
+            isDirectory: true
+        )
     }
 
     public static func modelFilename(_ model: String = defaultModel) -> String {
@@ -58,7 +70,9 @@ public enum WhisperServerSetup {
     /// `download-ggml-model.sh` pulls from, used directly because a Homebrew install does
     /// not ship that script.
     public static func modelDownloadURL(_ model: String = defaultModel) -> URL {
-        URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(modelFilename(model))")!
+        URL(
+            string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\(verifiedModelRevision)/\(modelFilename(model))"
+        )!
     }
 
     // MARK: - Detection
@@ -68,12 +82,27 @@ public enum WhisperServerSetup {
         searchPaths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    /// Whether a model file is already present in the suggested location.
+    /// Canonical integrity inspection used by Preferences readiness. Hashing runs on a utility
+    /// task because the verified base model is roughly 148 MB.
+    public static func inspectModel(
+        _ model: String = defaultModel,
+        modelDirectory: URL = suggestedModelDirectoryURL
+    ) async -> WhisperModelStatus {
+        guard let artifact = WhisperModelDownloadPolicy.artifact(for: model) else {
+            return .unsupportedModel
+        }
+        let fileURL = modelDirectory.appendingPathComponent(modelFilename(model))
+        return await Task.detached(priority: .utility) {
+            WhisperModelDownloadPolicy.modelStatus(fileAt: fileURL, artifact: artifact)
+        }.value
+    }
+
+    /// Synchronous compatibility query for non-UI callers. This means "verified", not merely
+    /// "a path exists"; UI readiness uses `inspectModel` so hashing never blocks AppKit.
     public static func hasModel(_ model: String = defaultModel) -> Bool {
-        let path = (suggestedModelDirectory as NSString).expandingTildeInPath
-        return FileManager.default.fileExists(
-            atPath: (path as NSString).appendingPathComponent(modelFilename(model))
-        )
+        guard let artifact = WhisperModelDownloadPolicy.artifact(for: model) else { return false }
+        let fileURL = suggestedModelDirectoryURL.appendingPathComponent(modelFilename(model))
+        return WhisperModelDownloadPolicy.modelStatus(fileAt: fileURL, artifact: artifact).isVerified
     }
 
     /// Probes the configured endpoint, then falls back to inspecting the filesystem.
@@ -106,14 +135,16 @@ public enum WhisperServerSetup {
         endpoint: URL = VoicePreferences.whisperEndpoint,
         timeout: TimeInterval = 1.5
     ) async -> Bool {
-        var request = URLRequest(url: readinessProbeURL(for: endpoint))
+        guard LocalEndpointSecurity.isValid(endpoint) else { return false }
+        let probeURL = readinessProbeURL(for: endpoint)
+        guard LocalEndpointSecurity.isValid(probeURL) else { return false }
+        var request = URLRequest(url: probeURL)
         request.timeoutInterval = timeout
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.waitsForConnectivity = false
-        configuration.timeoutIntervalForRequest = timeout
-
-        guard let (_, response) = try? await URLSession(configuration: configuration).data(for: request),
+        guard let (_, response) = try? await LocalEndpointSecurity.data(
+            for: request,
+            maximumResponseBytes: LocalEndpointSecurity.maximumReadinessResponseBytes
+        ),
               let http = response as? HTTPURLResponse else {
             return false
         }
@@ -126,11 +157,26 @@ public enum WhisperServerSetup {
     public static func steps(
         for state: State,
         model: String = defaultModel,
+        modelStatus: WhisperModelStatus? = nil,
         endpoint: URL = VoicePreferences.whisperEndpoint
     ) -> [Step] {
-        let modelDirectory = suggestedModelDirectory
-        let modelPath = "\(modelDirectory)/\(modelFilename(model))"
         let port = endpoint.port ?? 8080
+        let artifact = WhisperModelDownloadPolicy.artifact(for: model)
+        let resolvedModelStatus: WhisperModelStatus
+        if artifact == nil {
+            // A caller-provided status must never turn an unmanifested model into a runnable one.
+            resolvedModelStatus = .unsupportedModel
+        } else if let modelStatus {
+            resolvedModelStatus = modelStatus
+        } else if let artifact {
+            let fileURL = suggestedModelDirectoryURL.appendingPathComponent(modelFilename(model))
+            resolvedModelStatus = WhisperModelDownloadPolicy.modelStatus(
+                fileAt: fileURL,
+                artifact: artifact
+            )
+        } else {
+            resolvedModelStatus = .unsupportedModel
+        }
 
         let isInstalled: Bool
         let serverExecutable: String
@@ -146,6 +192,18 @@ public enum WhisperServerSetup {
             serverExecutable = "whisper-server"
         }
 
+        let downloadDetail = artifact == nil
+            ? "This model has no verified download manifest. Choose base.en."
+            : "\(model) is ~148 MB and runs comfortably in real time on Apple Silicon."
+        let runCommand: String
+        if artifact == nil {
+            runCommand = unsupportedModelCommand
+        } else {
+            let modelPathSuffix = "/.cache/whisper.cpp/\(modelFilename(model))"
+            runCommand = "\(shellSingleQuoted(serverExecutable)) --host 127.0.0.1 --port \(port) "
+                + "-m \"$HOME\"\(shellSingleQuoted(modelPathSuffix))"
+        }
+
         return [
             Step(
                 title: "Install whisper.cpp",
@@ -155,18 +213,14 @@ public enum WhisperServerSetup {
             ),
             Step(
                 title: "Download a model",
-                detail: "\(model) is ~148 MB and runs comfortably in real time on Apple Silicon.",
-                command: """
-                mkdir -p \(modelDirectory) && \\
-                  curl -L -o \(modelPath) \\
-                  \(modelDownloadURL(model).absoluteString)
-                """,
-                isPending: !hasModel(model)
+                detail: downloadDetail,
+                command: verifiedDownloadCommand(for: model),
+                isPending: !resolvedModelStatus.isVerified
             ),
             Step(
                 title: "Start the server",
                 detail: "Leave this running while you dictate. DevType talks to it on \(endpoint.absoluteString).",
-                command: "\(serverExecutable) --host 127.0.0.1 --port \(port) -m \(modelPath)",
+                command: runCommand,
                 isPending: state != .running
             ),
         ]
@@ -176,12 +230,62 @@ public enum WhisperServerSetup {
     public static func pendingCommands(
         for state: State,
         model: String = defaultModel,
+        modelStatus: WhisperModelStatus? = nil,
         endpoint: URL = VoicePreferences.whisperEndpoint
     ) -> String {
-        steps(for: state, model: model, endpoint: endpoint)
+        steps(for: state, model: model, modelStatus: modelStatus, endpoint: endpoint)
             .filter(\.isPending)
             .map(\.command)
             .joined(separator: "\n\n")
+    }
+
+    private static let unsupportedModelCommand =
+        "echo 'No verified download manifest exists for this model. Choose base.en.' >&2; false"
+
+    /// Shell guidance keeps the same immutable revision, host allowlist, byte budget, and SHA-256
+    /// contract as the in-app downloader. The destination is replaced only after every check passes.
+    private static func verifiedDownloadCommand(for model: String) -> String {
+        guard let artifact = WhisperModelDownloadPolicy.artifact(for: model) else {
+            return unsupportedModelCommand
+        }
+        let filename = modelFilename(model)
+        return """
+        (
+          set -eu
+          umask 077
+          model_dir="$HOME/.cache/whisper.cpp"
+          filename=\(shellSingleQuoted(filename))
+          mkdir -p "$model_dir"
+          chmod 700 "$model_dir"
+          tmp="$(mktemp "$model_dir/.$filename.XXXXXX")"
+          trap 'rm -f "$tmp"' EXIT
+          trap 'exit 1' HUP INT TERM
+          effective_url="$(
+            curl --disable --fail --location --max-redirs 5 \
+              --max-filesize \(artifact.byteCount) --max-time 1800 \
+              --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+              --proto '=https' --proto-redir '=https' \
+              --write-out '%{url_effective}' --output "$tmp" \
+              \(shellSingleQuoted(artifact.sourceURL.absoluteString))
+          )"
+          case "$effective_url" in
+            https://huggingface.co/*|https://*.hf.co/*) ;;
+            *) echo 'The model host redirected to an untrusted destination.' >&2; exit 1 ;;
+          esac
+          test "$(stat -f%z "$tmp")" -eq \(artifact.byteCount)
+          actual_sha="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+          test "$actual_sha" = \(shellSingleQuoted(artifact.sha256))
+          chmod 600 "$tmp"
+          mv -f "$tmp" "$model_dir/$filename"
+          trap - EXIT HUP INT TERM
+        )
+        """
+    }
+
+    /// POSIX-shell single quoting. The manifest currently contains only a fixed safe model, but
+    /// keeping this boundary correct prevents a future path or URL from becoming executable text.
+    private static func shellSingleQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
     /// One line describing where the setup stands.

@@ -59,6 +59,7 @@ enum DevTypeAlert {
         destructive: Bool = false,
         style: NSAlert.Style = .warning,
         window: NSWindow? = nil,
+        onCancel: (() -> Void)? = nil,
         onConfirm: @escaping () -> Void
     ) {
         let cancel = cancelTitle ?? LocalizationManager.shared.s("common.cancel")
@@ -70,7 +71,11 @@ enum DevTypeAlert {
             destructiveFirstButton: destructive,
             window: window
         ) { index in
-            if index == 0 { onConfirm() }
+            if index == 0 {
+                onConfirm()
+            } else {
+                onCancel?()
+            }
         }
     }
 
@@ -114,6 +119,97 @@ enum DevTypeAlert {
         } else {
             let response = alert.runModal()
             handler?(resolve(response))
+        }
+    }
+}
+
+/// Lock-protected admission for user-initiated operations that must not overlap. The caller owns
+/// the operation until `finish()`; a second caller can therefore present explicit feedback instead
+/// of racing the same library or silently joining a queue.
+final class SnippetOperationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = false
+
+    @discardableResult
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !active else { return false }
+        active = true
+        return true
+    }
+
+    func finish() {
+        lock.lock()
+        active = false
+        lock.unlock()
+    }
+
+    var isActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+}
+
+/// Non-blocking, indeterminate progress presented with the same `NSAlert` vocabulary as the rest
+/// of the app. There is deliberately no cancel button: parse, serialized library commit, and an
+/// atomic filesystem replacement do not currently have an honest mid-operation cancellation
+/// boundary. The source/destination panels and import preview retain their existing cancellation.
+final class DevTypeProgressPresentation {
+    private let alert: NSAlert
+    private let spinner: NSProgressIndicator
+    private var dismissed = false
+
+    private init(alert: NSAlert, spinner: NSProgressIndicator) {
+        self.alert = alert
+        self.spinner = spinner
+    }
+
+    static func present(
+        title: String,
+        message: String,
+        window: NSWindow?
+    ) -> DevTypeProgressPresentation {
+        precondition(Thread.isMainThread, "Progress presentation must be created on the main thread.")
+
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+
+        let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+        spinner.style = .spinning
+        spinner.isIndeterminate = true
+        spinner.controlSize = .regular
+        spinner.setAccessibilityLabel(message)
+        alert.accessoryView = spinner
+
+        let presentation = DevTypeProgressPresentation(alert: alert, spinner: spinner)
+        spinner.startAnimation(nil)
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            alert.window.level = .floating
+            alert.window.center()
+            alert.window.makeKeyAndOrderFront(nil)
+        }
+        return presentation
+    }
+
+    var isVisible: Bool { alert.window.isVisible }
+
+    func dismiss() {
+        precondition(Thread.isMainThread, "Progress presentation must be dismissed on the main thread.")
+        guard !dismissed else { return }
+        dismissed = true
+        spinner.stopAnimation(nil)
+        let progressWindow = alert.window
+        if let parent = progressWindow.sheetParent {
+            parent.endSheet(progressWindow)
+        } else {
+            progressWindow.orderOut(nil)
         }
     }
 }

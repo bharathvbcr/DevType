@@ -181,10 +181,53 @@ final class SecretSnippetTests: XCTestCase {
         secrets.store("keep", for: keep)
         secrets.store("drop", for: drop)
 
-        XCTAssertEqual(secrets.purgeOrphans(keeping: [keep]), 1)
+        XCTAssertEqual(
+            secrets.purgeOrphans(keeping: [keep]),
+            .init(attempted: 1, removed: 1, failed: 0)
+        )
         XCTAssertEqual(secrets.secret(for: keep), "keep")
         XCTAssertNil(secrets.secret(for: drop))
         XCTAssertEqual(backing.accounts(), [SecretStore.account(for: keep)])
+    }
+
+    func testOrphanPurgeReportsFailuresAndCanBeRetriedWithoutNamingAccounts() {
+        let backing = InMemorySecretBackingStore()
+        let secrets = SecretStore(backing: backing)
+        let orphan = UUID()
+        XCTAssertTrue(secrets.store("must-be-removed", for: orphan).isSuccess)
+
+        backing.forcedStatus = errSecInteractionNotAllowed
+        let failed = secrets.purgeOrphans(keeping: [])
+
+        XCTAssertEqual(failed.attempted, 1)
+        XCTAssertEqual(failed.removed, 0)
+        XCTAssertEqual(failed.failed, 1)
+        XCTAssertTrue(secrets.hasSecret(for: orphan))
+
+        backing.forcedStatus = nil
+        let retried = secrets.purgeOrphans(keeping: [])
+        XCTAssertEqual(retried.attempted, 1)
+        XCTAssertEqual(retried.removed, 1)
+        XCTAssertEqual(retried.failed, 0)
+        XCTAssertFalse(secrets.hasSecret(for: orphan))
+    }
+
+    func testStagedSecretLeasePreventsAConcurrentOrphanSweep() {
+        let backing = InMemorySecretBackingStore()
+        let secrets = SecretStore(backing: backing)
+        let stagedID = UUID()
+        let lease = secrets.protectFromOrphanPurge(stagedID)
+        XCTAssertTrue(secrets.store("staged", for: stagedID).isSuccess)
+
+        XCTAssertEqual(secrets.purgeOrphans(keeping: []), .init())
+        XCTAssertTrue(secrets.hasSecret(for: stagedID))
+
+        lease.end()
+        XCTAssertEqual(
+            secrets.purgeOrphans(keeping: []),
+            .init(attempted: 1, removed: 1, failed: 0)
+        )
+        XCTAssertFalse(secrets.hasSecret(for: stagedID))
     }
 
     /// The purge only ever deletes what it can identify as one of ours. An account under our

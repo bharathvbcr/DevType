@@ -9,6 +9,9 @@ import Foundation
 /// is an explicit request and runs regardless of this flag.
 public enum UpdatePreferences {
 
+    /// Posted after a successful check's timestamp and latest-version fields are both durable.
+    public static let didChangeNotification = Notification.Name("devtype.updateStatus.didChange")
+
     public static let automaticCheckEnabledKey = "devtype.updates.automaticCheckEnabled"
     public static let lastCheckDateKey = "devtype.updates.lastCheckDate"
     public static let lastFoundVersionKey = "devtype.updates.lastFoundVersion"
@@ -60,6 +63,15 @@ public enum UpdatePreferences {
                 defaults.removeObject(forKey: lastFoundVersionKey)
             }
         }
+    }
+
+    /// Commits the user-visible result metadata as one coherent state, then tells open UI to
+    /// refresh. Callers observing the notification never see a new timestamp paired with the
+    /// previous release version.
+    public static func recordSuccessfulCheck(at date: Date = Date(), latestVersion: AppVersion) {
+        lastFoundVersion = latestVersion.rawValue
+        lastSuccessfulCheck = date
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
     }
 
     // MARK: - Skip

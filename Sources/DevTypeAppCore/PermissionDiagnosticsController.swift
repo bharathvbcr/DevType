@@ -1,6 +1,44 @@
 import AppKit
 import ExpanderEngine
 
+/// One canonical projection for both the on-screen diagnostics preview and Copy.
+/// Keeping the exact text here prevents a filtered preview from silently copying a
+/// different, unfiltered report.
+struct DiagnosticReportProjection: Equatable {
+    let text: String
+    let matchingLineCount: Int
+    let totalLineCount: Int
+    let isFiltered: Bool
+
+    var isCopyable: Bool { !text.isEmpty }
+
+    static func make(report: String, query: String) -> DiagnosticReportProjection {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = report.components(separatedBy: .newlines)
+        guard !normalizedQuery.isEmpty else {
+            return DiagnosticReportProjection(
+                text: report,
+                matchingLineCount: lines.count,
+                totalLineCount: lines.count,
+                isFiltered: false
+            )
+        }
+
+        let matches = lines.filter {
+            $0.range(
+                of: normalizedQuery,
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) != nil
+        }
+        return DiagnosticReportProjection(
+            text: matches.joined(separator: "\n"),
+            matchingLineCount: matches.count,
+            totalLineCount: lines.count,
+            isFiltered: true
+        )
+    }
+}
+
 /// Evidence half of Permission Recovery: binary identity, inject health, and the
 /// OSLog dump. Nothing here changes state — the Status tab owns every fix action,
 /// so this pane can stay collapsed until someone actually needs to file a bug.
@@ -292,22 +330,24 @@ final class PermissionDiagnosticsController: NSViewController {
     /// over a few thousand lines, no report rebuild.
     private func applyLogFilter(updateStatus: Bool) {
         guard !lastReport.isEmpty, let preview = logsPreviewView else { return }
-        let query = logFilterField?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
-        guard !query.isEmpty else {
-            preview.string = lastReport
-            if updateStatus {
-                logsStatusLabel?.stringValue = loc.s("diagnostics.logs.ready", lastReport.count)
-                logsStatusLabel?.textColor = DevTypeTheme.textSecondary
-            }
-            return
-        }
-        let lines = lastReport.components(separatedBy: .newlines)
-        let matches = lines.filter {
-            $0.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
-        }
-        preview.string = matches.joined(separator: "\n")
+        let projection = DiagnosticReportProjection.make(
+            report: lastReport,
+            query: logFilterField?.stringValue ?? ""
+        )
+        preview.string = projection.text
+        copyLogsButton?.isEnabled = projection.isCopyable && !isBuildingReport
+        copyLogsButton?.title = projection.isFiltered
+            ? loc.s("diagnostics.copy.filtered")
+            : loc.s("diagnostics.copy")
+        copyLogsButton?.setAccessibilityLabel(copyLogsButton?.title)
         if updateStatus {
-            logsStatusLabel?.stringValue = loc.s("diagnostics.logs.filtered", matches.count, lines.count)
+            logsStatusLabel?.stringValue = projection.isFiltered
+                ? loc.s(
+                    "diagnostics.logs.filtered",
+                    projection.matchingLineCount,
+                    projection.totalLineCount
+                )
+                : loc.s("diagnostics.logs.ready", lastReport.count)
             logsStatusLabel?.textColor = DevTypeTheme.textSecondary
         }
     }
@@ -377,26 +417,38 @@ final class PermissionDiagnosticsController: NSViewController {
         DiagnosticReport.buildAsync(cdHash: pendingEvidence?.cdHash) { [weak self] report in
             guard let self else { return }
             self.isBuildingReport = false
-            self.copyLogsButton?.isEnabled = true
             self.refreshLogsButton?.isEnabled = true
             self.lastReport = report
+            self.applyLogFilter(updateStatus: !copyToPasteboard)
             guard copyToPasteboard else {
-                // applyLogFilter owns the status line here so an active filter
-                // keeps its "N of M lines" readout after a refresh.
-                self.applyLogFilter(updateStatus: true)
                 return
             }
-            self.applyLogFilter(updateStatus: false)
-            if DiagnosticReport.copyToPasteboard(report) {
-                self.logsStatusLabel?.stringValue = self.loc.s("diagnostics.logs.copied", report.count)
+            let projection = DiagnosticReportProjection.make(
+                report: report,
+                query: self.logFilterField?.stringValue ?? ""
+            )
+            guard projection.isCopyable else {
+                self.logsStatusLabel?.stringValue = self.loc.s(
+                    "diagnostics.logs.filtered",
+                    projection.matchingLineCount,
+                    projection.totalLineCount
+                )
+                self.logsStatusLabel?.textColor = DevTypeTheme.textSecondary
+                return
+            }
+            if DiagnosticReport.copyToPasteboard(projection.text) {
+                self.logsStatusLabel?.stringValue = self.loc.s(
+                    "diagnostics.logs.copied",
+                    projection.text.count
+                )
                 self.logsStatusLabel?.textColor = DevTypeTheme.statusGreen
                 self.copyLogsButton?.title = self.loc.s("diagnostics.copied")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                     guard let self else { return }
-                    self.copyLogsButton?.title = self.loc.s("diagnostics.copy")
+                    self.applyLogFilter(updateStatus: false)
                 }
                 DevTypeLog.permission.info(
-                    "[Permission] UI Recovery copied diagnostic report chars=\(report.count, privacy: .public)"
+                    "[Permission] UI Recovery copied diagnostic projection chars=\(projection.text.count, privacy: .public) filtered=\(projection.isFiltered, privacy: .public)"
                 )
             } else {
                 self.logsStatusLabel?.stringValue = self.loc.s("diagnostics.logs.copyFailed")

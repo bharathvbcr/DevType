@@ -1,6 +1,17 @@
 import AppKit
 import Foundation
 
+/// Narrow pasteboard surface used to fault-inject every write result. `NSPasteboard` reports
+/// failures as booleans; ignoring those values turns a cleared clipboard into a false “Copied”.
+protocol SecretPasteboardWriting: AnyObject {
+    var changeCount: Int { get }
+    @discardableResult func clearContents() -> Int
+    func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool
+    func setData(_ data: Data?, forType dataType: NSPasteboard.PasteboardType) -> Bool
+}
+
+extension NSPasteboard: SecretPasteboardWriting {}
+
 /// Puts a secret on the pasteboard for a manual ⌘V, and takes it off again.
 ///
 /// This is the path that works when nothing else does. While a password field holds focus, macOS
@@ -34,9 +45,30 @@ public final class SecretClipboard {
         case nothingToClear
     }
 
+    public enum CopyOutcome: Equatable, Sendable {
+        case copied(clearAt: Date)
+        case empty
+        case writeFailed
+
+        public var didCopy: Bool {
+            if case .copied = self { return true }
+            return false
+        }
+    }
+
+    private struct Ownership {
+        let ticket: UInt64
+        /// `changeCount` of the write we own. A later value means another writer owns the board.
+        let changeCount: Int
+    }
+
+    /// Serializes this class's pasteboard I/O as well as ownership publication. External writers
+    /// remain protected by the `changeCount` comparison; this lock only prevents two DevType copy
+    /// and clear operations from interleaving their multi-write concealed payloads.
+    private let operationLock = NSLock()
     private let lock = UnfairLock()
-    /// `changeCount` of the write we own. Any later value means someone else owns the board now.
-    private var ownedChangeCount: Int?
+    private var nextOwnershipTicket: UInt64 = 0
+    private var activeOwnership: Ownership?
     private var clearWorkItem: DispatchWorkItem?
 
     public init() {}
@@ -65,9 +97,57 @@ public final class SecretClipboard {
         broker: PasteboardBroker? = .shared,
         schedule: ((@escaping () -> Void, TimeInterval) -> Void)? = nil
     ) -> Date? {
-        guard !secret.isEmpty else { return nil }
+        guard case .copied(let clearAt) = copyResult(
+            secret,
+            clearAfter: clearAfter,
+            pasteboardWriter: pasteboard,
+            broker: broker,
+            schedule: schedule
+        ) else { return nil }
+        return clearAt
+    }
 
-        cancelPendingClear()
+    @discardableResult
+    public func copyResult(
+        _ secret: String,
+        clearAfter: TimeInterval = defaultClearAfter,
+        pasteboard: NSPasteboard = .general,
+        broker: PasteboardBroker? = .shared,
+        schedule: ((@escaping () -> Void, TimeInterval) -> Void)? = nil
+    ) -> CopyOutcome {
+        copyResult(
+            secret,
+            clearAfter: clearAfter,
+            pasteboardWriter: pasteboard,
+            broker: broker,
+            schedule: schedule
+        )
+    }
+
+    /// Typed copy used by UI surfaces that must distinguish empty input from an actual
+    /// pasteboard failure. All four writes are required: without the concealment/transient
+    /// markers, a password may enter clipboard history, so a partial write is removed and fails.
+    @discardableResult
+    func copyResult(
+        _ secret: String,
+        clearAfter: TimeInterval = defaultClearAfter,
+        pasteboardWriter: SecretPasteboardWriting,
+        broker: PasteboardBroker? = .shared,
+        schedule: ((@escaping () -> Void, TimeInterval) -> Void)? = nil
+    ) -> CopyOutcome {
+        guard !secret.isEmpty else { return .empty }
+
+        operationLock.lock()
+
+        lock.lock()
+        nextOwnershipTicket &+= 1
+        if nextOwnershipTicket == 0 { nextOwnershipTicket = 1 }
+        let ticket = nextOwnershipTicket
+        let supersededWork = clearWorkItem
+        clearWorkItem = nil
+        activeOwnership = nil
+        lock.unlock()
+        supersededWork?.cancel()
 
         // Before the write, not after: an expansion's restore may still be scheduled, and it would
         // put the pre-expansion clipboard back over this secret. Worse, the markers set below make
@@ -76,30 +156,64 @@ public final class SecretClipboard {
         // a secret is being copied.
         broker?.invalidatePendingRestore()
 
-        pasteboard.clearContents()
-        pasteboard.setString(secret, forType: .string)
+        let writer = pasteboardWriter
+        // `clearContents` is the ownership transition and returns its exact change count. Capture
+        // that value rather than sampling after the multi-write payload: another process can take
+        // the pasteboard between our last marker write and a later read, and adopting that newer
+        // count would let our timer erase the external owner's contents.
+        let ownedChangeCount = writer.clearContents()
+        guard writer.setString(secret, forType: .string) else {
+            operationLock.unlock()
+            DevTypeLog.inject.error("[Secret] clipboard string write failed")
+            return .writeFailed
+        }
         // `ConcealedType` is the convention clipboard managers honour to mean "do not record
         // this" — it is what password managers mark their own copies with. Transient says "do not
         // persist"; AutoGenerated says a human did not type it. None of them are enforced by the
         // OS, so they reduce exposure rather than remove it.
-        pasteboard.setData(Data(), forType: PasteboardBroker.concealedType)
-        pasteboard.setData(Data(), forType: PasteboardBroker.transientType)
-        pasteboard.setData(Data(), forType: PasteboardBroker.autoGeneratedType)
-
-        lock.lock()
-        ownedChangeCount = pasteboard.changeCount
-        lock.unlock()
-
-        let work = DispatchWorkItem { [weak self] in
-            _ = self?.clearIfStillOurs(pasteboard: pasteboard)
+        for marker in [
+            PasteboardBroker.concealedType,
+            PasteboardBroker.transientType,
+            PasteboardBroker.autoGeneratedType,
+        ] {
+            let before = writer.changeCount
+            guard writer.setData(Data(), forType: marker) else {
+                // Clear only if nobody took ownership between our last successful write and
+                // this failure. A concurrent user copy is never ours to erase.
+                if writer.changeCount == before { writer.clearContents() }
+                operationLock.unlock()
+                DevTypeLog.inject.error("[Secret] clipboard safety-marker write failed")
+                return .writeFailed
+            }
         }
+
+        // Losing ownership anywhere inside the multi-write sequence is not a successful secret
+        // copy. Leave the newer owner strictly alone and retain no timer metadata for its board.
+        guard writer.changeCount == ownedChangeCount else {
+            operationLock.unlock()
+            DevTypeLog.inject.error("[Secret] clipboard ownership changed during write")
+            return .writeFailed
+        }
+
+        let clearAction = { [weak self] in
+            _ = self?.clearIfStillOurs(
+                pasteboardWriter: writer,
+                expectedTicket: ticket
+            )
+        }
+        let work = schedule == nil ? DispatchWorkItem(block: clearAction) : nil
+
         lock.lock()
+        activeOwnership = Ownership(ticket: ticket, changeCount: ownedChangeCount)
         clearWorkItem = work
         lock.unlock()
+        operationLock.unlock()
 
         if let schedule {
-            schedule({ work.perform() }, clearAfter)
-        } else {
+            // Custom schedulers cannot be cancelled by `DispatchWorkItem`; the ticket makes an old
+            // callback harmless after a newer copy, manual clear, or explicit invalidation.
+            schedule(clearAction, clearAfter)
+        } else if let work {
             DispatchQueue.main.asyncAfter(deadline: .now() + clearAfter, execute: work)
         }
 
@@ -110,30 +224,53 @@ public final class SecretClipboard {
             clearAfter=\(Int(clearAfter), privacy: .public)s
             """
         )
-        return Date().addingTimeInterval(clearAfter)
+        return .copied(clearAt: Date().addingTimeInterval(clearAfter))
     }
 
     /// Remove the secret now, if the board still holds ours. Safe to call at any time.
     @discardableResult
     public func clearIfStillOurs(pasteboard: NSPasteboard = .general) -> ClearOutcome {
+        clearIfStillOurs(pasteboardWriter: pasteboard, expectedTicket: nil)
+    }
+
+    /// Internal writer seam makes ownership interleavings deterministic in tests. A scheduled clear
+    /// supplies its ticket; a manual/quit clear passes nil and claims whichever write is current.
+    @discardableResult
+    func clearIfStillOurs(
+        pasteboardWriter: SecretPasteboardWriting,
+        expectedTicket: UInt64?
+    ) -> ClearOutcome {
+        operationLock.lock()
         lock.lock()
-        let owned = ownedChangeCount
+        let ownership = activeOwnership
         lock.unlock()
 
-        guard owned != nil else { return .nothingToClear }
+        guard let ownership,
+              expectedTicket == nil || expectedTicket == ownership.ticket else {
+            operationLock.unlock()
+            return .nothingToClear
+        }
 
         let outcome: ClearOutcome
-        if Self.mayClear(ownedChangeCount: owned, currentChangeCount: pasteboard.changeCount) {
-            pasteboard.clearContents()
+        if Self.mayClear(
+            ownedChangeCount: ownership.changeCount,
+            currentChangeCount: pasteboardWriter.changeCount
+        ) {
+            pasteboardWriter.clearContents()
             outcome = .cleared
         } else {
             outcome = .supersededByUser
         }
 
         lock.lock()
-        ownedChangeCount = nil
-        clearWorkItem = nil
+        let pending = clearWorkItem
+        if activeOwnership?.ticket == ownership.ticket {
+            activeOwnership = nil
+            clearWorkItem = nil
+        }
         lock.unlock()
+        operationLock.unlock()
+        pending?.cancel()
 
         DevTypeLog.inject.info("[Secret] clipboard clear → \(outcome.rawValue, privacy: .public)")
         return outcome
@@ -143,14 +280,6 @@ public final class SecretClipboard {
     public var hasOutstandingSecret: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return ownedChangeCount != nil
-    }
-
-    private func cancelPendingClear() {
-        lock.lock()
-        let pending = clearWorkItem
-        clearWorkItem = nil
-        lock.unlock()
-        pending?.cancel()
+        return activeOwnership != nil
     }
 }

@@ -25,37 +25,123 @@ final class ShortcutReferenceWindowController: NSWindowController {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     static func show() {
+        (shared.window?.contentViewController as? ShortcutReferenceViewController)?.refreshLocalization()
         shared.showWindow(nil)
         shared.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 }
 
-private final class ShortcutReferenceViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
-    private struct ShortcutItem: Equatable {
-        let section: String
-        let title: String
-        let keyCaps: [String]
-        let note: String?
+struct ShortcutReferenceEntry: Equatable {
+    let section: String
+    let title: String
+    let keyCaps: [String]
+    let note: String?
+}
+
+/// Immutable search result so an unmatched query is a deliberate, testable UI state rather than
+/// an unexplained blank table.
+struct ShortcutReferenceProjection: Equatable {
+    let entries: [ShortcutReferenceEntry]
+
+    init(entries candidates: [ShortcutReferenceEntry], query: String) {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else {
+            entries = candidates
+            return
+        }
+        entries = candidates.filter {
+            TokenizedFilter.matches(query: needle, fields: [
+                $0.title,
+                $0.section,
+                $0.keyCaps.joined(separator: " "),
+                $0.note ?? ""
+            ])
+        }
     }
 
-    private let loc = LocalizationManager.shared
+    var showsEmptyState: Bool { entries.isEmpty }
+}
+
+enum ShortcutReferenceCatalog {
+    static func make(
+        loc: LocalizationManager,
+        inlineSearch: DevTypeShortcut,
+        aiPalette: DevTypeShortcut,
+        voice: DevTypeShortcut
+    ) -> [ShortcutReferenceEntry] {
+        [
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.global"), title: loc.s("home.hotkeys.search"), keyCaps: inlineSearch.keyCaps, note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.global"), title: loc.s("home.hotkeys.ai"), keyCaps: aiPalette.keyCaps, note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.global"), title: loc.s("home.hotkeys.dictation"), keyCaps: voice.keyCaps, note: nil),
+
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.manager"), title: loc.s("common.edit"), keyCaps: ["↩"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.manager"), title: loc.s("manager.context.duplicate"), keyCaps: ["⌘", "D"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.manager"), title: loc.s("manager.context.delete"), keyCaps: ["⌫"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.manager"), title: loc.s("edit.undo"), keyCaps: ["⌘", "Z"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.manager"), title: loc.s("edit.redo"), keyCaps: ["⇧", "⌘", "Z"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.manager"), title: loc.s("manager.bulk.selectAll"), keyCaps: ["⌘", "A"], note: nil),
+
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.palette"), title: loc.s("search.hint.navigate"), keyCaps: ["↑", "↓"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.palette"), title: loc.s("search.hint.expand"), keyCaps: ["↩"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.palette"), title: loc.s("search.hint.jump"), keyCaps: ["⌘", "1…9"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.palette"), title: loc.s("palette.section.commands"), keyCaps: [">"], note: loc.s("shortcuts.note.commandPrefix")),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.palette"), title: loc.s("palette.math.title"), keyCaps: ["="], note: loc.s("shortcuts.note.mathPrefix")),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.palette"), title: loc.s("search.hint.close"), keyCaps: ["⎋"], note: nil),
+
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.ai"), title: loc.s("ai.preview.action.replace"), keyCaps: ["↩"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.ai"), title: loc.s("ai.preview.replaceAndCopy"), keyCaps: ["⌥", "↩"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.ai"), title: loc.s("common.copy"), keyCaps: ["⌘", "C"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.ai"), title: loc.s("common.retry"), keyCaps: ["⌘", "R"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.ai"), title: loc.s("common.cancel"), keyCaps: ["⎋"], note: nil),
+
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.editor"), title: loc.s("editor.save"), keyCaps: ["⌘", "↩"], note: nil),
+            ShortcutReferenceEntry(section: loc.s("shortcuts.section.editor"), title: loc.s("editor.macroGuide"), keyCaps: ["⇧", "⌘", "/"], note: loc.s("shortcuts.note.dynamicMacro"))
+        ]
+    }
+}
+
+final class ShortcutReferenceViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+
+    private let loc: LocalizationManager
     private let searchField = NSSearchField()
     private let tableView = NSTableView()
-    private var allShortcuts: [ShortcutItem] = []
-    private var filteredShortcuts: [ShortcutItem] = []
+    private let headerLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(16, .bold),
+        color: DevTypeTheme.textPrimary
+    )
+    private let emptyState = NSView()
+    private let emptyTitleLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(13, .semibold),
+        color: DevTypeTheme.textSecondary
+    )
+    private let emptyHintLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(11),
+        color: DevTypeTheme.textTertiary
+    )
+    private var openHotkeysButton: CapsuleButton?
+    private var allShortcuts: [ShortcutReferenceEntry] = []
+    private var filteredShortcuts: [ShortcutReferenceEntry] = []
+    private var languageObserver: NSObjectProtocol?
+
+    init(localization: LocalizationManager = .shared) {
+        self.loc = localization
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func loadView() {
         let root = NSView()
         root.wantsLayer = true
         root.layer?.backgroundColor = DevTypeTheme.windowBackground.cgColor
 
-        let header = DevTypeTheme.makeLabel(
-            loc.s("shortcuts.window.title"),
-            font: DevTypeTheme.font(16, .bold),
-            color: DevTypeTheme.textPrimary
-        )
-        header.translatesAutoresizingMaskIntoConstraints = false
+        headerLabel.stringValue = loc.s("shortcuts.window.title")
+        headerLabel.translatesAutoresizingMaskIntoConstraints = false
 
         searchField.placeholderString = loc.s("shortcuts.search")
         searchField.target = self
@@ -87,20 +173,22 @@ private final class ShortcutReferenceViewController: NSViewController, NSTableVi
             action: #selector(openHotkeysPrefs)
         )
         openHotkeysBtn.translatesAutoresizingMaskIntoConstraints = false
+        openHotkeysButton = openHotkeysBtn
 
-        root.addSubview(header)
+        root.addSubview(headerLabel)
         root.addSubview(searchField)
         root.addSubview(openHotkeysBtn)
         root.addSubview(scroll)
+        setupEmptyState(in: root, over: scroll)
 
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            headerLabel.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
+            headerLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
 
             openHotkeysBtn.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            openHotkeysBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            openHotkeysBtn.centerYAnchor.constraint(equalTo: headerLabel.centerYAnchor),
 
-            searchField.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
+            searchField.topAnchor.constraint(equalTo: headerLabel.bottomAnchor, constant: 12),
             searchField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             searchField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
 
@@ -115,63 +203,118 @@ private final class ShortcutReferenceViewController: NSViewController, NSTableVi
         view = root
     }
 
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        refreshLocalization()
+        if languageObserver == nil {
+            languageObserver = NotificationCenter.default.addObserver(
+                forName: .devTypeLanguageChanged,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.refreshLocalization()
+            }
+        }
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        if let languageObserver {
+            NotificationCenter.default.removeObserver(languageObserver)
+            self.languageObserver = nil
+        }
+    }
+
+    deinit {
+        if let languageObserver {
+            NotificationCenter.default.removeObserver(languageObserver)
+        }
+    }
+
+    private func setupEmptyState(in root: NSView, over scroll: NSScrollView) {
+        emptyState.translatesAutoresizingMaskIntoConstraints = false
+        emptyState.isHidden = true
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = DevTypeTheme.symbol(
+            "keyboard.badge.ellipsis",
+            size: 25,
+            weight: .light,
+            color: DevTypeTheme.accent.withAlphaComponent(0.7)
+        )
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.setAccessibilityElement(false)
+
+        emptyTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyHintLabel.translatesAutoresizingMaskIntoConstraints = false
+        let stack = NSStackView(views: [icon, emptyTitleLabel, emptyHintLabel])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        emptyState.addSubview(stack)
+        emptyState.setAccessibilityElement(true)
+        emptyState.setAccessibilityRole(.group)
+        root.addSubview(emptyState)
+
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: emptyState.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: emptyState.centerYAnchor),
+            emptyState.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            emptyState.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+            emptyState.topAnchor.constraint(equalTo: scroll.topAnchor),
+            emptyState.bottomAnchor.constraint(equalTo: scroll.bottomAnchor)
+        ])
+        refreshEmptyStateLocalization()
+    }
+
+    func refreshLocalization() {
+        guard isViewLoaded else { return }
+        headerLabel.stringValue = loc.s("shortcuts.window.title")
+        searchField.placeholderString = loc.s("shortcuts.search")
+        openHotkeysButton?.title = loc.s("prefs.tab.hotkeys")
+        refreshEmptyStateLocalization()
+        if let window = view.window {
+            DevTypeTheme.styleWindow(window, title: loc.s("shortcuts.window.title"))
+        }
+        buildShortcutsCatalog()
+        applyProjection(ShortcutReferenceProjection(
+            entries: allShortcuts,
+            query: searchField.stringValue
+        ))
+    }
+
+    private func refreshEmptyStateLocalization() {
+        emptyTitleLabel.stringValue = loc.s("shortcuts.empty")
+        emptyHintLabel.stringValue = loc.s("shortcuts.emptyHint")
+        emptyState.setAccessibilityLabel(loc.s("shortcuts.empty"))
+        emptyState.setAccessibilityHelp(loc.s("shortcuts.emptyHint"))
+    }
+
     private func buildShortcutsCatalog() {
-        allShortcuts = [
-            // Global
-            ShortcutItem(section: loc.s("shortcuts.section.global"), title: loc.s("home.hotkeys.search"), keyCaps: ["⌘", "/"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.global"), title: loc.s("home.hotkeys.ai"), keyCaps: ["⌥", "⌘", "/"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.global"), title: loc.s("home.hotkeys.dictation"), keyCaps: ["⌥", "Space"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.global"), title: loc.s("menu.muteFrontmost"), keyCaps: ["⌥", "⌘", "M"], note: nil),
-
-            // Manager
-            ShortcutItem(section: loc.s("shortcuts.section.manager"), title: loc.s("manager.snippet.new"), keyCaps: ["⌘", "N"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.manager"), title: loc.s("manager.group.add"), keyCaps: ["⇧", "⌘", "N"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.manager"), title: loc.s("common.edit"), keyCaps: ["↩"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.manager"), title: loc.s("manager.context.duplicate"), keyCaps: ["⌘", "D"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.manager"), title: loc.s("manager.context.delete"), keyCaps: ["⌫"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.manager"), title: loc.s("edit.undo"), keyCaps: ["⌘", "Z"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.manager"), title: loc.s("edit.redo"), keyCaps: ["⇧", "⌘", "Z"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.manager"), title: loc.s("manager.bulk.selectAll"), keyCaps: ["⌘", "A"], note: nil),
-
-            // Palette
-            ShortcutItem(section: loc.s("shortcuts.section.palette"), title: loc.s("search.hint.navigate"), keyCaps: ["↑", "↓"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.palette"), title: loc.s("search.hint.expand"), keyCaps: ["↩"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.palette"), title: loc.s("search.hint.jump"), keyCaps: ["⌘", "1…9"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.palette"), title: loc.s("palette.section.commands"), keyCaps: [">"], note: "Prefix query with >"),
-            ShortcutItem(section: loc.s("shortcuts.section.palette"), title: loc.s("palette.math.title"), keyCaps: ["="], note: "Prefix query with ="),
-            ShortcutItem(section: loc.s("shortcuts.section.palette"), title: loc.s("search.hint.close"), keyCaps: ["⎋"], note: nil),
-
-            // AI & Review
-            ShortcutItem(section: loc.s("shortcuts.section.ai"), title: loc.s("ai.preview.action.replace"), keyCaps: ["⌘", "↩"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.ai"), title: loc.s("common.copy"), keyCaps: ["⌘", "C"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.ai"), title: loc.s("common.retry"), keyCaps: ["⌘", "R"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.ai"), title: loc.s("common.cancel"), keyCaps: ["⎋"], note: nil),
-
-            // Dictation
-            ShortcutItem(section: loc.s("shortcuts.section.dictation"), title: loc.s("voice.hud.cancel"), keyCaps: ["⎋"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.dictation"), title: loc.s("voice.hud.copy"), keyCaps: ["Click HUD"], note: nil),
-
-            // Editor
-            ShortcutItem(section: loc.s("shortcuts.section.editor"), title: loc.s("editor.save"), keyCaps: ["⌘", "S"], note: nil),
-            ShortcutItem(section: loc.s("shortcuts.section.editor"), title: loc.s("editor.macroGuide"), keyCaps: ["%"], note: "Insert dynamic macro")
-        ]
+        allShortcuts = ShortcutReferenceCatalog.make(
+            loc: loc,
+            inlineSearch: HotkeyPreferences.inlineSearchShortcut,
+            aiPalette: HotkeyPreferences.aiPaletteShortcut,
+            voice: HotkeyPreferences.voiceShortcut
+        )
     }
 
     @objc private func searchChanged() {
-        let q = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if q.isEmpty {
-            filteredShortcuts = allShortcuts
-        } else {
-            filteredShortcuts = allShortcuts.filter {
-                TokenizedFilter.matches(query: q, fields: [
-                    $0.title,
-                    $0.section,
-                    $0.keyCaps.joined(separator: " "),
-                    $0.note ?? ""
-                ])
-            }
-        }
+        applyProjection(ShortcutReferenceProjection(
+            entries: allShortcuts,
+            query: searchField.stringValue
+        ))
+    }
+
+    private func applyProjection(_ projection: ShortcutReferenceProjection) {
+        filteredShortcuts = projection.entries
         tableView.reloadData()
+        emptyState.isHidden = !projection.showsEmptyState
+        if projection.showsEmptyState {
+            tableView.deselectAll(nil)
+        }
     }
 
     @objc private func openHotkeysPrefs() {

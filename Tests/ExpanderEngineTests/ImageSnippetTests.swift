@@ -216,6 +216,6 @@ final class ImageSnippetTests: XCTestCase {
 
         XCTAssertEqual(result.kind, .espanso)
         XCTAssertEqual(result.imageCount, 1)
-        XCTAssertTrue(result.notes.contains { $0.contains("image") })
+        XCTAssertTrue(result.notes.contains(.imageMatchImported(1)))
     }
 }

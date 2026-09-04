@@ -33,17 +33,33 @@ public actor DurableVoiceCapture {
         onAudioLevelUpdate = handler
     }
 
-    public static func checkMicrophonePermission() -> Bool {
+    public enum MicrophonePermissionStatus: String, Sendable, Equatable {
+        case authorized
+        case notDetermined
+        case denied
+        case restricted
+    }
+
+    public static func microphonePermissionStatus() -> MicrophonePermissionStatus {
         #if os(macOS)
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        return status == .authorized
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return .authorized
+        case .notDetermined: return .notDetermined
+        case .denied: return .denied
+        case .restricted: return .restricted
+        @unknown default: return .restricted
+        }
         #else
-        return true
+        return .authorized
         #endif
     }
 
-    /// Closure form for callers that cannot await — notably `PermissionRequester`, which
-    /// runs inside a synchronous permission audit.
+    public static func checkMicrophonePermission() -> Bool {
+        microphonePermissionStatus() == .authorized
+    }
+
+    /// Closure form for legacy/callback-driven callers. New permission flows should use the
+    /// async overload so the main run loop remains available to the system prompt.
     public static func requestMicrophonePermission(completion: @escaping @Sendable (Bool) -> Void) {
         #if os(macOS)
         AVCaptureDevice.requestAccess(for: .audio) { granted in completion(granted) }
@@ -119,7 +135,7 @@ public actor DurableVoiceCapture {
                     _ = try writer.finalize()
                 } catch {
                     DevTypeLog.voice.error(
-                        "[Voice] failed to close CAF after capture start failure: \(error.localizedDescription, privacy: .public)"
+                        "[Voice] failed to close CAF after capture start failure \(DevTypeLog.errorMetadata(error), privacy: .public)"
                     )
                 }
             }
@@ -315,7 +331,7 @@ public actor DurableVoiceCapture {
                 _ = try writer.finalize()
             } catch {
                 DevTypeLog.voice.error(
-                    "[Voice] failed to finalize cancelled CAF capture: \(error.localizedDescription, privacy: .public)"
+                    "[Voice] failed to finalize cancelled CAF capture \(DevTypeLog.errorMetadata(error), privacy: .public)"
                 )
             }
         }

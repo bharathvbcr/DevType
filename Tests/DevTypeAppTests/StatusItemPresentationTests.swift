@@ -41,6 +41,11 @@ final class StatusItemPresentationTests: XCTestCase {
                     urgentInject: urgent, libraryUnhealthy: unhealthy,
                     differentiateWithoutColor: differentiate, highlighted: options & 8 != 0
                 )
+                let enginePresentation = EngineDisplayPresentation(
+                    display: display,
+                    snapshot: snapshot,
+                    urgentInject: urgent
+                )
                 subject.apply(to: button)
                 XCTAssertEqual(subject.offersCopySecret, secure)
                 XCTAssertEqual(button.accessibilityRole(), secure ? .button : .menuButton)
@@ -55,14 +60,14 @@ final class StatusItemPresentationTests: XCTestCase {
                     XCTAssertTrue(button.accessibilityHelp()?.contains(copy) == true)
                     if display.requiresAction {
                         XCTAssertTrue(button.accessibilityHelp()?.contains(subject.statusName) == true)
-                        XCTAssertTrue(button.toolTip?.contains(display.toolTip(snapshot: snapshot)) == true)
+                        XCTAssertTrue(button.toolTip?.contains(enginePresentation.toolTip) == true)
                     }
                 } else {
                     XCTAssertNotEqual(button.accessibilityValue() as? String, copy)
                     let textRequired = differentiate || unhealthy || subject.needsAttention
                     XCTAssertEqual(button.title.isEmpty, !textRequired)
                     XCTAssertEqual(button.imagePosition, textRequired ? .imageLeading : .imageOnly)
-                    XCTAssertEqual(button.toolTip, display.toolTip(snapshot: snapshot))
+                    XCTAssertEqual(button.toolTip, enginePresentation.toolTip)
                 }
                 checked += 1
             }

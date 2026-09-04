@@ -10,7 +10,7 @@
 set -euo pipefail
 
 BUNDLE_ID="${DEVTYPE_BUNDLE_ID:-com.devtype.app}"
-SERVICES=(ListenEvent Accessibility PostEvent)
+SERVICES=(ListenEvent Accessibility PostEvent Microphone SpeechRecognition)
 
 if pgrep -x DevType >/dev/null 2>&1; then
   echo "==> quitting DevType (records must be reset while it is not running)"
@@ -22,10 +22,20 @@ if pgrep -x DevType >/dev/null 2>&1; then
   pgrep -x DevType >/dev/null 2>&1 && pkill -9 -x DevType 2>/dev/null || true
 fi
 
+FAILED_SERVICES=()
 for svc in "${SERVICES[@]}"; do
   echo "==> tccutil reset ${svc} ${BUNDLE_ID}"
-  tccutil reset "${svc}" "${BUNDLE_ID}" || true
+  if ! tccutil reset "${svc}" "${BUNDLE_ID}"; then
+    FAILED_SERVICES+=("${svc}")
+  fi
 done
+
+if (( ${#FAILED_SERVICES[@]} > 0 )); then
+  echo >&2
+  echo "ERROR: failed to reset ${#FAILED_SERVICES[@]} TCC service(s) for ${BUNDLE_ID}: ${FAILED_SERVICES[*]}" >&2
+  echo "No success claim was made; fix the reported tccutil errors and run this script again." >&2
+  exit 1
+fi
 
 echo
 echo "==> done — records cleared for ${BUNDLE_ID}"

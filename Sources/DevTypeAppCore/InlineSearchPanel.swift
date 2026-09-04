@@ -177,9 +177,9 @@ enum InlineSearchPanel {
         if let raised = DTMakeKeyAndOrderFrontCatchingException(panel) {
             DevTypeLog.app.error(
                 """
-                [Palette] window ordering raised \(raised.name.rawValue, privacy: .public): \
-                \(raised.reason ?? "(no reason)", privacy: .public)
-                \(raised.callStackSymbols.prefix(12).joined(separator: "\n"), privacy: .public)
+                [Palette] window ordering raised \(DevTypeLog.boundedPublicIdentifier(raised.name.rawValue, label: "exceptionName"), privacy: .public): \
+                \(DevTypeLog.publicTextMetadata(raised.reason), privacy: .public)
+                stackFrames=\(raised.callStackReturnAddresses.count, privacy: .public)
                 """
             )
         }

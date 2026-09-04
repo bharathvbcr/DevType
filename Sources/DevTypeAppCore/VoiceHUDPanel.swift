@@ -27,7 +27,14 @@ public final class VoiceHUDPanel: NSPanel {
     private let stateLabel: NSTextField
     private let timerLabel: NSTextField
     private let transcriptLabel: NSTextField
+    private let clipboardWriter: (String) -> Bool
+    /// Full user-authored/result text. The label is only a bounded visual preview and may
+    /// truncate or render a diff, so user actions must never read their payload back from it.
+    private var canonicalTranscript = ""
     private var dismissWorkItem: DispatchWorkItem?
+    private var dismissGeneration: UInt64 = 0
+    /// Non-nil only while the HUD represents a terminal state eligible for auto-dismiss.
+    private var terminalDismissDelay: TimeInterval?
     private var currentModelName: String = "Apple Speech"
     private var pendingTargetSize: CGSize?
     private var isResizeScheduled = false
@@ -48,8 +55,15 @@ public final class VoiceHUDPanel: NSPanel {
     private static let maxWidth: CGFloat = 520
     private static let maxHeight: CGFloat = 188
 
-    public init() {
+    public convenience init() {
+        self.init(clipboardWriter: { text in
+            PasteboardBroker.shared.writeUserClipboardString(text)
+        })
+    }
+
+    init(clipboardWriter: @escaping (String) -> Bool) {
         let loc = LocalizationManager.shared
+        self.clipboardWriter = clipboardWriter
         self.stateLabel = DevTypeTheme.makeLabel(
             loc.s("voice.hud.status.listening"),
             font: DevTypeTheme.font(11, .medium),
@@ -110,6 +124,7 @@ public final class VoiceHUDPanel: NSPanel {
     }
 
     private func setupLayout() {
+        let loc = LocalizationManager.shared
         contentView = blobContainer
 
         let rootStack = NSStackView()
@@ -131,16 +146,21 @@ public final class VoiceHUDPanel: NSPanel {
 
         // Action Buttons
         pinBtn = makeHeaderButton(symbol: "pin", action: #selector(togglePin))
-        pinBtn.toolTip = "Pin HUD"
+        pinBtn.toolTip = loc.s("voice.hud.pin")
+        pinBtn.setAccessibilityLabel(loc.s("voice.hud.pin"))
 
         compactBtn = makeHeaderButton(symbol: "rectangle.compress.vertical", action: #selector(toggleCompact))
-        compactBtn.toolTip = "Toggle Compact Mode"
+        compactBtn.toolTip = loc.s("voice.hud.compact")
+        compactBtn.setAccessibilityLabel(loc.s("voice.hud.compact"))
 
         copyBtn = makeHeaderButton(symbol: "doc.on.doc", action: #selector(copyTranscript))
-        copyBtn.toolTip = "Copy Transcript"
+        copyBtn.toolTip = loc.s("voice.hud.copy")
+        copyBtn.setAccessibilityLabel(loc.s("voice.hud.copy"))
+        copyBtn.isEnabled = false
 
         cancelBtn = makeHeaderButton(symbol: "xmark", action: #selector(cancelRecording))
-        cancelBtn.toolTip = "Cancel Dictation"
+        cancelBtn.toolTip = loc.s("voice.hud.cancel")
+        cancelBtn.setAccessibilityLabel(loc.s("voice.hud.cancel"))
 
         headerStack.addArrangedSubview(micImageView)
         headerStack.addArrangedSubview(stateLabel)
@@ -176,6 +196,7 @@ public final class VoiceHUDPanel: NSPanel {
         let btn = NSButton(image: DevTypeTheme.tintedSymbol(symbol, size: 10.5, weight: .medium, color: DevTypeTheme.textSecondary) ?? NSImage(), target: self, action: action)
         btn.isBordered = false
         btn.bezelStyle = .regularSquare
+        btn.setAccessibilityRole(.button)
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.widthAnchor.constraint(equalToConstant: 16).isActive = true
         btn.heightAnchor.constraint(equalToConstant: 16).isActive = true
@@ -189,24 +210,39 @@ public final class VoiceHUDPanel: NSPanel {
         let iconName = isPinned ? "pin.fill" : "pin"
         let tint = isPinned ? DevTypeTheme.accent : DevTypeTheme.textSecondary
         pinBtn.image = DevTypeTheme.tintedSymbol(iconName, size: 10.5, weight: .medium, color: tint)
-        if !isPinned {
-            scheduleAutoDismiss(after: VoiceHUDPresentationTiming.successHoldDuration)
+        let loc = LocalizationManager.shared
+        let pinTitle = loc.s(isPinned ? "voice.hud.unpin" : "voice.hud.pin")
+        pinBtn.toolTip = pinTitle
+        pinBtn.setAccessibilityLabel(pinTitle)
+        if isPinned {
+            cancelAutoDismiss()
+        } else if let terminalDismissDelay {
+            scheduleAutoDismiss(after: terminalDismissDelay)
         }
-        DevTypeAccessibility.announce(isPinned ? "HUD Pinned" : "HUD Unpinned")
+        DevTypeAccessibility.announce(pinTitle)
     }
 
     @objc private func toggleCompact() {
         isCompactMode.toggle()
         transcriptLabel.isHidden = isCompactMode
         compactBtn.image = DevTypeTheme.tintedSymbol(isCompactMode ? "rectangle.expand.vertical" : "rectangle.compress.vertical", size: 10.5, weight: .medium, color: DevTypeTheme.textSecondary)
+        let actionTitle = LocalizationManager.shared.s(
+            isCompactMode ? "voice.hud.expand" : "voice.hud.compact"
+        )
+        compactBtn.toolTip = actionTitle
+        compactBtn.setAccessibilityLabel(actionTitle)
+        DevTypeAccessibility.announce(actionTitle)
         scheduleSize(forText: isCompactMode ? "" : transcriptLabel.stringValue)
     }
 
     @objc private func copyTranscript() {
-        let text = transcriptLabel.stringValue
-        guard !text.isEmpty && text != LocalizationManager.shared.s("voice.hud.placeholder") else { return }
-        PasteboardBroker.shared.writeUserClipboardString(text)
-        ToastPanel.show("Copied transcript", symbol: "doc.on.doc.fill")
+        guard !canonicalTranscript.isEmpty else { return }
+        let loc = LocalizationManager.shared
+        if clipboardWriter(canonicalTranscript) {
+            ToastPanel.show(loc.s("voice.hud.copied"), symbol: "doc.on.doc.fill")
+        } else {
+            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill")
+        }
     }
 
     @objc private func cancelRecording() {
@@ -241,11 +277,13 @@ public final class VoiceHUDPanel: NSPanel {
 
     /// Updates the HUD state and positions it on screen.
     public func updateState(_ state: VoiceHUDState) {
-        if !isPinned { dismissWorkItem?.cancel() }
+        cancelAutoDismiss()
+        terminalDismissDelay = nil
         let loc = LocalizationManager.shared
 
         switch state {
         case .listening(let modelName):
+            canonicalTranscript = ""
             currentModelName = modelName
             updateStatus(loc.s("voice.hud.status.listening"), color: DevTypeTheme.accent)
             transcriptLabel.stringValue = loc.s("voice.hud.placeholder")
@@ -258,6 +296,7 @@ public final class VoiceHUDPanel: NSPanel {
             showOnScreen()
 
         case .streaming(let transcript, let modelName):
+            canonicalTranscript = transcript
             currentModelName = modelName
             updateStatus(loc.s("voice.hud.status.live"), color: DevTypeTheme.accent)
             let prompt = loc.s("voice.hud.listening")
@@ -280,6 +319,8 @@ public final class VoiceHUDPanel: NSPanel {
             showOnScreen()
 
         case .success(let text, let diffSegments):
+            canonicalTranscript = text
+            terminalDismissDelay = VoiceHUDPresentationTiming.successHoldDuration
             stopTimer()
             updateStatus(loc.s("voice.hud.status.inserted"), color: DevTypeTheme.statusGreen)
             if let diffSegments, diffSegments.contains(where: { $0.isCut }) {
@@ -313,11 +354,9 @@ public final class VoiceHUDPanel: NSPanel {
             scheduleSize(forText: isCompactMode ? "" : text)
             updateAccessibility(status: stateLabel.stringValue, transcript: text)
             showOnScreen()
-            if !isPinned {
-                scheduleAutoDismiss(after: VoiceHUDPresentationTiming.successHoldDuration)
-            }
 
         case .error(let message):
+            terminalDismissDelay = VoiceHUDPresentationTiming.errorHoldDuration
             stopTimer()
             updateStatus(loc.s("voice.hud.status.failed"), color: DevTypeTheme.statusOrange)
             transcriptLabel.stringValue = message
@@ -328,9 +367,11 @@ public final class VoiceHUDPanel: NSPanel {
             scheduleSize(forText: isCompactMode ? "" : message)
             updateAccessibility(status: stateLabel.stringValue, transcript: message)
             showOnScreen()
-            if !isPinned {
-                scheduleAutoDismiss(after: VoiceHUDPresentationTiming.errorHoldDuration)
-            }
+        }
+
+        copyBtn.isEnabled = !canonicalTranscript.isEmpty
+        if !isPinned, let terminalDismissDelay {
+            scheduleAutoDismiss(after: terminalDismissDelay)
         }
     }
 
@@ -452,15 +493,28 @@ public final class VoiceHUDPanel: NSPanel {
     }
 
     private func scheduleAutoDismiss(after delay: TimeInterval) {
+        cancelAutoDismiss()
+        let generation = dismissGeneration
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.dismissAnimated()
+            guard self.dismissGeneration == generation, !self.isPinned else { return }
+            self.dismissWorkItem = nil
+            self.dismissAnimated(generation: generation)
         }
         dismissWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private func dismissAnimated() {
+    private func cancelAutoDismiss() {
+        dismissGeneration &+= 1
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+        if isVisible {
+            alphaValue = 1
+        }
+    }
+
+    private func dismissAnimated(generation: UInt64) {
         if DevTypeAccessibility.reduceMotion {
             pauseAnimation()
             orderOut(nil)
@@ -474,6 +528,10 @@ public final class VoiceHUDPanel: NSPanel {
         }, completionHandler: { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.dismissGeneration == generation, !self.isPinned else {
+                    self.alphaValue = 1
+                    return
+                }
                 self.pauseAnimation()
                 self.orderOut(nil)
                 self.alphaValue = 1
@@ -488,7 +546,11 @@ public final class VoiceHUDPanel: NSPanel {
     }
 
     public func hide() {
-        dismissWorkItem?.cancel()
+        cancelAutoDismiss()
+        terminalDismissDelay = nil
+        canonicalTranscript = ""
+        copyBtn.isEnabled = false
+        stopTimer()
         pauseAnimation()
         orderOut(nil)
     }

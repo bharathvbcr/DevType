@@ -224,7 +224,7 @@ public enum SnippetTagSuggester {
             )
         } catch {
             DevTypeLog.store.debug(
-                "[AI] tag suggestion declined: \(error.localizedDescription, privacy: .public)"
+                "[AI] tag suggestion declined \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             suggestion = .none
         }

@@ -61,6 +61,30 @@ final class EraseSafetyTests: XCTestCase {
         XCTAssertTrue(reason.contains("scan=full"), reason)
     }
 
+    func testMismatchReasonKeepsShapeEvidenceWithoutRawFieldOrExpectedText() {
+        let actual = "hunt\u{00A0}r2"
+        let expected = "`secret"
+        XCTAssertEqual(actual.count, expected.count, "Sentinels must not be distinguishable by length.")
+
+        let result = ErasePreconditionChecker.evaluate(
+            plan: ErasePlan(text: expected),
+            value: actual,
+            caretLocation: actual.utf16.count,
+            selectionLength: 0
+        )
+        guard case .mismatch(let reason) = result else { return XCTFail("Got \(result)") }
+
+        XCTAssertFalse(reason.contains(actual), "Focused-field text leaked: \(reason)")
+        XCTAssertFalse(reason.contains(expected), "Expected erase text leaked: \(reason)")
+        XCTAssertTrue(reason.contains("comparison=exact"), reason)
+        XCTAssertTrue(reason.contains("actualChars=7"), reason)
+        XCTAssertTrue(reason.contains("expectedChars=7"), reason)
+        XCTAssertTrue(reason.contains("actualNonASCIIWhitespace=1"), reason)
+        XCTAssertTrue(reason.contains("actualHash="), reason)
+        XCTAssertTrue(reason.contains("expectedHash="), reason)
+        XCTAssertTrue(reason.contains("expectedTextInScan=absent"), reason)
+    }
+
     func testGeometryRecoveryCannotAuthoriseUndoOrASelection() {
         let value = "prefix `slm suffix"
         for caret in [0, 2, value.utf16.count] {

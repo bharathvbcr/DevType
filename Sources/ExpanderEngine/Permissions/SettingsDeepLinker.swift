@@ -1,12 +1,9 @@
 import Cocoa
 import Foundation
 
-/// Deep-links System Settings Privacy panes. Never returns provisional `didOpen: true`.
-///
-/// On macOS 13+/27, System Settings often **ignores** a second `Privacy_*` deep link while it
-/// is already open on another privacy sub-pane (e.g. Input Monitoring → Accessibility stays
-/// stuck). `open(for:)` therefore quits System Settings first when it is running, then opens
-/// the target URL so the correct pane appears.
+/// Deep-links System Settings Privacy panes without terminating or otherwise changing the
+/// lifecycle of another app. `didOpen` means macOS accepted one of the URLs; System Settings
+/// does not expose an API that proves which pane it ultimately displayed.
 public final class SettingsDeepLinker {
     public static let shared = SettingsDeepLinker()
 
@@ -30,11 +27,11 @@ public final class SettingsDeepLinker {
         "com.apple.Preferences"
     ]
 
-    /// Single-flight token: a newer `open` invalidates in-flight prepare/open work.
-    private var openGeneration: UInt64 = 0
-    private var pendingPrepareWorkItem: DispatchWorkItem?
+    private let openURL: (URL) -> Bool
 
-    public init() {}
+    public init(openURL: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
+        self.openURL = openURL
+    }
 
     public static let modernPrivacySecurityScheme = PermissionCopy.modernPrivacySecurityScheme
     public static let legacySecurityScheme = PermissionCopy.legacySecurityScheme
@@ -95,131 +92,21 @@ public final class SettingsDeepLinker {
         return nil
     }
 
-    /// Soft-quit timeout before a single force-terminate attempt (longer = less aggressive UX).
-    public static let softTerminateTimeout: TimeInterval = 3.0
-
-    /// Quits running System Settings asynchronously, then invokes `completion` on the main queue.
-    /// Uses timed polling (no main-thread `Thread.sleep`). Honors `generation` for single-flight.
-    /// Prefers a longer soft terminate; force-quits at most once after timeout.
-    public func prepareForDeepLinkAsync(
-        timeout: TimeInterval = SettingsDeepLinker.softTerminateTimeout,
-        generation: UInt64,
-        completion: @escaping () -> Void
-    ) {
-        let running = NSWorkspace.shared.runningApplications.filter { app in
-            guard let id = app.bundleIdentifier else { return false }
-            return Self.systemSettingsBundleIdentifiers.contains(id)
-        }
-        guard !running.isEmpty else {
-            completion()
-            return
-        }
-
-        DevTypeLog.permission.info(
-            "[Permission] open Settings prepare: soft-quitting \(running.count, privacy: .public) System Settings instance(s) (timeout=\(timeout, privacy: .public)s) so Privacy deep link can navigate"
-        )
-        for app in running {
-            app.terminate()
-        }
-
-        let deadline = Date().addingTimeInterval(max(0.5, timeout))
-        schedulePreparePoll(deadline: deadline, generation: generation, forceAttempted: false, completion: completion)
-    }
-
-    private func schedulePreparePoll(
-        deadline: Date,
-        generation: UInt64,
-        forceAttempted: Bool,
-        completion: @escaping () -> Void
-    ) {
-        pendingPrepareWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            guard generation == self.openGeneration else {
-                DevTypeLog.permission.debug("[Permission] open Settings prepare discarded (stale generation)")
-                return
-            }
-
-            let still = NSWorkspace.shared.runningApplications.contains { app in
-                guard let id = app.bundleIdentifier else { return false }
-                return Self.systemSettingsBundleIdentifiers.contains(id)
-            }
-
-            if !still {
-                self.pendingPrepareWorkItem = nil
-                completion()
-                return
-            }
-
-            if Date() < deadline {
-                self.schedulePreparePoll(
-                    deadline: deadline,
-                    generation: generation,
-                    forceAttempted: forceAttempted,
-                    completion: completion
-                )
-                return
-            }
-
-            if !forceAttempted {
-                let leftover = NSWorkspace.shared.runningApplications.filter { app in
-                    guard let id = app.bundleIdentifier else { return false }
-                    return Self.systemSettingsBundleIdentifiers.contains(id)
-                }
-                // One force attempt only after soft timeout — prefer soft quit for UX.
-                if let app = leftover.first {
-                    DevTypeLog.permission.notice(
-                        "[Permission] open Settings prepare: soft quit timed out — force-terminating System Settings once"
-                    )
-                    app.forceTerminate()
-                }
-                // Brief settle after force-quit, still async.
-                self.pendingPrepareWorkItem = nil
-                let settle = DispatchWorkItem { [weak self] in
-                    guard let self, generation == self.openGeneration else { return }
-                    self.pendingPrepareWorkItem = nil
-                    completion()
-                }
-                self.pendingPrepareWorkItem = settle
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: settle)
-                return
-            }
-
-            self.pendingPrepareWorkItem = nil
-            completion()
-        }
-        pendingPrepareWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
-    }
-
-    /// Opens Settings after async quit-before-open prepare. Single-flight: a newer open cancels prior work.
+    /// Opens the modern deep link immediately, with one legacy fallback when macOS rejects it.
     public func open(for kind: PermissionKind? = nil, completion: ((OpenResult) -> Void)? = nil) {
-        cancelPendingOpen()
-        openGeneration &+= 1
-        let generation = openGeneration
         let kindLabel = kind.map { DevTypeLog.kindName($0) } ?? "PrivacyRoot"
         let urls = Self.settingsURLs(for: kind)
         DevTypeLog.permission.info(
-            "[Permission] open Settings begin kind=\(kindLabel, privacy: .public) modernURL=\(urls.modern.absoluteString, privacy: .public) reveal=\(Self.privacyRevealKey(for: kind) ?? "root", privacy: .public) generation=\(generation, privacy: .public)"
+            "[Permission] open Settings begin kind=\(kindLabel, privacy: .public) modernURL=\(urls.modern.absoluteString, privacy: .public) reveal=\(Self.privacyRevealKey(for: kind) ?? "root", privacy: .public)"
         )
-
-        prepareForDeepLinkAsync(timeout: Self.softTerminateTimeout, generation: generation) { [weak self] in
-            guard let self else { return }
-            guard generation == self.openGeneration else {
-                DevTypeLog.permission.debug(
-                    "[Permission] open Settings aborted kind=\(kindLabel, privacy: .public) (superseded)"
-                )
-                return
-            }
-            let result = self.performOpen(urls: urls, kindLabel: kindLabel)
-            completion?(result)
-        }
+        let result = performOpen(urls: urls, kindLabel: kindLabel)
+        completion?(result)
     }
 
     private func performOpen(urls: (modern: URL, legacy: URL), kindLabel: String) -> OpenResult {
-        if NSWorkspace.shared.open(urls.modern) {
+        if openURL(urls.modern) {
             DevTypeLog.permission.info(
-                "[Permission] open Settings result kind=\(kindLabel, privacy: .public) didOpen=true usedModern=true"
+                "[Permission] open Settings result kind=\(kindLabel, privacy: .public) urlAccepted=true usedModern=true"
             )
             return OpenResult(
                 modernURL: urls.modern,
@@ -228,10 +115,10 @@ public final class SettingsDeepLinker {
                 didOpen: true
             )
         }
-        let legacyOpened = NSWorkspace.shared.open(urls.legacy)
+        let legacyOpened = openURL(urls.legacy)
         if legacyOpened {
             DevTypeLog.permission.info(
-                "[Permission] open Settings result kind=\(kindLabel, privacy: .public) didOpen=true usedModern=false legacyURL=\(urls.legacy.absoluteString, privacy: .public)"
+                "[Permission] open Settings result kind=\(kindLabel, privacy: .public) urlAccepted=true usedModern=false legacyURL=\(urls.legacy.absoluteString, privacy: .public)"
             )
         } else {
             DevTypeLog.permission.error(
@@ -246,12 +133,6 @@ public final class SettingsDeepLinker {
         )
     }
 
-    public func cancelPendingOpen() {
-        if pendingPrepareWorkItem != nil {
-            DevTypeLog.permission.debug("[Permission] open Settings pending cancelled")
-        }
-        pendingPrepareWorkItem?.cancel()
-        pendingPrepareWorkItem = nil
-        openGeneration &+= 1
-    }
+    /// Kept for callers that close permission UI; opening is now synchronous and has no pending work.
+    public func cancelPendingOpen() {}
 }

@@ -6,6 +6,29 @@ private final class FlippedDocumentView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// Canonical Recovery window geometry shared by presentation and rendered regression tests.
+/// `contentMinSize` keeps both tabs usable while still allowing the status pane to scroll.
+enum PermissionRecoveryWindowLayout {
+    static let defaultContentSize = NSSize(width: 640, height: 720)
+    static let minimumContentSize = NSSize(width: 560, height: 520)
+
+    static func apply(to window: NSWindow) {
+        window.contentMinSize = minimumContentSize
+        window.setContentSize(defaultContentSize)
+    }
+}
+
+/// Visual state for each Recovery request button. The single-flight settle is user-visible: a
+/// click that the controller will reject must never leave another request button looking active.
+struct PermissionRequestButtonPresentation: Equatable {
+    let isGranted: Bool
+    let isEnabled: Bool
+
+    static func resolve(isGranted: Bool, requestInFlight: Bool) -> Self {
+        Self(isGranted: isGranted, isEnabled: !isGranted && !requestInFlight)
+    }
+}
+
 /// Menu ⌘⇧P recovery window. Two tabs: **Status** owns everything that fixes a
 /// missing capability, **Diagnostics** owns the evidence you paste into an issue.
 /// Both render from a single capability probe per refresh.
@@ -193,19 +216,28 @@ final class PermissionRecoveryController: NSViewController {
         guidanceLabel.textColor = DevTypeTheme.textSecondary
         duplicateWarningLabel.font = DevTypeTheme.font(11, .semibold)
         duplicateWarningLabel.textColor = DevTypeTheme.statusOrange
-        duplicateWarningLabel.preferredMaxLayoutWidth = 540
+        // Identity/path warnings are the longest copy on this screen. Size their intrinsic
+        // height against the narrowest supported rendered card, then let wider windows use the
+        // same safe height; the status pane scrolls, so correctness wins over shaving one line.
+        duplicateWarningLabel.preferredMaxLayoutWidth = 340
         duplicateWarningLabel.isHidden = true
         settingsFallbackLabel.font = DevTypeTheme.font(11)
-        settingsFallbackLabel.preferredMaxLayoutWidth = 560
+        settingsFallbackLabel.preferredMaxLayoutWidth = 340
         settingsFallbackLabel.textColor = DevTypeTheme.statusOrange
         settingsFallbackLabel.isHidden = true
+        for label in [
+            livePreflightLabel, summaryLabel, guidanceLabel,
+            duplicateWarningLabel, settingsFallbackLabel
+        ] {
+            label.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
 
         let statusCard = makeCard()
         let statusStack = NSStackView(views: [
             summaryLabel, livePreflightLabel, guidanceLabel, duplicateWarningLabel
         ])
         statusStack.orientation = .vertical
-        statusStack.alignment = .leading
+        statusStack.alignment = .width
         statusStack.spacing = 6
         statusStack.translatesAutoresizingMaskIntoConstraints = false
         statusCard.contentView.addSubview(statusStack)
@@ -213,7 +245,7 @@ final class PermissionRecoveryController: NSViewController {
             statusStack.topAnchor.constraint(equalTo: statusCard.contentView.topAnchor, constant: 14),
             statusStack.leadingAnchor.constraint(equalTo: statusCard.contentView.leadingAnchor, constant: 16),
             statusStack.trailingAnchor.constraint(equalTo: statusCard.contentView.trailingAnchor, constant: -16),
-            statusCard.heightAnchor.constraint(equalTo: statusStack.heightAnchor, constant: 28)
+            statusStack.bottomAnchor.constraint(equalTo: statusCard.contentView.bottomAnchor, constant: -14)
         ])
 
         // MARK: Capability cards
@@ -357,6 +389,19 @@ final class PermissionRecoveryController: NSViewController {
         refreshPermissions()
     }
 
+    /// Refresh the dynamic permission diagnosis without replacing the controller or losing an
+    /// in-flight request. The visible status, identity warnings, tab labels, and window chrome
+    /// change immediately.
+    func refreshLocalization() {
+        guard isViewLoaded else { return }
+        if let window = view.window {
+            DevTypeTheme.styleWindow(window, title: loc.s("window.recovery"))
+        }
+        tabControl?.setLabel(loc.s("recovery.tab.status"), forSegment: Tab.status.rawValue)
+        tabControl?.setLabel(loc.s("recovery.tab.diagnostics"), forSegment: Tab.diagnostics.rawValue)
+        refreshPermissions()
+    }
+
     @objc private func tabChanged(_ sender: NSSegmentedControl) {
         applyTab(Tab(rawValue: sender.selectedSegment) ?? .status)
     }
@@ -412,7 +457,9 @@ final class PermissionRecoveryController: NSViewController {
         let descField = NSTextField(wrappingLabelWithString: description)
         descField.font = DevTypeTheme.font(11)
         descField.textColor = DevTypeTheme.textSecondary
-        descField.preferredMaxLayoutWidth = 250
+        descField.lineBreakMode = .byWordWrapping
+        descField.setContentCompressionResistancePriority(.required, for: .vertical)
+        descField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         textStack.addArrangedSubview(titleField)
         textStack.addArrangedSubview(descField)
@@ -445,18 +492,30 @@ final class PermissionRecoveryController: NSViewController {
         openButton.setAccessibilityLabel("\(openTitle) — \(title)")
         requestButton.setAccessibilityLabel("\(loc.s("recovery.request")) — \(title)")
 
-        let rowStack = NSStackView(views: [badge, textStack, statusLabel, buttonStack])
-        rowStack.translatesAutoresizingMaskIntoConstraints = false
-        rowStack.orientation = .horizontal
-        rowStack.alignment = .centerY
-        rowStack.spacing = 12
-        container.contentView.addSubview(rowStack)
+        // Keep the explanatory copy on a full-width row. The earlier single horizontal row
+        // squeezed it between two buttons and a status badge, producing 70–96 pt text columns
+        // and visibly clipping required permission guidance in the default 640 pt window.
+        let summaryRow = NSStackView(views: [badge, textStack, statusLabel])
+        summaryRow.translatesAutoresizingMaskIntoConstraints = false
+        summaryRow.orientation = .horizontal
+        summaryRow.alignment = .top
+        summaryRow.spacing = 12
+        textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statusLabel.setContentHuggingPriority(.required, for: .horizontal)
+        statusLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        buttonStack.translatesAutoresizingMaskIntoConstraints = false
+        container.contentView.addSubview(summaryRow)
+        container.contentView.addSubview(buttonStack)
 
         NSLayoutConstraint.activate([
-            rowStack.topAnchor.constraint(equalTo: container.contentView.topAnchor, constant: 12),
-            rowStack.leadingAnchor.constraint(equalTo: container.contentView.leadingAnchor, constant: 14),
-            rowStack.trailingAnchor.constraint(equalTo: container.contentView.trailingAnchor, constant: -14),
-            container.heightAnchor.constraint(equalTo: rowStack.heightAnchor, constant: 24)
+            summaryRow.topAnchor.constraint(equalTo: container.contentView.topAnchor, constant: 12),
+            summaryRow.leadingAnchor.constraint(equalTo: container.contentView.leadingAnchor, constant: 14),
+            summaryRow.trailingAnchor.constraint(equalTo: container.contentView.trailingAnchor, constant: -14),
+            buttonStack.topAnchor.constraint(equalTo: summaryRow.bottomAnchor, constant: 10),
+            buttonStack.trailingAnchor.constraint(equalTo: container.contentView.trailingAnchor, constant: -14),
+            buttonStack.bottomAnchor.constraint(equalTo: container.contentView.bottomAnchor, constant: -12)
         ])
         return container
     }
@@ -478,20 +537,20 @@ final class PermissionRecoveryController: NSViewController {
         let buildPresent = identity.cachedDevelopmentBundlePresent
         let runningIDs = NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)
         var warningBits: [String] = []
-        if let unpackaged = ProcessIdentity.unpackagedBinaryWarning(bundlePath: appPath) {
+        if let unpackaged = permissionCopy.unpackagedBinaryWarning(bundlePath: appPath) {
             warningBits.append(unpackaged)
         }
-        if let dual = ProcessIdentity.dualInstallWarning(
+        if let dual = permissionCopy.dualInstallWarning(
             runningPath: appPath,
             applicationsExists: appsExists,
             buildBundleExists: buildPresent
         ) {
             warningBits.append(dual)
         }
-        if let dup = ProcessIdentity.duplicateProcessWarning(siblingPaths: siblings) {
+        if let dup = permissionCopy.duplicateProcessWarning(siblingPaths: siblings) {
             warningBits.append(dup)
         }
-        if let stale = ProcessIdentity.staleLegacyBundleWarning(runningBundleIDs: runningIDs) {
+        if let stale = permissionCopy.staleLegacyBundleWarning(runningBundleIDs: runningIDs) {
             warningBits.append(stale)
         }
         if warningBits.isEmpty {
@@ -586,12 +645,12 @@ final class PermissionRecoveryController: NSViewController {
                 // so the write happens even if this view controller is deallocated first.
                 let pathSnapshot = appPath
                 DevTypeLog.identity.info(
-                    "[Identity] Recovery re-grant succeeded — CDHash pending; scheduling deferred identity update for path=\(pathSnapshot, privacy: .public)"
+                    "[Identity] Recovery re-grant succeeded — CDHash pending; scheduling deferred identity update \(DevTypeLog.publicPathMetadata(pathSnapshot), privacy: .public)"
                 )
                 ProcessIdentity.shared.refreshCDHashAsync { deferredHash in
                     ProcessIdentity.updateOnboardingIdentity(cdHash: deferredHash, path: pathSnapshot)
                     DevTypeLog.identity.info(
-                        "[Identity] Deferred identity update completed cdHash=\(deferredHash ?? "nil", privacy: .public) path=\(pathSnapshot, privacy: .public)"
+                        "[Identity] Deferred identity update completed cdHash=\(deferredHash ?? "nil", privacy: .public) \(DevTypeLog.publicPathMetadata(pathSnapshot), privacy: .public)"
                     )
                 }
             }
@@ -609,7 +668,11 @@ final class PermissionRecoveryController: NSViewController {
         siblingPaths: [String],
         identityChanged: Bool
     ) {
-        let engineLabel = display.menuTitle.replacingOccurrences(of: "Status: ", with: "")
+        let engineLabel = EngineDisplayPresentation.statusName(
+            for: display,
+            urgentInject: false,
+            loc: loc
+        )
         let grantedHash = UserDefaults.standard.string(
             forKey: ProcessIdentity.accessibilityGrantedCDHashDefaultsKey
         )
@@ -630,7 +693,7 @@ final class PermissionRecoveryController: NSViewController {
         if identityChanged != lastLoggedIdentityChanged {
             if identityChanged {
                 DevTypeLog.identity.notice(
-                    "[Identity] onboarding binary identity mismatch path=\(appPath, privacy: .public) cdHash=\(self.cdHash ?? "nil", privacy: .public)"
+                    "[Identity] onboarding binary identity mismatch \(DevTypeLog.publicPathMetadata(appPath), privacy: .public) cdHash=\(self.cdHash ?? "nil", privacy: .public)"
                 )
             }
             lastLoggedIdentityChanged = identityChanged
@@ -685,7 +748,7 @@ final class PermissionRecoveryController: NSViewController {
                 guidanceLabel.textColor = DevTypeTheme.statusOrange
             } else if snapshot.inputMonitoringBlocksEventTap || !snapshot.canUseAX || !snapshot.canPostEvents {
                 // Settings-on / preflight-off is the common stuck state after wrong-copy grants.
-                guidanceLabel.stringValue = ProcessIdentity.settingsToggleMismatchGuidance(
+                guidanceLabel.stringValue = permissionCopy.settingsToggleMismatchGuidance(
                     executablePath: ProcessIdentity.shared.executablePath,
                     cdHash: cdHash
                 )
@@ -835,14 +898,17 @@ final class PermissionRecoveryController: NSViewController {
 
     private func styleRequestButton(_ button: CapsuleButton?, isGranted: Bool) {
         guard let button else { return }
-        if isGranted {
+        let presentation = PermissionRequestButtonPresentation.resolve(
+            isGranted: isGranted,
+            requestInFlight: requestInFlight
+        )
+        button.isEnabled = presentation.isEnabled
+        if presentation.isGranted {
             button.title = loc.s("recovery.granted")
-            button.isEnabled = false
             button.buttonStyle = .secondary
             button.setSymbol("checkmark")
         } else {
             button.title = loc.s("recovery.request")
-            button.isEnabled = true
             button.buttonStyle = .primary
             button.setSymbol("hand.raised")
         }
@@ -876,7 +942,7 @@ final class PermissionRecoveryController: NSViewController {
         }
 
         DevTypeLog.permission.info(
-            "[Permission] UI Recovery Settings opened kind=\(DevTypeLog.kindName(kind), privacy: .public) afterRequest=\(didRequest, privacy: .public)"
+            "[Permission] UI Recovery Settings URL accepted kind=\(DevTypeLog.kindName(kind), privacy: .public) afterRequest=\(didRequest, privacy: .public)"
         )
         if didRequest {
             settingsFallbackLabel.stringValue = permissionCopy.notListedInSettingsGuidance(

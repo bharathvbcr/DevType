@@ -162,6 +162,10 @@ final class SecretSnippetStressTests: XCTestCase {
 
         store.saveSnippets([keep])
 
+        let cleanupFinished = expectation(description: "orphan cleanup finished")
+        store.requestOrphanSecretCleanupRetry { _ in cleanupFinished.fulfill() }
+        wait(for: [cleanupFinished], timeout: 5)
+
         XCTAssertEqual(secrets.secret(for: keep.id), "keep-me")
         XCTAssertNil(
             secrets.secret(for: drop.id),

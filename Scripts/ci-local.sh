@@ -56,9 +56,16 @@ fi
 echo "  - Checking property lists..."
 plutil -lint Resources/Info.plist
 plutil -lint Resources/DevType.entitlements
+for f in Resources/*.lproj/InfoPlist.strings; do
+  plutil -lint "$f"
+done
 
 echo "  - Checking signing identity resolution..."
 "${ROOT}/Scripts/test-signing-identity.sh"
+echo "  - Checking package signing cache and entitlement contract..."
+"${ROOT}/Scripts/test-package-signing-contract.sh"
+echo "  - Checking recoverable installer and canonical-path cleanup..."
+"${ROOT}/Scripts/test-install-app.sh"
 echo "  - Checking distribution signing gate..."
 "${ROOT}/Scripts/test-release-signing-preflight.sh"
 
@@ -97,6 +104,8 @@ fi
 BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
 VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
+LOCAL_NETWORKING="$(/usr/libexec/PlistBuddy -c \
+  'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "$APP/Contents/Info.plist")"
 
 echo "  Bundle Identifier: $BUNDLE_ID"
 echo "  Stamped Version:   $VER (build $BUILD)"
@@ -105,6 +114,18 @@ if [ "$VER" = "1.0.0" ] && [ "$BUILD" = "1" ]; then
   echo "error: version was not stamped from git (found placeholder 1.0.0 / build 1)" >&2
   exit 1
 fi
+
+if [[ "${LOCAL_NETWORKING}" != "true" ]]; then
+  echo "error: packaged Info.plist does not allow narrowly scoped local networking" >&2
+  exit 1
+fi
+for ATS_KEY in NSAllowsArbitraryLoads NSAllowsArbitraryLoadsForMedia NSAllowsArbitraryLoadsInWebContent; do
+  if /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:${ATS_KEY}" \
+    "$APP/Contents/Info.plist" >/dev/null 2>&1; then
+    echo "error: packaged Info.plist contains broad ATS exception ${ATS_KEY}" >&2
+    exit 1
+  fi
+done
 
 codesign --verify --strict --verbose=2 "$APP"
 

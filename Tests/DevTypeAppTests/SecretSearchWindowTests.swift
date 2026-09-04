@@ -4,12 +4,33 @@ import XCTest
 import ExpanderEngine
 @testable import DevTypeAppCore
 
-/// Opt in on a Mac with a WindowServer: these checks briefly show synthetic UI.
+/// Drives real panels with synthetic mouse and key events, so these need a WindowServer.
+///
+/// That requirement is now *detected* rather than declared. The suite used to be behind an
+/// opt-in `DEVTYPE_RUN_APPKIT_SMOKE=1` that nothing set — not the test script, not either CI
+/// job — so seven tests covering secret copying, biometric gating and click handling silently
+/// never ran anywhere. Skipping for a reason that is true is fine; skipping by default is
+/// coverage that only looks like it exists.
+///
+/// Set `DEVTYPE_SKIP_APPKIT_SMOKE=1` to opt out where briefly showing windows is unwelcome.
 final class SecretSearchWindowTests: XCTestCase {
+    /// Whether this process belongs to a GUI session. `nil` in a launch daemon or an ssh
+    /// login, where creating a panel would fail rather than merely look odd.
+    private static var hasWindowServerSession: Bool {
+        CGSessionCopyCurrentDictionary() != nil
+    }
+
     override func setUpWithError() throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["DEVTYPE_RUN_APPKIT_SMOKE"] == "1",
-                          "Set DEVTYPE_RUN_APPKIT_SMOKE=1 for native window interaction")
+        try XCTSkipIf(
+            ProcessInfo.processInfo.environment["DEVTYPE_SKIP_APPKIT_SMOKE"] == "1",
+            "AppKit smoke tests disabled by DEVTYPE_SKIP_APPKIT_SMOKE=1"
+        )
+        try XCTSkipUnless(
+            Self.hasWindowServerSession,
+            "no WindowServer session — these drive real windows and synthetic events"
+        )
         _ = NSApplication.shared
+        try XCTSkipUnless(!NSScreen.screens.isEmpty, "no attached screen")
     }
 
     private func descendants(of view: NSView) -> [NSView] {
@@ -294,16 +315,35 @@ final class SecretSearchWindowTests: XCTestCase {
     }
 
     func testNativeStatusButtonDeliversSecondaryClick() throws {
+        // SwiftPM runs this test target as an unbundled executable, whose default
+        // activation policy is `.prohibited`. AppKit does not promise windows or
+        // activation in that mode. The shipped app changes to `.accessory` before
+        // creating its status item, so exercise the native button under the same
+        // supported policy and restore the test host afterwards.
+        let previousActivationPolicy = NSApp.activationPolicy()
+        guard previousActivationPolicy == .accessory || NSApp.setActivationPolicy(.accessory) else {
+            return XCTFail("The test host could not enter the app's accessory activation policy")
+        }
+        defer {
+            if previousActivationPolicy != .accessory {
+                XCTAssertTrue(NSApp.setActivationPolicy(previousActivationPolicy))
+            }
+        }
+
         let item = NSStatusBar.system.statusItem(withLength: 30)
         defer { NSStatusBar.system.removeStatusItem(item) }
         let button = try XCTUnwrap(item.button)
         button.title = "T"
         let window = try XCTUnwrap(button.window)
         let layoutDeadline = Date().addingTimeInterval(2)
-        while window.frame.height < 1 && Date() < layoutDeadline {
+        while (window.frame.width < 1 || window.frame.height < 1
+            || button.bounds.width < 1 || button.bounds.height < 1) && Date() < layoutDeadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         }
-        XCTAssertGreaterThan(window.frame.height, 0, "WindowServer must lay out the status item before event delivery")
+        guard window.frame.width > 0, window.frame.height > 0,
+              button.bounds.width > 0, button.bounds.height > 0 else {
+            return XCTFail("WindowServer must lay out the status item before event delivery")
+        }
         var searches = 0
         var menus = 0
         let interaction = StatusItemInteraction(

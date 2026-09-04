@@ -23,7 +23,7 @@ public final class VoiceSessionStore: @unchecked Sendable {
             )
         } catch {
             DevTypeLog.store.error(
-                "[Voice] could not create session store directory \(self.baseDirectory.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                "[Voice] could not create session store directory \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
         }
     }

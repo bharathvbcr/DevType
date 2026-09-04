@@ -51,11 +51,22 @@ struct DevTypeShortcut: Equatable, Codable {
 
     /// `⌃⌥⇧⌘` in the canonical macOS order.
     var modifierSymbols: String {
-        var out = ""
-        if carbonModifiers & UInt32(controlKey) != 0 { out += "⌃" }
-        if carbonModifiers & UInt32(optionKey) != 0 { out += "⌥" }
-        if carbonModifiers & UInt32(shiftKey) != 0 { out += "⇧" }
-        if carbonModifiers & UInt32(cmdKey) != 0 { out += "⌘" }
+        modifierKeyCaps.joined()
+    }
+
+    /// Individual keycaps in the same order macOS presents shortcut modifiers.
+    /// This is the canonical presentation used by Home, Preferences, menus, and
+    /// the shortcut reference instead of each surface hardcoding old defaults.
+    var keyCaps: [String] {
+        modifierKeyCaps + [Self.keyName(for: keyCode)]
+    }
+
+    private var modifierKeyCaps: [String] {
+        var out: [String] = []
+        if carbonModifiers & UInt32(controlKey) != 0 { out.append("⌃") }
+        if carbonModifiers & UInt32(optionKey) != 0 { out.append("⌥") }
+        if carbonModifiers & UInt32(shiftKey) != 0 { out.append("⇧") }
+        if carbonModifiers & UInt32(cmdKey) != 0 { out.append("⌘") }
         return out
     }
 

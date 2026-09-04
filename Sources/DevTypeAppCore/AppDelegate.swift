@@ -12,6 +12,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuRebuildPending = false
     private var secretsSubmenu: NSMenu?
     private var snippetWindowController: NSWindowController?
+    private var snippetManagerRenderedLanguage: AppLanguage?
     private var permissionWindowController: NSWindowController?
     private var onboardingWindowController: NSWindowController?
     private var statusToggleMenuItem: NSMenuItem?
@@ -28,7 +29,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuHeaderAccessibilityHost: NSView?
     private var menuHeaderVersion = "1.0.0"
     private var recentSubmenu: NSMenu?
-    private var recentSnippets: [SnippetModel] = []
+    /// IDs only: each menu rebuild and click resolves through the live library so edits,
+    /// disables, deletions, and secret conversions cannot insert a stale snapshot.
+    private var recentSnippetIDs: [UUID] = []
     private var lastTapStartFailed = false
     private var lastLoggedDisplayStatus: EngineDisplayStatus?
     /// Single-flight: launch + CDHash callback must not open Setup twice.
@@ -46,6 +49,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isOnboardingVisible: Bool {
         onboardingWindowController?.window?.isVisible == true
     }
+    /// Recovery already renders the failed tap, identity, and remediation actions inline. A
+    /// second app-modal Tap Failed alert over that window blocks the very controls needed to fix
+    /// the problem and can be re-created by each capability refresh.
+    private var isPermissionRecoveryVisible: Bool {
+        permissionWindowController?.window?.isVisible == true
+    }
     /// Token for the Setup window's close observer, so re-creating the window cannot register a
     /// second one against the same notification.
     private var onboardingCloseObserver: NSObjectProtocol?
@@ -57,6 +66,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var libraryHealthToken: UUID?
     /// One launch-time escalation per run, not one per observer callback.
     private var libraryAlertShown = false
+    private var activityTransitionTracker = ActivityTransitionTracker()
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -74,11 +84,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // mismatched identity — measured with a probe; launch must be unwedgeable.
         DispatchQueue.global(qos: .utility).async {
             SecretStore.shared.consolidateSecrets()
+            // A failed destructive sweep from a prior run is not represented in the library
+            // file, so waiting for another user save would retain that orphan forever. Sweep on
+            // every launch after consolidation; failures remain aggregate-only in diagnostics
+            // and can be retried from Advanced > Maintenance.
+            self.requestOrphanSecretCleanupRetryRefreshingPreferences()
         }
 
         let identity = ProcessIdentity.shared
         DevTypeLog.app.info(
-            "[App] launch bundleID=\(identity.bundleIdentifier, privacy: .public) packaged=\(identity.isPackaged, privacy: .public) path=\(identity.bundlePath, privacy: .public)"
+            "[App] launch bundleID=\(DevTypeLog.boundedPublicIdentifier(identity.bundleIdentifier, label: "bundleID"), privacy: .public) packaged=\(identity.isPackaged, privacy: .public) \(DevTypeLog.publicPathMetadata(identity.bundlePath), privacy: .public)"
         )
 
         setupStatusItem()
@@ -107,6 +122,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.installEditMenu(force: true)
             self?.rebuildMenu()
+            PreferencesWindowController.shared.refreshLocalization()
+            self?.refreshSnippetManagerLocalization()
+            if let recovery = self?.permissionWindowController?.contentViewController
+                as? PermissionRecoveryController,
+               recovery.view.window?.isVisible == true {
+                recovery.refreshLocalization()
+            }
+            if let onboarding = self?.onboardingWindowController?.contentViewController
+                as? PermissionOnboardingController,
+               onboarding.view.window?.isVisible == true {
+                onboarding.refreshLocalization()
+            }
         }
 
         NotificationCenter.default.addObserver(
@@ -217,13 +244,31 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidBecomeActive(_ notification: Notification) {
         PermissionCoordinator.shared.handleApplicationDidBecomeActive()
+        if SnippetStore.shared.pendingSecretCleanupCount > 0 {
+            requestOrphanSecretCleanupRetryRefreshingPreferences()
+        }
         if let recovery = permissionWindowController?.contentViewController as? PermissionRecoveryController {
             recovery.refreshFromAppActivation()
         }
         if let onboarding = onboardingWindowController?.contentViewController as? PermissionOnboardingController {
             onboarding.refreshFromAppActivation()
         }
+        if PreferencesWindowController.shared.window?.isVisible == true {
+            PreferencesWindowController.shared.refreshPermissionState()
+        }
         refreshStatusItemUI()
+    }
+
+    /// Automatic launch/activation retries run away from the main thread because securityd may
+    /// stall. Their completion still has to invalidate the visible Advanced pane; without this,
+    /// the store can be healthy while Preferences indefinitely shows an earlier cleanup failure.
+    private func requestOrphanSecretCleanupRetryRefreshingPreferences() {
+        SnippetStore.shared.requestOrphanSecretCleanupRetry { _ in
+            DispatchQueue.main.async {
+                guard PreferencesWindowController.shared.window?.isVisible == true else { return }
+                PreferencesWindowController.shared.refreshMaintenanceState()
+            }
+        }
     }
 
     private func wireTapHealth() {
@@ -256,6 +301,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleCoordinatorStatus(_ status: PermissionCoordinator.Status) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.handleCoordinatorStatus(status) }
+            return
+        }
+
+        for signal in activityTransitionTracker.signals(for: status) {
+            ActivityHistoryStore.publish(signal)
+        }
+
         if status.tapRunning {
             lastTapStartFailed = false
         }
@@ -411,7 +465,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let versionLabel = DevTypeTheme.makeLabel("v\(version)", font: DevTypeTheme.font(10, .medium), color: DevTypeTheme.textTertiary)
         versionLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let pill = PillBadgeView(text: "Active", tint: DevTypeTheme.statusGreen, showsDot: true)
+        let pill = PillBadgeView(text: loc.s("status.active"), tint: DevTypeTheme.statusGreen, showsDot: true)
         menuHeaderStatusPill = pill
 
         wrapper.addSubview(logo)
@@ -528,6 +582,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         recentSubmenu = recentMenu
         rebuildRecentMenu()
         menu.addItem(recentItem)
+        menu.addItem(item(
+            loc.s("menu.recentActivity"),
+            "list.bullet.rectangle",
+            #selector(openRecentActivity(_:))
+        ))
 
         menu.addItem(NSMenuItem.separator())
 
@@ -691,21 +750,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard let recentSubmenu else { return }
+        let current = SnippetStore.expandableSnippets(in: SnippetStore.shared.loadGroups())
+        recentSnippetIDs = RecentSnippetResolver.reconcile(recentSnippetIDs, with: current)
         recentSubmenu.removeAllItems()
-        if recentSnippets.isEmpty {
+        if recentSnippetIDs.isEmpty {
             let empty = NSMenuItem(title: loc.s("menu.recent.empty"), action: nil, keyEquivalent: "")
             empty.isEnabled = false
             recentSubmenu.addItem(empty)
             return
         }
-        for snippet in recentSnippets {
+        for id in recentSnippetIDs {
+            guard let snippet = RecentSnippetResolver.resolve(id, in: current) else { continue }
             let title = snippet.triggerKeyword.isEmpty
                 ? snippet.displayTitle
                 : "\(snippet.triggerKeyword) — \(snippet.displayTitle)"
             let item = NSMenuItem(title: title, action: #selector(expandRecent(_:)), keyEquivalent: "")
             item.target = self
             item.image = DevTypeTheme.menuIcon("text.insert")
-            item.representedObject = snippet
+            item.representedObject = id
             recentSubmenu.addItem(item)
         }
     }
@@ -835,7 +897,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 if !command.isEphemeral {
                     CommandUsageStatsStore.shared.recordUsage(for: command.id)
                 }
-                _ = SecretClipboard.shared.copy(insertText)
+                guard SecretClipboard.shared.copyResult(insertText).didCopy else {
+                    ToastPanel.show(
+                        self.loc.s("clipboard.write.failed"),
+                        symbol: "exclamationmark.triangle.fill"
+                    )
+                    return
+                }
                 ToastPanel.show(self.loc.s("snippet.copied.toast", self.loc.s(command.titleKey)))
             }
         }
@@ -931,7 +999,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         switch result {
         case .success(let text):
-            _ = SecretClipboard.shared.copy(text)
+            guard SecretClipboard.shared.copyResult(text).didCopy else {
+                ToastPanel.show(
+                    loc.s("clipboard.write.failed"),
+                    symbol: "exclamationmark.triangle.fill"
+                )
+                return
+            }
             SnippetStore.shared.incrementUsage(for: snippet.id)
             // Never an alert. A modal here made the user dismiss a dialog mid-task, and — because
             // an alert activates DevType — took focus off the very field they were about to paste
@@ -1005,27 +1079,42 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func recordRecent(_ snippet: SnippetModel) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            // Recent is a one-click *insert*. A secret has no place there — it would put a
-            // password one stray click away, in a menu the user opens for ordinary snippets.
-            guard !snippet.isSecret else { return }
-            self.recentSnippets.removeAll { $0.id == snippet.id }
-            self.recentSnippets.insert(snippet, at: 0)
-            if self.recentSnippets.count > 6 {
-                self.recentSnippets.removeLast(self.recentSnippets.count - 6)
-            }
+            self.recentSnippetIDs = RecentSnippetResolver.record(
+                snippet,
+                in: self.recentSnippetIDs
+            )
             self.rebuildRecentMenu()
         }
     }
 
     @objc private func expandRecent(_ sender: NSMenuItem) {
-        guard let snippet = sender.representedObject as? SnippetModel else { return }
+        guard let id = sender.representedObject as? UUID else { return }
+        let current = SnippetStore.expandableSnippets(in: SnippetStore.shared.loadGroups())
+        guard let snippet = RecentSnippetResolver.resolve(id, in: current) else {
+            recentSnippetIDs = RecentSnippetResolver.reconcile(recentSnippetIDs, with: current)
+            rebuildRecentMenu()
+            ToastPanel.show(
+                loc.s("menu.recent.unavailable"),
+                symbol: "exclamationmark.triangle.fill"
+            )
+            return
+        }
         expandFromSearch(snippet, sourceApp: nil)
     }
 
     private func bindSnippetStore() {
-        SnippetStore.shared.addListener { [weak self] snippets in
+        SnippetStore.shared.addGroupListener { [weak self] groups in
+            let snippets = SnippetStore.expandableSnippets(in: groups)
             EventTapEngine.shared.snippets = snippets
-            DispatchQueue.main.async { self?.rebuildSecretsMenu() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.recentSnippetIDs = RecentSnippetResolver.reconcile(
+                    self.recentSnippetIDs,
+                    with: snippets
+                )
+                self.rebuildSecretsMenu()
+                self.rebuildRecentMenu()
+            }
         }
     }
 
@@ -1080,16 +1169,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             draft: draft,
             groups: groups,
             currentGroupID: groups.first?.id,
-            validate: { _, _ in nil },
-            completion: { result, chosenGroupID in
-                guard let snippet = result else { return }
-                var groups = store.loadGroups()
-                let targetGroupID = chosenGroupID ?? groups.first?.id
-                if let targetGroupID,
-                   let index = groups.firstIndex(where: { $0.id == targetGroupID }) {
-                    groups[index].snippets.append(snippet)
-                    _ = store.saveGroups(groups)
-                }
+            completion: { snippet, chosenGroupID in
+                .mutating(
+                    store: store,
+                    mutation: { latest in
+                        guard let after = SnippetLibraryEdit.applying(
+                            snippet: snippet,
+                            existingID: nil,
+                            chosenGroupID: chosenGroupID,
+                            fallbackGroupID: latest.first?.id,
+                            to: latest
+                        ) else { return false }
+                        latest = after
+                        return true
+                    },
+                    finalize: { _, _ in }
+                )
             }
         )
     }
@@ -1154,6 +1249,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.onRegistrationFailed = { [weak self] label, status in
             guard let self else { return }
             DispatchQueue.main.async {
+                ActivityHistoryStore.publish(
+                    .hotkeyRegistrationFailed(status: Int32(status))
+                )
                 // Preferences reports its own failure inline; don't double-alert.
                 if PreferencesWindowController.shared.window?.isVisible == true { return }
                 DevTypeAlert.present(
@@ -1180,8 +1278,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// application-specific information was `abort() called` — no exception name, no
     /// reason, because the raiser (`-[NSRemoteView containingWindowWillOrderOnScreen:]`)
     /// catches and rethrows, which loses AppKit's default logging. Diagnosing them cost a
-    /// debugger session. This puts the name, the reason, and the raising stack into the
-    /// unified log first, so the next one is readable from `log show` alone.
+    /// debugger session. This puts the name, a content-free reason fingerprint, and a bounded
+    /// frame count into the unified log first, so the next one is correlatable without exporting
+    /// filesystem paths embedded in symbolicated frames.
     ///
     /// This does not prevent the abort — nothing can, once an exception is uncaught. It
     /// only makes the crash diagnosable. Preventing a specific crash is the job of an
@@ -1191,9 +1290,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         NSSetUncaughtExceptionHandler { exception in
             DevTypeLog.app.fault(
                 """
-                [Crash] uncaught \(exception.name.rawValue, privacy: .public): \
-                \(exception.reason ?? "(no reason)", privacy: .public)
-                \(exception.callStackSymbols.joined(separator: "\n"), privacy: .public)
+                [Crash] uncaught \(DevTypeLog.boundedPublicIdentifier(exception.name.rawValue, label: "exceptionName"), privacy: .public): \
+                \(DevTypeLog.publicTextMetadata(exception.reason), privacy: .public)
+                stackFrames=\(exception.callStackReturnAddresses.count, privacy: .public)
                 """
             )
         }
@@ -1742,6 +1841,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.refreshStatusItemUI()
             guard let condition else { return }
+            let activityIssue: ActivitySignal.LibraryIssue
+            let affectedCount: Int?
+            switch condition {
+            case .readBlocked:
+                activityIssue = .readBlocked
+                affectedCount = nil
+            case .corrupted:
+                activityIssue = .corrupted
+                affectedCount = nil
+            case .emptyFile:
+                activityIssue = .emptyFile
+                affectedCount = nil
+            case .saveFailed:
+                activityIssue = .saveFailed
+                affectedCount = nil
+            case .conflicts(let versions):
+                activityIssue = .conflicts
+                affectedCount = versions.count
+            }
+            ActivityHistoryStore.publish(
+                .libraryIssue(activityIssue, affectedCount: affectedCount)
+            )
             // Only a hard read block interrupts at launch; save failures and
             // iCloud conflicts ride the non-modal banner in the manager window.
             switch condition {
@@ -1764,15 +1885,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // and each Verify/Done render, so a machine that cannot install the tap would throw a
         // modal alert in front of Setup repeatedly — over the one screen already reporting
         // "Tap: not running" and offering the fix. Setup speaks for itself while it is open.
-        if isOnboardingVisible {
+        if isOnboardingVisible || isPermissionRecoveryVisible {
             DevTypeLog.eventTap.notice(
-                "[EventTap] tap start failed while Setup is open — deferring to the wizard's own status"
+                "[EventTap] tap start failed while a permission UI is open — deferring to its inline status"
             )
             return
         }
+        let permissionCopy = PermissionCopy.localized(using: loc)
         DevTypeAlert.present(
             title: loc.s("alert.tapFailed.title"),
-            message: EngineDisplayStatus.tapFailedRecoveryGuidance,
+            message: permissionCopy.tapCreateFailedDespiteListenGuidance,
             style: .critical,
             buttons: [loc.s("alert.tapFailed.openRecovery"), loc.s("common.ok")]
         ) { [weak self] index in
@@ -1804,6 +1926,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         assertMainThread()
         let secureInputActive = AXContextChecker.isSecureEventInputEnabledLive()
+        if let signal = activityTransitionTracker.signalForSecureInput(active: secureInputActive) {
+            ActivityHistoryStore.publish(signal)
+        }
         EventTapEngine.shared.isSecureInputActive = secureInputActive
         statusItemContext.refresh(secureInputActive: secureInputActive)
         let snapshot = PermissionProbe().snapshot()
@@ -1879,6 +2004,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             window.center()
             window.isReleasedWhenClosed = false
             snippetWindowController = NSWindowController(window: window)
+            snippetManagerRenderedLanguage = loc.language
+        } else if snippetManagerRenderedLanguage != loc.language {
+            refreshSnippetManagerLocalization()
         }
 
         guard let window = snippetWindowController?.window else { return }
@@ -1889,6 +2017,31 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// Rebuilds AppKit labels that were materialized in the previous language while carrying
+    /// transient manager navigation and its undo stack forward. A visible editor sheet owns
+    /// unsaved input, so replacement is deferred until the next show rather than dropping it.
+    private func refreshSnippetManagerLocalization() {
+        guard let window = snippetWindowController?.window else { return }
+        DevTypeTheme.styleWindow(window, title: loc.s("window.snippets"))
+        guard snippetManagerRenderedLanguage != loc.language else { return }
+        guard window.attachedSheet == nil,
+              let current = window.contentViewController as? SnippetManagerViewController else {
+            return
+        }
+
+        let replacement = SnippetManagerViewController(
+            restorationState: current.localizationState(),
+            snippetUndoManager: current.snippetUndoManager,
+            snippetUndoTarget: current.snippetUndoTarget
+        )
+        window.contentViewController = replacement
+        snippetManagerRenderedLanguage = loc.language
+    }
+
+    @objc private func openRecentActivity(_ sender: Any?) {
+        ActivityCenterViewController.show()
     }
 
     /// Menu-bar "Diagnostics…": same window as Recovery, pre-selected on the
@@ -1918,7 +2071,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let window = NSWindow(contentViewController: viewController)
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            window.setContentSize(NSSize(width: 640, height: 720))
+            PermissionRecoveryWindowLayout.apply(to: window)
             DevTypeTheme.styleWindow(window, title: loc.s("window.recovery"))
             window.center()
             window.isReleasedWhenClosed = false
@@ -2064,7 +2217,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func diagnoseSecureInput(_ sender: NSMenuItem) {
         let lockStatus = SecureInputMonitor.shared.checkLockStatus()
         DevTypeLog.secureInput.info(
-            "[SecureInput] diagnose locked=\(lockStatus.isLocked, privacy: .public) frontmost=\(lockStatus.holdingAppName ?? "nil", privacy: .public) frontmostPID=\(lockStatus.holdingPID.map(String.init) ?? "nil", privacy: .public)"
+            "[SecureInput] diagnose locked=\(lockStatus.isLocked, privacy: .public) frontmost=\(DevTypeLog.boundedPublicIdentifier(lockStatus.holdingAppName, label: "appName"), privacy: .public) frontmostPID=\(lockStatus.holdingPID.map(String.init) ?? "nil", privacy: .public)"
         )
         // §6.1 / §4.8: was a hardcoded-English hand-built NSAlert.
         let unknown = loc.s("alert.secureInput.unknown")

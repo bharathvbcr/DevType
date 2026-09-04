@@ -90,13 +90,13 @@ public enum AppRelauncher {
             try process.run()
         } catch {
             DevTypeLog.app.error(
-                "[App] relaunch helper failed to spawn — staying alive error=\(error.localizedDescription, privacy: .public)"
+                "[App] relaunch helper failed to spawn — staying alive \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             return false
         }
 
         DevTypeLog.app.info(
-            "[App] relaunch helper spawned pid=\(process.processIdentifier, privacy: .public) target=\(path, privacy: .public)"
+            "[App] relaunch helper spawned pid=\(process.processIdentifier, privacy: .public) \(DevTypeLog.publicPathMetadata(path), privacy: .public)"
         )
 
         PermissionCoordinator.shared.cancelPendingWork()

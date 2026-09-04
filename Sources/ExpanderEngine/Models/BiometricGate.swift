@@ -59,6 +59,10 @@ public final class BiometricGate {
     private let clock: () -> Date
     private let lock = UnfairLock()
     private var lastSuccess: Date?
+    /// Invalidating the gate retires every earlier evaluation for reuse-window purposes. The
+    /// caller may still receive its requested result, but a late success cannot silently reopen
+    /// authorization after the app has moved to the background.
+    private var authorizationGeneration: UInt64 = 0
 
     public init(
         authenticator: BiometricAuthenticating = LocalAuthenticationAuthenticator(),
@@ -115,6 +119,7 @@ public final class BiometricGate {
     ) {
         lock.lock()
         let last = lastSuccess
+        let generation = authorizationGeneration
         lock.unlock()
 
         guard Self.needsAuthentication(lastSuccess: last, now: clock()) else {
@@ -127,7 +132,9 @@ public final class BiometricGate {
                 // Stamped when the answer arrived, not when it was asked: a prompt the user left
                 // sitting for a minute should not spend that minute of the window before it opens.
                 self.lock.lock()
-                self.lastSuccess = self.clock()
+                if self.authorizationGeneration == generation {
+                    self.lastSuccess = self.clock()
+                }
                 self.lock.unlock()
             }
             // Privacy: the outcome, never the snippet's value; the reason string is already the
@@ -142,6 +149,7 @@ public final class BiometricGate {
     public func invalidate() {
         lock.lock()
         lastSuccess = nil
+        authorizationGeneration &+= 1
         lock.unlock()
         authenticator.invalidate()
     }

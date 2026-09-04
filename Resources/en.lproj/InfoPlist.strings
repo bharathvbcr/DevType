@@ -1,0 +1,4 @@
+"NSAccessibilityUsageDescription" = "DevType requires Accessibility access to replace trigger keywords with expanded text in active applications.";
+"NSInputMonitoringUsageDescription" = "DevType requires Input Monitoring access to detect trigger keywords as you type.";
+"NSMicrophoneUsageDescription" = "DevType requires Microphone access to capture audio for Smart Dictation. Your selected voice engine determines whether audio stays on this Mac or is sent to a cloud service.";
+"NSSpeechRecognitionUsageDescription" = "DevType uses Apple Speech Recognition for Apple-based transcription and optional live previews.";

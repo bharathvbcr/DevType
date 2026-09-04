@@ -1,11 +1,12 @@
 import Foundation
 
 public final class DeterministicCorrector: TranscriptCorrector, @unchecked Sendable {
+    public static let providerID = "deterministic.local"
     public let descriptor: CorrectionProviderDescriptor
 
     public init() {
         self.descriptor = CorrectionProviderDescriptor(
-            id: "deterministic.local",
+            id: Self.providerID,
             displayName: "Deterministic Rules (Instant)",
             modelVersion: "rules-v1",
             privacyRoute: .onDeviceOnly,

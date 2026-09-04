@@ -1,21 +1,25 @@
 import AppKit
 import ExpanderEngine
 
-/// §4: Interactive Snippet Conflict Resolver Sheet.
+/// Interactive trigger-conflict resolver.
 ///
-/// Surfaces trigger conflicts (exact duplicates, prefix collisions, case overlap)
-/// with side-by-side comparison, runtime winner explanation, and inline resolution actions.
+/// The table renders an immutable `ConflictResolverSnapshot`; destructive actions resolve their
+/// UUID against the store's latest state so a sheet left open cannot write its stale projection
+/// back over a newer library.
 final class SnippetConflictResolverSheet: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
-    typealias TriggerConflict = SnippetStore.TriggerConflict
-
-    public static func present(from window: NSWindow?, store: SnippetStore = .shared, completion: (() -> Void)? = nil) {
-        let vc = SnippetConflictResolverSheet(store: store, completion: completion)
-        let sheetWindow = NSWindow(contentViewController: vc)
-        sheetWindow.title = LocalizationManager.shared.s("conflict.resolver.title")
+    public static func present(
+        from window: NSWindow?,
+        store: SnippetStore = .shared,
+        completion: (() -> Void)? = nil
+    ) {
+        let controller = SnippetConflictResolverSheet(store: store, completion: completion)
+        let sheetWindow = NSWindow(contentViewController: controller)
+        let title = LocalizationManager.shared.s("conflict.resolver.title")
+        sheetWindow.title = title
         sheetWindow.styleMask = [.titled, .closable, .resizable]
-        sheetWindow.setContentSize(NSSize(width: 680, height: 460))
+        sheetWindow.setContentSize(NSSize(width: 680, height: 520))
         sheetWindow.minSize = NSSize(width: 540, height: 360)
-        DevTypeTheme.styleWindow(sheetWindow, title: LocalizationManager.shared.s("conflict.resolver.title"))
+        DevTypeTheme.styleWindow(sheetWindow, title: title)
 
         if let window {
             window.beginSheet(sheetWindow)
@@ -30,8 +34,13 @@ final class SnippetConflictResolverSheet: NSViewController, NSTableViewDataSourc
     private let completion: (() -> Void)?
     private let loc = LocalizationManager.shared
     private let tableView = NSTableView()
-    private var conflicts: [TriggerConflict] = []
-    private var allSnippetsByID: [UUID: SnippetModel] = [:]
+    private let summaryLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(11.5, .medium),
+        color: DevTypeTheme.textSecondary,
+        wrapping: true
+    )
+    private var snapshot = ConflictResolverSnapshot(groups: [], detectionEnabled: true)
 
     init(store: SnippetStore = .shared, completion: (() -> Void)? = nil) {
         self.store = store
@@ -54,62 +63,80 @@ final class SnippetConflictResolverSheet: NSViewController, NSTableViewDataSourc
         )
         header.translatesAutoresizingMaskIntoConstraints = false
 
-        let closeBtn = CapsuleButton(
+        summaryLabel.translatesAutoresizingMaskIntoConstraints = false
+        summaryLabel.maximumNumberOfLines = 2
+
+        let closeButton = CapsuleButton(
             title: loc.s("common.done"),
             style: .primary,
             target: self,
             action: #selector(closeTapped)
         )
-        closeBtn.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
 
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
 
         tableView.headerView = nil
-        tableView.rowHeight = 110
         tableView.intercellSpacing = NSSize(width: 0, height: 8)
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .none
         tableView.dataSource = self
         tableView.delegate = self
+        tableView.setAccessibilityRole(NSAccessibility.Role.table)
+        tableView.setAccessibilityLabel(loc.s("conflict.resolver.ax.table"))
         tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("conflictCol")))
-        scroll.documentView = tableView
+        scrollView.documentView = tableView
 
         root.addSubview(header)
-        root.addSubview(closeBtn)
-        root.addSubview(scroll)
+        root.addSubview(summaryLabel)
+        root.addSubview(closeButton)
+        root.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            header.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -12),
 
-            closeBtn.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            closeBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            closeButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            closeButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
 
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 14),
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
-            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14)
+            summaryLabel.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
+            summaryLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            summaryLabel.trailingAnchor.constraint(equalTo: closeButton.trailingAnchor),
+
+            scrollView.topAnchor.constraint(equalTo: summaryLabel.bottomAnchor, constant: 10),
+            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
+            scrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
         ])
 
-        reloadConflicts()
         view = root
+        reloadConflicts()
     }
 
     private func reloadConflicts() {
-        let groups = store.loadGroups()
-        var map: [UUID: SnippetModel] = [:]
-        for g in groups {
-            for s in g.snippets {
-                map[s.id] = s
-            }
+        // Exactly one store read: detector output, item details, group names, and counts cannot
+        // straddle watcher updates or a concurrent editor save.
+        snapshot = ConflictResolverSnapshot(
+            groups: store.loadGroups(),
+            detectionEnabled: SnippetStore.isConflictDetectionEnabled
+        )
+        if snapshot.rows.isEmpty {
+            summaryLabel.stringValue = ""
+        } else {
+            summaryLabel.stringValue = loc.p(
+                "conflict.resolver.summary",
+                count: snapshot.conflictCount,
+                snapshot.conflictCount,
+                snapshot.affectedSnippetCount
+            )
         }
-        allSnippetsByID = map
-        conflicts = store.triggerConflicts()
         tableView.reloadData()
     }
 
@@ -125,61 +152,163 @@ final class SnippetConflictResolverSheet: NSViewController, NSTableViewDataSourc
     // MARK: - Table
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        conflicts.isEmpty ? 1 : conflicts.count
+        snapshot.rows.isEmpty ? 1 : snapshot.rows.count
     }
 
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if conflicts.isEmpty {
-            let empty = NSTableCellView()
-            let label = DevTypeTheme.makeLabel(
-                loc.s("library.health.conflictsNone"),
-                font: DevTypeTheme.font(13),
-                color: DevTypeTheme.textSecondary
-            )
-            label.translatesAutoresizingMaskIntoConstraints = false
-            empty.addSubview(label)
-            NSLayoutConstraint.activate([
-                label.centerXAnchor.constraint(equalTo: empty.centerXAnchor),
-                label.centerYAnchor.constraint(equalTo: empty.centerYAnchor)
-            ])
-            return empty
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard snapshot.rows.indices.contains(row) else {
+            return ConflictResolverLayout.emptyRowHeight
         }
+        return ConflictResolverLayout.rowHeight(
+            snippetCount: snapshot.rows[row].affectedSnippetCount
+        )
+    }
 
-        let conflict = conflicts[row]
-        let relevantSnippets = conflict.snippetIDs.compactMap { allSnippetsByID[$0] }
-        let cell = ConflictRowView(conflict: conflict, snippets: relevantSnippets, store: store) { [weak self] in
-            self?.reloadConflicts()
+    func tableView(
+        _ tableView: NSTableView,
+        viewFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> NSView? {
+        guard snapshot.rows.indices.contains(row) else { return makeEmptyState() }
+        return ConflictRowView(
+            row: snapshot.rows[row],
+            onDisable: { [weak self] target in self?.resolve(target: target, action: .disable) },
+            onDelete: { [weak self] item in self?.confirmDelete(item) }
+        )
+    }
+
+    private func makeEmptyState() -> NSView {
+        let empty = NSTableCellView()
+        let text: String
+        switch snapshot.emptyState {
+        case .detectionDisabled:
+            text = loc.s("conflict.resolver.disabled")
+        case .noConflicts, .none:
+            text = loc.s("library.health.conflictsNone")
         }
-        return cell
+        let label = DevTypeTheme.makeLabel(
+            text,
+            font: DevTypeTheme.font(13),
+            color: DevTypeTheme.textSecondary,
+            wrapping: true
+        )
+        label.alignment = .center
+        label.maximumNumberOfLines = 3
+        label.translatesAutoresizingMaskIntoConstraints = false
+        empty.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: empty.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: empty.centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: empty.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: empty.trailingAnchor, constant: -24),
+        ])
+        return empty
+    }
+
+    private func confirmDelete(_ item: ConflictResolverSnapshot.Item) {
+        DevTypeAlert.confirm(
+            title: loc.s("manager.delete.confirm.title"),
+            message: loc.s("manager.delete.confirm.message", displayTitle(for: item.snippet)),
+            confirmTitle: loc.s("common.delete"),
+            destructive: true,
+            window: view.window
+        ) { [weak self] in
+            self?.resolve(target: item.target, action: .delete)
+        }
+    }
+
+    private func resolve(
+        target: SnippetStore.TriggerConflictTarget,
+        action: SnippetStore.TriggerConflictResolutionAction
+    ) {
+        switch store.resolveTriggerConflict(target: target, action: action) {
+        case .persisted:
+            reloadConflicts()
+        case .targetUnavailable:
+            reloadConflicts()
+            DevTypeAlert.warn(
+                title: loc.s("conflict.resolver.stale.title"),
+                message: loc.s("conflict.resolver.stale.message"),
+                window: view.window
+            )
+        case .refused(let outcome):
+            // `saveGroupsSerialized` leaves the cache untouched on refusal. Re-render that
+            // unchanged state, refresh the persistent health banner, and explain why it remains.
+            reloadConflicts()
+            LibraryHealthMonitor.shared.refresh()
+            DevTypeAlert.warn(
+                title: loc.s("library.save.title"),
+                message: saveFailureMessage(for: outcome),
+                window: view.window
+            )
+        }
+    }
+
+    private func saveFailureMessage(for outcome: SnippetStore.SaveOutcome) -> String {
+        switch outcome {
+        case .saved:
+            return loc.s("library.save.banner")
+        case .blockedByNewerSchema:
+            return loc.s("library.save.blockedSchema")
+        case .blockedByRemoteChange:
+            return loc.s("library.save.blockedRemote")
+        case .failed(let reason):
+            return loc.s("library.save.failed", reason)
+        }
+    }
+
+    private func displayTitle(for snippet: SnippetModel) -> String {
+        let title = snippet.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? loc.s("conflict.resolver.untitled") : title
+    }
+}
+
+/// Exact action identity retained by each row. `NSButton.tag` is an `Int`; narrowing a UUID to
+/// `hashValue` permits collisions and randomized values. Keeping the rendered occurrence target
+/// makes the action lossless and independently retained from the button's weak target reference.
+final class ConflictSnippetActionTarget: NSObject {
+    let conflictTarget: SnippetStore.TriggerConflictTarget
+    private let handler: (SnippetStore.TriggerConflictTarget) -> Void
+
+    init(
+        target: SnippetStore.TriggerConflictTarget,
+        handler: @escaping (SnippetStore.TriggerConflictTarget) -> Void
+    ) {
+        self.conflictTarget = target
+        self.handler = handler
+    }
+
+    @objc func invoke(_ sender: NSButton) {
+        handler(conflictTarget)
     }
 }
 
 private final class ConflictRowView: NSView {
-    typealias TriggerConflict = SnippetStore.TriggerConflict
-    private let conflict: TriggerConflict
-    private let snippets: [SnippetModel]
-    private let store: SnippetStore
-    private let onRefresh: () -> Void
+    private let row: ConflictResolverSnapshot.Row
+    private let onDisable: (SnippetStore.TriggerConflictTarget) -> Void
+    private let onDelete: (ConflictResolverSnapshot.Item) -> Void
     private let loc = LocalizationManager.shared
+    private var actionTargets: [ConflictSnippetActionTarget] = []
 
-    init(conflict: TriggerConflict, snippets: [SnippetModel], store: SnippetStore, onRefresh: @escaping () -> Void) {
-        self.conflict = conflict
-        self.snippets = snippets
-        self.store = store
-        self.onRefresh = onRefresh
+    init(
+        row: ConflictResolverSnapshot.Row,
+        onDisable: @escaping (SnippetStore.TriggerConflictTarget) -> Void,
+        onDelete: @escaping (ConflictResolverSnapshot.Item) -> Void
+    ) {
+        self.row = row
+        self.onDisable = onDisable
+        self.onDelete = onDelete
         super.init(frame: .zero)
 
         let card = GlassCardView(tint: DevTypeTheme.statusOrange.withAlphaComponent(0.06))
         card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
-
         let content = card.contentView
 
-        // Winner explanation badge
         let explanationText: String
-        switch conflict.kind {
+        switch row.conflict.kind {
         case .emptyTrigger:
-            explanationText = loc.s("snippets.filter.empty")
+            explanationText = loc.s("conflict.issue.empty")
         case .duplicateTrigger:
             explanationText = loc.s("conflict.winner.exact")
         case .caseShadow:
@@ -188,22 +317,41 @@ private final class ConflictRowView: NSView {
             explanationText = loc.s("conflict.winner.shorter")
         }
 
-        let winnerBadge = PillBadgeView(text: explanationText, tint: DevTypeTheme.statusOrange, showsDot: true)
+        let winnerBadge = PillBadgeView(
+            text: explanationText,
+            tint: DevTypeTheme.statusOrange,
+            showsDot: row.conflict.kind != .emptyTrigger
+        )
         winnerBadge.translatesAutoresizingMaskIntoConstraints = false
+        winnerBadge.heightAnchor.constraint(
+            equalToConstant: ConflictResolverLayout.headerRowHeight
+        ).isActive = true
 
-        let hStack = NSStackView()
-        hStack.orientation = .horizontal
-        hStack.distribution = .fillEqually
-        hStack.spacing = 10
-        hStack.translatesAutoresizingMaskIntoConstraints = false
+        let countBadge = PillBadgeView(
+            text: loc.p(
+                "conflict.resolver.affected",
+                count: row.affectedSnippetCount,
+                row.affectedSnippetCount
+            ),
+            tint: DevTypeTheme.textTertiary,
+            showsDot: false
+        )
+        countBadge.translatesAutoresizingMaskIntoConstraints = false
 
-        for (index, snippet) in snippets.prefix(3).enumerated() {
-            let summary = makeSnippetSummary(snippet, isWinner: index == 0)
-            hStack.addArrangedSubview(summary)
+        let snippetsStack = NSStackView()
+        snippetsStack.orientation = .vertical
+        snippetsStack.alignment = .width
+        snippetsStack.spacing = ConflictResolverLayout.snippetSpacing
+        snippetsStack.translatesAutoresizingMaskIntoConstraints = false
+        for item in row.items {
+            let summary = makeSnippetSummary(item)
+            summary.heightAnchor.constraint(equalToConstant: ConflictResolverLayout.snippetRowHeight).isActive = true
+            snippetsStack.addArrangedSubview(summary)
         }
 
         content.addSubview(winnerBadge)
-        content.addSubview(hStack)
+        content.addSubview(countBadge)
+        content.addSubview(snippetsStack)
 
         NSLayoutConstraint.activate([
             card.topAnchor.constraint(equalTo: topAnchor, constant: 4),
@@ -213,89 +361,133 @@ private final class ConflictRowView: NSView {
 
             winnerBadge.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             winnerBadge.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            winnerBadge.trailingAnchor.constraint(lessThanOrEqualTo: countBadge.leadingAnchor, constant: -8),
 
-            hStack.topAnchor.constraint(equalTo: winnerBadge.bottomAnchor, constant: 8),
-            hStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            hStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            hStack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
+            countBadge.centerYAnchor.constraint(equalTo: winnerBadge.centerYAnchor),
+            countBadge.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+
+            snippetsStack.topAnchor.constraint(equalTo: winnerBadge.bottomAnchor, constant: 8),
+            snippetsStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            snippetsStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            snippetsStack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    private func makeSnippetSummary(_ snippet: SnippetModel, isWinner: Bool) -> NSView {
+    private func makeSnippetSummary(_ item: ConflictResolverSnapshot.Item) -> NSView {
+        let snippet = item.snippet
+        let title = displayTitle(for: snippet)
+        let trigger = snippet.triggerKeyword.isEmpty
+            ? loc.s("conflict.resolver.noTrigger")
+            : snippet.triggerKeyword
+
         let container = NSView()
         container.wantsLayer = true
         container.layer?.cornerRadius = 6
         container.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.04).cgColor
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = (isWinner ? DevTypeTheme.accent.withAlphaComponent(0.4) : NSColor.white.withAlphaComponent(0.08)).cgColor
+        container.layer?.borderColor = (
+            item.isWinner
+                ? DevTypeTheme.accent.withAlphaComponent(0.4)
+                : NSColor.white.withAlphaComponent(0.08)
+        ).cgColor
         container.translatesAutoresizingMaskIntoConstraints = false
+        container.setAccessibilityElement(true)
+        container.setAccessibilityRole(NSAccessibility.Role.group)
+        container.setAccessibilityLabel(loc.s("conflict.resolver.ax.item", title, trigger, item.groupName))
 
-        let titleLabel = DevTypeTheme.makeLabel(snippet.displayTitle, font: DevTypeTheme.font(12, .semibold), color: DevTypeTheme.textPrimary)
-        let triggerLabel = DevTypeTheme.makeLabel(snippet.triggerKeyword.isEmpty ? "(none)" : snippet.triggerKeyword, font: DevTypeTheme.mono(11, .bold), color: DevTypeTheme.accent)
-        let previewLabel = DevTypeTheme.makeLabel(snippet.replacementText.replacingOccurrences(of: "\n", with: " "), font: DevTypeTheme.font(10.5), color: DevTypeTheme.textSecondary)
+        let titleLabel = DevTypeTheme.makeLabel(
+            title,
+            font: DevTypeTheme.font(12, .semibold),
+            color: DevTypeTheme.textPrimary
+        )
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.toolTip = title
 
-        let toggleBtn = CapsuleButton(
-            title: snippet.enabled ? loc.s("manager.disable") : loc.s("manager.enable"),
+        let groupText = loc.s("conflict.resolver.group", item.groupName)
+        let groupLabel = DevTypeTheme.makeLabel(
+            groupText,
+            font: DevTypeTheme.font(10, .medium),
+            color: DevTypeTheme.textTertiary
+        )
+        groupLabel.lineBreakMode = .byTruncatingMiddle
+        groupLabel.toolTip = groupText
+
+        let triggerLabel = DevTypeTheme.makeLabel(
+            trigger,
+            font: DevTypeTheme.mono(11, .bold),
+            color: DevTypeTheme.accent
+        )
+        triggerLabel.lineBreakMode = .byTruncatingMiddle
+        triggerLabel.toolTip = trigger
+
+        let previewText = snippet.isImageSnippet
+            ? loc.s("editor.image.attached")
+            : snippet.replacementText.replacingOccurrences(of: "\n", with: " ")
+        let previewLabel = DevTypeTheme.makeLabel(
+            previewText,
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textSecondary
+        )
+        previewLabel.lineBreakMode = .byTruncatingTail
+        previewLabel.toolTip = previewText
+
+        let infoStack = NSStackView(views: [titleLabel, groupLabel, triggerLabel, previewLabel])
+        infoStack.orientation = .vertical
+        infoStack.alignment = .leading
+        infoStack.spacing = 2
+        infoStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let disableTarget = ConflictSnippetActionTarget(target: item.target, handler: onDisable)
+        actionTargets.append(disableTarget)
+        let disableButton = CapsuleButton(
+            title: loc.s("conflict.action.disable"),
             style: .secondary,
-            target: self,
-            action: #selector(toggleSnippet(_:))
+            target: disableTarget,
+            action: #selector(ConflictSnippetActionTarget.invoke(_:))
         )
-        toggleBtn.tag = snippet.id.hashValue
-        toggleBtn.controlSize = .small
+        disableButton.controlSize = .small
+        disableButton.setAccessibilityLabel(loc.s("conflict.resolver.ax.disable", title))
 
-        let deleteBtn = CapsuleButton(
-            title: loc.s("common.delete"),
+        let deleteTarget = ConflictSnippetActionTarget(target: item.target) { [onDelete, item] _ in
+            onDelete(item)
+        }
+        actionTargets.append(deleteTarget)
+        let deleteButton = CapsuleButton(
+            title: loc.s("conflict.action.delete"),
             style: .destructive,
-            target: self,
-            action: #selector(deleteSnippet(_:))
+            target: deleteTarget,
+            action: #selector(ConflictSnippetActionTarget.invoke(_:))
         )
-        deleteBtn.tag = snippet.id.hashValue
-        deleteBtn.controlSize = .small
+        deleteButton.controlSize = .small
+        deleteButton.setAccessibilityLabel(loc.s("conflict.resolver.ax.delete", title))
 
-        let btnRow = NSStackView(views: [toggleBtn, deleteBtn])
-        btnRow.orientation = .horizontal
-        btnRow.spacing = 6
+        let buttonRow = NSStackView(views: [disableButton, deleteButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.alignment = .centerY
+        buttonRow.spacing = 6
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [titleLabel, triggerLabel, previewLabel, btnRow])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 4
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        container.addSubview(stack)
+        container.addSubview(infoStack)
+        container.addSubview(buttonRow)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6)
+            infoStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            infoStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            infoStack.topAnchor.constraint(greaterThanOrEqualTo: container.topAnchor, constant: 6),
+            infoStack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -6),
+            infoStack.trailingAnchor.constraint(lessThanOrEqualTo: buttonRow.leadingAnchor, constant: -10),
+
+            buttonRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            buttonRow.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
 
         return container
     }
 
-    @objc private func toggleSnippet(_ sender: NSButton) {
-        guard let snippet = snippets.first(where: { $0.id.hashValue == sender.tag }) else { return }
-        var groups = store.loadGroups()
-        for gi in groups.indices {
-            if let si = groups[gi].snippets.firstIndex(where: { $0.id == snippet.id }) {
-                groups[gi].snippets[si].enabled.toggle()
-                break
-            }
-        }
-        _ = store.saveGroups(groups)
-        onRefresh()
-    }
-
-    @objc private func deleteSnippet(_ sender: NSButton) {
-        guard let snippet = snippets.first(where: { $0.id.hashValue == sender.tag }) else { return }
-        var groups = store.loadGroups()
-        for gi in groups.indices {
-            groups[gi].snippets.removeAll(where: { $0.id == snippet.id })
-        }
-        _ = store.saveGroups(groups)
-        onRefresh()
+    private func displayTitle(for snippet: SnippetModel) -> String {
+        let title = snippet.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? loc.s("conflict.resolver.untitled") : title
     }
 }

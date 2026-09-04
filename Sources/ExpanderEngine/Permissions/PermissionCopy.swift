@@ -93,12 +93,13 @@ public enum PermissionCopy {
             lines.append(loc.s("permission.notListed.appPath", appPath))
             lines.append(loc.s("permission.notListed.binary", resolvedBinary))
 
-            // These two diagnostics are produced by the identity subsystem and intentionally keep
-            // their technical wording; the surrounding recovery instructions are localized here.
-            if let unpackaged = ProcessIdentity.unpackagedBinaryWarning(bundlePath: appPath) {
+            // Preserve exact paths and identifiers, but render the instructions in the language
+            // selected inside DevType. The parameterless ProcessIdentity variants remain the
+            // stable English vocabulary for logs and diagnostic reports.
+            if let unpackaged = unpackagedBinaryWarning(bundlePath: appPath) {
                 lines.append(unpackaged)
             }
-            if let duplicate = ProcessIdentity.duplicateProcessWarning(siblingPaths: siblingPaths) {
+            if let duplicate = duplicateProcessWarning(siblingPaths: siblingPaths) {
                 lines.append(duplicate)
             } else {
                 lines.append(
@@ -151,6 +152,79 @@ public enum PermissionCopy {
                 lines.append(loc.s("permission.identity.cdHash", cdHash))
             }
             return lines.joined(separator: " ")
+        }
+
+        public func unpackagedBinaryWarning(bundlePath: String) -> String? {
+            guard !ProcessIdentity.isPackagedAppBundle(bundlePath: bundlePath) else { return nil }
+            return loc.s(
+                "permission.identity.unpackaged",
+                bundlePath,
+                ProcessIdentity.preferredInstalledAppPath,
+                ProcessIdentity.expectedBundleIdentifier
+            )
+        }
+
+        public func duplicateProcessWarning(siblingPaths: [String]) -> String? {
+            guard !siblingPaths.isEmpty else { return nil }
+            return loc.s(
+                "permission.identity.duplicate",
+                siblingPaths.joined(separator: "\n• ")
+            )
+        }
+
+        public func settingsToggleMismatchGuidance(
+            executablePath: String,
+            cdHash: String?
+        ) -> String {
+            var lines = [
+                loc.s("permission.identity.settingsMismatch.intro"),
+                loc.s(
+                    "permission.identity.settingsMismatch.action",
+                    ProcessIdentity.legacyStaleBundleIdentifier
+                ),
+                loc.s("permission.identity.settingsMismatch.binary", executablePath)
+            ]
+            if let cdHash, !cdHash.isEmpty {
+                lines.append(loc.s("permission.identity.settingsMismatch.cdHash", cdHash))
+            }
+            lines.append(
+                loc.s(
+                    "permission.identity.settingsMismatch.recommended",
+                    ProcessIdentity.preferredInstalledAppPath,
+                    ProcessIdentity.expectedBundleIdentifier
+                )
+            )
+            return lines.joined(separator: "\n")
+        }
+
+        public func staleLegacyBundleWarning(runningBundleIDs: [String?]) -> String? {
+            guard runningBundleIDs.contains(where: {
+                $0 == ProcessIdentity.legacyStaleBundleIdentifier
+            }) else { return nil }
+            return loc.s(
+                "permission.identity.staleBundle",
+                ProcessIdentity.legacyStaleBundleIdentifier,
+                ProcessIdentity.expectedBundleIdentifier
+            )
+        }
+
+        public func dualInstallWarning(
+            runningPath: String,
+            applicationsExists: Bool,
+            buildBundleExists: Bool
+        ) -> String? {
+            guard applicationsExists, buildBundleExists else { return nil }
+            let runningApplicationsCopy =
+                ProcessIdentity.normalizedBundlePath(runningPath)
+                == ProcessIdentity.normalizedBundlePath(ProcessIdentity.preferredInstalledAppPath)
+            let key = runningApplicationsCopy
+                ? "permission.identity.dualInstall.applicationsRunning"
+                : "permission.identity.dualInstall.developmentRunning"
+            return loc.s(
+                key,
+                ProcessIdentity.preferredInstalledAppPath,
+                ProcessIdentity.developmentAppPathHint
+            )
         }
 
         public func degradedInjectTooltip(snapshot: PermissionSnapshot) -> String {
@@ -246,9 +320,9 @@ public enum PermissionCopy {
         case .postEvent:
             return "Synthetic backspace, paste, and arrow cursor moves. Separate TCC service (may appear under Accessibility). No dedicated Privacy_PostEvent pane."
         case .microphone:
-            return "Required for Smart Speech-to-Text and Dictation. Audio stays strictly local on your Mac."
+            return "Required to capture audio for Smart Dictation. Apple Speech, Local AI, and Local Whisper stay local; Gemini uploads recorded audio to Google only after explicit consent."
         case .speechRecognition:
-            return "Required for on-device fallback speech recognition using Apple Speech framework."
+            return "Required by Apple-based transcription and used for optional live previews with other voice engines."
         }
     }
 

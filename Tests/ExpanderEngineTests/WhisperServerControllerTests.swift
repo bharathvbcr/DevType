@@ -16,36 +16,38 @@ final class WhisperServerControllerTests: XCTestCase {
 
     // MARK: - Refusing to launch
 
-    /// A missing model is the common case after `brew install` and before downloading one.
-    /// It must be named, not reported as a generic launch failure.
-    func testMissingModelIsReportedWithItsPath() async throws {
-        guard WhisperServerSetup.installedBinaryPath() != nil else {
-            throw XCTSkip("whisper.cpp not installed on this machine")
-        }
-        guard !WhisperServerSetup.hasModel("nonexistent-model-xyz") else {
-            return XCTFail("Test model unexpectedly present")
-        }
-
-        let result = await WhisperServerController.shared.start(
+    /// An unmanifested model must fail as unsupported, independent of whether the binary or a
+    /// similarly named file happens to exist on this machine.
+    func testUnsupportedModelIsRejectedBeforeBinaryOrFilesystemLookup() async {
+        let controller = WhisperServerController(
+            binaryPathProvider: { nil },
+            modelDirectory: FileManager.default.temporaryDirectory,
+            artifactProvider: { _ in nil },
+            readinessProbe: { _, _ in false }
+        )
+        let result = await controller.start(
             model: "nonexistent-model-xyz",
             endpoint: URL(string: "http://127.0.0.1:8099/inference")!
         )
-
-        guard case .failure(let failure) = result else {
-            return XCTFail("Started with a missing model")
-        }
-        guard case .modelMissing(let path) = failure else {
-            return XCTFail("Wrong failure: \(failure)")
-        }
-        XCTAssertTrue(path.contains("ggml-nonexistent-model-xyz.bin"))
-        XCTAssertTrue(failure.userMessage.contains(path))
+        assertStartFailure(
+            result,
+            equals: .unsupportedModel(model: "nonexistent-model-xyz")
+        )
     }
 
     /// Every failure has to tell the user what to do next; a bare error is not actionable.
     func testEveryFailureHasAnActionableMessage() {
         let failures: [WhisperServerController.StartFailure] = [
+            .invalidEndpoint,
             .notInstalled,
+            .unsupportedModel(model: "unverified"),
             .modelMissing(path: "/tmp/ggml-base.en.bin"),
+            .modelUnreadable(path: "/tmp/ggml-base.en.bin"),
+            .modelWrongSize(path: "/tmp/ggml-base.en.bin", expected: 3, actual: 2),
+            .modelDigestMismatch(path: "/tmp/ggml-base.en.bin"),
+            .modelChanged(path: "/tmp/ggml-base.en.bin"),
+            .startInProgress,
+            .cancelled,
             .launchFailed("permission denied"),
             .neverBecameReady(log: "error: failed to load model"),
             .portBusy,
@@ -67,6 +69,370 @@ final class WhisperServerControllerTests: XCTestCase {
                 .userMessage.contains("failed to load model"),
             "Server output is what explains a model that will not load"
         )
+    }
+
+    func testModelDownloadPolicyPinsTheArtifactAndRejectsUnsafeRedirects() throws {
+        let artifact = try XCTUnwrap(WhisperModelDownloadPolicy.artifact(for: "base.en"))
+        XCTAssertEqual(artifact.byteCount, 147_964_211)
+        XCTAssertEqual(
+            artifact.sha256,
+            "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+        )
+        XCTAssertTrue(artifact.sourceURL.path.contains(WhisperServerSetup.verifiedModelRevision))
+        XCTAssertFalse(artifact.sourceURL.path.contains("/resolve/main/"))
+        XCTAssertNil(WhisperModelDownloadPolicy.artifact(for: "../../untrusted"))
+
+        XCTAssertTrue(
+            WhisperModelDownloadPolicy.allowsRedirect(
+                to: URL(string: "https://us.aws.cdn.hf.co/xet/model")!
+            )
+        )
+        XCTAssertFalse(
+            WhisperModelDownloadPolicy.allowsRedirect(
+                to: URL(string: "http://us.aws.cdn.hf.co/xet/model")!
+            )
+        )
+        XCTAssertFalse(
+            WhisperModelDownloadPolicy.allowsRedirect(
+                to: URL(string: "https://hf.co.attacker.invalid/model")!
+            )
+        )
+        XCTAssertFalse(
+            WhisperModelDownloadPolicy.allowsRedirect(
+                to: URL(string: "https://huggingface.co.attacker.invalid/model")!
+            )
+        )
+    }
+
+    func testModelDownloadBudgetAndDigestAreExact() throws {
+        XCTAssertTrue(
+            WhisperModelDownloadPolicy.isWithinBudget(
+                totalBytesWritten: 10,
+                expectedBytes: 10,
+                maximumBytes: 10
+            )
+        )
+        XCTAssertFalse(
+            WhisperModelDownloadPolicy.isWithinBudget(
+                totalBytesWritten: 11,
+                expectedBytes: -1,
+                maximumBytes: 10
+            )
+        )
+        XCTAssertFalse(
+            WhisperModelDownloadPolicy.isWithinBudget(
+                totalBytesWritten: 1,
+                expectedBytes: 11,
+                maximumBytes: 10
+            )
+        )
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-policy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("model.bin")
+        try Data("abc".utf8).write(to: file)
+
+        XCTAssertNoThrow(
+            try WhisperModelDownloadPolicy.verify(
+                fileAt: file,
+                expectedByteCount: 3,
+                expectedSHA256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            )
+        )
+        XCTAssertThrowsError(
+            try WhisperModelDownloadPolicy.verify(
+                fileAt: file,
+                expectedByteCount: 2,
+                expectedSHA256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            )
+        )
+        XCTAssertThrowsError(
+            try WhisperModelDownloadPolicy.verify(
+                fileAt: file,
+                expectedByteCount: 3,
+                expectedSHA256: String(repeating: "0", count: 64)
+            )
+        )
+    }
+
+    func testModelVerificationPropagatesCancellation() {
+        XCTAssertThrowsError(
+            try WhisperModelDownloadPolicy.verify(
+                fileAt: URL(fileURLWithPath: "/definitely-not-read"),
+                expectedByteCount: 3,
+                expectedSHA256: String(repeating: "0", count: 64),
+                cancellationCheck: { throw CancellationError() }
+            )
+        ) { error in
+            XCTAssertTrue(error is CancellationError, "Cancellation became \(error)")
+        }
+        XCTAssertFalse(WhisperServerController.DownloadFailure.cancelled.userMessage.isEmpty)
+    }
+
+    func testCanonicalModelStatusDistinguishesMissingSizeDigestAndVerifiedBytes() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-status-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("ggml-fixture.bin")
+        let artifact = WhisperModelDownloadPolicy.Artifact(
+            sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+            byteCount: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+
+        XCTAssertEqual(
+            WhisperModelDownloadPolicy.modelStatus(fileAt: directory, artifact: artifact),
+            .unreadable,
+            "A directory must not be accepted as a regular model file"
+        )
+
+        XCTAssertEqual(
+            WhisperModelDownloadPolicy.modelStatus(fileAt: file, artifact: artifact),
+            .missing
+        )
+
+        try Data("ab".utf8).write(to: file)
+        XCTAssertEqual(
+            WhisperModelDownloadPolicy.modelStatus(fileAt: file, artifact: artifact),
+            .wrongSize(expected: 3, actual: 2)
+        )
+
+        try Data("abd".utf8).write(to: file)
+        XCTAssertEqual(
+            WhisperModelDownloadPolicy.modelStatus(fileAt: file, artifact: artifact),
+            .digestMismatch
+        )
+
+        try Data("abc".utf8).write(to: file)
+        guard case .verified(let verified) = WhisperModelDownloadPolicy.modelStatus(
+            fileAt: file,
+            artifact: artifact
+        ) else {
+            return XCTFail("Exact fixture was not accepted")
+        }
+        XCTAssertTrue(WhisperModelDownloadPolicy.isStillCurrent(verified))
+
+        try Data("abd".utf8).write(to: file, options: .atomic)
+        XCTAssertFalse(
+            WhisperModelDownloadPolicy.isStillCurrent(verified),
+            "Replacing the path after verification must invalidate the launch token."
+        )
+    }
+
+    func testStartRejectsMissingWrongSizeAndSameSizeWrongDigestModels() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-start-status-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let artifact = WhisperModelDownloadPolicy.Artifact(
+            sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+            byteCount: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        let controller = WhisperServerController(
+            binaryPathProvider: { "/usr/bin/false" },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? artifact : nil },
+            readinessProbe: { _, _ in false }
+        )
+        let endpoint = URL(string: "http://127.0.0.1:8096/inference")!
+        let path = directory.appendingPathComponent("ggml-fixture.bin").path
+
+        let missingResult = await controller.start(model: "fixture", endpoint: endpoint)
+        assertStartFailure(missingResult, equals: .modelMissing(path: path))
+
+        try Data("ab".utf8).write(to: URL(fileURLWithPath: path))
+        let wrongSizeResult = await controller.start(model: "fixture", endpoint: endpoint)
+        assertStartFailure(
+            wrongSizeResult,
+            equals: .modelWrongSize(path: path, expected: 3, actual: 2)
+        )
+
+        try Data("abd".utf8).write(to: URL(fileURLWithPath: path))
+        let wrongDigestResult = await controller.start(model: "fixture", endpoint: endpoint)
+        assertStartFailure(wrongDigestResult, equals: .modelDigestMismatch(path: path))
+    }
+
+    func testStartRejectsAPathReplacedBetweenVerificationAndLaunch() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-start-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("ggml-fixture.bin")
+        try Data("abc".utf8).write(to: file)
+        let artifact = WhisperModelDownloadPolicy.Artifact(
+            sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+            byteCount: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        let mutationError = ErrorDescriptionRecorder()
+        let controller = WhisperServerController(
+            binaryPathProvider: { "/usr/bin/false" },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? artifact : nil },
+            readinessProbe: { _, _ in false },
+            beforeModelIdentityRecheckForTesting: { url in
+                do {
+                    try Data("abd".utf8).write(to: url, options: .atomic)
+                } catch {
+                    mutationError.record(error)
+                }
+            }
+        )
+
+        let result = await controller.start(
+            model: "fixture",
+            endpoint: URL(string: "http://127.0.0.1:8096/inference")!
+        )
+        XCTAssertNil(mutationError.value, mutationError.value ?? "")
+        assertStartFailure(result, equals: .modelChanged(path: file.path))
+    }
+
+    func testCancellationImmediatelyBeforeLaunchDoesNotSpawnAChild() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-prelaunch-cancel-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("abc".utf8).write(
+            to: directory.appendingPathComponent("ggml-fixture.bin")
+        )
+        let artifact = WhisperModelDownloadPolicy.Artifact(
+            sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+            byteCount: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        let controller = WhisperServerController(
+            binaryPathProvider: { "/usr/bin/yes" },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? artifact : nil },
+            readinessProbe: { _, _ in false },
+            beforeModelIdentityRecheckForTesting: { _ in
+                withUnsafeCurrentTask { task in
+                    task?.cancel()
+                }
+            }
+        )
+        defer { controller.stopIfManaged() }
+
+        let attempt = Task {
+            await controller.start(
+                model: "fixture",
+                endpoint: URL(string: "http://127.0.0.1:8096/inference")!
+            )
+        }
+        let result = await attempt.value
+
+        assertStartFailure(result, equals: .cancelled)
+        XCTAssertFalse(controller.isManagedByApp)
+    }
+
+    func testStartUsesInjectedReadinessProbeBeforeAndAfterLaunch() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-readiness-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("ggml-fixture.bin")
+        try Data("abc".utf8).write(to: file)
+        let artifact = WhisperModelDownloadPolicy.Artifact(
+            sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+            byteCount: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        let probeCalls = LockedIntegerCounter()
+        let controller = WhisperServerController(
+            binaryPathProvider: { "/usr/bin/yes" },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? artifact : nil },
+            readinessProbe: { _, _ in
+                probeCalls.increment()
+                return probeCalls.value > 1
+            }
+        )
+        defer { controller.stopIfManaged() }
+
+        let result = await controller.start(
+            model: "fixture",
+            endpoint: URL(string: "http://127.0.0.1:8096/inference")!
+        )
+
+        guard case .success = result else {
+            return XCTFail("Injected post-launch readiness was bypassed: \(result)")
+        }
+        XCTAssertGreaterThanOrEqual(probeCalls.value, 2)
+        XCTAssertTrue(controller.isManagedByApp)
+    }
+
+    func testConcurrentStartsAreSingleFlightAndCancellationStopsTheOwnedChild() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-start-flight-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("abc".utf8).write(
+            to: directory.appendingPathComponent("ggml-fixture.bin")
+        )
+        let artifact = WhisperModelDownloadPolicy.Artifact(
+            sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+            byteCount: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        let readiness = PostLaunchReadinessGate()
+        let controller = WhisperServerController(
+            binaryPathProvider: { "/usr/bin/yes" },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? artifact : nil },
+            readinessProbe: { _, _ in await readiness.probe() }
+        )
+        defer { controller.stopIfManaged() }
+        let endpoint = URL(string: "http://127.0.0.1:8096/inference")!
+
+        let first = Task {
+            await controller.start(model: "fixture", endpoint: endpoint)
+        }
+        await readiness.waitUntilPostLaunchProbe()
+
+        let overlap = await controller.start(model: "fixture", endpoint: endpoint)
+        assertStartFailure(overlap, equals: .startInProgress)
+
+        first.cancel()
+        await readiness.release()
+        let cancelled = await first.value
+        assertStartFailure(cancelled, equals: .cancelled)
+        XCTAssertFalse(controller.isManagedByApp, "Cancelled startup left its child running")
+    }
+
+    func testConcurrentDownloadsAreSingleFlightAndCancellationIsTyped() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-download-flight-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let artifact = WhisperModelDownloadPolicy.Artifact(
+            sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+            byteCount: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        let gate = AsyncSuspensionGate()
+        let controller = WhisperServerController(
+            binaryPathProvider: { nil },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? artifact : nil },
+            readinessProbe: { _, _ in false },
+            beforeDownloadForTesting: { await gate.wait() }
+        )
+
+        let first = Task {
+            await controller.downloadModel("fixture")
+        }
+        await gate.waitUntilEntered()
+
+        let overlap = await controller.downloadModel("fixture")
+        assertDownloadFailure(overlap, equals: .downloadInProgress)
+
+        first.cancel()
+        await gate.release()
+        let cancelled = await first.value
+        assertDownloadFailure(cancelled, equals: .cancelled)
     }
 
     // MARK: - Refusing to kill
@@ -138,6 +504,102 @@ final class WhisperServerControllerTests: XCTestCase {
 
         let stillUp = await WhisperServerSetup.isReachable(endpoint: endpoint, timeout: 1.0)
         XCTAssertFalse(stillUp, "Server survived stop()")
+    }
+
+    private func assertStartFailure(
+        _ result: Result<Void, WhisperServerController.StartFailure>,
+        equals expected: WhisperServerController.StartFailure,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard case .failure(let actual) = result else {
+            return XCTFail("Expected start failure \(expected), got success", file: file, line: line)
+        }
+        XCTAssertEqual(actual, expected, file: file, line: line)
+    }
+
+    private func assertDownloadFailure(
+        _ result: Result<URL, WhisperServerController.DownloadFailure>,
+        equals expected: WhisperServerController.DownloadFailure,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard case .failure(let actual) = result else {
+            return XCTFail("Expected download failure \(expected), got success", file: file, line: line)
+        }
+        XCTAssertEqual(actual, expected, file: file, line: line)
+    }
+}
+
+private final class ErrorDescriptionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: String?
+
+    var value: String? {
+        lock.withLock { storage }
+    }
+
+    func record(_ error: Error) {
+        lock.withLock { storage = error.localizedDescription }
+    }
+}
+
+private final class LockedIntegerCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.withLock { storage }
+    }
+
+    func increment() {
+        lock.withLock { storage += 1 }
+    }
+}
+
+private actor AsyncSuspensionGate {
+    private var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        entered = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitUntilEntered() async {
+        while !entered {
+            await Task.yield()
+        }
+    }
+
+    func release() {
+        let waiting = continuation
+        continuation = nil
+        waiting?.resume()
+    }
+}
+
+private actor PostLaunchReadinessGate {
+    private var probeCount = 0
+    private let suspension = AsyncSuspensionGate()
+
+    func probe() async -> Bool {
+        probeCount += 1
+        if probeCount == 1 {
+            return false
+        }
+        await suspension.wait()
+        return false
+    }
+
+    func waitUntilPostLaunchProbe() async {
+        await suspension.waitUntilEntered()
+    }
+
+    func release() async {
+        await suspension.release()
     }
 }
 

@@ -128,6 +128,13 @@ jobs:
           if [ "$VER" = "1.0.0" ] && [ "$BUILD" = "1" ]; then
             echo "error: version was not stamped from git"; exit 1
           fi
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "$APP/Contents/Info.plist")" = true
+          for ATS_KEY in NSAllowsArbitraryLoads NSAllowsArbitraryLoadsForMedia NSAllowsArbitraryLoadsInWebContent; do
+            if /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:${ATS_KEY}" \
+              "$APP/Contents/Info.plist" >/dev/null 2>&1; then
+              echo "error: packaged Info.plist contains broad ATS exception ${ATS_KEY}"; exit 1
+            fi
+          done
           codesign --verify --verbose=2 "$APP"
 
       - name: Upload bundle
@@ -151,6 +158,13 @@ jobs:
         run: |
           plutil -lint Resources/Info.plist
           plutil -lint Resources/DevType.entitlements
+          for f in Resources/*.lproj/InfoPlist.strings; do plutil -lint "$f"; done
+
+      - name: Package signing cache and entitlement contract
+        run: ./Scripts/test-package-signing-contract.sh
+
+      - name: Recoverable installer and canonical-path cleanup
+        run: ./Scripts/test-install-app.sh
 
       - name: Localization table parity
         # §6.1/§7.1 — a missing key in ko/ja silently falls back to English, and a

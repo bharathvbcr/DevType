@@ -10,7 +10,7 @@ import XCTest
 ///  2. The §3.1d delivery-input counter is scoped to one delivery
 ///     (`beginDeliveryWindow` discards stale counts).
 ///  3. `DiagnosticReport.makeLogStore` falls back to the current-process store when the
-///     system-wide scope is refused, so previous-launch history degrades gracefully.
+///     system-wide scope is refused, so current-process diagnostics remain available.
 final class UndoBackspaceReturnTests: XCTestCase {
 
     // MARK: - Undo window bounds

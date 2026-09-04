@@ -204,7 +204,12 @@ public enum ErasePreconditionChecker {
                 ? actual.lowercased() == normExpected.lowercased()
                 : actual == normExpected
             if matches { return .ok }
-            disagreement = "field holds \(debugQuote(rawActual)), expected \(debugQuote(expected))"
+            let comparison = plan.caseInsensitive ? "case-folded" : "exact"
+            disagreement = "field window differs from expected erase text (comparison=\(comparison); "
+                + DiagnosticPrivacy.textShape(rawActual, label: "actual", domain: "erase-actual")
+                + "; "
+                + DiagnosticPrivacy.textShape(expected, label: "expected", domain: "erase-expected")
+                + ")"
         }
 
         // AXValue and AXSelectedTextRange can use inconsistent coordinates, including a
@@ -225,24 +230,4 @@ public enum ErasePreconditionChecker {
         return .mismatch("\(disagreement); \(evidence)")
     }
 
-    /// Short, redaction-friendly rendering for logs — length plus a bounded prefix. Exotic
-    /// whitespace is escaped so a mismatch involving an NBSP variant cannot print two
-    /// identical-looking strings ("field holds \"`slm \", expected \"`slm \"" — the field
-    /// actually held U+00A0).
-    private static func debugQuote(_ text: String) -> String {
-        let limit = 12
-        var rendered = ""
-        for scalar in text.prefix(limit).unicodeScalars {
-            let isExoticWhitespace = scalar.properties.isWhitespace
-                && scalar != " " && scalar != "\n" && scalar != "\t"
-            let isInvisibleFormat = scalar.properties.generalCategory == .format
-            if isExoticWhitespace || isInvisibleFormat {
-                rendered += String(format: "\\u{%X}", scalar.value)
-            } else {
-                rendered.unicodeScalars.append(scalar)
-            }
-        }
-        guard text.count > limit else { return "\"\(rendered)\"" }
-        return "\"\(rendered)…\"(\(text.count))"
-    }
 }

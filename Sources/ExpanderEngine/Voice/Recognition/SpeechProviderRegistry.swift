@@ -1,5 +1,36 @@
 import Foundation
 
+/// Exactly one of `recognizer` or `failure` is populated. Resolution is a typed preflight rather
+/// than a best-effort provider guess, so an unready preferred service cannot silently route audio
+/// through an Apple recognizer that is itself unready or requires a permission the session lacks.
+public struct SpeechProviderResolution: Sendable {
+    public let recognizer: (any SpeechRecognizer)?
+    public let failure: VoiceFailure?
+
+    private init(recognizer: (any SpeechRecognizer)?, failure: VoiceFailure?) {
+        self.recognizer = recognizer
+        self.failure = failure
+    }
+
+    static func ready(_ recognizer: any SpeechRecognizer) -> SpeechProviderResolution {
+        SpeechProviderResolution(recognizer: recognizer, failure: nil)
+    }
+
+    static func unavailable() -> SpeechProviderResolution {
+        SpeechProviderResolution(
+            recognizer: nil,
+            failure: VoiceFailure(
+                stage: .recognition,
+                code: .noReadyProvider,
+                retryClass: .afterUserAction,
+                artifactState: .durable,
+                userAction: .retryWithOtherProvider,
+                redactedDetail: "No permitted speech provider reported ready"
+            )
+        )
+    }
+}
+
 public actor SpeechProviderRegistry {
     public static let shared = SpeechProviderRegistry()
 
@@ -49,20 +80,34 @@ public actor SpeechProviderRegistry {
     /// Resolves the recognizer for a session.
     ///
     /// A preferred provider is used only when the session's privacy route permits it *and*
-    /// it probes ready. Probing matters: an unimplemented adapter or a local server that is
-    /// not running must fall through to the on-device path rather than fail the dictation.
-    public func resolveActiveRecognizer(preferredID: String?, privacyRoute: PrivacyRoute) async -> SpeechRecognizer {
+    /// it probes ready. Unready local/Apple implementations may use the ready on-device floor,
+    /// but an explicitly selected cloud provider fails closed instead of silently changing where
+    /// recognition happens after its credential or consent prerequisite disappears.
+    public func resolveActiveRecognizer(
+        preferredID: String?,
+        privacyRoute: PrivacyRoute
+    ) async -> SpeechProviderResolution {
         if let id = preferredID,
            let preferred = providers[id],
-           privacyRoute.permits(preferred.descriptor.privacyRoute),
-           await preferred.probe().isReady {
-            return preferred
+           privacyRoute.permits(preferred.descriptor.privacyRoute) {
+            if await preferred.probe().isReady {
+                return .ready(preferred)
+            }
+
+            if preferred.descriptor.privacyRoute == .cloudPermitted {
+                return .unavailable()
+            }
         }
 
-        // Floor: on-device Apple Speech, which needs no configuration and no network.
-        if let legacy = providers["apple.speech.legacy"] {
-            return legacy
+        // The on-device floor is a fallback only after it independently proves ready. Returning it
+        // solely because it exists bypasses TCC and per-locale on-device capability checks.
+        let legacyID = "apple.speech.legacy"
+        if preferredID != legacyID,
+           let legacy = providers[legacyID],
+           privacyRoute.permits(legacy.descriptor.privacyRoute),
+           await legacy.probe().isReady {
+            return .ready(legacy)
         }
-        return LegacyAppleSpeechAdapter()
+        return .unavailable()
     }
 }

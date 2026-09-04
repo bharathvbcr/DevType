@@ -133,7 +133,7 @@ public enum PaletteToolRouter {
             routed = raw.flatMap(sanitize).map { Routed(query: trimmed, text: $0) }
         } catch {
             DevTypeLog.store.debug(
-                "[AI] palette routing declined: \(error.localizedDescription, privacy: .public)"
+                "[AI] palette routing declined \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             routed = nil
         }

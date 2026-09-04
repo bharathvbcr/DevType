@@ -3,19 +3,18 @@ import Foundation
 /// In-memory record of recent on-device AI transform outcomes, for `DiagnosticReport`.
 ///
 /// Why this exists: an AI failure used to leave no trace in the one artifact people actually
-/// paste when something breaks. `AITextTransformer` logs the failure detail to OSLog, but a
-/// diagnostic report captures only the last 30 minutes of log and a support request often
-/// arrives well after that window — and `GenerationError.Context.debugDescription` is the
-/// only explanation the framework ever gives for a guardrail refusal. Losing it means the
-/// question "why did the model refuse?" becomes permanently unanswerable.
+/// paste when something breaks. The stable failure class is retained because a diagnostic report
+/// captures only a short OSLog window and a support request often arrives later. Provider error
+/// prose is reduced to length plus a process-salted fingerprint: frameworks may echo input,
+/// prompt fragments, endpoint bodies, and local paths in their descriptions.
 ///
 /// Deliberately in-memory and process-scoped: this is a debugging aid, not telemetry. It is
 /// never written to disk and never leaves the machine.
 ///
-/// **Privacy:** stores only the transform kind and Apple's own diagnostic string. The user's
-/// selected text and the generated output are never recorded here.
+/// **Privacy:** stores only whitelisted transform/failure labels and content-free shape metadata.
+/// The user's selected text, generated output, and provider descriptions are never retained.
 public final class AIDiagnosticsStore {
-    public static let shared = AIDiagnosticsStore()
+    public static let shared = AIDiagnosticsStore(activitySink: ActivityHistoryStore.publish)
 
     /// Most recent failures retained; older entries are dropped.
     public static let capacity = 20
@@ -26,7 +25,8 @@ public final class AIDiagnosticsStore {
         public let kind: String
         /// Short case label (`guardrailViolation`, `rateLimited`, …).
         public let error: String
-        /// Apple's `GenerationError.Context.debugDescription`, or empty.
+        /// Content-free shape of provider detail (`detailChars`, `detailUTF8`, salted hash), or
+        /// empty. Never the provider string itself.
         public let detail: String
 
         public init(at: Date, kind: String, error: String, detail: String) {
@@ -91,12 +91,42 @@ public final class AIDiagnosticsStore {
 
     private let lock = UnfairLock()
     private var failures: [Failure] = []
+    private var failureObservedCount = 0
     private var successCount = 0
     private var lastSuccessAt: Date?
     private var lastSuccessKind: String?
     private var selectionReads: [SelectionRead] = []
+    private var selectionReadObservedCount = 0
+    private let activitySink: ((ActivitySignal) -> Void)?
 
-    public init() {}
+    private static let allowedKinds: Set<String> = Set(AITransformKind.allCases.map(\.rawValue))
+        .union(["injection-boundary"])
+    private static let allowedErrors: Set<String> = [
+        "assetsUnavailable",
+        "concurrentRequests",
+        "decodingFailure",
+        "emptyOutput",
+        "exceededContextWindowSize",
+        "guardrailViolation",
+        "languageDrift",
+        "promptEcho",
+        "rateLimited",
+        "refusal",
+        "refusalProse",
+        "unexpectedRewrite",
+        "unknown",
+        "unsupportedGuide",
+        "unsupportedLanguageOrLocale",
+    ]
+    private static let detailHashCharacterLimit = 4_096
+
+    public init() {
+        activitySink = nil
+    }
+
+    init(activitySink: @escaping (ActivitySignal) -> Void) {
+        self.activitySink = activitySink
+    }
 
     // MARK: - Recording
 
@@ -106,20 +136,33 @@ public final class AIDiagnosticsStore {
         detail: String,
         at date: Date = Date()
     ) {
+        let safeKind = Self.allowedKinds.contains(kind) ? kind : "unknown"
+        let safeError = Self.allowedErrors.contains(error) ? error : "unknown"
+        let safeDetail = Self.contentFreeDetailSummary(detail)
         lock.lock()
-        failures.append(Failure(at: date, kind: kind, error: error, detail: detail))
+        failureObservedCount = Self.saturatingAdd(failureObservedCount, 1)
+        failures.append(Failure(at: date, kind: safeKind, error: safeError, detail: safeDetail))
         if failures.count > Self.capacity {
             failures.removeFirst(failures.count - Self.capacity)
         }
         lock.unlock()
+        activitySink?(.aiFailed)
     }
 
     public func recordSuccess(kind: String, at date: Date = Date()) {
         lock.lock()
         successCount += 1
         lastSuccessAt = date
-        lastSuccessKind = kind
+        lastSuccessKind = Self.allowedKinds.contains(kind) ? kind : "unknown"
         lock.unlock()
+    }
+
+    private static func contentFreeDetailSummary(_ detail: String) -> String {
+        guard !detail.isEmpty else { return "" }
+        let sample = String(detail.prefix(detailHashCharacterLimit))
+        return "detailChars=\(detail.count) detailUTF8=\(detail.utf8.count)"
+            + " detailHash=\(DiagnosticPrivacy.fingerprint(sample, domain: "ai-failure-detail"))"
+            + " detailSampled=\(detail.count > detailHashCharacterLimit)"
     }
 
     public func recordSelectionRead(
@@ -132,16 +175,39 @@ public final class AIDiagnosticsStore {
         elapsedMilliseconds: Int = 0,
         at date: Date = Date()
     ) {
+        let safeOutcome = DiagnosticPrivacy.boundedIdentifier(
+            outcome,
+            label: "selectionOutcome",
+            domain: "ai-selection-outcome"
+        )
+        let safeBundleID = bundleID.map {
+            DiagnosticPrivacy.boundedIdentifier(
+                $0,
+                label: "selectionBundleID",
+                domain: "ai-selection-bundle-id"
+            )
+        }
+        let safeProbeSummary = DiagnosticPrivacy.boundedIdentifier(
+            probeSummary,
+            label: "selectionProbes",
+            domain: "ai-selection-probes"
+        )
+        let safeVia = DiagnosticPrivacy.boundedIdentifier(
+            via,
+            label: "selectionVia",
+            domain: "ai-selection-via"
+        )
         lock.lock()
+        selectionReadObservedCount = Self.saturatingAdd(selectionReadObservedCount, 1)
         selectionReads.append(
             SelectionRead(
                 at: date,
-                outcome: outcome,
-                bundleID: bundleID,
+                outcome: safeOutcome,
+                bundleID: safeBundleID,
                 candidateCount: candidateCount,
                 characters: characters,
-                probeSummary: probeSummary,
-                via: via,
+                probeSummary: safeProbeSummary,
+                via: safeVia,
                 elapsedMilliseconds: elapsedMilliseconds
             )
         )
@@ -154,10 +220,12 @@ public final class AIDiagnosticsStore {
     public func reset() {
         lock.lock()
         failures.removeAll()
+        failureObservedCount = 0
         successCount = 0
         lastSuccessAt = nil
         lastSuccessKind = nil
         selectionReads.removeAll()
+        selectionReadObservedCount = 0
         lock.unlock()
     }
 
@@ -196,10 +264,12 @@ public final class AIDiagnosticsStore {
     ) -> [String] {
         lock.lock()
         let snapshot = failures
+        let observedFailures = failureObservedCount
         let successes = successCount
         let successAt = lastSuccessAt
         let successKind = lastSuccessKind
         let reads = selectionReads
+        let observedReads = selectionReadObservedCount
         lock.unlock()
 
         var lines = [
@@ -210,8 +280,10 @@ public final class AIDiagnosticsStore {
             lines.append("Locale: \(localeNote)")
         }
         lines.append(
-            "Transforms this session: \(successes) succeeded, \(snapshot.count) failed"
-                + (snapshot.count >= Self.capacity ? " (failure list capped at \(Self.capacity))" : "")
+            "Transforms this session: \(successes) succeeded, \(observedFailures) failed"
+                + (observedFailures > snapshot.count
+                    ? " (retained \(snapshot.count)/\(Self.capacity); dropped \(observedFailures - snapshot.count))"
+                    : "")
         )
 
         if let successAt {
@@ -224,7 +296,11 @@ public final class AIDiagnosticsStore {
 
         guard let last = snapshot.last else {
             lines.append("Last failure: (none)")
-            lines.append(contentsOf: Self.selectionReadLines(reads, iso: iso))
+            lines.append(contentsOf: Self.selectionReadLines(
+                reads,
+                observedCount: observedReads,
+                iso: iso
+            ))
             return lines
         }
         lines.append(
@@ -245,7 +321,11 @@ public final class AIDiagnosticsStore {
                 .joined(separator: " ")
             lines.append("Failure breakdown: \(summary)")
         }
-        lines.append(contentsOf: Self.selectionReadLines(reads, iso: iso))
+        lines.append(contentsOf: Self.selectionReadLines(
+            reads,
+            observedCount: observedReads,
+            iso: iso
+        ))
         return lines
     }
 
@@ -256,14 +336,18 @@ public final class AIDiagnosticsStore {
     /// never reports a selection".
     static func selectionReadLines(
         _ reads: [SelectionRead],
+        observedCount: Int? = nil,
         iso: ISO8601DateFormatter
     ) -> [String] {
         guard let last = reads.last else {
             return ["Selection reads: (none this session)"]
         }
+        let observed = max(reads.count, max(0, observedCount ?? reads.count))
         var lines = [
-            "Selection reads: \(reads.count)"
-                + (reads.count >= capacity ? " (capped at \(capacity))" : "")
+            "Selection reads: \(observed)"
+                + (observed > reads.count
+                    ? " (retained \(reads.count)/\(capacity); dropped \(observed - reads.count))"
+                    : "")
         ]
         lines.append(
             "Last selection read: \(iso.string(from: last.at)) outcome=\(last.outcome) "
@@ -298,5 +382,10 @@ public final class AIDiagnosticsStore {
             lines.append("Selection read attributes: \(viaSummary)")
         }
         return lines
+    }
+
+    private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : sum
     }
 }

@@ -1087,6 +1087,35 @@ final class SourceContractTests: XCTestCase {
         XCTAssertFalse(hud.contains("NSScreen.screens[0]"))
     }
 
+    func testPublicOSLogNeverInterpolatesFreeFormErrorDescriptions() throws {
+        let sourcesRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Sources", isDirectory: true)
+        let enumerator = FileManager.default.enumerator(
+            at: sourcesRoot,
+            includingPropertiesForKeys: nil
+        )
+        var offenders: [String] = []
+        while let file = enumerator?.nextObject() as? URL {
+            guard file.pathExtension == "swift" else { continue }
+            let contents = try String(contentsOf: file, encoding: .utf8)
+            if contents.range(
+                of: #"(?:localizedDescription|String\(describing:\s*(?:error|outcome)\))\s*,\s*privacy:\s*\.public"#,
+                options: .regularExpression
+            ) != nil {
+                offenders.append(file.path.replacingOccurrences(
+                    of: sourcesRoot.deletingLastPathComponent().path + "/",
+                    with: ""
+                ))
+            }
+        }
+
+        XCTAssertEqual(
+            offenders,
+            [],
+            "Free-form error prose can contain paths, provider bodies, or user content; log typed metadata instead: \(offenders)"
+        )
+    }
+
     // `testVoiceAsyncCaptureTasksRejectCancellationAndStaleGenerations` lived here. It counted
     // `isCurrentGeneration` / `Task.checkCancellation` tokens inside the `.startAudioCapture`
     // and `.finalizeAudioCapture` switch cases to assert that a superseded session tears the

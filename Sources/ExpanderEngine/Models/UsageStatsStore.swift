@@ -20,31 +20,140 @@ import AppKit
 public final class UsageStatsStore {
     public static let shared = UsageStatsStore()
 
+    /// Calendar periods offered by the Statistics UI. Bounded periods include
+    /// the current calendar day plus the stated number of preceding days.
+    public enum Period: Int, CaseIterable {
+        case all = 0
+        case today = 1
+        case sevenDays = 2
+        case thirtyDays = 3
+    }
+
+    /// One hour of timestamped usage. Hourly aggregation keeps the recording hot
+    /// path and sidecar bounded without losing counts when a snippet is expanded
+    /// repeatedly in the same hour.
+    public struct UsageBucket: Codable, Equatable {
+        public var startedAt: Date
+        public var usageCount: Int
+        public var lastUsedAt: Date
+
+        public init(startedAt: Date, usageCount: Int, lastUsedAt: Date) {
+            self.startedAt = startedAt
+            self.usageCount = usageCount
+            self.lastUsedAt = lastUsedAt
+        }
+    }
+
+    /// At most 800 non-empty hourly buckets are retained for each snippet. That
+    /// covers every hour in the 30-day UI window, including long DST days, while
+    /// putting a fixed ceiling on sidecar growth.
+    public static let maximumBucketsPerSnippet = 800
+
+    public struct PeriodStat: Equatable {
+        public let usageCount: Int
+        public let lastUsedAt: Date?
+
+        public init(usageCount: Int, lastUsedAt: Date?) {
+            self.usageCount = usageCount
+            self.lastUsedAt = lastUsedAt
+        }
+    }
+
+    public struct TimelinePoint: Equatable {
+        public let startedAt: Date
+        public let usageCount: Int
+
+        public init(startedAt: Date, usageCount: Int) {
+            self.startedAt = startedAt
+            self.usageCount = usageCount
+        }
+    }
+
+    /// One internally consistent view of usage for a selected period. Callers
+    /// should derive every displayed metric from this value rather than mixing
+    /// lifetime reads with period-filtered reads.
+    public struct PeriodSnapshot {
+        public let period: Period
+        public let generatedAt: Date
+        public let entries: [UUID: PeriodStat]
+        public let timeline: [TimelinePoint]
+        public let totalUsage: Int
+
+        /// Lifetime usages that predate schema v2, or whose old hourly buckets
+        /// fell beyond the retention cap. Their count is still exact, but their
+        /// timestamps are unknowable, so bounded periods intentionally omit them.
+        public let unbucketedUsageCount: Int
+
+        public func usageCount(for snippetID: UUID) -> Int {
+            entries[snippetID]?.usageCount ?? 0
+        }
+
+        public func lastUsedAt(for snippetID: UUID) -> Date? {
+            entries[snippetID]?.lastUsedAt
+        }
+
+        public func topSnippetIDs(limit: Int = 10) -> [UUID] {
+            guard limit > 0 else { return [] }
+            return entries.sorted { lhs, rhs in
+                if lhs.value.usageCount != rhs.value.usageCount {
+                    return lhs.value.usageCount > rhs.value.usageCount
+                }
+                let lhsDate = lhs.value.lastUsedAt ?? .distantPast
+                let rhsDate = rhs.value.lastUsedAt ?? .distantPast
+                if lhsDate != rhsDate { return lhsDate > rhsDate }
+                return lhs.key.uuidString < rhs.key.uuidString
+            }
+            .prefix(limit)
+            .map(\.key)
+        }
+
+        public func recentSnippetIDs(limit: Int = 10) -> [UUID] {
+            guard limit > 0 else { return [] }
+            return entries
+                .filter { $0.value.lastUsedAt != nil }
+                .sorted { lhs, rhs in
+                    let lhsDate = lhs.value.lastUsedAt ?? .distantPast
+                    let rhsDate = rhs.value.lastUsedAt ?? .distantPast
+                    if lhsDate != rhsDate { return lhsDate > rhsDate }
+                    return lhs.key.uuidString < rhs.key.uuidString
+                }
+                .prefix(limit)
+                .map(\.key)
+        }
+    }
+
     /// Per-snippet counters. `lastUsedAt` is new in this sidecar — the library
     /// schema never carried it (§4.5).
     public struct Stat: Codable, Equatable {
         public var usageCount: Int
         public var lastUsedAt: Date?
+        public var buckets: [UsageBucket]
 
-        public init(usageCount: Int = 0, lastUsedAt: Date? = nil) {
+        public init(
+            usageCount: Int = 0,
+            lastUsedAt: Date? = nil,
+            buckets: [UsageBucket] = []
+        ) {
             self.usageCount = usageCount
             self.lastUsedAt = lastUsedAt
+            self.buckets = buckets
         }
 
         private enum CodingKeys: String, CodingKey {
-            case usageCount, lastUsedAt
+            case usageCount, lastUsedAt, buckets
         }
 
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             usageCount = try c.decodeIfPresent(Int.self, forKey: .usageCount) ?? 0
             lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+            buckets = try c.decodeIfPresent([UsageBucket].self, forKey: .buckets) ?? []
         }
     }
 
     /// On-disk envelope. Versioned for the same reason `SnippetDocument` is.
     private struct Document: Codable {
-        static let currentSchemaVersion = 1
+        static let currentSchemaVersion = 2
         var schemaVersion: Int
         /// Keyed by `UUID.uuidString` — JSON object keys must be strings.
         var stats: [String: Stat]
@@ -63,6 +172,11 @@ public final class UsageStatsStore {
             schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
             stats = try c.decodeIfPresent([String: Stat].self, forKey: .stats) ?? [:]
         }
+    }
+
+    private struct LoadResult {
+        var stats: [UUID: Stat]
+        var needsRewrite: Bool
     }
 
     public static let fileName = "usage-stats.json"
@@ -119,8 +233,11 @@ public final class UsageStatsStore {
         }
         self.flushInterval = max(0, flushInterval)
         self.flushRetryDelay = max(0, flushRetryDelay)
-        stats = Self.loadFromDisk(fileURL: self.fileURL)
+        let loaded = Self.loadFromDisk(fileURL: self.fileURL)
+        stats = loaded.stats
+        dirty = loaded.needsRewrite
         installTerminateHook()
+        if dirty { scheduleFlush() }
     }
 
     deinit {
@@ -134,11 +251,40 @@ public final class UsageStatsStore {
     // MARK: - Recording
 
     /// Records one expansion. Cheap: in-memory mutation plus a debounced write.
-    public func recordUsage(for snippetID: UUID, at date: Date = Date()) {
+    public func recordUsage(
+        for snippetID: UUID,
+        at date: Date = Date(),
+        calendar: Calendar = .current
+    ) {
+        let bucketStart = calendar.dateInterval(of: .hour, for: date)?.start ?? date
         lock.lock()
         var stat = stats[snippetID] ?? Stat()
-        stat.usageCount += 1
-        stat.lastUsedAt = date
+        stat.usageCount = Self.addingClamped(stat.usageCount, 1)
+        if let previous = stat.lastUsedAt {
+            stat.lastUsedAt = max(previous, date)
+        } else {
+            stat.lastUsedAt = date
+        }
+
+        if let index = stat.buckets.lastIndex(where: { $0.startedAt == bucketStart }) {
+            stat.buckets[index].usageCount = Self.addingClamped(
+                stat.buckets[index].usageCount,
+                1
+            )
+            if date > stat.buckets[index].lastUsedAt {
+                stat.buckets[index].lastUsedAt = date
+            }
+        } else {
+            stat.buckets.append(UsageBucket(
+                startedAt: bucketStart,
+                usageCount: 1,
+                lastUsedAt: date
+            ))
+            stat.buckets.sort { $0.startedAt < $1.startedAt }
+            if stat.buckets.count > Self.maximumBucketsPerSnippet {
+                stat.buckets.removeFirst(stat.buckets.count - Self.maximumBucketsPerSnippet)
+            }
+        }
         stats[snippetID] = stat
         dirty = true
         _revision &+= 1
@@ -210,6 +356,71 @@ public final class UsageStatsStore {
         lock.lock()
         defer { lock.unlock() }
         return stats
+    }
+
+    /// Returns a period-correct snapshot from one locked copy of the sidecar.
+    /// `snippetIDs` lets a UI constrain all metrics, including the timeline, to
+    /// the exact library projection it is displaying.
+    public func snapshot(
+        period: Period,
+        snippetIDs: Set<UUID>? = nil,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> PeriodSnapshot {
+        let stored = allStats()
+        let selected = stored.filter { snippetIDs?.contains($0.key) ?? true }
+        let start = Self.startDate(for: period, now: now, calendar: calendar)
+        var entries: [UUID: PeriodStat] = [:]
+        var selectedBuckets: [UsageBucket] = []
+        var totalUsage = 0
+        var unbucketedUsage = 0
+
+        for (id, stat) in selected {
+            let retainedCount = stat.buckets.reduce(0) {
+                Self.addingClamped($0, max(0, $1.usageCount))
+            }
+
+            if period == .all {
+                let count = max(0, stat.usageCount)
+                if count > 0 {
+                    entries[id] = PeriodStat(usageCount: count, lastUsedAt: stat.lastUsedAt)
+                    totalUsage = Self.addingClamped(totalUsage, count)
+                }
+                unbucketedUsage = Self.addingClamped(
+                    unbucketedUsage,
+                    max(0, count - retainedCount)
+                )
+                selectedBuckets.append(contentsOf: stat.buckets)
+                continue
+            }
+
+            let buckets = stat.buckets.filter { bucket in
+                guard let start else { return false }
+                return bucket.lastUsedAt >= start && bucket.lastUsedAt <= now
+            }
+            let count = buckets.reduce(0) {
+                Self.addingClamped($0, max(0, $1.usageCount))
+            }
+            guard count > 0 else { continue }
+            let lastUsedAt = buckets.map(\.lastUsedAt).max()
+            entries[id] = PeriodStat(usageCount: count, lastUsedAt: lastUsedAt)
+            totalUsage = Self.addingClamped(totalUsage, count)
+            selectedBuckets.append(contentsOf: buckets)
+        }
+
+        return PeriodSnapshot(
+            period: period,
+            generatedAt: now,
+            entries: entries,
+            timeline: Self.makeTimeline(
+                period: period,
+                buckets: selectedBuckets,
+                now: now,
+                calendar: calendar
+            ),
+            totalUsage: totalUsage,
+            unbucketedUsageCount: unbucketedUsage
+        )
     }
 
     /// Total recorded expansions across every snippet (§4.5 statistics surface).
@@ -327,7 +538,7 @@ public final class UsageStatsStore {
             let generation = flushGeneration
             lock.unlock()
             DevTypeLog.store.error(
-                "[Store] Failed to write usage stats: \(error.localizedDescription, privacy: .public)"
+                "[Store] Failed to write usage stats \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             ioQueue.asyncAfter(deadline: .now() + flushRetryDelay) { [weak self] in
                 guard let self else { return }
@@ -353,24 +564,140 @@ public final class UsageStatsStore {
         try data.write(to: fileURL, options: .atomic)
     }
 
-    private static func loadFromDisk(fileURL: URL) -> [UUID: Stat] {
+    private static func loadFromDisk(fileURL: URL) -> LoadResult {
         guard FileManager.default.fileExists(atPath: fileURL.path),
               let data = try? Data(contentsOf: fileURL), !data.isEmpty else {
-            return [:]
+            return LoadResult(stats: [:], needsRewrite: false)
         }
         guard let document = try? JSONDecoder().decode(Document.self, from: data) else {
             DevTypeLog.store.error(
-                "[Store] Usage stats unreadable at \(fileURL.path, privacy: .public); starting empty"
+                "[Store] Usage stats unreadable \(DevTypeLog.publicPathMetadata(fileURL.path), privacy: .public); starting empty"
             )
-            return [:]
+            return LoadResult(stats: [:], needsRewrite: false)
         }
         var out: [UUID: Stat] = [:]
         out.reserveCapacity(document.stats.count)
+        var needsRewrite = document.schemaVersion < Document.currentSchemaVersion
         for (key, stat) in document.stats {
-            guard let id = UUID(uuidString: key) else { continue }
-            out[id] = stat
+            guard let id = UUID(uuidString: key) else {
+                needsRewrite = true
+                continue
+            }
+            let normalized = normalize(stat)
+            if normalized != stat { needsRewrite = true }
+            out[id] = normalized
         }
-        return out
+        return LoadResult(stats: out, needsRewrite: needsRewrite)
+    }
+
+    private static func normalize(_ stat: Stat) -> Stat {
+        var merged: [Date: UsageBucket] = [:]
+        for bucket in stat.buckets where bucket.usageCount > 0 {
+            let sanitized = UsageBucket(
+                startedAt: bucket.startedAt,
+                usageCount: bucket.usageCount,
+                lastUsedAt: max(bucket.startedAt, bucket.lastUsedAt)
+            )
+            if var existing = merged[bucket.startedAt] {
+                existing.usageCount = addingClamped(existing.usageCount, sanitized.usageCount)
+                existing.lastUsedAt = max(existing.lastUsedAt, sanitized.lastUsedAt)
+                merged[bucket.startedAt] = existing
+            } else {
+                merged[bucket.startedAt] = sanitized
+            }
+        }
+
+        var buckets = merged.values.sorted { $0.startedAt < $1.startedAt }
+        if buckets.count > maximumBucketsPerSnippet {
+            buckets.removeFirst(buckets.count - maximumBucketsPerSnippet)
+        }
+        let retainedCount = buckets.reduce(0) {
+            addingClamped($0, max(0, $1.usageCount))
+        }
+        let latestBucketDate = buckets.map(\.lastUsedAt).max()
+        let lastUsedAt: Date?
+        switch (stat.lastUsedAt, latestBucketDate) {
+        case let (lhs?, rhs?): lastUsedAt = max(lhs, rhs)
+        case let (lhs?, nil): lastUsedAt = lhs
+        case let (nil, rhs?): lastUsedAt = rhs
+        case (nil, nil): lastUsedAt = nil
+        }
+        return Stat(
+            usageCount: max(max(0, stat.usageCount), retainedCount),
+            lastUsedAt: lastUsedAt,
+            buckets: buckets
+        )
+    }
+
+    private static func startDate(
+        for period: Period,
+        now: Date,
+        calendar: Calendar
+    ) -> Date? {
+        let today = calendar.startOfDay(for: now)
+        switch period {
+        case .all:
+            return nil
+        case .today:
+            return today
+        case .sevenDays:
+            return calendar.date(byAdding: .day, value: -6, to: today) ?? today
+        case .thirtyDays:
+            return calendar.date(byAdding: .day, value: -29, to: today) ?? today
+        }
+    }
+
+    private static func makeTimeline(
+        period: Period,
+        buckets: [UsageBucket],
+        now: Date,
+        calendar: Calendar
+    ) -> [TimelinePoint] {
+        let component: Calendar.Component = period == .today ? .hour : .day
+        var counts: [Date: Int] = [:]
+        for bucket in buckets where bucket.usageCount > 0 {
+            let start: Date
+            if component == .hour {
+                start = calendar.dateInterval(of: .hour, for: bucket.lastUsedAt)?.start
+                    ?? bucket.startedAt
+            } else {
+                start = calendar.startOfDay(for: bucket.lastUsedAt)
+            }
+            counts[start] = addingClamped(counts[start] ?? 0, bucket.usageCount)
+        }
+
+        if period == .all {
+            return counts.keys.sorted().map {
+                TimelinePoint(startedAt: $0, usageCount: counts[$0] ?? 0)
+            }
+        }
+
+        guard let first = startDate(for: period, now: now, calendar: calendar) else {
+            return []
+        }
+        let last: Date
+        if component == .hour {
+            last = calendar.dateInterval(of: .hour, for: now)?.start ?? now
+        } else {
+            last = calendar.startOfDay(for: now)
+        }
+
+        var points: [TimelinePoint] = []
+        var cursor = first
+        while cursor <= last {
+            points.append(TimelinePoint(startedAt: cursor, usageCount: counts[cursor] ?? 0))
+            guard let next = calendar.date(byAdding: component, value: 1, to: cursor),
+                  next > cursor else {
+                break
+            }
+            cursor = next
+        }
+        return points
+    }
+
+    private static func addingClamped(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : sum
     }
 
     private func installTerminateHook() {

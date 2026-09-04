@@ -6,27 +6,44 @@ import XCTest
 /// one reproduction the user was willing to capture.
 final class VoiceDiagnosticsTraceTests: XCTestCase {
 
-    private var previousSetting = false
+    private var previousSettingObject: Any?
+    private var temporaryDirectories: [URL] = []
 
     override func setUp() {
         super.setUp()
-        previousSetting = VoicePreferences.isVoiceTracingEnabled
-        VoiceDiagnosticsRecorder.shared.clear()
+        previousSettingObject = UserDefaults.standard.object(
+            forKey: VoicePreferences.voiceTracingKey
+        )
     }
 
     override func tearDown() {
-        VoicePreferences.isVoiceTracingEnabled = previousSetting
-        VoiceDiagnosticsRecorder.shared.clear()
+        if let previousSettingObject {
+            UserDefaults.standard.set(
+                previousSettingObject,
+                forKey: VoicePreferences.voiceTracingKey
+            )
+        } else {
+            UserDefaults.standard.removeObject(forKey: VoicePreferences.voiceTracingKey)
+        }
+        for directory in temporaryDirectories {
+            try? FileManager.default.removeItem(at: directory)
+        }
         super.tearDown()
     }
 
-    /// Flushes the recorder's background queue.
-    private func settle() {
-        let expectation = expectation(description: "trace flushed")
-        DispatchQueue(label: "test.settle").asyncAfter(deadline: .now() + 0.25) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 2.0)
+    private func makeTraceURL() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-voice-trace-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        temporaryDirectories.append(directory)
+        return directory.appendingPathComponent("voice-trace.jsonl")
+    }
+
+    private func permissions(at url: URL) throws -> Int {
+        let value = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        )
+        return value.intValue & 0o777
     }
 
     // MARK: - Default state
@@ -53,17 +70,17 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
     }
 
     /// This records what the user dictated. It must never run when switched off.
-    func testNothingIsRecordedWhenDisabled() {
+    func testNothingIsRecordedWhenDisabled() throws {
         VoicePreferences.isVoiceTracingEnabled = false
+        let recorder = VoiceDiagnosticsRecorder(traceURL: try makeTraceURL())
 
-        VoiceDiagnosticsRecorder.shared.record(
+        recorder.record(
             "reconcile",
             segment: SpeechSegment(segmentID: "live-0", text: "secret words", finality: .volatile),
             erase: 5
         )
-        settle()
 
-        XCTAssertNil(VoiceDiagnosticsRecorder.shared.read(),
+        XCTAssertNil(recorder.read(),
             "Tracing wrote to disk while disabled")
     }
 
@@ -71,16 +88,17 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
 
     func testTraceCapturesTheReconcileDecision() throws {
         VoicePreferences.isVoiceTracingEnabled = true
+        let recorder = VoiceDiagnosticsRecorder(traceURL: try makeTraceURL())
 
-        VoiceDiagnosticsRecorder.shared.beginSession(engine: "apple_speech", realTimeTyping: true)
-        VoiceDiagnosticsRecorder.shared.record(
+        recorder.beginSession(engine: "apple_speech", liveDeliveryMode: "typeAsYouSpeak")
+        recorder.record(
             "segment.ingested",
             segment: SpeechSegment(segmentID: "live-0", revision: 2, text: "hello world", finality: .volatile),
             settled: "",
             active: "hello world",
             cumulative: "hello world"
         )
-        VoiceDiagnosticsRecorder.shared.record(
+        recorder.record(
             "reconcile",
             segment: SpeechSegment(segmentID: "live-1", revision: 1, text: "how", finality: .volatile),
             cumulative: "how",
@@ -90,9 +108,8 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
             inject: "how",
             suppressed: false
         )
-        settle()
 
-        let trace = try XCTUnwrap(VoiceDiagnosticsRecorder.shared.read())
+        let trace = try XCTUnwrap(recorder.read())
         let lines = trace.split(separator: "\n").map(String.init)
         XCTAssertEqual(lines.count, 3, "Expected one line per event")
 
@@ -114,11 +131,11 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
 
     func testTraceIsValidJSONLine() throws {
         VoicePreferences.isVoiceTracingEnabled = true
-        VoiceDiagnosticsRecorder.shared.record("segment.ingested",
+        let recorder = VoiceDiagnosticsRecorder(traceURL: try makeTraceURL())
+        recorder.record("segment.ingested",
             segment: SpeechSegment(segmentID: "live-0", text: "text with \"quotes\" and \nnewline", finality: .final))
-        settle()
 
-        let trace = try XCTUnwrap(VoiceDiagnosticsRecorder.shared.read())
+        let trace = try XCTUnwrap(recorder.read())
         // Awkward content must not break the line format the file depends on.
         XCTAssertEqual(trace.split(separator: "\n").count, 1)
         XCTAssertNoThrow(
@@ -129,14 +146,339 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
         )
     }
 
-    func testClearRemovesTheTrace() {
+    func testTraceWriteTightensPreexistingDirectoryAndFilePermissions() throws {
         VoicePreferences.isVoiceTracingEnabled = true
-        VoiceDiagnosticsRecorder.shared.record("session.begin")
-        settle()
-        XCTAssertNotNil(VoiceDiagnosticsRecorder.shared.read())
+        let url = try makeTraceURL()
+        let directory = url.deletingLastPathComponent()
+        try Data().write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: directory.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: url.path)
+        let recorder = VoiceDiagnosticsRecorder(traceURL: url)
 
-        VoiceDiagnosticsRecorder.shared.clear()
-        XCTAssertNil(VoiceDiagnosticsRecorder.shared.read())
+        XCTAssertEqual(recorder.record("permission-hardening", note: "dictated secret"), .accepted)
+        XCTAssertNotNil(recorder.read())
+
+        XCTAssertEqual(try permissions(at: directory), 0o700)
+        XCTAssertEqual(try permissions(at: url), 0o600)
+        XCTAssertEqual(recorder.ioHealth.write, .succeeded)
+    }
+
+    func testTraceWriteCreatesOwnerOnlyDiagnosticsDirectoryAndFile() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-voice-trace-parent-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        temporaryDirectories.append(root)
+        let directory = root.appendingPathComponent("diagnostics", isDirectory: true)
+        let url = directory.appendingPathComponent("voice-trace.jsonl")
+        let recorder = VoiceDiagnosticsRecorder(traceURL: url)
+
+        XCTAssertEqual(recorder.record("new-permissions", note: "dictated secret"), .accepted)
+        XCTAssertNotNil(recorder.read())
+
+        XCTAssertEqual(try permissions(at: directory), 0o700)
+        XCTAssertEqual(try permissions(at: url), 0o600)
+        XCTAssertEqual(recorder.ioHealth.write, .succeeded)
+    }
+
+    func testDirectoryPermissionNoOpIsTypedAndNeverReportedAsSuccessful() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let url = try makeTraceURL()
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: directory.path)
+        let recorder = VoiceDiagnosticsRecorder(
+            traceURL: url,
+            permissionSetter: { _, _ in }
+        )
+
+        XCTAssertEqual(recorder.record("directory-permission-failure"), .accepted)
+        XCTAssertEqual(recorder.ioHealth.write, .failed(.directoryPermissions))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testTracePermissionFailureIsTypedAndDoesNotRetainNewTranscriptFile() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let url = try makeTraceURL()
+        let recorder = VoiceDiagnosticsRecorder(
+            traceURL: url,
+            permissionSetter: { candidate, mode in
+                if mode == 0o600 { throw CocoaError(.fileWriteNoPermission) }
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: mode],
+                    ofItemAtPath: candidate.path
+                )
+            }
+        )
+
+        XCTAssertEqual(recorder.record("permission-failure", note: "dictated secret"), .accepted)
+        XCTAssertEqual(recorder.ioHealth.write, .failed(.filePermissions))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testTraceReadTightensPreexistingDirectoryAndFilePermissions() throws {
+        let url = try makeTraceURL()
+        let directory = url.deletingLastPathComponent()
+        try Data("existing dictated trace".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: directory.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: url.path)
+        let recorder = VoiceDiagnosticsRecorder(traceURL: url)
+
+        XCTAssertEqual(recorder.read(), "existing dictated trace")
+        XCTAssertEqual(try permissions(at: directory), 0o700)
+        XCTAssertEqual(try permissions(at: url), 0o600)
+        XCTAssertEqual(recorder.ioHealth.read, .succeeded)
+    }
+
+    func testTraceReadPermissionFailureIsTypedAndNeverReportsSuccess() throws {
+        let url = try makeTraceURL()
+        try Data("existing dictated trace".utf8).write(to: url)
+        let recorder = VoiceDiagnosticsRecorder(
+            traceURL: url,
+            permissionSetter: { candidate, mode in
+                if mode == 0o600 { throw CocoaError(.fileReadNoPermission) }
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: mode],
+                    ofItemAtPath: candidate.path
+                )
+            }
+        )
+
+        XCTAssertNil(recorder.read())
+        XCTAssertEqual(recorder.ioHealth.read, .failed(.filePermissions))
+        XCTAssertTrue(recorder.ioHealth.hasFailure)
+    }
+
+    func testClearRemovesTheTrace() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let recorder = VoiceDiagnosticsRecorder(traceURL: try makeTraceURL())
+        recorder.record("session.begin")
+        XCTAssertNotNil(recorder.read())
+
+        recorder.clear()
+        XCTAssertNil(recorder.read())
+    }
+
+    // MARK: - Serialized I/O and retention
+
+    func testAcceptedWriteIsVisibleToAnImmediateRead() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let writeStarted = DispatchSemaphore(value: 0)
+        let releaseWrite = DispatchSemaphore(value: 0)
+        let recorder = VoiceDiagnosticsRecorder(
+            traceURL: try makeTraceURL(),
+            beforeAppendForTesting: {
+                writeStarted.signal()
+                releaseWrite.wait()
+            }
+        )
+
+        XCTAssertEqual(recorder.record("immediate-read"), .accepted)
+        guard writeStarted.wait(timeout: .now() + 1) == .success else {
+            releaseWrite.signal()
+            return XCTFail("The accepted append never reached the recorder queue.")
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.05) {
+            releaseWrite.signal()
+        }
+
+        let trace = try XCTUnwrap(recorder.read(), "read() must wait for every accepted write ahead of it")
+        XCTAssertTrue(trace.contains("immediate-read"))
+    }
+
+    func testClearCannotBeUndoneByAnAlreadyQueuedAppend() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let writeStarted = DispatchSemaphore(value: 0)
+        let releaseWrite = DispatchSemaphore(value: 0)
+        let appendFinished = DispatchSemaphore(value: 0)
+        let recorder = VoiceDiagnosticsRecorder(
+            traceURL: try makeTraceURL(),
+            beforeAppendForTesting: {
+                writeStarted.signal()
+                releaseWrite.wait()
+            },
+            afterAppendForTesting: {
+                appendFinished.signal()
+            }
+        )
+
+        XCTAssertEqual(recorder.record("queued-before-clear"), .accepted)
+        guard writeStarted.wait(timeout: .now() + 1) == .success else {
+            releaseWrite.signal()
+            return XCTFail("The accepted append never reached the recorder queue.")
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.05) {
+            releaseWrite.signal()
+        }
+
+        XCTAssertEqual(recorder.clear(), .succeeded)
+        XCTAssertEqual(appendFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertNil(recorder.read(), "A queued append recreated the trace after clear returned.")
+    }
+
+    func testProjectedWriteRollsOverBeforeCrossingFourMiB() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let url = try makeTraceURL()
+        try Data(repeating: 0x61, count: VoiceDiagnosticsRecorder.maxBytes - 32).write(to: url)
+        let recorder = VoiceDiagnosticsRecorder(traceURL: url)
+
+        XCTAssertEqual(recorder.record("newest-after-rollover", note: "bounded"), .accepted)
+        let trace = try XCTUnwrap(recorder.read())
+        let size = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber
+        ).intValue
+
+        XCTAssertLessThanOrEqual(size, VoiceDiagnosticsRecorder.maxBytes)
+        XCTAssertEqual(trace.split(separator: "\n").count, 1, "The stale prefix must be replaced.")
+        XCTAssertTrue(trace.contains("newest-after-rollover"))
+        XCTAssertEqual(recorder.ioHealth.write, .succeeded)
+        let coverage = try XCTUnwrap(recorder.ioHealth.traceReadCoverage)
+        XCTAssertFalse(coverage.isComplete, "A rotated trace is only the retained tail, not complete history.")
+        XCTAssertEqual(
+            coverage.droppedByteCount,
+            UInt64(VoiceDiagnosticsRecorder.maxBytes - 32)
+        )
+        XCTAssertEqual(coverage.retainedByteCount, size)
+        XCTAssertEqual(
+            coverage.observedByteCount,
+            coverage.droppedByteCount + UInt64(coverage.retainedByteCount)
+        )
+        let retainedEvent = try JSONDecoder().decode(
+            VoiceDiagnosticsRecorder.Event.self,
+            from: Data(trace.trimmingCharacters(in: .newlines).utf8)
+        )
+        XCTAssertEqual(retainedEvent.droppedBytes, coverage.droppedByteCount)
+
+        let reloaded = VoiceDiagnosticsRecorder(traceURL: url)
+        XCTAssertNotNil(reloaded.read())
+        XCTAssertEqual(
+            reloaded.ioHealth.traceReadCoverage,
+            coverage,
+            "Rollover coverage must be recoverable from the JSONL file after relaunch."
+        )
+    }
+
+    func testLegacyTraceEventWithoutRolloverMetadataStillDecodes() throws {
+        let legacyLine = #"{"at":0,"kind":"session.begin"}"#
+
+        let event = try JSONDecoder().decode(
+            VoiceDiagnosticsRecorder.Event.self,
+            from: Data(legacyLine.utf8)
+        )
+
+        XCTAssertEqual(event.kind, "session.begin")
+        XCTAssertNil(event.droppedBytes)
+    }
+
+    func testSingleOversizedEventIsRejectedWithoutBreakingTheCap() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let url = try makeTraceURL()
+        let recorder = VoiceDiagnosticsRecorder(traceURL: url)
+        let oversizedNote = String(repeating: "x", count: VoiceDiagnosticsRecorder.maxBytes)
+
+        XCTAssertEqual(recorder.record("oversized", note: oversizedNote), .accepted)
+        XCTAssertEqual(recorder.ioHealth.write, .failed(.eventExceedsLimit))
+        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?
+            .intValue ?? 0
+
+        XCTAssertLessThanOrEqual(size, VoiceDiagnosticsRecorder.maxBytes)
+        XCTAssertNil(recorder.read())
+        XCTAssertEqual(
+            recorder.ioHealth.write,
+            .failed(.eventExceedsLimit),
+            "A successful empty read must not erase the write failure."
+        )
+    }
+
+    func testIOHealthReportsTypedContentFreeWriteFailure() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let root = try makeTraceURL().deletingLastPathComponent()
+        let nonDirectory = root.appendingPathComponent("not-a-directory")
+        try Data("blocker".utf8).write(to: nonDirectory)
+        let impossibleURL = nonDirectory.appendingPathComponent("voice-trace.jsonl")
+        let recorder = VoiceDiagnosticsRecorder(traceURL: impossibleURL)
+        let privateText = "private dictated health sentinel"
+
+        XCTAssertEqual(recorder.record("write-failure", note: privateText), .accepted)
+        let health = recorder.ioHealth
+
+        XCTAssertEqual(health.write, .failed(.directoryCreation))
+        XCTAssertEqual(health.read, .notAttempted)
+        XCTAssertEqual(health.delete, .notAttempted)
+        XCTAssertFalse(String(describing: health).contains(privateText))
+        XCTAssertFalse(String(describing: health).contains(impossibleURL.path))
+    }
+
+    func testInvalidTraceDataIsAReadFailureRatherThanAQuietEmptyTrace() throws {
+        let url = try makeTraceURL()
+        try Data([0xFF, 0xFE]).write(to: url)
+        let recorder = VoiceDiagnosticsRecorder(traceURL: url)
+
+        XCTAssertNil(recorder.read())
+        XCTAssertEqual(recorder.ioHealth.read, .failed(.invalidUTF8))
+        XCTAssertTrue(recorder.ioHealth.hasFailure)
+    }
+
+    func testTraceReadAcceptsTheExactInputByteLimit() throws {
+        let url = try makeTraceURL()
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(VoiceDiagnosticsRecorder.maxBytes))
+        try handle.close()
+        let recorder = VoiceDiagnosticsRecorder(traceURL: url)
+
+        let trace = try XCTUnwrap(recorder.read())
+
+        XCTAssertEqual(trace.utf8.count, VoiceDiagnosticsRecorder.maxBytes)
+        XCTAssertEqual(recorder.ioHealth.read, .succeeded)
+        XCTAssertEqual(
+            recorder.ioHealth.traceReadCoverage,
+            VoiceDiagnosticsRecorder.TraceReadCoverage(
+                observedByteCount: UInt64(VoiceDiagnosticsRecorder.maxBytes),
+                retainedByteCount: VoiceDiagnosticsRecorder.maxBytes,
+                droppedByteCount: 0,
+                isComplete: true
+            )
+        )
+    }
+
+    func testTraceReadRejectsLimitPlusOneInsteadOfReturningACappedSampleAsComplete() throws {
+        let url = try makeTraceURL()
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(VoiceDiagnosticsRecorder.maxBytes + 1))
+        try handle.close()
+        let recorder = VoiceDiagnosticsRecorder(traceURL: url)
+
+        XCTAssertNil(recorder.read())
+        XCTAssertEqual(recorder.ioHealth.read, .failed(.traceExceedsLimit))
+        XCTAssertEqual(
+            recorder.ioHealth.traceReadCoverage,
+            VoiceDiagnosticsRecorder.TraceReadCoverage(
+                observedByteCount: UInt64(VoiceDiagnosticsRecorder.maxBytes + 1),
+                retainedByteCount: 0,
+                droppedByteCount: UInt64(VoiceDiagnosticsRecorder.maxBytes + 1),
+                isComplete: false
+            )
+        )
+    }
+
+    func testDeleteTraceLeavesCaptureEnabledButDisableAndDeleteStopsIt() throws {
+        VoicePreferences.isVoiceTracingEnabled = true
+        let recorder = VoiceDiagnosticsRecorder(traceURL: try makeTraceURL())
+        XCTAssertEqual(recorder.record("before-delete"), .accepted)
+        XCTAssertNotNil(recorder.read())
+
+        XCTAssertEqual(recorder.deleteTrace(), .succeeded)
+        XCTAssertTrue(recorder.isEnabled)
+        XCTAssertNil(recorder.read())
+
+        XCTAssertEqual(recorder.record("before-disable"), .accepted)
+        XCTAssertNotNil(recorder.read())
+        XCTAssertEqual(recorder.disableAndDelete(), .succeeded)
+        XCTAssertFalse(recorder.isEnabled)
+        XCTAssertNil(recorder.read())
+        XCTAssertEqual(recorder.record("after-disable"), .disabled)
+        XCTAssertNil(recorder.read())
     }
 
     // MARK: - Ordering precondition

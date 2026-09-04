@@ -376,7 +376,7 @@ public final class InjectTimingStore {
             try data.write(to: fileURL, options: .atomic)
         } catch {
             DevTypeLog.inject.error(
-                "[Inject] Failed to persist inject timing samples: \(error.localizedDescription, privacy: .public)"
+                "[Inject] Failed to persist inject timing samples \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
         }
     }

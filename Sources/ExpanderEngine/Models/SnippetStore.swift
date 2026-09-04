@@ -81,6 +81,111 @@ public final class SnippetStore {
         case failed(String)
 
         public var didSave: Bool { self == .saved }
+
+        /// Stable, content-free label for public diagnostics. The associated failure prose is
+        /// retained for user-facing recovery, but can contain a library path or an OS/provider
+        /// description and must never be mirrored into a support report.
+        public var diagnosticLabel: String {
+            switch self {
+            case .saved: return "saved"
+            case .blockedByNewerSchema: return "blockedByNewerSchema"
+            case .blockedByRemoteChange: return "blockedByRemoteChange"
+            case .failed: return "failed"
+            }
+        }
+    }
+
+    /// Result of a store-owned whole-library read-modify-write.
+    ///
+    /// `saved` includes the exact current state that was read under `rmwLock` and the exact
+    /// candidate committed from it. `rejected` means the caller's precondition no longer held;
+    /// no write was attempted. `unchanged` likewise performs no write. Keeping these distinct
+    /// prevents stale UI actions and stale undo snapshots from masquerading as successful saves.
+    public enum GroupMutationResult: Equatable {
+        case saved(before: [SnippetGroup], after: [SnippetGroup])
+        case unchanged(current: [SnippetGroup])
+        case rejected(current: [SnippetGroup])
+        case refused(SaveOutcome)
+
+        public var saveOutcome: SaveOutcome? {
+            switch self {
+            case .saved, .unchanged: return .saved
+            case .rejected: return nil
+            case .refused(let outcome): return outcome
+            }
+        }
+    }
+
+    /// Result of deleting one attachment through the library owner.
+    ///
+    /// Deletion is conditional because a path removed by one edit can be referenced again by a
+    /// later edit before post-commit cleanup runs. Callers treat `retainedReferenced` as a
+    /// successful cleanup decision, while deferred and failed operations remain retryable.
+    public enum ImageCleanupResult: Equatable {
+        case removed
+        case retainedReferenced
+        case deferredRemoteChange
+        case failed
+    }
+
+    /// Deterministic synchronization points for concurrency regression tests. Production leaves
+    /// this unset, so the persistence path pays only a lock-and-nil-check at each boundary.
+    struct ConcurrencyProbe {
+        var mutationDidRead: (() -> Void)?
+        var externalReloadWillAcquireMutationLock: (() -> Void)?
+        var externalReloadDidAdopt: (() -> Void)?
+        var attachmentCleanupWillAcquireMutationLock: (() -> Void)?
+        var secretCleanupRetryDidBeginPass: (() -> Void)?
+
+        init(
+            mutationDidRead: (() -> Void)? = nil,
+            externalReloadWillAcquireMutationLock: (() -> Void)? = nil,
+            externalReloadDidAdopt: (() -> Void)? = nil,
+            attachmentCleanupWillAcquireMutationLock: (() -> Void)? = nil,
+            secretCleanupRetryDidBeginPass: (() -> Void)? = nil
+        ) {
+            self.mutationDidRead = mutationDidRead
+            self.externalReloadWillAcquireMutationLock = externalReloadWillAcquireMutationLock
+            self.externalReloadDidAdopt = externalReloadDidAdopt
+            self.attachmentCleanupWillAcquireMutationLock = attachmentCleanupWillAcquireMutationLock
+            self.secretCleanupRetryDidBeginPass = secretCleanupRetryDidBeginPass
+        }
+    }
+
+    /// A conflict-row action, expressed as an idempotent domain mutation rather than a UI
+    /// toggle. The resolver can be stale by the time the user clicks; `disable` still converges
+    /// on the requested state if another surface already disabled the snippet.
+    public enum TriggerConflictResolutionAction: Equatable {
+        case disable
+        case delete
+    }
+
+    /// Stable identity for one rendered occurrence in a malformed library that may contain
+    /// duplicate snippet UUIDs. `occurrence` is the zero-based ordinal among snippets with the
+    /// same UUID in the same group; the full rendered value is retained as a content fingerprint,
+    /// so a reordered, moved, or edited stale row is rejected instead of mutating another entry.
+    public struct TriggerConflictTarget: Equatable {
+        public let groupID: UUID
+        public let snippetID: UUID
+        public let occurrence: Int
+        fileprivate let renderedSnippet: SnippetModel
+
+        public init(groupID: UUID, snippet: SnippetModel, occurrence: Int) {
+            self.groupID = groupID
+            self.snippetID = snippet.id
+            self.occurrence = occurrence
+            self.renderedSnippet = snippet
+        }
+    }
+
+    /// The exact persistence result of a trigger-conflict action.
+    public enum TriggerConflictResolutionOutcome: Equatable {
+        case persisted
+        /// The resolver's snapshot was stale, missing, or ambiguous.
+        case targetUnavailable
+        /// The candidate mutation was not committed. Carries the store's typed reason so the UI
+        /// cannot present a refused or failed write as a successful resolution.
+        case refused(SaveOutcome)
     }
 
     /// §1.13: one iCloud conflict version, surfaced instead of being silently overwritten.
@@ -185,6 +290,41 @@ public final class SnippetStore {
         }
     }
 
+    /// Read-only projection used by import confirmation UI. It is produced by
+    /// the same merge implementation that commit uses, so collision scope and
+    /// case-folding cannot drift into a second UI-only interpretation.
+    public struct ImportPreview: Equatable {
+        public enum Status: Equatable {
+            case isNew
+            case isUpdate
+            case isConflict
+        }
+
+        public struct Item: Equatable {
+            public let snippet: SnippetModel
+            public let groupName: String
+            public let status: Status
+
+            fileprivate init(snippet: SnippetModel, groupName: String, status: Status) {
+                self.snippet = snippet
+                self.groupName = groupName
+                self.status = status
+            }
+        }
+
+        /// The exact parsed payload these rows describe and confirmation commits.
+        public let plan: SnippetImporter.ImportPlan
+        public let items: [Item]
+        public var newCount: Int { items.filter { $0.status == .isNew }.count }
+        public var updateCount: Int { items.filter { $0.status == .isUpdate }.count }
+        public var conflictCount: Int { items.filter { $0.status == .isConflict }.count }
+
+        fileprivate init(plan: SnippetImporter.ImportPlan, items: [Item]) {
+            self.plan = plan
+            self.items = items
+        }
+    }
+
     public struct Location: Equatable {
         public let fileURL: URL
         /// User explicitly chose this path (iCloud sync folder, Link, Save As).
@@ -244,6 +384,8 @@ public final class SnippetStore {
     private var _hardFailure: SaveOutcome?
     private var _lastSaveFailure: SaveOutcome?
     private var _pendingConflicts: [ConflictVersion] = []
+    /// Count only: account identifiers and values never cross the SecretStore boundary.
+    private var _pendingSecretCleanupCount = 0
 
     private var fileURL: URL
     private var expectsExistingLibrary: Bool
@@ -257,7 +399,7 @@ public final class SnippetStore {
     private var savedDigest: FileDigest = .absent
 
     /// Serializes read-modify-write mutations (`importGroups`, `saveSnippets`) and
-    /// the sanitize→write→purge tail of every direct `saveGroups`.
+    /// the sanitize→write→cache-commit tail of every direct `saveGroups`.
     /// The per-call `lock` cannot span an RMW — `loadGroups()` and `saveGroups()`
     /// acquire it internally and unfair locks are not reentrant — so two
     /// overlapping merges both computed against the same cached baseline and the
@@ -266,16 +408,30 @@ public final class SnippetStore {
     /// and every successful in-process write refreshes the digest that the check
     /// compares against.
     ///
-    /// `saveGroups` is included because its orphan purge is destructive beyond the
-    /// library file: a direct save computed from a stale snapshot could interleave
-    /// its purge after another writer's commit and delete keychain secrets that
-    /// the just-written library still references.
+    /// `saveGroups` is included so a direct save computed from a stale snapshot cannot
+    /// interleave its file/cache commit with a logical mutation. Secret cleanup is deliberately
+    /// excluded: securityd can stall indefinitely, so cleanup runs single-flight on its own queue
+    /// and re-reads this store's canonical committed live-ID projection before each deletion.
     ///
     /// Held across listener dispatch (they fire from `saveGroupsSerialized`, which
     /// these methods all reach): a listener that synchronously calls back into
     /// `importGroups`/`saveSnippets`/`saveGroups` would self-deadlock. Every
     /// current listener hops to main asynchronously first.
     private let rmwLock = NSLock()
+
+    private let concurrencyProbeLock = NSLock()
+    private var concurrencyProbe: ConcurrencyProbe?
+    private let secretCleanupRetryStateLock = NSLock()
+    /// Covers the destructive sweep itself, including direct test/maintenance calls. The request
+    /// queue is serial, but this also prevents a synchronous retry from racing that worker.
+    private let secretCleanupExecutionLock = NSLock()
+    private var secretCleanupRetryRunning = false
+    private var secretCleanupRetryNeedsTrailingPass = false
+    private var secretCleanupRetryCompletions: [(SecretStore.PurgeSummary) -> Void] = []
+    private let secretCleanupRetryQueue = DispatchQueue(
+        label: "devtype.store.secret-cleanup",
+        qos: .utility
+    )
 
     /// §2.5: reentrancy guard. Set for the duration of an external-state apply so a
     /// watcher event produced by that apply cannot recurse back into `reloadFromDisk`.
@@ -439,6 +595,19 @@ public final class SnippetStore {
     }
 
     deinit { watcher?.stop() }
+
+    func installConcurrencyProbeForTesting(_ probe: ConcurrencyProbe?) {
+        concurrencyProbeLock.lock()
+        concurrencyProbe = probe
+        concurrencyProbeLock.unlock()
+    }
+
+    private func invokeConcurrencyProbe(_ keyPath: KeyPath<ConcurrencyProbe, (() -> Void)?>) {
+        concurrencyProbeLock.lock()
+        let callback = concurrencyProbe?[keyPath: keyPath]
+        concurrencyProbeLock.unlock()
+        callback?()
+    }
 
     public func consumeLastLoadIssue() -> LoadIssue? {
         lock.lock()
@@ -627,7 +796,7 @@ public final class SnippetStore {
             _saveBlocked = hard
             saveBlockLock.unlock()
             DevTypeLog.store.error(
-                "[Store] Library at \(self.fileURL.path, privacy: .public) is unreadable; saves are blocked until this is resolved."
+                "[Store] Library \(DevTypeLog.publicPathMetadata(self.fileURL.path), privacy: .public) is unreadable; saves are blocked until this is resolved."
             )
             return _cachedGroups ?? []
         }
@@ -703,16 +872,60 @@ public final class SnippetStore {
     }
 
     /// Commits `groups` as the whole library. The sanitize → write → cache-commit
-    /// → purge sequence runs under `rmwLock`, so it cannot interleave with the
+    /// sequence runs under `rmwLock`, so it cannot interleave with the
     /// read-modify-write mutations (`importGroups`, `saveSnippets`): a save whose
-    /// payload was computed from a stale snapshot can still lose to a later
-    /// logical writer, but its write and its orphan purge now land atomically —
-    /// a purge never runs against library bytes other than the ones it computed.
+    /// payload was computed from a stale snapshot can still lose to a later logical writer. The
+    /// potentially unbounded secret cleanup is scheduled after commit and re-checks the latest
+    /// canonical cache around each deletion; it never extends this mutation lock across securityd.
     @discardableResult
     public func saveGroups(_ groups: [SnippetGroup]) -> SaveOutcome {
         rmwLock.lock()
         defer { rmwLock.unlock() }
         return saveGroupsSerialized(groups)
+    }
+
+    /// Applies a logical mutation to the latest in-process library while holding the same lock
+    /// used by imports, conflict resolution, and direct saves. Long-lived controllers must use
+    /// this instead of loading a snapshot and later handing that whole snapshot to `saveGroups`,
+    /// which can overwrite another successful in-process mutation even though disk digests match.
+    ///
+    /// Return `false` from `mutation` when the user-visible target or another required precondition
+    /// no longer exists. That is a stale action (`rejected`), not an unchanged successful edit.
+    @discardableResult
+    public func mutateGroups(
+        _ mutation: (inout [SnippetGroup]) -> Bool
+    ) -> GroupMutationResult {
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
+
+        lock.lock()
+        let before = _cachedGroups ?? loadGroupsUnlocked()
+        lock.unlock()
+        invokeConcurrencyProbe(\.mutationDidRead)
+
+        var after = before
+        guard mutation(&after) else { return .rejected(current: before) }
+        guard after != before else { return .unchanged(current: before) }
+
+        let sanitized = Self.sanitizeGroups(after)
+        let outcome = saveGroupsSerialized(sanitized)
+        guard outcome.didSave else { return .refused(outcome) }
+        return .saved(before: before, after: sanitized)
+    }
+
+    /// Replaces the whole library only when it is still exactly the state an earlier operation
+    /// committed. This is the safe model-only undo/rollback primitive: if any other writer landed
+    /// in between, refusing preserves that newer work instead of reverting it incidentally.
+    @discardableResult
+    public func replaceGroups(
+        ifCurrent expected: [SnippetGroup],
+        with replacement: [SnippetGroup]
+    ) -> GroupMutationResult {
+        mutateGroups { current in
+            guard current == expected else { return false }
+            current = replacement
+            return true
+        }
     }
 
     /// Body of `saveGroups`. The caller must already hold `rmwLock`: either the
@@ -727,11 +940,51 @@ public final class SnippetStore {
     /// lost at quit.
     private func saveGroupsSerialized(_ groups: [SnippetGroup]) -> SaveOutcome {
         let sanitized = Self.sanitizeGroups(groups)
+        let liveSecretIDs = Set(
+            sanitized
+                .flatMap(\.snippets)
+                .filter(\.isSecret)
+                .map(\.id)
+        )
+        // Install the whole commit's protection in one brief critical section. This method already
+        // runs under `rmwLock`, so it must never wait for securityd: an uncoordinated same-ID
+        // re-reference that intersects an irreversible delete fails closed, releasing `rmwLock`
+        // for unrelated mutations. The editor's staged-secret transaction acquires its blocking
+        // per-ID lease before entering this method, so its publication reaches this fast path only
+        // after the old delete has finished and the replacement value has been stored.
+        let secretCommitLease = secretPurgeEnabled
+            ? secretStore.tryProtectFromOrphanPurge(liveSecretIDs)
+            : nil
+        if secretPurgeEnabled, secretCommitLease == nil {
+            let failure = SaveOutcome.failed(
+                "A referenced secret is still being removed; retry after cleanup finishes."
+            )
+            publishSaveFailure(failure)
+            return failure
+        }
+        defer { secretCommitLease?.end() }
+
+        if secretPurgeEnabled {
+            guard let previouslyLiveSecretIDs = committedLiveSecretIDs() else {
+                let failure = SaveOutcome.failed("Secret state is unavailable; the library was not changed.")
+                publishSaveFailure(failure)
+                return failure
+            }
+            let newlyReferencedIDs = liveSecretIDs.subtracting(previouslyLiveSecretIDs)
+            guard newlyReferencedIDs.allSatisfy({ secretStore.hasSecret(for: $0) }) else {
+                let failure = SaveOutcome.failed(
+                    "A newly referenced secret has no stored value; the library was not changed."
+                )
+                publishSaveFailure(failure)
+                return failure
+            }
+        }
+
         let outcome = writeGroupsToDisk(sanitized)
 
         guard outcome.didSave else {
             DevTypeLog.store.error(
-                "[Store] Save did not land: \(String(describing: outcome), privacy: .public)"
+                "[Store] Save did not land outcome=\(outcome.diagnosticLabel, privacy: .public)"
             )
             publishSaveFailure(outcome)
             return outcome
@@ -747,15 +1000,15 @@ public final class SnippetStore {
 
         let flat = sanitized.flatMap(\.snippets)
 
-        // Only after the bytes reached disk. A secret whose snippet is gone from the *saved*
-        // library is unreachable — no UI can ever show it again — so leaving it in the keychain
-        // means the user deleted a password and it silently stayed. Purging before the write
-        // would destroy the value for a save that then failed, which is the worse mistake, so
-        // this deliberately sits under `outcome.didSave`.
-        purgeOrphanSecrets(liveIDs: Set(flat.map(\.id)))
-
         for listener in snippetListeners.values { listener(flat) }
         for listener in groupListenersCopy.values { listener(sanitized) }
+
+        // Only after bytes, cache, and deterministic notifications have committed. Keychain and
+        // encrypted-archive operations may stall; enqueueing is bounded and coalesced, while the
+        // worker re-reads the canonical live secret IDs immediately around each deletion.
+        if secretPurgeEnabled {
+            requestOrphanSecretCleanupRetry()
+        }
         return outcome
     }
 
@@ -765,14 +1018,28 @@ public final class SnippetStore {
     /// the importers' scratch stores, and every test that saves two snippets to a temp directory —
     /// would otherwise read "these are all the snippets that exist" and delete the real library's
     /// secrets. Only the shared store, which owns the whole library, is allowed to purge.
-    private func purgeOrphanSecrets(liveIDs: Set<UUID>) {
-        guard secretPurgeEnabled else { return }
-        let removed = secretStore.purgeOrphans(keeping: liveIDs)
-        if removed > 0 {
+    @discardableResult
+    private func purgeOrphanSecrets(
+        keepingLatest latestLiveIDs: () -> Set<UUID>?
+    ) -> SecretStore.PurgeSummary {
+        guard secretPurgeEnabled else { return .init() }
+        let summary = secretStore.purgeOrphans(keepingLatest: latestLiveIDs)
+        saveBlockLock.lock()
+        _pendingSecretCleanupCount = summary.failed
+        saveBlockLock.unlock()
+        if summary.removed > 0 {
             DevTypeLog.store.info(
-                "[Store] purged \(removed, privacy: .public) orphaned secret(s) from the keychain"
+                "[Store] purged \(summary.removed, privacy: .public) orphaned secret(s) from the keychain"
             )
         }
+        if summary.failed > 0 {
+            // Aggregate counts only. Never log the stable keychain account UUID, snippet title,
+            // trigger, or value while surfacing a failed destructive cleanup.
+            DevTypeLog.store.error(
+                "[Store] orphaned secret cleanup incomplete attempted=\(summary.attempted, privacy: .public) removed=\(summary.removed, privacy: .public) failed=\(summary.failed, privacy: .public)"
+            )
+        }
+        return summary
     }
 
     /// §1.10: `.merge` shim preserving the original signature.
@@ -789,6 +1056,16 @@ public final class SnippetStore {
     public func importGroups(_ imported: [SnippetGroup], mode: ImportMode) -> ImportSummary {
         rmwLock.lock()
         defer { rmwLock.unlock() }
+        return importGroupsSerialized(imported, mode: mode)
+    }
+
+    /// Caller owns `rmwLock`. Shared by the ordinary group API and the image
+    /// promotion transaction so orphan collection cannot observe a promoted
+    /// attachment before its library reference commits.
+    private func importGroupsSerialized(
+        _ imported: [SnippetGroup],
+        mode: ImportMode
+    ) -> ImportSummary {
         var current = loadGroups()
         var created: [String] = []
         var updatedGroups: [String] = []
@@ -800,24 +1077,36 @@ public final class SnippetStore {
             switch mode {
             case .intoNewGroup:
                 var copy = group
+                // "Duplicate" is a new library entity, not another occurrence of the vendor's
+                // stable UUID. Repeating the same import must therefore create a fresh identity
+                // every time, even when the first vendor UUID did not collide yet.
+                copy.id = Self.freshGroupID(excluding: current)
                 copy.name = Self.uniqueGroupName(base: group.name, existing: current.map(\.name))
                 added += copy.snippets.count
                 current.append(copy)
                 created.append(copy.name)
 
             case .replaceGroup:
-                if let idx = current.firstIndex(where: { $0.name == group.name }) {
+                if let idx = Self.importTargetIndex(named: group.name, in: current) {
                     added += group.snippets.count
-                    current[idx] = group
+                    var replacement = group
+                    // Replacement keeps the local entity's identity; importing a vendor UUID
+                    // must not invalidate selection/restoration state or collide with a peer.
+                    replacement.id = current[idx].id
+                    current[idx] = replacement
                     updatedGroups.append(group.name)
                 } else {
+                    var copy = group
+                    if current.contains(where: { $0.id == copy.id }) {
+                        copy.id = Self.freshGroupID(excluding: current)
+                    }
                     added += group.snippets.count
-                    current.append(group)
+                    current.append(copy)
                     created.append(group.name)
                 }
 
             case .merge:
-                if let idx = current.firstIndex(where: { $0.name == group.name }) {
+                if let idx = Self.importTargetIndex(named: group.name, in: current) {
                     let result = Self.mergeSnippets(incoming: group.snippets, into: current[idx].snippets)
                     current[idx].snippets = result.snippets
                     added += result.added
@@ -827,13 +1116,17 @@ public final class SnippetStore {
                         updatedGroups.append(group.name)
                     }
                 } else {
+                    var copy = group
+                    if current.contains(where: { $0.id == copy.id }) {
+                        copy.id = Self.freshGroupID(excluding: current)
+                    }
                     added += group.snippets.count
-                    current.append(group)
+                    current.append(copy)
                     created.append(group.name)
                 }
 
             case .skipConflicts:
-                if let idx = current.firstIndex(where: { $0.name == group.name }) {
+                if let idx = Self.importTargetIndex(named: group.name, in: current) {
                     let result = Self.mergeSnippets(
                         incoming: group.snippets,
                         into: current[idx].snippets,
@@ -846,8 +1139,12 @@ public final class SnippetStore {
                         updatedGroups.append(group.name)
                     }
                 } else {
+                    var copy = group
+                    if current.contains(where: { $0.id == copy.id }) {
+                        copy.id = Self.freshGroupID(excluding: current)
+                    }
                     added += group.snippets.count
-                    current.append(group)
+                    current.append(copy)
                     created.append(group.name)
                 }
             }
@@ -867,11 +1164,58 @@ public final class SnippetStore {
         )
     }
 
+    /// Preview a prepared source against the store's current library snapshot.
+    /// Commit still reloads under `rmwLock`, preserving edits made while the
+    /// confirmation sheet is open.
+    public func previewImport(_ plan: SnippetImporter.ImportPlan) -> ImportPreview {
+        Self.previewImport(plan, against: loadGroups())
+    }
+
+    /// Pure preview seam for tests and UI projections. Same-named imported
+    /// groups are simulated in order because commit does the same; a trigger in
+    /// another group is deliberately not a collision.
+    public static func previewImport(
+        _ plan: SnippetImporter.ImportPlan,
+        against existingGroups: [SnippetGroup]
+    ) -> ImportPreview {
+        var projected = existingGroups
+        var items: [ImportPreview.Item] = []
+
+        for group in plan.groups {
+            if let index = importTargetIndex(named: group.name, in: projected) {
+                let merge = mergeSnippets(incoming: group.snippets, into: projected[index].snippets)
+                projected[index].snippets = merge.snippets
+                items.append(contentsOf: zip(group.snippets, merge.statuses).map { snippet, status in
+                    ImportPreview.Item(snippet: snippet, groupName: group.name, status: status)
+                })
+            } else {
+                projected.append(group)
+                items.append(contentsOf: group.snippets.map {
+                    ImportPreview.Item(snippet: $0, groupName: group.name, status: .isNew)
+                })
+            }
+        }
+
+        return ImportPreview(plan: plan, items: items)
+    }
+
+    private static func importTargetIndex(named name: String, in groups: [SnippetGroup]) -> Int? {
+        groups.firstIndex { $0.name == name }
+    }
+
+    private static func freshGroupID(excluding groups: [SnippetGroup]) -> UUID {
+        let occupied = Set(groups.map(\.id))
+        var candidate = UUID()
+        while occupied.contains(candidate) { candidate = UUID() }
+        return candidate
+    }
+
     private struct MergeResult {
         var snippets: [SnippetModel]
         var added: Int
         var updated: Int
         var unchanged: Int
+        var statuses: [ImportPreview.Status]
     }
 
     private static func mergeSnippets(
@@ -895,11 +1239,14 @@ public final class SnippetStore {
         var added = 0
         var updated = 0
         var unchanged = 0
+        var statuses: [ImportPreview.Status] = []
 
         for candidate in incoming {
             let trigger = candidate.triggerKeyword
             let folded = trigger.lowercased()
-            let match = trigger.isEmpty ? nil : (exactIndex[trigger] ?? foldedIndex[folded])
+            let exactMatch = trigger.isEmpty ? nil : exactIndex[trigger]
+            let foldedMatch = trigger.isEmpty ? nil : foldedIndex[folded]
+            let match = exactMatch ?? foldedMatch
 
             guard let idx = match else {
                 result.append(candidate)
@@ -909,10 +1256,14 @@ public final class SnippetStore {
                     if foldedIndex[folded] == nil { foldedIndex[folded] = position }
                 }
                 added += 1
+                statuses.append(.isNew)
                 continue
             }
 
             let localSnippet = result[idx]
+            statuses.append(
+                exactMatch != nil || localSnippet.id == candidate.id ? .isUpdate : .isConflict
+            )
             if !updateMatches {
                 unchanged += 1
                 continue
@@ -962,7 +1313,13 @@ public final class SnippetStore {
             }
         }
 
-        return MergeResult(snippets: result, added: added, updated: updated, unchanged: unchanged)
+        return MergeResult(
+            snippets: result,
+            added: added,
+            updated: updated,
+            unchanged: unchanged,
+            statuses: statuses
+        )
     }
 
     private static func uniqueGroupName(base: String, existing: [String]) -> String {
@@ -1074,6 +1431,84 @@ public final class SnippetStore {
         saveBlockLock.lock()
         defer { saveBlockLock.unlock() }
         return _lastSaveFailure
+    }
+
+    /// Aggregate cleanup debt suitable for diagnostics. No keychain account identifiers or
+    /// secret values are retained here.
+    public var pendingSecretCleanupCount: Int {
+        saveBlockLock.lock()
+        defer { saveBlockLock.unlock() }
+        return _pendingSecretCleanupCount
+    }
+
+    /// Retries a failed orphan sweep against the latest committed library. The destructive work is
+    /// serialized separately from mutations: securityd may stall, and no persistence/UI action may
+    /// wait behind it. `SecretStore` re-evaluates this projection before each delete and publishes
+    /// a per-ID claim that makes same-ID staging wait while every unrelated mutation continues.
+    @discardableResult
+    public func retryOrphanSecretCleanup() -> SecretStore.PurgeSummary {
+        secretCleanupExecutionLock.lock()
+        defer { secretCleanupExecutionLock.unlock() }
+        return purgeOrphanSecrets(keepingLatest: { [weak self] in
+            self?.committedLiveSecretIDs()
+        })
+    }
+
+    /// Nil is intentionally distinct from an empty library. If canonical cache state is unavailable,
+    /// cleanup retains every value and a later request retries after state recovery.
+    private func committedLiveSecretIDs() -> Set<UUID>? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let groups = _cachedGroups else { return nil }
+        return Set(
+            groups
+                .flatMap(\.snippets)
+                .filter(\.isSecret)
+                .map(\.id)
+        )
+    }
+
+    /// Coalesces launch, activation, and manual retries onto one bounded worker. While a pass is
+    /// stalled in securityd, any number of new requests sets one trailing-pass bit rather than
+    /// enqueueing one global job apiece. Callbacks run on the cleanup queue after the coalesced
+    /// work is complete.
+    public func requestOrphanSecretCleanupRetry(
+        completion: ((SecretStore.PurgeSummary) -> Void)? = nil
+    ) {
+        secretCleanupRetryStateLock.lock()
+        if let completion { secretCleanupRetryCompletions.append(completion) }
+        if secretCleanupRetryRunning {
+            secretCleanupRetryNeedsTrailingPass = true
+            secretCleanupRetryStateLock.unlock()
+            return
+        }
+        secretCleanupRetryRunning = true
+        secretCleanupRetryStateLock.unlock()
+
+        secretCleanupRetryQueue.async { [weak self] in
+            self?.runRequestedOrphanSecretCleanup()
+        }
+    }
+
+    private func runRequestedOrphanSecretCleanup() {
+        while true {
+            invokeConcurrencyProbe(\.secretCleanupRetryDidBeginPass)
+            let summary = retryOrphanSecretCleanup()
+
+            secretCleanupRetryStateLock.lock()
+            if secretCleanupRetryNeedsTrailingPass {
+                secretCleanupRetryNeedsTrailingPass = false
+                secretCleanupRetryStateLock.unlock()
+                continue
+            }
+            secretCleanupRetryRunning = false
+            let completions = secretCleanupRetryCompletions
+            secretCleanupRetryCompletions.removeAll()
+            secretCleanupRetryStateLock.unlock()
+
+            for completion in completions { completion(summary) }
+            return
+        }
     }
 
     /// §1.4: clears the surfaced failure after the UI has shown it. Does not
@@ -1249,7 +1684,7 @@ public final class SnippetStore {
             data = try Self.encodeLibrary(groups)
         } catch {
             DevTypeLog.store.error(
-                "[Store] Failed to encode snippets: \(error.localizedDescription, privacy: .public)"
+                "[Store] Failed to encode snippets \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             return .failed(error.localizedDescription)
         }
@@ -1291,13 +1726,13 @@ public final class SnippetStore {
         }
         if let error = coordinationError {
             DevTypeLog.store.error(
-                "[Store] File coordination failed while saving: \(error.localizedDescription, privacy: .public)"
+                "[Store] File coordination failed while saving \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             return .failed(error.localizedDescription)
         }
         if let error = writeError {
             DevTypeLog.store.error(
-                "[Store] Failed to save snippets: \(error.localizedDescription, privacy: .public)"
+                "[Store] Failed to save snippets \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             return .failed(error.localizedDescription)
         }
@@ -1368,7 +1803,7 @@ public final class SnippetStore {
             try fm.startDownloadingUbiquitousItem(at: url)
         } catch {
             DevTypeLog.store.error(
-                "[Store] startDownloadingUbiquitousItem failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                "[Store] startDownloadingUbiquitousItem failed \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             return false
         }
@@ -1475,7 +1910,7 @@ public final class SnippetStore {
             return candidate
         } catch {
             DevTypeLog.store.error(
-                "[Store] Could not back up unreadable library: \(error.localizedDescription, privacy: .public)"
+                "[Store] Could not back up unreadable library \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             return nil
         }
@@ -1502,7 +1937,7 @@ public final class SnippetStore {
             raw = try coordinatedRead(at: url)
         } catch {
             DevTypeLog.store.error(
-                "[Store] Failed to read snippets from \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                "[Store] Failed to read snippets \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             out.digest = .unreadable
             out.loadIssue = .unreadable(path: url.path, reason: error.localizedDescription)
@@ -1532,7 +1967,7 @@ public final class SnippetStore {
             }
         } catch {
             DevTypeLog.store.error(
-                "[Store] Failed to decode snippets from \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                "[Store] Failed to decode snippets \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             if let backupURL = makeTimestampedBackup(of: url) {
                 out.loadIssue = .corrupted(backupURL: backupURL)
@@ -1609,6 +2044,13 @@ public final class SnippetStore {
             externalStateLock.unlock()
         }
 
+        // A reload is another whole-library writer: advancing the remembered digest and cache
+        // while a mutation is paused after reading would let that stale mutation pass its digest
+        // guard and overwrite the just-adopted external bytes. Share the complete RMW boundary.
+        invokeConcurrencyProbe(\.externalReloadWillAcquireMutationLock)
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
+
         let loaded = Self.loadFrom(Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary))
         setLastKnownDigest(loaded.digest)
         let conflictsChanged = storePendingConflicts(loaded.conflicts)
@@ -1672,6 +2114,7 @@ public final class SnippetStore {
         let snippetListeners = listeners
         let groupListenersCopy = groupListeners
         lock.unlock()
+        invokeConcurrencyProbe(\.externalReloadDidAdopt)
 
         let flat = Self.expandableSnippets(in: loaded.groups)
         // `self` is only needed to prove the store is still alive — both listener tables were
@@ -1802,20 +2245,63 @@ public final class SnippetStore {
         }
     }
 
-    /// Unified import: auto-detects TextExpander vs Espanso and merges the
-    /// resulting groups into the library. Single entry point for the UI.
+    /// Convenience for non-preview callers: auto-detect once, prepare a value
+    /// plan, then merge that plan into the library.
     @discardableResult
     public func importSnippets(from url: URL) throws -> SnippetImporter.ImportResult {
-        let result = try SnippetImporter.importFrom(url)
-        _ = importGroups(result.groups)
-        return result
+        let plan = try SnippetImporter.prepareImport(from: url)
+        let committed = commitImport(plan, mode: .merge)
+        guard committed.summary.outcome.didSave else {
+            throw SnippetImporter.ImportError.libraryCommitFailed
+        }
+        return committed.result
     }
 
     /// §1.10: same as `importSnippets(from:)` but returns the merge diff.
     public func importSnippets(from url: URL, mode: ImportMode) throws -> (SnippetImporter.ImportResult, ImportSummary) {
-        let result = try SnippetImporter.importFrom(url)
-        let summary = importGroups(result.groups, mode: mode)
-        return (result, summary)
+        let plan = try SnippetImporter.prepareImport(from: url)
+        return commitImport(plan, mode: mode)
+    }
+
+    /// Commits the exact parsed value shown in the confirmation sheet. No URL is
+    /// retained or read here; the store rebases these groups onto its current
+    /// library under the existing serialized read-modify-write boundary.
+    public func commitImport(
+        _ plan: SnippetImporter.ImportPlan,
+        mode: ImportMode
+    ) -> (result: SnippetImporter.ImportResult, summary: ImportSummary) {
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
+
+        let materialized: SnippetImporter.MaterializedImport
+        do {
+            materialized = try plan.materializeAttachments()
+        } catch {
+            return (
+                plan.result,
+                ImportSummary(
+                    mode: mode,
+                    groupsCreated: [],
+                    groupsUpdated: [],
+                    snippetsAdded: 0,
+                    snippetsUpdated: 0,
+                    snippetsUnchanged: 0,
+                    outcome: .failed("attachmentCommitFailed")
+                )
+            )
+        }
+
+        let summary = importGroupsSerialized(materialized.result.groups, mode: mode)
+        guard summary.outcome.didSave else {
+            materialized.rollbackAll()
+            return (materialized.result, summary)
+        }
+
+        // `.skipConflicts` can deliberately decline an incoming image snippet.
+        // Remove only files created by this promotion that the committed library
+        // does not reference; never run a broad orphan sweep here.
+        materialized.removeUnreferenced(from: loadGroups())
+        return (materialized.result, summary)
     }
 
     // MARK: - Trigger hygiene (§1.9)
@@ -1861,6 +2347,116 @@ public final class SnippetStore {
         return Self.triggerConflicts(in: loadGroups())
     }
 
+    /// Resolves one conflict entry against the latest in-process library snapshot.
+    ///
+    /// This owns the complete read-modify-write under `rmwLock`. Passing the groups rendered by
+    /// the sheet back to `saveGroups` would overwrite edits that landed while the user was
+    /// reading or confirming the conflict. The UUID is resolved only after acquiring the lock,
+    /// and cache/listener changes still happen only through `saveGroupsSerialized` after a real
+    /// disk write.
+    public func resolveTriggerConflict(
+        snippetID: UUID,
+        action: TriggerConflictResolutionAction
+    ) -> TriggerConflictResolutionOutcome {
+        resolveTriggerConflict(action: action) { groups in
+            var matches: [(group: Int, snippet: Int)] = []
+            for groupIndex in groups.indices {
+                for snippetIndex in groups[groupIndex].snippets.indices
+                where groups[groupIndex].snippets[snippetIndex].id == snippetID {
+                    matches.append((groupIndex, snippetIndex))
+                }
+            }
+            // UUID-only callers remain idempotent for a well-formed library, but must fail closed
+            // when malformed input makes that UUID name more than one physical entry.
+            return matches.count == 1 ? matches[0] : nil
+        }
+    }
+
+    /// Resolves the exact occurrence rendered by the conflict sheet. Unlike the compatibility
+    /// UUID-only entry point, this can safely address non-identical duplicate UUIDs. Any moved,
+    /// reordered, edited, or indistinguishable duplicate is a stale/ambiguous target and is refused.
+    public func resolveTriggerConflict(
+        target: TriggerConflictTarget,
+        action: TriggerConflictResolutionAction
+    ) -> TriggerConflictResolutionOutcome {
+        resolveTriggerConflict(action: action) { groups in
+            guard target.occurrence >= 0 else { return nil }
+            var matches: [(group: Int, snippet: Int)] = []
+
+            for groupIndex in groups.indices where groups[groupIndex].id == target.groupID {
+                let sameID = groups[groupIndex].snippets.indices.filter {
+                    groups[groupIndex].snippets[$0].id == target.snippetID
+                }
+                guard sameID.indices.contains(target.occurrence) else { continue }
+                let snippetIndex = sameID[target.occurrence]
+                let candidate = groups[groupIndex].snippets[snippetIndex]
+                guard Self.matchesRenderedConflictTarget(
+                    candidate,
+                    rendered: target.renderedSnippet,
+                    action: action
+                ) else { continue }
+
+                // Two byte-for-byte-equivalent duplicate identities cannot be distinguished by a
+                // stale UI row even with an ordinal; reject rather than guessing which one moved.
+                let indistinguishable = sameID.filter {
+                    Self.matchesRenderedConflictTarget(
+                        groups[groupIndex].snippets[$0],
+                        rendered: target.renderedSnippet,
+                        action: action
+                    )
+                }
+                guard indistinguishable.count == 1 else { continue }
+                matches.append((groupIndex, snippetIndex))
+            }
+            return matches.count == 1 ? matches[0] : nil
+        }
+    }
+
+    private func resolveTriggerConflict(
+        action: TriggerConflictResolutionAction,
+        locate: ([SnippetGroup]) -> (group: Int, snippet: Int)?
+    ) -> TriggerConflictResolutionOutcome {
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
+
+        lock.lock()
+        var groups = _cachedGroups ?? loadGroupsUnlocked()
+        lock.unlock()
+
+        guard let location = locate(groups) else { return .targetUnavailable }
+
+        switch action {
+        case .disable:
+            // The requested state already holds. Avoid a needless whole-library write while
+            // still reporting success: the stale conflict is resolved and a reload will remove it.
+            if !groups[location.group].snippets[location.snippet].enabled {
+                return .persisted
+            }
+            groups[location.group].snippets[location.snippet].enabled = false
+        case .delete:
+            groups[location.group].snippets.remove(at: location.snippet)
+        }
+
+        let outcome = saveGroupsSerialized(groups)
+        return outcome.didSave ? .persisted : .refused(outcome)
+    }
+
+    private static func matchesRenderedConflictTarget(
+        _ candidate: SnippetModel,
+        rendered: SnippetModel,
+        action: TriggerConflictResolutionAction
+    ) -> Bool {
+        var candidate = candidate
+        var rendered = rendered
+        if action == .disable {
+            // Another surface may already have converged on the requested disabled state. Enabled
+            // is therefore the one mutable bit excluded from this action's stale-row fingerprint.
+            candidate.enabled = false
+            rendered.enabled = false
+        }
+        return candidate == rendered
+    }
+
     /// §1.9: case folding matches `AbbreviationMatcher` — case-sensitive snippets
     /// key on the exact trigger, case-insensitive ones on `lowercased()` — so the
     /// store and the matcher agree about what collides.
@@ -1882,13 +2478,16 @@ public final class SnippetStore {
         var byFolded: [String: [Entry]] = [:]
         var all: [Entry] = []
 
-        for group in groups {
+        for group in groups where group.enabled {
             for snippet in group.snippets {
                 // A secret never reaches the matcher (`EventTapEngine.snippets` filters it), so it
                 // can neither shadow another trigger nor be shadowed, and an empty trigger on one
                 // is intentional rather than a mistake to report. Including them here produced
                 // conflicts the user could not act on and warnings about triggers that do nothing.
-                guard snippet.isTypedTriggerExpandable else { continue }
+                // Disabled snippets and snippets in disabled groups are equally absent from the
+                // matcher. Reporting either made the resolver's Disable action appear to work
+                // while the same duplicate/case/empty warning immediately returned.
+                guard snippet.enabled, snippet.isTypedTriggerExpandable else { continue }
                 let trigger = snippet.triggerKeyword
                 let punctuationStarted = trigger.first.map { !AbbreviationMatcher.isWordCharacter($0) } ?? false
                 let entry = Entry(
@@ -1902,8 +2501,7 @@ public final class SnippetStore {
                     empties.append(entry)
                 } else {
                     byFolded[trigger.lowercased(), default: []].append(entry)
-                    // Disabled snippets cannot fire, so they neither shadow nor are shadowed.
-                    if snippet.enabled { all.append(entry) }
+                    all.append(entry)
                 }
             }
         }
@@ -2000,16 +2598,73 @@ public final class SnippetStore {
         ]
     }
 
+    /// Replaces the complete library with a single canonical defaults group under the same
+    /// read-modify-write boundary as every other logical mutation. Callers receive the exact
+    /// before/after pair and must not present success unless this result is `.saved`.
+    @discardableResult
+    public func resetToDefaults() -> GroupMutationResult {
+        mutateGroups { groups in
+            groups = [SnippetGroup(
+                name: SnippetDocument.defaultGroupName,
+                snippets: defaultSnippets()
+            )]
+            return true
+        }
+    }
+
     public func search(_ query: String, limit: Int? = nil) -> [SearchHit] {
         SnippetSearch.run(query: query, in: loadGroups(), includeDisabled: false, limit: limit)
     }
 
     // MARK: - Image housekeeping (§3.7)
 
+    /// Deletes one attachment only if the latest committed library still leaves it unreferenced.
+    ///
+    /// Post-save cleanup cannot safely act on the editor/manager's old snapshot: another mutation
+    /// may have re-used the path after that save returned. The reference check and physical
+    /// deletion therefore share the store's whole-library RMW lock. A changed disk digest is
+    /// deferred until external state is adopted rather than treating a stale cache as authority.
+    @discardableResult
+    public func deleteImageIfUnreferenced(
+        _ path: String,
+        deleteImage: (String) -> Bool
+    ) -> ImageCleanupResult {
+        guard !path.isEmpty else { return .failed }
+
+        invokeConcurrencyProbe(\.attachmentCleanupWillAcquireMutationLock)
+        rmwLock.lock()
+
+        lock.lock()
+        let current = _cachedGroups ?? loadGroupsUnlocked()
+        lock.unlock()
+
+        let isReferenced = current.lazy
+            .flatMap(\.snippets)
+            .contains(where: { $0.imagePath == path })
+        let result: ImageCleanupResult
+        if isReferenced {
+            result = .retainedReferenced
+        } else if Self.currentDigest(at: fileURL) != lastKnownDigest() {
+            result = .deferredRemoteChange
+        } else if let blocked = blockedReason() {
+            result = blocked == .blockedByRemoteChange ? .deferredRemoteChange : .failed
+        } else {
+            result = deleteImage(path) ? .removed : .failed
+        }
+        rmwLock.unlock()
+
+        if result == .deferredRemoteChange {
+            externalChangeDetected()
+        }
+        return result
+    }
+
     /// §3.7: deletes stored images no live snippet references. Returns the file
     /// names removed (or that would be removed when `dryRun` is true).
     @discardableResult
     public func collectOrphanedImages(dryRun: Bool = false) -> [String] {
-        ImageAttachmentStore.shared.collectOrphans(for: loadGroups(), dryRun: dryRun)
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
+        return ImageAttachmentStore.shared.collectOrphans(for: loadGroups(), dryRun: dryRun)
     }
 }

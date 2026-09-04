@@ -1333,7 +1333,7 @@ public actor AITextTransformer {
         attempt: Int
     ) {
         DevTypeLog.store.error(
-            "[AI] \(violation, privacy: .public) kind=\(kind.rawValue, privacy: .public) \(detail, privacy: .public) attempt=\(attempt, privacy: .public)"
+            "[AI] \(violation, privacy: .public) kind=\(kind.rawValue, privacy: .public) detailChars=\(detail.count, privacy: .public) attempt=\(attempt, privacy: .public)"
         )
         AIDiagnosticsStore.shared.recordFailure(
             kind: kind.rawValue,
@@ -1581,13 +1581,14 @@ public actor AITextTransformer {
         @unknown default:
             detail = generation.localizedDescription
         }
+        let errorLabel = Self.caseLabel(generation)
         DevTypeLog.store.error(
-            "[AI] transform failed kind=\(kind.rawValue, privacy: .public) detail=\(detail, privacy: .public)"
+            "[AI] transform failed kind=\(kind.rawValue, privacy: .public) error=\(errorLabel, privacy: .public) detailChars=\(detail.count, privacy: .public)"
         )
         // OSLog only survives the report's 30-minute lookback; retain it for DiagnosticReport.
         AIDiagnosticsStore.shared.recordFailure(
             kind: kind.rawValue,
-            error: Self.caseLabel(generation),
+            error: errorLabel,
             detail: detail
         )
     }
@@ -1621,7 +1622,12 @@ public actor AITextTransformer {
                 sources: [input, kind.framing, kind.instructions]
             )
             DevTypeLog.store.error(
-                "[AI] transform failed kind=\(kind.rawValue, privacy: .public) non-GenerationError=\(redacted, privacy: .public)"
+                "[AI] transform failed kind=\(kind.rawValue, privacy: .public) nonGenerationError \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
+            AIDiagnosticsStore.shared.recordFailure(
+                kind: kind.rawValue,
+                error: "unknown",
+                detail: redacted
             )
             return .unknown(redacted)
         }

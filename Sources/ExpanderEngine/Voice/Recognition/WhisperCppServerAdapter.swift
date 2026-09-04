@@ -1,14 +1,43 @@
 import Foundation
 
 public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendable {
+    typealias Transport = @Sendable (URLRequest, Int) async throws -> (Data, URLResponse)
+
     public let descriptor: SpeechProviderDescriptor
     private let endpointOverride: URL?
+    private let maximumWAVBytes: Int
+    private let transport: Transport
 
     /// Resolved per call so a Preferences change applies without relaunching.
     public var endpointURL: URL { endpointOverride ?? VoicePreferences.whisperEndpoint }
 
     public init(endpointURL: URL? = nil) {
         self.endpointOverride = endpointURL
+        self.maximumWAVBytes = WhisperAudioPayload.maximumWAVBytes
+        self.transport = { request, maximumResponseBytes in
+            try await LocalEndpointSecurity.data(
+                for: request,
+                maximumResponseBytes: maximumResponseBytes
+            )
+        }
+        self.descriptor = SpeechProviderDescriptor(
+            id: "whispercpp.server",
+            displayName: "Local whisper.cpp Server",
+            modelVersion: "whisper-local",
+            privacyRoute: .localNetworkOnly,
+            supportsStreaming: false,
+            supportsContextualStrings: false
+        )
+    }
+
+    init(
+        endpointURL: URL?,
+        maximumWAVBytes: Int = WhisperAudioPayload.maximumWAVBytes,
+        transport: @escaping Transport
+    ) {
+        self.endpointOverride = endpointURL
+        self.maximumWAVBytes = maximumWAVBytes
+        self.transport = transport
         self.descriptor = SpeechProviderDescriptor(
             id: "whispercpp.server",
             displayName: "Local whisper.cpp Server",
@@ -20,12 +49,12 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
     }
 
     public func probe() async -> ProviderReadiness {
-        let components = URLComponents(url: endpointURL, resolvingAgainstBaseURL: false)
-        guard let host = components?.host, (host == "127.0.0.1" || host == "localhost" || host == "::1") else {
+        let endpoint = endpointURL
+        guard LocalEndpointSecurity.isValid(endpoint) else {
             return .requiresConfiguration(.invalidEndpointFormat)
         }
 
-        guard await WhisperServerSetup.isReachable(endpoint: endpointURL, timeout: 2.0) else {
+        guard await WhisperServerSetup.isReachable(endpoint: endpoint, timeout: 2.0) else {
             return .temporarilyUnavailable(retryAfterSeconds: 5.0, reason: .endpointUnreachable)
         }
 
@@ -39,15 +68,35 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
     }
 
     public func transcribe(_ request: SpeechRequest) -> AsyncThrowingStream<SpeechEvent, Error> {
-        AsyncThrowingStream { continuation in
-            Task {
+        // Capture once, then enforce again at the actual egress boundary. `probe()` is only a
+        // readiness hint: callers can invoke `transcribe` directly and preferences can change
+        // between a probe and this call. Audio must never follow either path off loopback.
+        let endpoint = endpointURL
+        return AsyncThrowingStream { continuation in
+            let task = Task {
                 let startTime = Date()
                 do {
+                    try Task.checkCancellation()
+                    guard LocalEndpointSecurity.isValid(endpoint) else {
+                        throw VoiceFailure(
+                            stage: .recognition,
+                            code: .endpointUnreachable,
+                            providerID: descriptor.id,
+                            retryClass: .afterUserAction,
+                            artifactState: .durable,
+                            userAction: .configureEndpoint,
+                            redactedDetail: "Local Whisper refused a non-loopback endpoint"
+                        )
+                    }
                     // whisper.cpp decodes 16 kHz mono PCM WAV natively; other containers
                     // depend on how the server was built. Capture is CAF, so it is
                     // converted here rather than hoping the server can read it.
-                    let audioData = try WhisperAudioPayload.wav16kMono(from: request.audio.fileURL)
-                    var urlRequest = URLRequest(url: endpointURL)
+                    let audioData = try WhisperAudioPayload.wav16kMono(
+                        from: request.audio.fileURL,
+                        maximumWAVBytes: self.maximumWAVBytes
+                    )
+                    try Task.checkCancellation()
+                    var urlRequest = URLRequest(url: endpoint)
                     urlRequest.httpMethod = "POST"
                     urlRequest.timeoutInterval = max(1.0, request.deadline.timeIntervalSince(Date()))
 
@@ -79,7 +128,12 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
                     body.append("--\(boundary)--\r\n".data(using: .utf8)!)
                     urlRequest.httpBody = body
 
-                    let (data, response) = try await URLSession.shared.data(for: urlRequest)
+                    try Task.checkCancellation()
+                    let (data, response) = try await self.transport(
+                        urlRequest,
+                        LocalEndpointSecurity.maximumTranscriptionResponseBytes
+                    )
+                    try Task.checkCancellation()
                     guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                         throw VoiceFailure(
                             stage: .recognition,
@@ -130,8 +184,11 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
-    public func cancel(sessionID: VoiceSessionID) async {}
+    public func cancel(sessionID: VoiceSessionID) async {
+        // Consumer cancellation terminates the stream and cancels its conversion/transport task.
+    }
 }

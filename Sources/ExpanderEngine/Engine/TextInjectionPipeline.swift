@@ -1188,7 +1188,7 @@ public final class TextInjectionPipeline {
             }
             guard let image = ImageAttachmentStore.shared.loadImage(path: context.snippet.imagePath) else {
                 refuseInject(
-                    "Image attachment missing or unreadable: \(context.snippet.imagePath)",
+                    "Image attachment missing or unreadable",
                     path: "imagePaste",
                     swallowed: swallowed,
                     completion: completion
@@ -1479,17 +1479,19 @@ public final class TextInjectionPipeline {
                 // and every expansion after that skips the AX write for the HID paste path.
                 // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
                 guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
+                let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
+                let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
                 switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
                     bundleID: bundleID,
                     role: focusedRole
                 ) {
                 case .struck(let count):
                     DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(why, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(bundleID, privacy: .public)"
+                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
                     )
                 case .condemned:
                     DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(why, privacy: .public)) — verdict learned for \(bundleID, privacy: .public); this expansion is refused, the next uses HID paste"
+                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
                     )
                 case .alreadyCondemned:
                     break
@@ -1749,6 +1751,10 @@ public final class TextInjectionPipeline {
         trailingKeys: [String] = [],
         completion: @escaping InjectionCompletion
     ) {
+        let safeBundleID = DevTypeLog.boundedPublicIdentifier(
+            context.frontBundleID,
+            label: "bundleID"
+        )
         // §8.4 defense-in-depth: a `.failed` verdict may only drive the trigger restore when this
         // `(bundle, role)` is a proven truthful witness. The hold loop applies the same gate
         // before ever emitting `.failed`, but this function is reachable from more than one
@@ -1764,7 +1770,7 @@ public final class TextInjectionPipeline {
             DevTypeLog.inject.notice(
                 """
                 [Inject] paste delivery: AX says missing but \
-                \(context.frontBundleID ?? "(unknown)", privacy: .public) is not a proven delivery \
+                \(safeBundleID, privacy: .public) is not a proven delivery \
                 witness — leaving the field alone (restore would duplicate)
                 """
             )
@@ -1843,7 +1849,7 @@ public final class TextInjectionPipeline {
                     DevTypeLog.inject.notice(
                         """
                         [Inject] paste re-verify: AX says missing but \
-                        \(context.frontBundleID ?? "(unknown)", privacy: .public) is not a proven \
+                        \(safeBundleID, privacy: .public) is not a proven \
                         delivery witness — leaving the field alone (restoring the trigger would duplicate)
                         """
                     )
@@ -1870,7 +1876,7 @@ public final class TextInjectionPipeline {
                     // but the ambiguity itself is logged, so a diagnostic report shows
                     // that this app was never verifiable instead of silently skipping.
                     DevTypeLog.inject.info(
-                        "[Inject] paste re-verify: field unreadable — delivery stays unverified (app=\(context.frontBundleID ?? "(unknown)", privacy: .public))"
+                        "[Inject] paste re-verify: field unreadable — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
                     )
                 }
             }
@@ -1879,7 +1885,7 @@ public final class TextInjectionPipeline {
             DevTypeLog.inject.error(
                 """
                 [Inject] paste delivery \(TextInjectionPipeline.pasteResultLabel(result), privacy: .public) \
-                — restoring trigger (app=\(context.frontBundleID ?? "(unknown)", privacy: .public) path=\(path, privacy: .public))
+                — restoring trigger (app=\(safeBundleID, privacy: .public) path=\(path, privacy: .public))
                 """
             )
             restoreTriggerAfterFailedPaste(
@@ -1953,12 +1959,15 @@ public final class TextInjectionPipeline {
         if allowKeyReplay, swallowed.mustReinjectOnRefuse {
             _ = reinjectSwallowedKey(swallowed)
         }
+        let safeReason = PermissionCoordinator.sanitizedRefusalReason(reason, path: path)
+        var safeContext = refuseContext
+        safeContext?.reason = safeReason
         PermissionCoordinator.shared.recordInjectOutcome(
-            .refused(reason),
-            refuseContext: refuseContext,
+            .refused(safeReason),
+            refuseContext: safeContext,
             path: path
         )
-        completion(.refused(reason))
+        completion(.refused(safeReason))
     }
 
     /// §3.1: whether an expansion's end state supports an undo point at all. Every undo erase

@@ -274,7 +274,7 @@ public final class CommandUsageStatsStore {
             let generation = flushGeneration
             lock.unlock()
             DevTypeLog.store.error(
-                "[Store] Failed to write command usage stats: \(error.localizedDescription, privacy: .public)"
+                "[Store] Failed to write command usage stats \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             ioQueue.asyncAfter(deadline: .now() + flushRetryDelay) { [weak self] in
                 guard let self else { return }

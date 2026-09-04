@@ -233,6 +233,27 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertNil(UpdatePreferences.lastSuccessfulCheck)
     }
 
+    func testRecordingSuccessfulCheckPublishesOnlyAfterTimestampAndVersionAreCoherent() {
+        let stamp = Date(timeIntervalSince1970: 1_800_000_123)
+        let version = AppVersion("2.4.6")!
+        let observed = expectation(
+            forNotification: UpdatePreferences.didChangeNotification,
+            object: nil
+        ) { _ in
+            XCTAssertEqual(
+                UpdatePreferences.lastSuccessfulCheck?.timeIntervalSince1970 ?? 0,
+                stamp.timeIntervalSince1970,
+                accuracy: 0.001
+            )
+            XCTAssertEqual(UpdatePreferences.lastFoundVersion, version.rawValue)
+            return true
+        }
+
+        UpdatePreferences.recordSuccessfulCheck(at: stamp, latestVersion: version)
+
+        wait(for: [observed], timeout: 0.5)
+    }
+
     // MARK: - Outcome distinctness
 
     func testFailureIsNeverEqualToUpToDate() {

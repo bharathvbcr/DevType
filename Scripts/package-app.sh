@@ -31,8 +31,14 @@ BUNDLE_ID="com.devtype.app"
 PLIST_SRC="${ROOT}/Resources/Info.plist"
 # Sidecar: sha256 of the SPM binary last successfully packaged (not the signed Mach-O inside the .app).
 SOURCE_HASH_STAMP="${APP_BUNDLE}.source-sha256"
+# Sidecar: canonical semantic hash of the entitlement plist last successfully embedded. It is
+# deliberately independent from the binary stamp because entitlement-only edits must re-sign.
+ENTITLEMENTS_HASH_STAMP="${APP_BUNDLE}.entitlements-sha256"
 STALE_APP="${ROOT}/build/DevType.app"
 STALE_SUFFIX="${ROOT}/build/DevType.app.stale"
+
+# shellcheck source=package-signing-contract.sh
+source "${ROOT}/Scripts/package-signing-contract.sh"
 
 # Signing identity. Scripts/signing-identity.sh is the single owner of the choice
 # (an Apple-issued certificate when one exists, else the stable self-signed one,
@@ -78,6 +84,11 @@ fi
 # Authority line to match when deciding whether an existing bundle can keep its
 # signature (see bundle_signing_mode_matches).
 SIGN_IDENTITY="${SIGN_ARG}"
+HARDENED_REQUEST="${DEVTYPE_HARDENED_RUNTIME:-auto}"
+if ! HARDENED="$(devtype_effective_hardened_runtime "${HARDENED_REQUEST}" "${SIGN_KIND}")"; then
+  echo "error: DEVTYPE_HARDENED_RUNTIME must be one of: auto, 0, 1" >&2
+  exit 1
+fi
 
 sha256_file() {
   shasum -a 256 "$1" | awk '{print $1}'
@@ -154,6 +165,34 @@ codesign_info() {
 file_size() {
   stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null
 }
+
+# Local Whisper/Ollama-compatible endpoints use loopback HTTP. Keep the ATS
+# exception scoped to local networking and reject the global/media/web escape
+# hatches that would also weaken unrelated remote URLSession traffic.
+verify_narrow_local_network_ats() {
+  local plist="$1"
+  local allows_local
+  allows_local="$(/usr/libexec/PlistBuddy \
+    -c 'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "${plist}" 2>/dev/null || true)"
+  if [[ "${allows_local}" != "true" ]]; then
+    echo "error: ${plist} must set NSAppTransportSecurity:NSAllowsLocalNetworking=true" >&2
+    return 1
+  fi
+
+  local broad_key
+  for broad_key in \
+    NSAllowsArbitraryLoads \
+    NSAllowsArbitraryLoadsForMedia \
+    NSAllowsArbitraryLoadsInWebContent; do
+    if /usr/libexec/PlistBuddy \
+      -c "Print :NSAppTransportSecurity:${broad_key}" "${plist}" >/dev/null 2>&1; then
+      echo "error: ${plist} must not contain NSAppTransportSecurity:${broad_key}" >&2
+      return 1
+    fi
+  done
+}
+
+verify_narrow_local_network_ats "${PLIST_SRC}"
 
 bundle_codesign_ok() {
   local app="$1"
@@ -242,6 +281,7 @@ for USAGE_KEY in NSAccessibilityUsageDescription NSInputMonitoringUsageDescripti
 done
 
 NEW_SOURCE_HASH="$(sha256_file "${BINARY}")"
+NEW_ENTITLEMENTS_HASH="$(devtype_entitlements_hash "${ENTITLEMENTS}")"
 OLD_SOURCE_HASH=""
 if [[ -f "${SOURCE_HASH_STAMP}" ]]; then
   OLD_SOURCE_HASH="$(tr -d '[:space:]' < "${SOURCE_HASH_STAMP}")"
@@ -250,6 +290,12 @@ fi
 BINARY_UNCHANGED=0
 if [[ -n "${OLD_SOURCE_HASH}" && "${NEW_SOURCE_HASH}" == "${OLD_SOURCE_HASH}" ]]; then
   BINARY_UNCHANGED=1
+fi
+
+ENTITLEMENTS_CURRENT=0
+if devtype_entitlements_are_current \
+    "${ENTITLEMENTS}" "${ENTITLEMENTS_HASH_STAMP}" "${APP_BUNDLE}"; then
+  ENTITLEMENTS_CURRENT=1
 fi
 
 # Identity-critical support: Info.plist + PkgInfo. Cosmetic Resources (icons) alone
@@ -271,11 +317,37 @@ identity_plist_unchanged() {
   cmp -s "${PLIST_STAGED}" "${packaged}"
 }
 
+# System-owned permission prompts read UsageDescription values from localized
+# InfoPlist.strings files. Treat those files as identity support, not optional
+# cosmetics: a translation-only edit must rebuild the signed resource seal and
+# appear in the next bundle instead of being deferred until the binary changes.
+localized_info_resources_match() {
+  local source_file packaged_file relative
+  while IFS= read -r source_file; do
+    relative="${source_file#"${ROOT}"/Resources/}"
+    packaged_file="${RESOURCES_DIR}/${relative}"
+    [[ -f "${packaged_file}" ]] || return 1
+    cmp -s "${source_file}" "${packaged_file}" || return 1
+  done < <(find "${ROOT}/Resources" -mindepth 2 -maxdepth 2 -type f \
+    -path '*.lproj/InfoPlist.strings' -print 2>/dev/null | sort)
+
+  # Also reject a stale localization removed from the source tree. Otherwise a
+  # previously packaged permission reason could survive indefinitely.
+  while IFS= read -r packaged_file; do
+    relative="${packaged_file#"${RESOURCES_DIR}"/}"
+    [[ -f "${ROOT}/Resources/${relative}" ]] || return 1
+  done < <(find "${RESOURCES_DIR}" -mindepth 2 -maxdepth 2 -type f \
+    -path '*.lproj/InfoPlist.strings' -print 2>/dev/null | sort)
+}
+
 IDENTITY_SUPPORT_UNCHANGED=1
 if ! identity_plist_unchanged; then
   IDENTITY_SUPPORT_UNCHANGED=0
 fi
 if [[ ! -f "${CONTENTS}/PkgInfo" ]]; then
+  IDENTITY_SUPPORT_UNCHANGED=0
+fi
+if ! localized_info_resources_match; then
   IDENTITY_SUPPORT_UNCHANGED=0
 fi
 
@@ -301,21 +373,13 @@ if packaged_binary_aligns_with_spm "${BINARY}" "${PACKAGED_EXE}"; then
 fi
 
 SKIP_RESIGN=0
-HARDENED_WANTED="${DEVTYPE_HARDENED_RUNTIME:-0}"
-HARDENED_PRESENT=0
-if codesign -d --verbose=2 "${APP_BUNDLE}" 2>&1 | grep -q "flags=.*runtime"; then
-  HARDENED_PRESENT=1
-fi
-
 if [[ "${BINARY_UNCHANGED}" -eq 1 \
    && "${IDENTITY_SUPPORT_UNCHANGED}" -eq 1 \
-   && "${BINARY_ALIGN_OK}" -eq 1 ]] \
-   && bundle_codesign_ok "${APP_BUNDLE}"; then
-  if [[ "${HARDENED_WANTED}" == "1" && "${HARDENED_PRESENT}" -eq 0 ]]; then
-    SKIP_RESIGN=0
-  else
-    SKIP_RESIGN=1
-  fi
+   && "${BINARY_ALIGN_OK}" -eq 1 \
+   && "${ENTITLEMENTS_CURRENT}" -eq 1 ]] \
+   && bundle_codesign_ok "${APP_BUNDLE}" \
+   && devtype_bundle_hardened_runtime_matches "${APP_BUNDLE}" "${HARDENED}"; then
+  SKIP_RESIGN=1
 elif [[ "${BINARY_UNCHANGED}" -eq 1 && "${IDENTITY_SUPPORT_UNCHANGED}" -eq 1 ]] \
    && ! packaged_binary_aligns_with_spm "${BINARY}" "${PACKAGED_EXE}"; then
   echo "==> packaged MacOS/DevType does not align with SPM product — will resign"
@@ -346,6 +410,17 @@ else
 
   # Copy all resources except signing inputs / the separately-staged plist.
   if [[ -d "${ROOT}/Resources" ]]; then
+    # Remove only stale localized Info.plist overrides; `cp -R` below updates or
+    # adds the source-owned language directories but intentionally does not
+    # delete unrelated bundle resources.
+    while IFS= read -r packaged_info; do
+      relative="${packaged_info#"${RESOURCES_DIR}"/}"
+      if [[ ! -f "${ROOT}/Resources/${relative}" ]]; then
+        rm -f "${packaged_info}"
+        rmdir "$(dirname "${packaged_info}")" 2>/dev/null || true
+      fi
+    done < <(find "${RESOURCES_DIR}" -mindepth 2 -maxdepth 2 -type f \
+      -path '*.lproj/InfoPlist.strings' -print 2>/dev/null | sort)
     for resfile in "${ROOT}/Resources"/*; do
       [[ -e "${resfile}" ]] || continue
       is_excluded_resource "$(basename "${resfile}")" && continue
@@ -361,19 +436,9 @@ else
   # §7.5: notarization requires the Hardened Runtime. It is OFF by default so local
   # dev signing behaviour is unchanged, and ON automatically for a Developer ID
   # identity (the only identity that can be notarized) or when forced explicitly.
-  CODESIGN_EXTRA=()
-  HARDENED="${DEVTYPE_HARDENED_RUNTIME:-auto}"
-  if [[ "${HARDENED}" == "auto" ]]; then
-    # Developer ID only. An Apple Development certificate can carry the Hardened
-    # Runtime too, but its entitlements would then need a provisioning profile to
-    # be honoured, and it can never be notarized — so local dev stays unhardened.
-    if [[ "${SIGN_KIND}" == "developer-id" ]]; then HARDENED=1; else HARDENED=0; fi
-  fi
+  CODESIGN_EXTRA=(--entitlements "${ENTITLEMENTS}")
   if [[ "${HARDENED}" == "1" ]]; then
     CODESIGN_EXTRA+=(--options runtime --timestamp)
-    if [[ -f "${ENTITLEMENTS}" ]]; then
-      CODESIGN_EXTRA+=(--entitlements "${ENTITLEMENTS}")
-    fi
     echo "    signing: ${SIGN_MODE} (${SIGN_ARG}) [hardened runtime]"
   else
     echo "    signing: ${SIGN_MODE} (${SIGN_ARG})"
@@ -399,6 +464,33 @@ for USAGE_KEY in NSAccessibilityUsageDescription NSInputMonitoringUsageDescripti
     exit 1
   fi
 done
+verify_narrow_local_network_ats "${CONTENTS}/Info.plist"
+
+# The system, not DevType's in-process localization table, renders these prompt
+# reasons. Validate the files inside the sealed bundle so a source-only resource
+# or a broken copy loop cannot silently fall back to English.
+LOCALIZED_INFO_COUNT=0
+for SOURCE_LOCALIZED_INFO in "${ROOT}"/Resources/*.lproj/InfoPlist.strings; do
+  [[ -f "${SOURCE_LOCALIZED_INFO}" ]] || continue
+  LOCALIZED_INFO_COUNT=$((LOCALIZED_INFO_COUNT + 1))
+  LANGUAGE_DIR="$(basename "$(dirname "${SOURCE_LOCALIZED_INFO}")")"
+  PACKAGED_LOCALIZED_INFO="${RESOURCES_DIR}/${LANGUAGE_DIR}/InfoPlist.strings"
+  if [[ ! -f "${PACKAGED_LOCALIZED_INFO}" ]]; then
+    echo "error: packaged resources missing ${LANGUAGE_DIR}/InfoPlist.strings" >&2
+    exit 1
+  fi
+  plutil -lint "${PACKAGED_LOCALIZED_INFO}" >/dev/null
+  for USAGE_KEY in NSAccessibilityUsageDescription NSInputMonitoringUsageDescription NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
+    if ! /usr/libexec/PlistBuddy -c "Print :${USAGE_KEY}" "${PACKAGED_LOCALIZED_INFO}" >/dev/null 2>&1; then
+      echo "error: ${LANGUAGE_DIR}/InfoPlist.strings missing ${USAGE_KEY}" >&2
+      exit 1
+    fi
+  done
+done
+if [[ "${LOCALIZED_INFO_COUNT}" -eq 0 ]]; then
+  echo "error: no localized InfoPlist.strings permission resources found" >&2
+  exit 1
+fi
 PACKAGED_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${CONTENTS}/Info.plist")"
 if [[ "${PACKAGED_ID}" != "${BUNDLE_ID}" ]]; then
   echo "error: packaged CFBundleIdentifier=${PACKAGED_ID} does not match ${BUNDLE_ID}" >&2
@@ -409,10 +501,19 @@ if ! codesign --verify --strict "${APP_BUNDLE}" >/dev/null 2>&1; then
   echo "error: codesign --verify failed for ${APP_BUNDLE}" >&2
   exit 1
 fi
+if ! devtype_signed_entitlements_match "${ENTITLEMENTS}" "${APP_BUNDLE}"; then
+  echo "error: embedded entitlements do not match Resources/DevType.entitlements" >&2
+  exit 1
+fi
+if ! devtype_bundle_hardened_runtime_matches "${APP_BUNDLE}" "${HARDENED}"; then
+  echo "error: packaged Hardened Runtime state does not match effective policy ${HARDENED}" >&2
+  exit 1
+fi
 
-# Record SPM source hash so the next run can skip resign when the binary is identical.
+# Record both successful-package inputs only after signature, entitlement, and runtime checks pass.
 # (Cannot compare MacOS/DevType sha256 to SPM — codesign rewrites the Mach-O signature blob.)
 printf '%s\n' "${NEW_SOURCE_HASH}" > "${SOURCE_HASH_STAMP}"
+printf '%s\n' "${NEW_ENTITLEMENTS_HASH}" > "${ENTITLEMENTS_HASH_STAMP}"
 
 CDHASH="$(awk -F= '/^CDHash=/{print $2; exit}' <<<"${SIGNED_INFO}")"
 # The designated requirement is what TCC stores; print it so a CDHash-pinned bundle
@@ -444,6 +545,8 @@ echo "    CDHash: ${CDHASH}"
 echo "    Signing: ${SIGN_KIND} (${SIGN_ARG})"
 echo "    Designated requirement: ${DESIGNATED_REQ:-unknown}"
 echo "    Source sha256: ${NEW_SOURCE_HASH}"
+echo "    Entitlements sha256: ${NEW_ENTITLEMENTS_HASH}"
+echo "    Hardened Runtime: $([[ "${HARDENED}" == "1" ]] && echo enabled || echo disabled)"
 if [[ "${SKIP_RESIGN}" -eq 1 ]]; then
   echo "    Resign: skipped (binary + identity plist unchanged; cosmetic-only changes deferred)"
 else

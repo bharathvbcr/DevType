@@ -1,0 +1,4 @@
+"NSAccessibilityUsageDescription" = "DevTypeが使用中のアプリでトリガーキーワードを展開テキストに置き換えるには、アクセシビリティへのアクセスが必要です。";
+"NSInputMonitoringUsageDescription" = "DevTypeが入力中のトリガーキーワードを検出するには、入力監視へのアクセスが必要です。";
+"NSMicrophoneUsageDescription" = "DevTypeがスマート音声入力用の音声を収録するには、マイクへのアクセスが必要です。選択した音声エンジンによって、音声はこのMac内に保持されるか、クラウドサービスへ送信されます。";
+"NSSpeechRecognitionUsageDescription" = "DevTypeは、Appleベースの文字起こしとオプションのライブプレビューにApple音声認識を使用します。";

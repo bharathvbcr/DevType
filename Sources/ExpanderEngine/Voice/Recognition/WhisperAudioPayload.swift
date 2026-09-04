@@ -8,9 +8,19 @@ import AVFoundation
 /// Converting here means the engine works against a stock `brew install whisper-cpp`
 /// server rather than only against one built with extra codecs.
 public enum WhisperAudioPayload {
+    /// 16 kHz mono Int16 uses 32,000 bytes/second, so this permits roughly 35 minutes while
+    /// preventing an unbounded hands-free capture from being materialized in process memory.
+    public static let maximumWAVBytes = 64 * 1024 * 1024
+    private static let wavHeaderBytes = 44
 
     /// Reads `url` and returns 16 kHz mono 16-bit PCM WAV bytes.
-    public static func wav16kMono(from url: URL) throws -> Data {
+    public static func wav16kMono(
+        from url: URL,
+        maximumWAVBytes: Int = maximumWAVBytes
+    ) throws -> Data {
+        guard maximumWAVBytes >= wavHeaderBytes else {
+            throw oversizedPayloadFailure()
+        }
         let file = try AVAudioFile(forReading: url)
 
         guard let target = AVAudioFormat(
@@ -80,6 +90,12 @@ public enum WhisperAudioPayload {
             }
 
             if output.frameLength > 0, let channel = output.int16ChannelData {
+                let outputByteCount = Int(output.frameLength) * MemoryLayout<Int16>.size
+                let maximumPCMBytes = maximumWAVBytes - wavHeaderBytes
+                guard samples.count <= maximumPCMBytes,
+                      outputByteCount <= maximumPCMBytes - samples.count else {
+                    throw oversizedPayloadFailure()
+                }
                 samples.append(
                     UnsafeBufferPointer(start: channel[0], count: Int(output.frameLength))
                         .withMemoryRebound(to: UInt8.self) { Data($0) }
@@ -92,6 +108,17 @@ public enum WhisperAudioPayload {
         }
 
         return wavContainer(pcm: samples, sampleRate: 16000, channels: 1, bitsPerSample: 16)
+    }
+
+    private static func oversizedPayloadFailure() -> VoiceFailure {
+        VoiceFailure(
+            stage: .recognition,
+            code: .captureBackpressure,
+            retryClass: .afterUserAction,
+            artifactState: .durable,
+            userAction: .retryWithOtherProvider,
+            redactedDetail: "Converted Whisper audio exceeded the local payload budget"
+        )
     }
 
     /// Wraps raw PCM in a canonical 44-byte RIFF/WAVE header.

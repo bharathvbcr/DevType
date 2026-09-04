@@ -1,0 +1,4 @@
+"NSAccessibilityUsageDescription" = "DevType가 활성 앱에서 트리거 키워드를 확장된 텍스트로 바꾸려면 손쉬운 사용 권한이 필요합니다.";
+"NSInputMonitoringUsageDescription" = "DevType가 사용자가 입력하는 트리거 키워드를 감지하려면 입력 모니터링 권한이 필요합니다.";
+"NSMicrophoneUsageDescription" = "DevType가 스마트 받아쓰기를 위해 오디오를 녹음하려면 마이크 권한이 필요합니다. 선택한 음성 엔진에 따라 오디오가 이 Mac에만 유지되거나 클라우드 서비스로 전송됩니다.";
+"NSSpeechRecognitionUsageDescription" = "DevType는 Apple 기반 전사와 선택적 실시간 미리보기에 Apple 음성 인식을 사용합니다.";

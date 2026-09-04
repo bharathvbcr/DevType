@@ -135,11 +135,42 @@ final class AIDiagnosticsTests: XCTestCase {
         XCTAssertTrue(store.recentSelectionReads().isEmpty)
     }
 
-    /// The whole point: Apple's `debugDescription` is the only explanation for a guardrail
-    /// refusal, so it must survive into the report verbatim.
-    func testGuardrailFailureDetailSurvivesIntoTheReport() {
+    func testCappedAIRingsReportObservedAndRetainedCountsTruthfully() {
         let store = AIDiagnosticsStore()
-        let detail = "Content flagged by safety classifier (input)"
+        let total = AIDiagnosticsStore.capacity + 31
+        for index in 0..<total {
+            store.recordFailure(kind: "proofread", error: "refusal", detail: "detail")
+            store.recordSelectionRead(
+                outcome: "emptySelection",
+                bundleID: "com.example.\(index)",
+                candidateCount: 1,
+                characters: 0
+            )
+        }
+
+        let report = store.diagnosticLines(
+            enabled: true,
+            availability: "available",
+            localeNote: nil,
+            iso: makeISO()
+        ).joined(separator: "\n")
+
+        XCTAssertTrue(
+            report.contains("\(total) failed (retained \(AIDiagnosticsStore.capacity)/\(AIDiagnosticsStore.capacity)"),
+            report
+        )
+        XCTAssertTrue(
+            report.contains("Selection reads: \(total) (retained \(AIDiagnosticsStore.capacity)/\(AIDiagnosticsStore.capacity)"),
+            report
+        )
+    }
+
+    /// Provider error prose is not a trustworthy diagnostics payload: frameworks may echo the
+    /// selected text, prompt, endpoint body, or a local path. Preserve correlation/size evidence
+    /// without copying the prose into the report users paste into support channels.
+    func testGuardrailFailureDetailReachesTheReportAsContentFreeShape() {
+        let store = AIDiagnosticsStore()
+        let detail = "PRIVATE selected text /Users/person/document.txt bearer-token"
         store.recordFailure(
             kind: "promptenhance",
             error: "guardrailViolation",
@@ -155,10 +186,35 @@ final class AIDiagnosticsTests: XCTestCase {
 
         XCTAssertTrue(text.contains("kind=promptenhance"), "Transform kind must be reported.")
         XCTAssertTrue(text.contains("error=guardrailViolation"))
-        XCTAssertTrue(
-            text.contains(detail),
-            "Apple's Context.debugDescription is the only explanation available and must not be dropped."
+        XCTAssertFalse(text.contains(detail))
+        XCTAssertFalse(text.contains("PRIVATE selected text"))
+        XCTAssertFalse(text.contains("bearer-token"))
+        XCTAssertTrue(text.contains("detailChars=61"), text)
+        XCTAssertTrue(text.contains("detailHash="), text)
+    }
+
+    func testFailureBoundaryRejectsFreeFormKindAndErrorLabels() {
+        let store = AIDiagnosticsStore()
+        let attackerControlled = String(repeating: "private-user-content/", count: 1_000)
+
+        store.recordFailure(
+            kind: attackerControlled,
+            error: attackerControlled,
+            detail: attackerControlled
         )
+
+        let failure = store.recentFailures().last
+        let report = store.diagnosticLines(
+            enabled: true,
+            availability: "available",
+            localeNote: nil,
+            iso: makeISO()
+        ).joined(separator: "\n")
+        XCTAssertEqual(failure?.kind, "unknown")
+        XCTAssertEqual(failure?.error, "unknown")
+        XCTAssertLessThan(failure?.detail.utf8.count ?? .max, 160)
+        XCTAssertFalse(report.contains(attackerControlled))
+        XCTAssertFalse(report.contains("private-user-content"))
     }
 
     func testMissingDetailIsStatedRatherThanBlank() {
@@ -193,14 +249,20 @@ final class AIDiagnosticsTests: XCTestCase {
     func testStoreIsBoundedAndKeepsMostRecent() {
         let store = AIDiagnosticsStore()
         for i in 0..<(AIDiagnosticsStore.capacity + 10) {
-            store.recordFailure(kind: "k\(i)", error: "e", detail: "d")
+            store.recordFailure(
+                kind: "k\(i)",
+                error: "e",
+                detail: "d",
+                at: Date(timeIntervalSince1970: TimeInterval(i))
+            )
         }
         let failures = store.recentFailures()
 
         XCTAssertEqual(failures.count, AIDiagnosticsStore.capacity, "Store must stay bounded.")
+        XCTAssertEqual(failures.last?.kind, "unknown")
         XCTAssertEqual(
-            failures.last?.kind,
-            "k\(AIDiagnosticsStore.capacity + 9)",
+            failures.last?.at,
+            Date(timeIntervalSince1970: TimeInterval(AIDiagnosticsStore.capacity + 9)),
             "Eviction must drop the oldest entries, not the newest."
         )
     }
@@ -274,10 +336,9 @@ final class AIDiagnosticsTests: XCTestCase {
         let report = DiagnosticReport.formatHeader(context)
         XCTAssertTrue(report.contains("-- On-device AI --"), "Report must carry an AI section.")
         XCTAssertTrue(report.contains("guardrailViolation"))
-        XCTAssertTrue(
-            report.contains("flagged by safety classifier"),
-            "The refusal detail must reach the pasted report, not just OSLog."
-        )
+        XCTAssertTrue(report.contains("detailChars=28"), report)
+        XCTAssertTrue(report.contains("detailHash="), report)
+        XCTAssertFalse(report.contains("flagged by safety classifier"))
     }
 
     /// A report built without AI lines must say so rather than render an empty heading.

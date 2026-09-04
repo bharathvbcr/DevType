@@ -163,6 +163,11 @@ public enum VoiceSessionReducer {
         case (.finalizingAudio, .audioFinalized(let artifact)):
             state.audioArtifact = artifact
             state.phase = .recognizing
+            // The batch pass restates the whole session rather than extending the live
+            // preview, so `segments` is reset here — exactly once — and from now on means
+            // "what this provider recognized". That is what the completion is checked
+            // against below, and it was previously accumulated and never read at all.
+            state.segments.removeAll()
             commands.append(.persistAudio(artifact))
             commands.append(.transcribeAudio(audio: artifact))
             commands.append(.notifyHUD(phase: .recognizing))
@@ -170,20 +175,28 @@ public enum VoiceSessionReducer {
 
         // Recognizing -> Segments / Completion
         case (.recognizing, .speechSegmentReceived(let segment)):
-            // Reconcile interval segments
             if let idx = state.segments.firstIndex(where: { $0.segmentID == segment.segmentID }) {
                 state.segments[idx] = segment
             } else {
                 state.segments.append(segment)
             }
-            // Segments are HUD updates only
-            commands.append(.notifyHUD(phase: .recognizing))
+            // No phase change: a segment is not a transition, and announcing one per revision
+            // is what filled the trace with eighty identical `recognizing` lines.
 
         case (.recognizing, .speechCompleted(let completion)):
-            state.rawTranscript = completion.rawTranscript
+            // A provider's completion is a claim, and its own segment stream is the evidence
+            // against it. `LegacyAppleSpeechAdapter` used to report the last utterance as the
+            // whole transcript, and nothing downstream could tell — the session persisted and
+            // delivered a fraction of what had just been recognized.
+            //
+            // That specific defect is fixed at its source, but this check is what makes the
+            // *class* unreachable: any provider, present or future, that under-reports its own
+            // recognition is corrected here rather than silently believed.
+            let raw = Self.reconcileCompletion(completion, against: state.segments)
+            state.rawTranscript = raw
             state.phase = .validatingRaw
-            commands.append(.persistRaw(completion.rawTranscript))
-            commands.append(.validateRawTranscript(completion.rawTranscript))
+            commands.append(.persistRaw(raw))
+            commands.append(.validateRawTranscript(raw))
             commands.append(.notifyHUD(phase: .validatingRaw))
             commands.append(.persistManifest(phase: .validatingRaw))
 
@@ -217,7 +230,10 @@ public enum VoiceSessionReducer {
             guard let raw = state.rawTranscript else {
                 let fail = VoiceFailure(stage: .correctionValidation, code: .speechProtocolViolation, redactedDetail: "Raw transcript missing during correction candidate receipt")
                 state.phase = .failed(fail)
+                state.failure = fail
                 commands.append(.notifyHUD(phase: .failed(fail)))
+                commands.append(.persistManifest(phase: .failed(fail)))
+                commands.append(.cleanupResources)
                 return .success(commands)
             }
             state.correctionCandidate = candidate
@@ -284,5 +300,81 @@ public enum VoiceSessionReducer {
         }
 
         return .success(commands)
+    }
+}
+
+extension VoiceSessionReducer {
+
+    /// How much shorter a provider's own completion may be than the segments it emitted
+    /// before that counts as under-reporting rather than tidying.
+    ///
+    /// A provider legitimately trims its final answer a little — trailing silence, a
+    /// half-word retracted at the endpoint. Losing a fifth of what it just recognized is not
+    /// trimming; it is a whole utterance going missing, which is precisely the shape of the
+    /// defect this guards.
+    static let maxCompletionShortfall = 0.20
+
+    /// Returns the transcript to treat as authoritative for `completion`.
+    ///
+    /// Normally the provider's own `rawTranscript`. When that accounts for materially less
+    /// than the segments the same provider emitted, the segments win: they are the provider's
+    /// own evidence, and a completion that contradicts them downward is the provider losing
+    /// text, never finding it.
+    ///
+    /// Deliberately one-directional. A completion *longer* than its segments is a provider
+    /// that streamed partial results and finished with a fuller answer, which is ordinary and
+    /// must not be second-guessed.
+    static func reconcileCompletion(
+        _ completion: SpeechCompletion,
+        against segments: [SpeechSegment]
+    ) -> RawTranscript {
+        let claimed = completion.rawTranscript
+        guard !segments.isEmpty else { return claimed }
+
+        var assembler = LiveTranscriptAssembler()
+        for segment in segments {
+            assembler.ingest(segment)
+        }
+        let recognized = assembler.cumulativeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !recognized.isEmpty else { return claimed }
+
+        let recognizedContent = contentCharacterCount(recognized)
+        guard recognizedContent > 0 else { return claimed }
+
+        let claimedContent = contentCharacterCount(claimed.text)
+        let retained = Double(claimedContent) / Double(recognizedContent)
+        guard retained < 1.0 - maxCompletionShortfall else { return claimed }
+
+        DevTypeLog.voice.error(
+            """
+            [Voice] provider under-reported its own recognition \
+            provider=\(claimed.providerID, privacy: .public) \
+            completion=\(claimedContent, privacy: .public) segments=\(recognizedContent, privacy: .public) \
+            — using the segment stream
+            """
+        )
+        VoiceDiagnosticsRecorder.shared.record(
+            "recognition.completionShortfall",
+            cumulative: recognized,
+            note: "provider=\(claimed.providerID) completionChars=\(claimedContent) segmentChars=\(recognizedContent)"
+        )
+
+        return RawTranscript(
+            text: recognized,
+            localeIdentifier: claimed.localeIdentifier,
+            confidence: claimed.confidence,
+            providerID: claimed.providerID,
+            modelVersion: claimed.modelVersion,
+            latencyMs: claimed.latencyMs,
+            audioSHA256: claimed.audioSHA256,
+            isFinal: true
+        )
+    }
+
+    /// Letters and digits only — punctuation and spacing are not evidence about lost words.
+    private static func contentCharacterCount(_ text: String) -> Int {
+        text.reduce(into: 0) { count, character in
+            if character.isLetter || character.isNumber { count += 1 }
+        }
     }
 }

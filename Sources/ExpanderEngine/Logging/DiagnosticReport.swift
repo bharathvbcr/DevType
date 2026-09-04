@@ -13,6 +13,170 @@ public enum DiagnosticReport {
     /// pasted into chat windows and issue trackers, so it carries the recent tail plus a notice
     /// rather than the whole buffer.
     public static let defaultMirrorLineLimit = 400
+    /// Independent of the line cap: a single unexpectedly large OSLog message must not make a
+    /// support report (or its construction) effectively unbounded.
+    /// The report contains both an OSLog tail and an independent in-process mirror tail. Capping
+    /// each at 256 KiB leaves enough room for every 16 KiB state section while keeping the full
+    /// pasteboard artifact below 800 KiB even when every source is at its ceiling.
+    public static let defaultLogByteLimit = 256 * 1_024
+    /// Per-section ceiling for dynamic header collections. These collections are derived from
+    /// user libraries and learned app state, so neither their item count nor one hostile entry may
+    /// make a pasteboard report grow without bound.
+    static let headerProjectionItemLimit = 64
+    static let headerProjectionByteLimit = 16 * 1_024
+    static let diagnosticLineByteLimit = 4 * 1_024
+
+    struct HeaderProjection: Equatable {
+        let retainedLines: [String]
+        let observedCount: Int
+        let retainedUTF8Bytes: Int
+        let droppedCount: Int
+        let itemLimit: Int
+        let byteLimit: Int
+
+        func summaryLine(label: String) -> String {
+            "(\(label) projection — observed=\(observedCount); "
+                + "retained=\(retainedLines.count)/\(itemLimit); "
+                + "bytes=\(retainedUTF8Bytes)/\(byteLimit); dropped=\(droppedCount))"
+        }
+    }
+
+    /// Streaming builder for dynamic diagnostic sections. It counts every source row while
+    /// retaining only rows that fit both caps, so callers never have to allocate an unbounded
+    /// intermediate `[String]` merely to truncate it later.
+    struct HeaderProjectionBuilder {
+        private let itemLimit: Int
+        private let byteLimit: Int
+        private var retainedLines: [String] = []
+        private var retainedUTF8Bytes = 0
+        private var observedCount = 0
+
+        init(itemLimit: Int, byteLimit: Int) {
+            self.itemLimit = max(0, itemLimit)
+            self.byteLimit = max(0, byteLimit)
+            retainedLines.reserveCapacity(min(self.itemLimit, 64))
+        }
+
+        mutating func observe(_ line: String) {
+            if observedCount < Int.max { observedCount += 1 }
+            guard retainedLines.count < itemLimit else { return }
+            let separatorBytes = retainedLines.isEmpty ? 0 : 1
+            let remaining = byteLimit - retainedUTF8Bytes
+            guard separatorBytes <= remaining else { return }
+            let lineBytes = line.utf8.count
+            // A single externally-derived message must not consume an entire section or echo an
+            // attacker-sized payload into a copied report. It remains represented by the
+            // observed/dropped counters, so a capped sample is never presented as complete.
+            guard lineBytes <= DiagnosticReport.diagnosticLineByteLimit else { return }
+            guard lineBytes <= remaining - separatorBytes else { return }
+            retainedLines.append(line)
+            retainedUTF8Bytes += separatorBytes + lineBytes
+        }
+
+        /// `totalObservedCount` carries an upstream count when that boundary already selected a
+        /// bounded subset (for example the AX verdict store). It may only increase the count this
+        /// builder observed; retained/dropped therefore remain truthful under composition.
+        func finish(totalObservedCount: Int? = nil) -> HeaderProjection {
+            let total = max(observedCount, max(0, totalObservedCount ?? observedCount))
+            return HeaderProjection(
+                retainedLines: retainedLines,
+                observedCount: total,
+                retainedUTF8Bytes: retainedUTF8Bytes,
+                droppedCount: total - retainedLines.count,
+                itemLimit: itemLimit,
+                byteLimit: byteLimit
+            )
+        }
+    }
+
+    /// Keeps the earliest fitting lines in source order. An oversized line is dropped rather than
+    /// truncated mid-grapheme, and later small evidence can still be retained. `retainedUTF8Bytes`
+    /// exactly matches the UTF-8 size of `retainedLines.joined(separator: "\n")`.
+    static func boundedHeaderProjection(
+        _ sourceLines: [String],
+        itemLimit: Int = headerProjectionItemLimit,
+        byteLimit: Int = headerProjectionByteLimit
+    ) -> HeaderProjection {
+        var builder = HeaderProjectionBuilder(itemLimit: itemLimit, byteLimit: byteLimit)
+        for line in sourceLines {
+            builder.observe(line)
+        }
+        return builder.finish()
+    }
+
+    enum LogCollectionScope: Equatable {
+        case systemFilteredToCurrentProcess
+        case currentProcess
+
+        var diagnosticLabel: String {
+            switch self {
+            case .systemFilteredToCurrentProcess:
+                return "system/current-process-filtered"
+            case .currentProcess:
+                return "current-process"
+            }
+        }
+    }
+
+    /// Content-bearing fields stay internal to the bounded collector and are never included in
+    /// its metadata line. This seam lets tests model system-store entries from parallel launches.
+    struct LogRecord: Equatable {
+        let date: Date
+        let category: String
+        let level: String
+        let message: String
+        let processIdentifier: pid_t
+        let process: String
+    }
+
+    struct LogCollection: Equatable {
+        let lines: [String]
+        let scope: LogCollectionScope
+        let observedEntryCount: Int
+        let retainedEntryCount: Int
+        let retainedUTF8Bytes: Int
+        let entryLimit: Int
+        let byteLimit: Int
+        let excludedForeignProcessCount: Int
+        let oversizedEntryCount: Int
+        let evictedEntryCount: Int
+    }
+
+    /// Voice permission/configuration evidence. It contains no audio, transcript, API key, or
+    /// provider response — only the state needed to explain why dictation could not start.
+    public struct VoicePermissionContext: Equatable {
+        public enum GeminiCredentialState: String, Equatable {
+            case configured
+            case missing
+            case unavailable
+        }
+
+        public var microphone: DurableVoiceCapture.MicrophonePermissionStatus
+        public var speechRecognition: SpeechAuthorization.Status
+        public var selectedEngine: TranscriptionEngine
+        public var effectiveEngine: TranscriptionEngine
+        public var realTimeTypingEnabled: Bool
+        public var cloudAudioConsentGranted: Bool
+        public var geminiCredentialState: GeminiCredentialState
+
+        public init(
+            microphone: DurableVoiceCapture.MicrophonePermissionStatus,
+            speechRecognition: SpeechAuthorization.Status,
+            selectedEngine: TranscriptionEngine,
+            effectiveEngine: TranscriptionEngine,
+            realTimeTypingEnabled: Bool,
+            cloudAudioConsentGranted: Bool,
+            geminiCredentialState: GeminiCredentialState
+        ) {
+            self.microphone = microphone
+            self.speechRecognition = speechRecognition
+            self.selectedEngine = selectedEngine
+            self.effectiveEngine = effectiveEngine
+            self.realTimeTypingEnabled = realTimeTypingEnabled
+            self.cloudAudioConsentGranted = cloudAudioConsentGranted
+            self.geminiCredentialState = geminiCredentialState
+        }
+    }
 
     /// Static / live state captured for the dump header (no OSLog I/O).
     public struct Context: Equatable {
@@ -77,6 +241,26 @@ public enum DiagnosticReport {
         /// §9.1: `DevLogMirror` — engine log lines retained in-process past what OSLog still
         /// holds. This is the section that answers "it broke yesterday in Slack" at all.
         public var logMirrorLines: [String]
+        /// Always-on finite-vocabulary voice outcomes. Unlike the opt-in trace, these lines can
+        /// never contain transcript/audio/provider error payloads.
+        public var voiceTerminalLines: [String]
+        public var voicePermissions: VoicePermissionContext?
+        /// Bounded health of the persisted Recent Activity envelope. This distinguishes a truly
+        /// empty history from one that could not be read or written.
+        public var activityHistoryLine: String?
+        /// Opt-in debug-trace state and its latest typed write result. The type can represent only
+        /// finite status values, so a configured path or trace payload cannot enter the report.
+        public var debugTraceHealth: DebugTrace.Health?
+
+        /// Production capture fills these at the subsystem boundary. Public/test callers keep the
+        /// array initializer and are projected during formatting for source compatibility.
+        var mutedAppsProjection: HeaderProjection?
+        var siblingPathsProjection: HeaderProjection?
+        var injectTelemetryProjection: HeaderProjection?
+        var matchingSuspensionProjection: HeaderProjection?
+        var overlongTriggerProjection: HeaderProjection?
+        var axWriteVerdictProjection: HeaderProjection?
+        var unreachableSnippetProjection: HeaderProjection?
 
         public init(
             generatedAt: Date = Date(),
@@ -110,7 +294,11 @@ public enum DiagnosticReport {
             matchingSuspensionLines: [String] = [],
             matchDropLines: [String] = [],
             unreachableSnippetLines: [String] = [],
-            logMirrorLines: [String] = []
+            logMirrorLines: [String] = [],
+            voiceTerminalLines: [String] = [],
+            voicePermissions: VoicePermissionContext? = nil,
+            activityHistoryLine: String? = nil,
+            debugTraceHealth: DebugTrace.Health? = nil
         ) {
             self.generatedAt = generatedAt
             self.bundleID = bundleID
@@ -144,6 +332,17 @@ public enum DiagnosticReport {
             self.matchDropLines = matchDropLines
             self.unreachableSnippetLines = unreachableSnippetLines
             self.logMirrorLines = logMirrorLines
+            self.voiceTerminalLines = voiceTerminalLines
+            self.voicePermissions = voicePermissions
+            self.activityHistoryLine = activityHistoryLine
+            self.debugTraceHealth = debugTraceHealth
+            self.mutedAppsProjection = nil
+            self.siblingPathsProjection = nil
+            self.injectTelemetryProjection = nil
+            self.matchingSuspensionProjection = nil
+            self.overlongTriggerProjection = nil
+            self.axWriteVerdictProjection = nil
+            self.unreachableSnippetProjection = nil
         }
     }
 
@@ -214,8 +413,52 @@ public enum DiagnosticReport {
         } else {
             appVersion = version ?? build
         }
+        // One Keychain read feeds both fields. Two independent reads could report a provider
+        // fallback and a credential state that never coexisted if Keychain availability changed
+        // between calls, and would needlessly double a security-service operation.
+        let selectedVoiceEngine = VoicePreferences.transcriptionEngine
+        let geminiReadState = GeminiAPIKeyStore.readState()
+        let effectiveVoiceEngine = VoicePreferences.effectiveEngine(
+            preferred: selectedVoiceEngine,
+            keyState: geminiReadState
+        )
+        let overlongTriggerProjection = EventTapEngine.shared.overlongTriggerDiagnosticProjection()
+        let axWriteVerdictProjection = captureAXWriteVerdictProjection()
+        let unreachableSnippetProjection = EventTapEngine.shared.silentNoExpandDiagnosticProjection()
+        let mutedAppsProjection: HeaderProjection
+        let capturedMutedApps: [String]
+        if let mutedApps {
+            var builder = HeaderProjectionBuilder(
+                itemLimit: headerProjectionItemLimit,
+                byteLimit: headerProjectionByteLimit
+            )
+            for identifier in mutedApps {
+                builder.observe(
+                    DiagnosticPrivacy.boundedIdentifier(
+                        identifier,
+                        label: "mutedApp",
+                        domain: "muted-app"
+                    )
+                )
+            }
+            mutedAppsProjection = builder.finish()
+            capturedMutedApps = mutedAppsProjection.retainedLines
+        } else {
+            mutedAppsProjection = captureMutedAppProjection()
+            capturedMutedApps = mutedAppsProjection.retainedLines
+        }
+        let siblingPathsProjection = captureSiblingPathProjection(identity: identity)
+        let injectTelemetryProjection = PermissionCoordinator.shared
+            .injectTelemetryDiagnosticProjection()
+        let matchingSuspensionProjection = EventTapEngine.shared
+            .matchingSuspensionDiagnosticProjection()
+        let activityStore = ActivityHistoryStore.shared
+        let activityHistoryLine = activityHistoryDiagnosticLine(
+            health: activityStore.persistenceHealth,
+            retainedEventCount: activityStore.recentEvents(limit: ActivityHistoryStore.maxEvents).count
+        )
 
-        return Context(
+        var context = Context(
             bundleID: identity.bundleIdentifier,
             appPath: identity.bundlePath,
             executablePath: identity.executablePath,
@@ -230,25 +473,26 @@ public enum DiagnosticReport {
             frontmostAppName: front?.localizedName,
             frontmostBundleID: front?.bundleIdentifier,
             frontmostPID: front?.processIdentifier,
-            mutedApps: mutedApps ?? AppMuteStore.shared.allMuted(),
+            mutedApps: capturedMutedApps,
             expandGate: AXContextChecker.shared.expandGateSnapshot(
                 canUseAX: resolvedSnapshot.canUseAX,
                 canPostEvents: resolvedSnapshot.canPostEvents
             ),
             expandGateAtLastRefuse: PermissionCoordinator.shared.lastRecordedInjectRefuseProvenance,
-            siblingPaths: identity.siblingPaths(),
+            siblingPaths: siblingPathsProjection.retainedLines,
             macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             appVersion: appVersion,
             // §2.10 / §3.2 / §3.9: three diagnostics the engine already maintains and
             // that nothing used to print. Every one of them answers a question a bug
             // report cannot otherwise answer.
             tapDisableSummary: EventTapEngine.shared.tapDisableCounters.summaryLine,
-            injectTelemetryLines: PermissionCoordinator.shared.injectTelemetrySummaryLines(),
-            overlongTriggerLines: EventTapEngine.shared.overlongTriggerDiagnostics(),
-            axWriteVerdictLines: captureAXWriteVerdictLines(),
+            injectTelemetryLines: injectTelemetryProjection.retainedLines,
+            overlongTriggerLines: overlongTriggerProjection.retainedLines,
+            axWriteVerdictLines: axWriteVerdictProjection.retainedLines,
             aiLines: captureAILines(),
             secretLines: captureSecretLines(
                 pendingMigrationCount: { SecretStore.shared.snippetIDsPendingMigration().count },
+                pendingCleanupCount: { SnippetStore.shared.pendingSecretCleanupCount },
                 keychainLocked: { SecretStore.shared.isKeychainLocked() },
                 storageDescription: { SecretStore.shared.storageDescription() }
             ),
@@ -257,29 +501,77 @@ public enum DiagnosticReport {
             // the report could not previously answer at all. Each covers a distinct way an
             // expansion dies before it becomes an inject, and therefore before any counter above
             // this line can see it.
-            matchingSuspensionLines: EventTapEngine.shared.matchingSuspensionDiagnostics(),
+            matchingSuspensionLines: matchingSuspensionProjection.retainedLines,
             matchDropLines: EventTapEngine.shared.matchDropDiagnostics(),
-            unreachableSnippetLines: EventTapEngine.shared.silentNoExpandDiagnostics(),
-            logMirrorLines: Self.mirrorReportLines()
+            unreachableSnippetLines: unreachableSnippetProjection.retainedLines,
+            logMirrorLines: Self.mirrorReportLines(),
+            voiceTerminalLines: VoiceDiagnosticsRecorder.shared.terminalReportLines(),
+            voicePermissions: VoicePermissionContext(
+                microphone: DurableVoiceCapture.microphonePermissionStatus(),
+                speechRecognition: SpeechAuthorization.status(),
+                selectedEngine: selectedVoiceEngine,
+                effectiveEngine: effectiveVoiceEngine,
+                realTimeTypingEnabled: VoicePreferences.isRealTimeTypingEnabled,
+                cloudAudioConsentGranted: VoicePreferences.hasCloudAudioConsent,
+                geminiCredentialState: geminiCredentialState(for: geminiReadState)
+            ),
+            activityHistoryLine: activityHistoryLine,
+            debugTraceHealth: DebugTrace.health
         )
+        context.mutedAppsProjection = mutedAppsProjection
+        context.siblingPathsProjection = siblingPathsProjection
+        context.injectTelemetryProjection = injectTelemetryProjection
+        context.matchingSuspensionProjection = matchingSuspensionProjection
+        context.overlongTriggerProjection = overlongTriggerProjection
+        context.axWriteVerdictProjection = axWriteVerdictProjection
+        context.unreachableSnippetProjection = unreachableSnippetProjection
+        return context
+    }
+
+    static func geminiCredentialState(
+        for readState: GeminiAPIKeyStore.ReadState
+    ) -> VoicePermissionContext.GeminiCredentialState {
+        switch readState {
+        case .available: return .configured
+        case .missing: return .missing
+        case .unavailable: return .unavailable
+        }
     }
 
     /// Newest mirrored lines for the report, with a truncation notice when the ring holds more
-    /// than the report carries. The count/read pair is not atomic; a line landing between the
-    /// two only skews the notice by one, which is fine for diagnostics.
+    /// than the report carries. Lines and retention counters come from one atomic snapshot.
     static func mirrorReportLines(
         limit: Int = defaultMirrorLineLimit,
         mirror: DevLogMirror = .shared
     ) -> [String] {
-        let total = mirror.count
-        guard total > 0 else { return [] }
-        var lines = mirror.recentLines(limit: limit)
+        let snapshot = mirror.snapshot(limit: limit)
+        let health = snapshot.health
+        let total = health.retainedEntryCount
+        let healthLine: String? = if health.consecutiveFailures > 0 {
+            "(mirror unavailable — OSLog fetch failed \(health.consecutiveFailures) time(s)"
+                + (health.lastFailureKind.map { " (\($0))" } ?? "")
+                + "; cursor retained for retry)"
+        } else if health.hasSuccessfulPoll {
+            "(mirror healthy — last fetch succeeded; no matching entries)"
+        } else {
+            "(mirror pending — no successful OSLog fetch yet)"
+        }
+        let retentionLine = "(mirror retention — observed=\(health.observedEntryCount); "
+            + "retained=\(health.retainedEntryCount)/\(health.entryCapacity); "
+            + "bytes=\(health.retainedUTF8Bytes)/\(health.byteCapacity); "
+            + "oversized=\(health.oversizedEntryCount); evicted=\(health.evictedEntryCount))"
+        guard total > 0 else { return [healthLine!, retentionLine] }
+        var lines = snapshot.lines
         if total > lines.count {
             lines.insert(
                 "(oldest \(total - lines.count) mirrored line(s) truncated — full ring lives in process memory)",
                 at: 0
             )
         }
+        if health.consecutiveFailures > 0, let healthLine {
+            lines.insert(healthLine, at: 0)
+        }
+        lines.insert(retentionLine, at: health.consecutiveFailures > 0 ? 1 : 0)
         return lines
     }
 
@@ -299,6 +591,7 @@ public enum DiagnosticReport {
         defaults: UserDefaults = .standard,
         accessDiagnostics: SecretAccessDiagnostics = .shared,
         pendingMigrationCount: (() -> Int)? = nil,
+        pendingCleanupCount: (() -> Int)? = nil,
         keychainLocked: (() -> Bool)? = nil,
         storageDescription: (() -> String)? = nil
     ) -> [String] {
@@ -308,13 +601,33 @@ public enum DiagnosticReport {
 
         let capability: String
         switch resolved {
-        case .biometry(let name): capability = "available (\(name))"
+        case .biometry(let name):
+            let safeName = DiagnosticPrivacy.boundedIdentifier(
+                name,
+                label: "biometryName",
+                domain: "biometry-display-name"
+            )
+            capability = "available (\(safeName))"
         case .passwordOnly: capability = "password only — no enrolled biometrics on this Mac"
         case .unavailable: capability = "unavailable — no login password or biometrics set"
         }
 
+        let safeStorageDescription = DiagnosticPrivacy.boundedIdentifier(
+            (storageDescription ?? { "in-memory" })(),
+            label: "secretStorage",
+            domain: "secret-storage-description"
+        )
+        let trailLines = accessDiagnostics.trail().suffix(16).map {
+            let safeTrail = DiagnosticPrivacy.boundedIdentifier(
+                $0,
+                label: "secretTrail",
+                domain: "secret-access-trail"
+            )
+            return "  trail: \(safeTrail)"
+        }
+
         return [
-            "Secret snippets: \(all.filter { $0.isSecret }.count)",
+            "Secret snippets: \(all.lazy.filter { $0.isSecret }.count)",
             "Biometry: \(capability)",
             "Require authentication: \(gateOn ? "on" : "off")",
             "Reuse window: \(Int(BiometricGate.reuseWindow))s",
@@ -326,15 +639,17 @@ public enum DiagnosticReport {
             // Hermetic by default (tests must never touch the live keychain); the production
             // capture site below injects the real closures.
             "Secrets pending migration: \((pendingMigrationCount ?? { 0 })())",
+            // A failed destructive sweep remains retryable; count only, never item identity.
+            "Secret cleanup pending: \((pendingCleanupCount ?? { 0 })())",
             // A locked keychain fails every decrypt while metadata still answers — without
             // this line those reports read exactly like "the secret vanished".
             "Keychain: \((keychainLocked ?? { false })() ? "LOCKED" : "unlocked")",
             // §8.11: where the values actually live, and whether the master key is intact.
-            "Storage: \((storageDescription ?? { "in-memory" })())",
+            "Storage: \(safeStorageDescription)",
         ]
         // The step trail: every fetch/heal/migrate with its OSStatus, accounts aliased to
         // "item A/B/…" — the exact sequence that produced whatever the user just saw.
-        + accessDiagnostics.trail().suffix(16).map { "  trail: \($0)" }
+        + trailLines
     }
 
     /// Renders `AXWriteCapabilityStore`'s learned per-app verdicts for the report.
@@ -348,15 +663,76 @@ public enum DiagnosticReport {
     ) -> [String] {
         let interesting = store.learnedVerdicts().filter { $0.verdict != .unknown }
         guard !interesting.isEmpty else { return [] }
-        return interesting.map { entry in
-            let label: String
-            switch entry.verdict {
-            case .trusted: label = "trusted (AX writes verified)"
-            case .falseSuccess: label = "falseSuccess (AX lied — pasting instead)"
-            case .unknown: label = "unknown"
-            }
-            return "\(entry.key): \(label)"
+        return interesting.map(axWriteVerdictLine)
+    }
+
+    /// Production report path: the store counts all learned entries while selecting only the
+    /// bounded lexicographic prefix. Formatting then applies the independent byte cap and carries
+    /// the store's complete observed count into the rendered projection metadata.
+    static func captureAXWriteVerdictProjection(
+        store: AXWriteCapabilityStore = .shared,
+        itemLimit: Int = headerProjectionItemLimit,
+        byteLimit: Int = headerProjectionByteLimit
+    ) -> HeaderProjection {
+        let source = store.learnedVerdictProjection(limit: max(0, itemLimit))
+        var builder = HeaderProjectionBuilder(itemLimit: itemLimit, byteLimit: byteLimit)
+        for entry in source.entries {
+            builder.observe(axWriteVerdictLine(entry))
         }
+        return builder.finish(totalObservedCount: source.observedCount)
+    }
+
+    /// Production report path for the persisted per-app mute set. The store selects a bounded,
+    /// stable prefix under its lock and supplies the complete observed count; report formatting
+    /// applies the independent byte limit without ever copying or sorting the full set.
+    static func captureMutedAppProjection(
+        store: AppMuteStore = .shared,
+        itemLimit: Int = headerProjectionItemLimit,
+        byteLimit: Int = headerProjectionByteLimit
+    ) -> HeaderProjection {
+        let source = store.mutedIdentifierProjection(limit: max(0, itemLimit))
+        var builder = HeaderProjectionBuilder(itemLimit: itemLimit, byteLimit: byteLimit)
+        for identifier in source.identifiers {
+            builder.observe(
+                DiagnosticPrivacy.boundedIdentifier(
+                    identifier,
+                    label: "mutedApp",
+                    domain: "muted-app"
+                )
+            )
+        }
+        return builder.finish(totalObservedCount: source.observedCount)
+    }
+
+    /// Running applications are an OS-owned finite snapshot, but their paths are still external
+    /// strings. Bound the diagnostic projection before it enters `Context`, retaining ordinary
+    /// paths verbatim and converting only oversized outliers to content-free shape metadata.
+    static func captureSiblingPathProjection(
+        identity: ProcessIdentity,
+        itemLimit: Int = headerProjectionItemLimit,
+        byteLimit: Int = headerProjectionByteLimit
+    ) -> HeaderProjection {
+        identity.siblingPathDiagnosticProjection(
+            itemLimit: itemLimit,
+            byteLimit: byteLimit
+        )
+    }
+
+    private static func axWriteVerdictLine(
+        _ entry: (key: String, verdict: AXWriteCapabilityStore.Verdict)
+    ) -> String {
+        let label: String
+        switch entry.verdict {
+        case .trusted: label = "trusted (AX writes verified)"
+        case .falseSuccess: label = "falseSuccess (AX lied — pasting instead)"
+        case .unknown: label = "unknown"
+        }
+        let key = DiagnosticPrivacy.boundedIdentifier(
+            entry.key,
+            label: "axKey",
+            domain: "ax-write-key"
+        )
+        return "\(key): \(label)"
     }
 
     static func captureAILines(
@@ -392,40 +768,93 @@ public enum DiagnosticReport {
         )
     }
 
+    /// Finite persistence health for Recent Activity. `PersistenceHealth` intentionally exposes a
+    /// string for source compatibility, so normalize it back through the closed failure enum before
+    /// rendering; a malformed file path or NSError payload can never escape via this line.
+    static func activityHistoryDiagnosticLine(
+        health: ActivityHistoryStore.PersistenceHealth,
+        retainedEventCount: Int
+    ) -> String {
+        let retained = min(ActivityHistoryStore.maxEvents, max(0, retainedEventCount))
+        guard let rawFailure = health.lastFailureKind else {
+            return "Activity history: healthy retained=\(retained)/\(ActivityHistoryStore.maxEvents)"
+        }
+        let failure = ActivityHistoryStore.PersistenceFailureKind(rawValue: rawFailure)?.rawValue
+            ?? "unknown"
+        return "Activity history: unavailable failure=\(failure) "
+            + "retained=\(retained)/\(ActivityHistoryStore.maxEvents)"
+    }
+
     public static func formatHeader(_ context: Context) -> String {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var lines: [String] = [
             "=== DevType Diagnostic Report ===",
             "Generated: \(iso.string(from: context.generatedAt))",
-            "macOS: \(context.macOSVersion)",
-            "App version: \(context.appVersion ?? "unknown")",
+            "macOS: \(boundedScalar(context.macOSVersion, label: "macOS", domain: "macos-version"))",
+            "App version: \(boundedOptionalScalar(context.appVersion, label: "appVersion", domain: "app-version", nilValue: "unknown"))",
             "",
             "-- Identity --",
-            "Bundle ID: \(context.bundleID)",
-            "App path: \(context.appPath)",
-            "Executable: \(context.executablePath)",
-            "CDHash: \(context.cdHash ?? "(unknown)")",
-            "Requirement: \(context.designatedRequirement ?? "(unknown)")",
+            "Bundle ID: \(boundedScalar(context.bundleID, label: "bundleID", domain: "process-bundle-id"))",
+            "App path: \(boundedScalar(context.appPath, label: "appPath", domain: "process-app-path"))",
+            "Executable: \(boundedScalar(context.executablePath, label: "executable", domain: "process-executable-path"))",
+            "CDHash: \(boundedOptionalScalar(context.cdHash, label: "cdHash", domain: "process-cdhash", nilValue: "(unknown)"))",
+            "Requirement: \(boundedOptionalScalar(context.designatedRequirement, label: "requirement", domain: "process-requirement", nilValue: "(unknown)"))",
             "",
             "-- Capabilities --",
             "LIVE: \(PermissionCopy.livePreflightSummary(snapshot: context.snapshot))",
             "Tap running: \(context.tapRunning)",
             "Engine enabled: \(context.engineEnabled)",
             "Secure Input active: \(context.secureInputActive)",
-            "Display status: \(context.displayStatus)",
-            "Last inject: \(context.lastInjectOutcome ?? "(none)")",
-            "",
-            "-- Expand gate (live) --",
+            "Display status: \(boundedScalar(context.displayStatus, label: "displayStatus", domain: "display-status"))",
+            "Last inject: \(boundedOptionalScalar(context.lastInjectOutcome, label: "injectOutcome", domain: "inject-outcome", nilValue: "(none)"))",
         ]
+        lines.append("")
+        lines.append("-- Voice permissions --")
+        if let voice = context.voicePermissions {
+            lines.append("Microphone: \(voice.microphone.rawValue)")
+            lines.append("Speech Recognition: \(voice.speechRecognition.diagnosticLabel)")
+            lines.append("Selected engine: \(voice.selectedEngine.rawValue)")
+            lines.append("Effective engine: \(voice.effectiveEngine.rawValue)")
+            lines.append("Real-time typing: \(voice.realTimeTypingEnabled ? "on" : "off")")
+            lines.append("Cloud audio consent: \(voice.cloudAudioConsentGranted ? "granted" : "not granted")")
+            lines.append("Gemini credential: \(voice.geminiCredentialState.rawValue)")
+        } else {
+            lines.append("(not captured)")
+        }
+        lines.append("")
+        lines.append("-- Voice terminal diagnostics (content-free) --")
+        if context.voiceTerminalLines.isEmpty {
+            lines.append("(not captured)")
+        } else {
+            appendBoundedHeaderProjection(
+                boundedHeaderProjection(context.voiceTerminalLines),
+                label: "voice-terminal-lines",
+                emptyLine: "(not captured)",
+                to: &lines
+            )
+        }
+        lines.append("")
+        lines.append("-- Activity history persistence --")
+        lines.append(boundedOptionalScalar(
+            context.activityHistoryLine,
+            label: "activityHistory",
+            domain: "activity-history-health",
+            nilValue: "(not captured)"
+        ))
+        lines.append("")
+        lines.append("-- Opt-in debug trace --")
+        lines.append(context.debugTraceHealth?.diagnosticLine ?? "(not captured)")
+        lines.append("")
+        lines.append("-- Expand gate (live) --")
         lines.append(contentsOf: formatExpandGateLines(context.expandGate))
         lines.append("")
         lines.append("-- Expand gate at last refuse --")
         if let refuse = context.expandGateAtLastRefuse {
             lines.append("Refused at: \(iso.string(from: refuse.refusedAt))")
-            lines.append("Refuse reason: \(refuse.reason)")
-            lines.append("Frontmost name: \(refuse.frontmostAppName ?? "(none)")")
-            lines.append("Frontmost bundle ID: \(refuse.frontmostBundleID ?? "(none)")")
+            lines.append("Refuse reason: \(boundedScalar(refuse.reason, label: "refuseReason", domain: "inject-refuse-reason"))")
+            lines.append("Frontmost name: \(boundedOptionalScalar(refuse.frontmostAppName, label: "frontmostName", domain: "frontmost-name", nilValue: "(none)"))")
+            lines.append("Frontmost bundle ID: \(boundedOptionalScalar(refuse.frontmostBundleID, label: "frontmostBundleID", domain: "frontmost-bundle-id", nilValue: "(none)"))")
             lines.append("Frontmost PID: \(refuse.frontmostPID.map(String.init) ?? "(none)")")
             lines.append("AX error: \(refuse.axErrorRawValue.map(String.init) ?? "(none)")")
             if let gate = refuse.gateSnapshot {
@@ -439,22 +868,39 @@ public enum DiagnosticReport {
         lines.append(contentsOf: [
             "",
             "-- Frontmost --",
-            "Name: \(context.frontmostAppName ?? "(none)")",
-            "Bundle ID: \(context.frontmostBundleID ?? "(none)")",
+            "Name: \(boundedOptionalScalar(context.frontmostAppName, label: "frontmostName", domain: "frontmost-name", nilValue: "(none)"))",
+            "Bundle ID: \(boundedOptionalScalar(context.frontmostBundleID, label: "frontmostBundleID", domain: "frontmost-bundle-id", nilValue: "(none)"))",
             "PID: \(context.frontmostPID.map(String.init) ?? "(none)")",
             "",
             "-- Muted apps --",
-            context.mutedApps.isEmpty ? "(none)" : context.mutedApps.sorted().joined(separator: "\n"),
-            "",
-            "-- Sibling DevType paths --",
-            context.siblingPaths.isEmpty ? "(none)" : context.siblingPaths.joined(separator: "\n"),
         ])
+        appendBoundedHeaderProjection(
+            context.mutedAppsProjection
+                ?? boundedHeaderProjection(context.mutedApps),
+            label: "muted-apps",
+            emptyLine: "(none)",
+            to: &lines
+        )
+        lines.append("")
+        lines.append("-- Sibling DevType paths --")
+        appendBoundedHeaderProjection(
+            context.siblingPathsProjection
+                ?? boundedHeaderProjection(context.siblingPaths),
+            label: "sibling-paths",
+            emptyLine: "(none)",
+            to: &lines
+        )
 
         // §2.10: tap-disable-by-timeout is the most likely silent field failure and used
         // to produce one indistinguishable `notice` line with no counter.
         lines.append("")
         lines.append("-- Event tap health --")
-        lines.append(context.tapDisableSummary ?? "(not captured)")
+        lines.append(boundedOptionalScalar(
+            context.tapDisableSummary,
+            label: "tapHealth",
+            domain: "tap-health",
+            nilValue: "(not captured)"
+        ))
 
         // §3.2: five outcomes and a dozen refuse reasons used to collapse into one
         // overwritten variable.
@@ -463,7 +909,13 @@ public enum DiagnosticReport {
         if context.injectTelemetryLines.isEmpty {
             lines.append("(none)")
         } else {
-            lines.append(contentsOf: context.injectTelemetryLines)
+            appendBoundedHeaderProjection(
+                context.injectTelemetryProjection
+                    ?? boundedHeaderProjection(context.injectTelemetryLines),
+                label: "inject-telemetry",
+                emptyLine: "(none)",
+                to: &lines
+            )
         }
 
         // An AI guardrail refusal used to leave no trace here at all, so the one artifact
@@ -473,7 +925,12 @@ public enum DiagnosticReport {
         if context.aiLines.isEmpty {
             lines.append("(not captured)")
         } else {
-            lines.append(contentsOf: context.aiLines)
+            appendBoundedHeaderProjection(
+                boundedHeaderProjection(context.aiLines),
+                label: "ai-diagnostics",
+                emptyLine: "(not captured)",
+                to: &lines
+            )
         }
 
         // Prefix-debounce lifecycle. "races-absorbed" is the line to read when a report claims
@@ -486,12 +943,22 @@ public enum DiagnosticReport {
         if context.secretLines.isEmpty {
             lines.append("(not captured)")
         } else {
-            lines.append(contentsOf: context.secretLines)
+            appendBoundedHeaderProjection(
+                boundedHeaderProjection(context.secretLines),
+                label: "secret-diagnostics",
+                emptyLine: "(not captured)",
+                to: &lines
+            )
         }
 
         lines.append("")
         lines.append("-- Prefix debounce --")
-        lines.append(context.prefixDebounceSummary ?? "(not captured)")
+        lines.append(boundedOptionalScalar(
+            context.prefixDebounceSummary,
+            label: "prefixDebounce",
+            domain: "prefix-debounce",
+            nilValue: "(not captured)"
+        ))
 
         // The expansion-outage section. Everything above describes expansions that *happened*;
         // these three describe the ways one never starts. A report where every counter looks
@@ -501,7 +968,13 @@ public enum DiagnosticReport {
         if context.matchingSuspensionLines.isEmpty {
             lines.append("(not captured)")
         } else {
-            lines.append(contentsOf: context.matchingSuspensionLines)
+            appendBoundedHeaderProjection(
+                context.matchingSuspensionProjection
+                    ?? boundedHeaderProjection(context.matchingSuspensionLines),
+                label: "matching-suspensions",
+                emptyLine: "(not captured)",
+                to: &lines
+            )
         }
 
         lines.append("")
@@ -509,33 +982,44 @@ public enum DiagnosticReport {
         if context.matchDropLines.isEmpty {
             lines.append("(not captured)")
         } else {
-            lines.append(contentsOf: context.matchDropLines)
+            appendBoundedHeaderProjection(
+                boundedHeaderProjection(context.matchDropLines),
+                label: "match-drops",
+                emptyLine: "(not captured)",
+                to: &lines
+            )
         }
 
         lines.append("")
         lines.append("-- Snippets that never expand by typing --")
-        if context.unreachableSnippetLines.isEmpty {
-            lines.append("(none)")
-        } else {
-            lines.append(contentsOf: context.unreachableSnippetLines)
-        }
+        appendBoundedHeaderProjection(
+            context.unreachableSnippetProjection
+                ?? boundedHeaderProjection(context.unreachableSnippetLines),
+            label: "silent-no-expand",
+            emptyLine: "(none)",
+            to: &lines
+        )
 
         // §3.9: triggers past the 64-character match buffer can never fire and nothing said so.
         lines.append("")
         lines.append("-- Overlong triggers --")
-        if context.overlongTriggerLines.isEmpty {
-            lines.append("(none)")
-        } else {
-            lines.append(contentsOf: context.overlongTriggerLines)
-        }
+        appendBoundedHeaderProjection(
+            context.overlongTriggerProjection
+                ?? boundedHeaderProjection(context.overlongTriggerLines),
+            label: "overlong-triggers",
+            emptyLine: "(none)",
+            to: &lines
+        )
 
         lines.append("")
         lines.append("-- Learned AX write verdicts (per app) --")
-        if context.axWriteVerdictLines.isEmpty {
-            lines.append("(none learned yet)")
-        } else {
-            lines.append(contentsOf: context.axWriteVerdictLines)
-        }
+        appendBoundedHeaderProjection(
+            context.axWriteVerdictProjection
+                ?? boundedHeaderProjection(context.axWriteVerdictLines),
+            label: "ax-write-verdicts",
+            emptyLine: "(none learned yet)",
+            to: &lines
+        )
 
         // §9.1: the mirror's own section. OSLog's direct fetch above is bounded by what logd
         // still holds; these lines were captured into process memory precisely so a report
@@ -545,10 +1029,33 @@ public enum DiagnosticReport {
         if context.logMirrorLines.isEmpty {
             lines.append("(mirror empty — not started or nothing logged yet)")
         } else {
-            lines.append(contentsOf: context.logMirrorLines)
+            appendBoundedHeaderProjection(
+                boundedHeaderProjection(
+                    context.logMirrorLines,
+                    itemLimit: defaultMirrorLineLimit + 4,
+                    byteLimit: defaultLogByteLimit
+                ),
+                label: "log-mirror-lines",
+                emptyLine: "(mirror empty — not started or nothing logged yet)",
+                to: &lines
+            )
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    private static func appendBoundedHeaderProjection(
+        _ projection: HeaderProjection,
+        label: String,
+        emptyLine: String,
+        to reportLines: inout [String]
+    ) {
+        reportLines.append(projection.summaryLine(label: label))
+        if projection.retainedLines.isEmpty {
+            reportLines.append(emptyLine)
+        } else {
+            reportLines.append(contentsOf: projection.retainedLines)
+        }
     }
 
     private static func formatExpandGateLines(_ gate: ExpandGateSnapshot) -> [String] {
@@ -559,7 +1066,7 @@ public enum DiagnosticReport {
             "Secure field: \(optionalBool(gate.isSecureField))",
             "IME marked text: \(optionalBool(gate.hasIMEMarkedText))",
             "Should block expand: \(gate.shouldBlockExpand)",
-            "Block reason: \(gate.blockReason)",
+            "Block reason: \(boundedScalar(gate.blockReason, label: "blockReason", domain: "expand-gate-reason"))",
         ]
     }
 
@@ -568,7 +1075,13 @@ public enum DiagnosticReport {
         if logLines.isEmpty {
             parts.append("(no recent entries — OSLogStore empty or unavailable)")
         } else {
-            parts.append(contentsOf: logLines)
+            let projection = boundedHeaderProjection(
+                logLines,
+                itemLimit: defaultLogLineLimit + 1,
+                byteLimit: defaultLogByteLimit
+            )
+            parts.append(projection.summaryLine(label: "recent-oslog-lines"))
+            parts.append(contentsOf: projection.retainedLines)
         }
         parts.append("")
         parts.append("=== End DevType Diagnostic Report ===")
@@ -582,55 +1095,197 @@ public enum DiagnosticReport {
     /// quiet minutes from half an hour ago and cut exactly the seconds around the incident the
     /// report exists to explain.
     ///
-    /// Scope: the system-wide store is tried first so persisted entries from *previous*
-    /// launches of the app are included — "it broke this morning" must not be answerable
-    /// only while the process that saw it is still alive. Some hosts refuse that scope;
-    /// the current-process store is the fallback. Entries are filtered to the DevType
-    /// subsystem either way, so nothing from other processes' logs is ever rendered.
+    /// Scope: the system-wide store is tried first, but subsystem equality is not process
+    /// identity. Every enumerated log is therefore required to match both this executable's
+    /// process name and PID before it can enter the bounded tail. Some hosts refuse system scope;
+    /// that fallback is explicitly reported as current-process scope. We intentionally do not
+    /// claim prior-launch coverage: parallel launches and PID reuse cannot be attributed safely.
     public static func fetchRecentLogLines(
         lookback: TimeInterval = defaultLogLookback,
-        limit: Int = defaultLogLineLimit
+        limit: Int = defaultLogLineLimit,
+        byteLimit: Int = defaultLogByteLimit
     ) -> [String] {
-        let store: OSLogStore
+        let selection: LogStoreSelection
         do {
-            store = try makeLogStore(preferSystemScope: true)
+            selection = try makeLogStoreSelection(preferSystemScope: true)
         } catch {
-            return ["(OSLogStore error: \(error.localizedDescription))"]
+            return [osLogFailureLine(error)]
         }
         do {
             let startDate = Date().addingTimeInterval(-lookback)
-            let position = store.position(date: startDate)
+            let position = selection.store.position(date: startDate)
             let predicate = NSPredicate(format: "subsystem == %@", DevTypeLog.subsystem)
-            let entries = try store.getEntries(at: position, matching: predicate)
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-            var lines: [String] = []
+            let entries = try selection.store.getEntries(at: position, matching: predicate)
+            var accumulator = LogCollectionAccumulator(
+                limit: limit,
+                byteLimit: byteLimit,
+                scope: selection.scope,
+                currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+                currentProcessNames: currentProcessNames()
+            )
             for entry in entries {
                 guard let log = entry as? OSLogEntryLog else { continue }
-                let level = levelLabel(log.level)
-                lines.append(
-                    "\(formatter.string(from: log.date)) [\(log.category)] \(level) \(log.composedMessage)"
+                accumulator.observe(
+                    LogRecord(
+                        date: log.date,
+                        category: log.category,
+                        level: levelLabel(log.level),
+                        message: log.composedMessage,
+                        processIdentifier: log.processIdentifier,
+                        process: log.process
+                    )
                 )
             }
-            return keepingMostRecent(lines, limit: limit)
+            return reportLines(for: accumulator.result)
         } catch {
-            return ["(OSLogStore error: \(error.localizedDescription))"]
+            return [osLogFailureLine(error)]
         }
     }
 
-    /// Store construction with fallback. Internal so tests can pin the ordering.
-    static func makeLogStore(preferSystemScope: Bool) throws -> OSLogStore {
+    private struct LogStoreSelection {
+        let store: OSLogStore
+        let scope: LogCollectionScope
+    }
+
+    /// Store construction with fallback. The selection used by report generation carries the
+    /// actual scope so a fallback can never silently masquerade as a system-store read.
+    private static func makeLogStoreSelection(preferSystemScope: Bool) throws -> LogStoreSelection {
         if preferSystemScope {
             do {
-                return try OSLogStore(scope: .system)
+                return LogStoreSelection(
+                    store: try OSLogStore(scope: .system),
+                    scope: .systemFilteredToCurrentProcess
+                )
             } catch {
+                let failureKind = String(reflecting: type(of: error))
                 DevTypeLog.app.notice(
-                    "[Diagnostics] system-wide OSLogStore unavailable (\(error.localizedDescription, privacy: .public)) — falling back to current-process scope"
+                    "[Diagnostics] system-wide OSLogStore unavailable (\(failureKind, privacy: .public)) — falling back to current-process scope"
                 )
             }
         }
-        return try OSLogStore(scope: .currentProcessIdentifier)
+        return LogStoreSelection(
+            store: try OSLogStore(scope: .currentProcessIdentifier),
+            scope: .currentProcess
+        )
+    }
+
+    /// Compatibility/test seam for callers that only need a store. Report generation uses the
+    /// selection above so it retains scope truthfulness.
+    static func makeLogStore(preferSystemScope: Bool) throws -> OSLogStore {
+        try makeLogStoreSelection(preferSystemScope: preferSystemScope).store
+    }
+
+    static func collectRecentLogLines<S: Sequence>(
+        _ records: S,
+        limit: Int,
+        byteLimit: Int,
+        scope: LogCollectionScope,
+        currentProcessIdentifier: pid_t,
+        currentProcessNames: Set<String>
+    ) -> LogCollection where S.Element == LogRecord {
+        var accumulator = LogCollectionAccumulator(
+            limit: limit,
+            byteLimit: byteLimit,
+            scope: scope,
+            currentProcessIdentifier: currentProcessIdentifier,
+            currentProcessNames: currentProcessNames
+        )
+        for record in records {
+            accumulator.observe(record)
+        }
+        return accumulator.result
+    }
+
+    static func reportLines(for collection: LogCollection) -> [String] {
+        let metadata = "(OSLog retention — scope=\(collection.scope.diagnosticLabel); "
+            + "observed=\(collection.observedEntryCount); "
+            + "retained=\(collection.retainedEntryCount)/\(collection.entryLimit); "
+            + "bytes=\(collection.retainedUTF8Bytes)/\(collection.byteLimit); "
+            + "excluded-foreign=\(collection.excludedForeignProcessCount); "
+            + "oversized=\(collection.oversizedEntryCount); "
+            + "evicted=\(collection.evictedEntryCount))"
+        return [metadata] + collection.lines
+    }
+
+    private struct LogCollectionAccumulator {
+        private let scope: LogCollectionScope
+        private let currentProcessIdentifier: pid_t
+        private let currentProcessNames: Set<String>
+        private var tail: BoundedUTF8Tail<String>
+        private var observedEntryCount = 0
+        private var excludedForeignProcessCount = 0
+
+        init(
+            limit: Int,
+            byteLimit: Int,
+            scope: LogCollectionScope,
+            currentProcessIdentifier: pid_t,
+            currentProcessNames: Set<String>
+        ) {
+            self.scope = scope
+            self.currentProcessIdentifier = currentProcessIdentifier
+            self.currentProcessNames = currentProcessNames
+            self.tail = BoundedUTF8Tail(
+                countLimit: limit,
+                byteLimit: byteLimit
+            )
+        }
+
+        mutating func observe(_ record: LogRecord) {
+            observedEntryCount = saturatingAdd(observedEntryCount, 1)
+            let nameMatches = currentProcessNames.contains(record.process)
+            guard record.processIdentifier == currentProcessIdentifier, nameMatches else {
+                excludedForeignProcessCount = saturatingAdd(excludedForeignProcessCount, 1)
+                return
+            }
+
+            let line = "\(Self.timestampFormatter.string(from: record.date)) "
+                + "[\(record.category)] \(record.level) \(record.message)"
+            _ = tail.append(line, utf8ByteCount: line.utf8.count + 1)
+        }
+
+        var result: LogCollection {
+            let statistics = tail.statistics
+            return LogCollection(
+                lines: tail.values,
+                scope: scope,
+                observedEntryCount: observedEntryCount,
+                retainedEntryCount: statistics.retainedCount,
+                retainedUTF8Bytes: statistics.retainedUTF8Bytes,
+                entryLimit: tail.countLimit,
+                byteLimit: tail.byteLimit,
+                excludedForeignProcessCount: excludedForeignProcessCount,
+                oversizedEntryCount: statistics.oversizedCount,
+                evictedEntryCount: statistics.evictedCount
+            )
+        }
+
+        private static let timestampFormatter: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+    }
+
+    private static func currentProcessNames() -> Set<String> {
+        Set(
+            [
+                ProcessInfo.processInfo.processName,
+                Bundle.main.executableURL?.lastPathComponent,
+            ].compactMap { name in
+                guard let name, !name.isEmpty else { return nil }
+                return name
+            }
+        )
+    }
+
+    static func osLogFailureLine(_ error: Error) -> String {
+        "(OSLogStore unavailable — \(String(reflecting: type(of: error))))"
+    }
+
+    private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : sum
     }
 
     /// Newest-last window over an oldest-first enumeration: keep the tail when the session
@@ -661,14 +1316,30 @@ public enum DiagnosticReport {
     /// Copy text to the general pasteboard as a plain string.
     @discardableResult
     public static func copyToPasteboard(_ text: String) -> Bool {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        return pasteboard.setString(text, forType: .string)
+        PasteboardBroker.shared.writeUserClipboardString(text)
     }
 
     private static func optionalBool(_ value: Bool?) -> String {
         guard let value else { return "(n/a — no focus)" }
         return value ? "yes" : "no"
+    }
+
+    private static func boundedScalar(
+        _ value: String,
+        label: String,
+        domain: String
+    ) -> String {
+        DiagnosticPrivacy.boundedIdentifier(value, label: label, domain: domain)
+    }
+
+    private static func boundedOptionalScalar(
+        _ value: String?,
+        label: String,
+        domain: String,
+        nilValue: String
+    ) -> String {
+        guard let value else { return nilValue }
+        return boundedScalar(value, label: label, domain: domain)
     }
 
     private static func levelLabel(_ level: OSLogEntryLog.Level) -> String {

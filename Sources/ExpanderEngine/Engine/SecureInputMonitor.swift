@@ -72,7 +72,10 @@ public final class SecureInputMonitor {
             guard self.shouldReport(status.isLocked, generation: currentGeneration) else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isCurrent(currentGeneration) else { return }
-                let app = status.holdingAppName ?? "nil"
+                let app = DevTypeLog.boundedPublicIdentifier(
+                    status.holdingAppName,
+                    label: "appName"
+                )
                 let pid = status.holdingPID.map { String($0) } ?? "nil"
                 DevTypeLog.secureInput.info(
                     "[SecureInput] lock \(status.isLocked ? "enabled" : "released", privacy: .public) frontmost=\(app, privacy: .public) pid=\(pid, privacy: .public)"

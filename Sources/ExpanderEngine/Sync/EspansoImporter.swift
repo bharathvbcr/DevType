@@ -37,6 +37,9 @@ public enum EspansoImporter {
         /// batch continues with the remaining imports; a broken top-level entry file
         /// still fails the import outright.
         public var skippedParseFailed: Int = 0
+        /// Validated in-memory payloads. Kept internal so callers can only
+        /// receive persistent references after the canonical promotion step.
+        internal var stagedAttachments: [SnippetImporter.StagedAttachment] = []
 
         public var totalSkipped: Int {
             skippedVars + skippedForm + skippedHtml + skippedMarkdown
@@ -78,39 +81,86 @@ public enum EspansoImporter {
 
     /// Import from an espanso root, `match/` folder, package directory, or single `.yml`/`.yaml`.
     /// `imageStore` receives copied `image_path` payloads (injectable for tests).
-    public static func importFrom(_ url: URL, imageStore: ImageAttachmentStore = .shared) throws -> ImportResult {
+    public static func importFrom(
+        _ url: URL,
+        imageStore: ImageAttachmentStore = .shared,
+        limits: SnippetImporter.ResourceLimits = .production
+    ) throws -> ImportResult {
+        let budget = SnippetImporter.ResourceBudget(limits: limits)
+        var result = try importFrom(
+            url,
+            imageStore: imageStore,
+            budget: budget,
+            stageAttachments: true
+        )
+        let promoted = try SnippetImporter.materializeAttachments(
+            in: result.groups,
+            attachments: result.stagedAttachments,
+            imageStore: imageStore
+        )
+        result.groups = promoted.groups
+        result.stagedAttachments = []
+        return result
+    }
+
+    internal static func importFrom(
+        _ url: URL,
+        imageStore: ImageAttachmentStore,
+        budget: SnippetImporter.ResourceBudget,
+        stageAttachments: Bool
+    ) throws -> ImportResult {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
             throw ImportError.pathNotFound(url.path)
         }
 
-        var accumulator = Accumulator(sourcePath: url.path)
+        var accumulator = Accumulator(
+            sourcePath: url.path,
+            budget: budget,
+            imageStore: imageStore
+        )
 
         if !isDir.boolValue {
             guard isYAMLFile(url) else {
                 throw ImportError.noMatchFiles(url.path)
             }
             try processFile(url, groupName: makeGroupName(for: url, packageRoot: nil), forceInclude: true, imageStore: imageStore, into: &accumulator)
-            return accumulator.makeResult()
+            return try finish(accumulator, stageAttachments: stageAttachments)
         }
 
         // Package directory (has package.yml / _manifest.yml, or looks like a package tree).
         if looksLikePackageDirectory(url) {
             try importPackageDirectory(url, imageStore: imageStore, into: &accumulator)
-            return accumulator.makeResult()
+            return try finish(accumulator, stageAttachments: stageAttachments)
         }
 
         // Espanso root → import match/
         let matchDir = url.appendingPathComponent("match", isDirectory: true)
         if fm.fileExists(atPath: matchDir.path) {
             try importMatchDirectory(matchDir, imageStore: imageStore, into: &accumulator)
-            return accumulator.makeResult()
+            return try finish(accumulator, stageAttachments: stageAttachments)
         }
 
         // Already a match/ folder (or any folder of YAML match sets).
         try importMatchDirectory(url, imageStore: imageStore, into: &accumulator)
-        return accumulator.makeResult()
+        return try finish(accumulator, stageAttachments: stageAttachments)
+    }
+
+    private static func finish(
+        _ accumulator: Accumulator,
+        stageAttachments: Bool
+    ) throws -> ImportResult {
+        var result = accumulator.makeResult()
+        guard !stageAttachments, !result.stagedAttachments.isEmpty else { return result }
+        let promoted = try SnippetImporter.materializeAttachments(
+            in: result.groups,
+            attachments: result.stagedAttachments,
+            imageStore: accumulator.imageStore
+        )
+        result.groups = promoted.groups
+        result.stagedAttachments = []
+        return result
     }
 
     // MARK: - Directory walks
@@ -127,6 +177,7 @@ public enum EspansoImporter {
 
         var seedFiles: [URL] = []
         for case let fileURL as URL in enumerator {
+            try accumulator.budget.registerFile(fileURL)
             guard isYAMLFile(fileURL) else { continue }
             let name = fileURL.lastPathComponent
             // Underscore-prefixed files are not auto-loaded (reached only via imports:).
@@ -142,7 +193,13 @@ public enum EspansoImporter {
 
         for file in seedFiles.sorted(by: { $0.path < $1.path }) {
             let packageRoot = enclosingPackageRoot(of: file, under: matchDir)
-            let name = makeGroupName(for: file, packageRoot: packageRoot)
+            let name: String
+            if let packageRoot {
+                name = try packageTitle(from: packageRoot, accumulator: &accumulator)
+                    ?? packageRoot.lastPathComponent
+            } else {
+                name = makeGroupName(for: file, packageRoot: nil)
+            }
             try processFile(file, groupName: name, forceInclude: false, imageStore: imageStore, into: &accumulator)
         }
 
@@ -152,7 +209,8 @@ public enum EspansoImporter {
     }
 
     private static func importPackageDirectory(_ packageDir: URL, imageStore: ImageAttachmentStore, into accumulator: inout Accumulator) throws {
-        let title = packageTitle(from: packageDir) ?? packageDir.lastPathComponent
+        let title = try packageTitle(from: packageDir, accumulator: &accumulator)
+            ?? packageDir.lastPathComponent
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: packageDir,
@@ -164,6 +222,7 @@ public enum EspansoImporter {
 
         var seedFiles: [URL] = []
         for case let fileURL as URL in enumerator {
+            try accumulator.budget.registerFile(fileURL)
             guard isYAMLFile(fileURL) else { continue }
             let name = fileURL.lastPathComponent
             if name.hasPrefix("_") { continue }
@@ -175,6 +234,7 @@ public enum EspansoImporter {
         for candidate in ["package.yml", "package.yaml"] {
             let pkg = packageDir.appendingPathComponent(candidate)
             if fm.fileExists(atPath: pkg.path) {
+                try accumulator.budget.registerFile(pkg)
                 seedFiles.append(pkg.standardizedFileURL)
             }
         }
@@ -199,6 +259,7 @@ public enum EspansoImporter {
         into accumulator: inout Accumulator
     ) throws {
         let standardized = fileURL.standardizedFileURL
+        try accumulator.budget.registerFile(standardized)
         if accumulator.visited.contains(standardized.path) { return }
         accumulator.visited.insert(standardized.path)
 
@@ -207,14 +268,15 @@ public enum EspansoImporter {
 
         // Import files are untrusted input: skip absurdly large sources instead of
         // ballooning memory in the YAML parser. Counted so the user is told.
-        if fileSize(at: standardized) > SnippetImporter.SnippetImportLimits.maxSourceFileBytes {
+        guard let sourceData = try boundedSourceData(at: standardized) else {
             accumulator.skippedOversized += 1
             return
         }
+        try accumulator.budget.consumeBytes(sourceData.count, from: standardized)
 
         let root: [String: Any]
         do {
-            root = try loadYAMLDictionary(at: standardized)
+            root = try loadYAMLDictionary(data: sourceData)
         } catch {
             throw ImportError.parseFailed(standardized.path, error.localizedDescription)
         }
@@ -238,6 +300,8 @@ public enum EspansoImporter {
                 let importedGroup = makeGroupName(for: importedURL, packageRoot: nil)
                 do {
                     try processFile(importedURL, groupName: importedGroup, forceInclude: true, imageStore: imageStore, into: &accumulator)
+                } catch let limitError as SnippetImporter.ImportError {
+                    throw limitError
                 } catch {
                     // §robustness: one malformed imported file must not abort the whole
                     // batch — skip it, count it, keep processing siblings. The top-level
@@ -247,13 +311,24 @@ public enum EspansoImporter {
             }
         }
 
-        let matches = root["matches"] as? [[String: Any]] ?? []
+        let matches = root["matches"] as? [Any] ?? []
         guard !matches.isEmpty else { return }
 
         let baseDir = standardized.deletingLastPathComponent()
         var snippets: [SnippetModel] = accumulator.pendingSnippets[groupName] ?? []
-        for match in matches {
-            appendSnippets(from: match, baseDir: baseDir, imageStore: imageStore, into: &snippets, counters: &accumulator)
+        for entry in matches {
+            guard let match = entry as? [String: Any] else {
+                try accumulator.budget.consumeSnippets()
+                accumulator.skippedVars += 1
+                continue
+            }
+            try appendSnippets(
+                from: match,
+                baseDir: baseDir,
+                imageStore: imageStore,
+                into: &snippets,
+                counters: &accumulator
+            )
         }
         accumulator.pendingSnippets[groupName] = snippets
     }
@@ -264,7 +339,14 @@ public enum EspansoImporter {
         imageStore: ImageAttachmentStore,
         into snippets: inout [SnippetModel],
         counters: inout Accumulator
-    ) {
+    ) throws {
+        let declaredTriggerCount: Int
+        if let rawTriggers = match["triggers"] as? [Any] {
+            declaredTriggerCount = max(1, rawTriggers.count)
+        } else {
+            declaredTriggerCount = 1
+        }
+        try counters.budget.consumeSnippets(declaredTriggerCount)
         if match["regex"] != nil {
             counters.skippedRegex += 1
             return
@@ -280,7 +362,7 @@ public enum EspansoImporter {
             return
         }
         if let rawImagePath = match["image_path"] as? String, !rawImagePath.isEmpty {
-            appendImageSnippets(
+            try appendImageSnippets(
                 from: match,
                 rawImagePath: rawImagePath,
                 baseDir: baseDir,
@@ -434,7 +516,32 @@ public enum EspansoImporter {
         imageStore: ImageAttachmentStore,
         into snippets: inout [SnippetModel],
         counters: inout Accumulator
-    ) {
+    ) throws {
+        // A match with no valid trigger can never produce a snippet. Validate
+        // that first so image-only/no-trigger input performs zero image I/O.
+        let triggers = collectTriggers(from: match)
+        if triggers.isEmpty {
+            counters.skippedEmptyTrigger += 1
+            return
+        }
+        var validTriggers: [String] = []
+        for trigger in triggers {
+            let trimmed = trigger.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                counters.skippedEmptyTrigger += 1
+                continue
+            }
+            guard !SnippetImporter.SnippetImportLimits.isOversized(
+                trigger: trimmed,
+                replacement: ""
+            ) else {
+                counters.skippedOversized += 1
+                continue
+            }
+            validTriggers.append(trimmed)
+        }
+        guard !validTriggers.isEmpty else { return }
+
         // §hardening: same confinement as `imports:` — an untrusted config may only
         // pull images from inside its own tree. Absolute paths and `..` escapes used
         // to copy arbitrary user-readable files into the store (an exfiltration
@@ -444,18 +551,26 @@ public enum EspansoImporter {
             return
         }
 
-        let storedName: String
-        do {
-            storedName = try imageStore.importImage(from: imageURL)
-        } catch {
-            counters.skippedImage += 1
-            return
-        }
-
-        let triggers = collectTriggers(from: match)
-        if triggers.isEmpty {
-            counters.skippedEmptyTrigger += 1
-            return
+        let sourceKey = imageURL.standardizedFileURL.resolvingSymlinksInPath().path
+        let staged: SnippetImporter.StagedAttachment
+        if let cached = counters.stagedAttachmentBySource[sourceKey] {
+            staged = cached
+        } else {
+            try counters.budget.registerFile(imageURL)
+            let prepared: ImageAttachmentStore.PreparedImage
+            do {
+                prepared = try imageStore.prepareImage(from: imageURL)
+            } catch {
+                counters.skippedImage += 1
+                return
+            }
+            try counters.budget.consumeBytes(prepared.data.count, from: imageURL)
+            staged = SnippetImporter.StagedAttachment(
+                token: "devtype-import-stage:\(UUID().uuidString)",
+                image: prepared
+            )
+            counters.stagedAttachmentBySource[sourceKey] = staged
+            counters.stagedAttachments.append(staged)
         }
 
         let label = (match["label"] as? String) ?? ""
@@ -469,12 +584,7 @@ public enum EspansoImporter {
         if !includeApps.isEmpty || !excludeApps.isEmpty { counters.appScopedCount += 1 }
         let tags = stringList(match["search_terms"])
 
-        for trigger in triggers {
-            let trimmed = trigger.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
-                counters.skippedEmptyTrigger += 1
-                continue
-            }
+        for trimmed in validTriggers {
             let title = label.isEmpty ? trimmed : label
             snippets.append(SnippetModel(
                 title: title,
@@ -485,7 +595,7 @@ public enum EspansoImporter {
                 requireWordBoundary: requireWordBoundary,
                 isPlainText: true,
                 enabled: true,
-                imagePath: storedName,
+                imagePath: staged.token,
                 tags: tags,
                 includeApps: includeApps,
                 excludeApps: excludeApps
@@ -556,10 +666,17 @@ public enum EspansoImporter {
         return ext == "yml" || ext == "yaml"
     }
 
-    /// File size in bytes; 0 when the file cannot be stat'ed (the read itself will fail).
-    private static func fileSize(at url: URL) -> Int64 {
+    private static func boundedSourceData(at url: URL) throws -> Data? {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        return (attributes?[.size] as? Int64) ?? 0
+        guard attributes?[.type] as? FileAttributeType == .typeRegular else { return nil }
+        let byteCount = (attributes?[.size] as? Int64) ?? 0
+        guard byteCount <= SnippetImporter.SnippetImportLimits.maxSourceFileBytes else { return nil }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(
+            upToCount: SnippetImporter.SnippetImportLimits.maxSourceFileBytes + 1
+        ) ?? Data()
+        return data.count > SnippetImporter.SnippetImportLimits.maxSourceFileBytes ? nil : data
     }
 
     private static func looksLikePackageDirectory(_ url: URL) -> Bool {
@@ -599,9 +716,6 @@ public enum EspansoImporter {
     /// `SnippetStore.importGroups` replaced the same-named group wholesale (§1.10). Qualify the
     /// name with the parent directory unless that directory is a generic container.
     private static func makeGroupName(for file: URL, packageRoot: URL?) -> String {
-        if let packageRoot, let title = packageTitle(from: packageRoot) {
-            return title
-        }
         if let packageRoot {
             return packageRoot.lastPathComponent
         }
@@ -617,19 +731,42 @@ public enum EspansoImporter {
         return "\(parent)/\(base)"
     }
 
-    private static func packageTitle(from packageRoot: URL) -> String? {
+    private static func packageTitle(
+        from packageRoot: URL,
+        accumulator: inout Accumulator
+    ) throws -> String? {
+        let rootPath = packageRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        if accumulator.inspectedPackageRoots.contains(rootPath) {
+            return accumulator.packageTitles[rootPath]
+        }
+        accumulator.inspectedPackageRoots.insert(rootPath)
+
         let manifest = packageRoot.appendingPathComponent("_manifest.yml")
-        guard FileManager.default.fileExists(atPath: manifest.path),
-              let dict = try? loadYAMLDictionary(at: manifest) else {
+        guard FileManager.default.fileExists(atPath: manifest.path) else {
             return nil
         }
-        if let title = dict["title"] as? String, !title.isEmpty { return title }
-        if let name = dict["name"] as? String, !name.isEmpty { return name }
+        try accumulator.budget.registerFile(manifest)
+        guard let data = try boundedSourceData(at: manifest) else {
+            accumulator.skippedOversized += 1
+            return nil
+        }
+        try accumulator.budget.consumeBytes(data.count, from: manifest)
+        guard let dict = try? loadYAMLDictionary(data: data) else { return nil }
+        if let title = dict["title"] as? String, !title.isEmpty {
+            accumulator.packageTitles[rootPath] = title
+            return title
+        }
+        if let name = dict["name"] as? String, !name.isEmpty {
+            accumulator.packageTitles[rootPath] = name
+            return name
+        }
         return nil
     }
 
-    private static func loadYAMLDictionary(at url: URL) throws -> [String: Any] {
-        let text = try String(contentsOf: url, encoding: .utf8)
+    private static func loadYAMLDictionary(data: Data) throws -> [String: Any] {
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw CocoaError(.fileReadInapplicableStringEncoding)
+        }
         guard let loaded = try Yams.load(yaml: text) else {
             return [:]
         }
@@ -647,8 +784,14 @@ public enum EspansoImporter {
 
     private struct Accumulator {
         var sourcePath: String
+        let budget: SnippetImporter.ResourceBudget
+        let imageStore: ImageAttachmentStore
         var visited: Set<String> = []
         var pendingSnippets: [String: [SnippetModel]] = [:]
+        var stagedAttachments: [SnippetImporter.StagedAttachment] = []
+        var stagedAttachmentBySource: [String: SnippetImporter.StagedAttachment] = [:]
+        var inspectedPackageRoots: Set<String> = []
+        var packageTitles: [String: String] = [:]
         var snippetCount = 0
         var imageCount = 0
         var skippedVars = 0
@@ -700,7 +843,8 @@ public enum EspansoImporter {
                 appScopedCount: appScopedCount,
                 skippedOversized: skippedOversized,
                 skippedUnsafeImports: skippedUnsafeImports,
-                skippedParseFailed: skippedParseFailed
+                skippedParseFailed: skippedParseFailed,
+                stagedAttachments: stagedAttachments
             )
         }
     }

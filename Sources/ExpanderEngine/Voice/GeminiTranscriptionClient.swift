@@ -12,6 +12,8 @@ public enum GeminiTranscriptionError: Error, Equatable, Sendable {
     case safetyBlocked
     case emptyTranscript
     case payloadTooLarge
+    case responseTooLarge
+    case uploadNotAuthorized
     case invalidResponse(String)
 }
 
@@ -61,15 +63,49 @@ public enum APIKeyValidationResult: Equatable, Sendable {
 public actor GeminiTranscriptionClient {
     public static let shared = GeminiTranscriptionClient()
     private let session: URLSession
-    private let baseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-transcribe:streamGenerateContent?alt=sse")!
+    private let baseURL: URL
+    private let maximumResponseBytes: Int
+    private let validationURL: URL
+    private let maximumValidationResponseBytes: Int
     
     /// Maximum allowed audio payload size for inline base64 data (25MB).
     public static let maxPayloadSizeBytes = 25 * 1024 * 1024
+
+    /// Gemini responses are text transcripts. Four MiB is generous for legitimate output while
+    /// bounding both the raw SSE stream and the decoded transcript held in memory.
+    public static let maxResponseSizeBytes = 4 * 1024 * 1024
+    /// API-key validation only needs to consume the small models-list envelope. Keep its budget
+    /// independent from transcription so a hostile error/success response cannot allocate MiBs.
+    public static let maxValidationResponseSizeBytes = 64 * 1024
+    private static let productionBaseURL = URL(
+        string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-transcribe:streamGenerateContent?alt=sse"
+    )!
+    private static let productionValidationURL = URL(
+        string: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
+    )!
     
     public init() {
         let config = URLSessionConfiguration.ephemeral
         config.waitsForConnectivity = false
         self.session = URLSession(configuration: config)
+        self.baseURL = Self.productionBaseURL
+        self.maximumResponseBytes = Self.maxResponseSizeBytes
+        self.validationURL = Self.productionValidationURL
+        self.maximumValidationResponseBytes = Self.maxValidationResponseSizeBytes
+    }
+
+    init(
+        session: URLSession,
+        baseURL: URL,
+        maximumResponseBytes: Int,
+        validationURL: URL? = nil,
+        maximumValidationResponseBytes: Int = GeminiTranscriptionClient.maxValidationResponseSizeBytes
+    ) {
+        self.session = session
+        self.baseURL = baseURL
+        self.maximumResponseBytes = maximumResponseBytes
+        self.validationURL = validationURL ?? Self.productionValidationURL
+        self.maximumValidationResponseBytes = maximumValidationResponseBytes
     }
     
     /// Transcribes audio data using the Gemini model.
@@ -79,13 +115,15 @@ public actor GeminiTranscriptionClient {
     ///   - audioDurationSeconds: The duration of the audio in seconds, for timeout calculation
     ///   - steeringPrompt: The prompt to steer the transcription
     ///   - apiKey: The Gemini API key
+    ///   - uploadAuthorized: Live authority checked immediately before every network attempt.
     /// - Returns: A GeminiTranscriptionResult
     public func transcribe(
         audioData: Data,
         mimeType: String,
         audioDurationSeconds: TimeInterval,
         steeringPrompt: String,
-        apiKey: String
+        apiKey: String,
+        uploadAuthorized: @escaping @Sendable () -> Bool
     ) async throws -> GeminiTranscriptionResult {
         return try await transcribeWithRetry(
             audioData: audioData,
@@ -93,6 +131,7 @@ public actor GeminiTranscriptionClient {
             audioDurationSeconds: audioDurationSeconds,
             steeringPrompt: steeringPrompt,
             apiKey: apiKey,
+            uploadAuthorized: uploadAuthorized,
             isRetry: false
         )
     }
@@ -103,8 +142,10 @@ public actor GeminiTranscriptionClient {
         audioDurationSeconds: TimeInterval,
         steeringPrompt: String,
         apiKey: String,
+        uploadAuthorized: @escaping @Sendable () -> Bool,
         isRetry: Bool
     ) async throws -> GeminiTranscriptionResult {
+        try Task.checkCancellation()
         guard !apiKey.isEmpty else {
             throw GeminiTranscriptionError.noAPIKey
         }
@@ -153,17 +194,64 @@ public actor GeminiTranscriptionClient {
         }
         
         do {
+            // Consent is mutable. A session-start snapshot cannot authorize a retry that begins
+            // after the user has revoked cloud-audio access, so check at every actual upload
+            // boundary. The second cancellation check closes the interval spent in the predicate.
+            try Task.checkCancellation()
+            let isUploadAuthorized = uploadAuthorized()
+            try Task.checkCancellation()
+            guard isUploadAuthorized else {
+                throw GeminiTranscriptionError.uploadNotAuthorized
+            }
+
             let (bytes, response) = try await session.bytes(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
+                bytes.task.cancel()
                 throw GeminiTranscriptionError.networkError("Invalid response type")
             }
-            
-            try checkStatusCode(httpResponse.statusCode)
-            
+
+            do {
+                try checkStatusCode(httpResponse.statusCode)
+            } catch {
+                // The response body may still be streaming. Refuse it before a typed status error
+                // retries or returns so a rejected request cannot remain live in the background.
+                bytes.task.cancel()
+                throw error
+            }
+
+            guard maximumResponseBytes > 0 else {
+                bytes.task.cancel()
+                throw GeminiTranscriptionError.responseTooLarge
+            }
+            if response.expectedContentLength > Int64(maximumResponseBytes) {
+                bytes.task.cancel()
+                throw GeminiTranscriptionError.responseTooLarge
+            }
+
+            // Bound raw bytes before line decoding: `AsyncLineSequence` may otherwise assemble one
+            // arbitrarily long line internally before the caller has a chance to reject it.
+            var responseData = Data()
+            responseData.reserveCapacity(min(maximumResponseBytes, 16 * 1024))
+            for try await byte in bytes {
+                if Task.isCancelled {
+                    bytes.task.cancel()
+                    throw CancellationError()
+                }
+                guard responseData.count < maximumResponseBytes else {
+                    bytes.task.cancel()
+                    throw GeminiTranscriptionError.responseTooLarge
+                }
+                responseData.append(byte)
+            }
+            try Task.checkCancellation()
+            guard let responseText = String(data: responseData, encoding: .utf8) else {
+                throw GeminiTranscriptionError.invalidResponse("SSE response was not valid UTF-8")
+            }
+
             var accumulatedText = ""
-            
-            for try await line in bytes.lines {
+            for lineSlice in responseText.split(separator: "\n", omittingEmptySubsequences: false) {
+                let line = String(lineSlice)
                 guard line.hasPrefix("data: ") else { continue }
                 let jsonString = String(line.dropFirst(6))
                 guard let data = jsonString.data(using: .utf8),
@@ -196,9 +284,14 @@ public actor GeminiTranscriptionClient {
             
             return GeminiTranscriptionResult(text: trimmed, rawText: accumulatedText)
             
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as GeminiTranscriptionError {
             throw error
         } catch let error as URLError {
+            if Task.isCancelled || error.code == .cancelled {
+                throw CancellationError()
+            }
             if !isRetry {
                 DevTypeLog.app.info("Transient URLError, retrying: \(error.localizedDescription)")
                 return try await transcribeWithRetry(
@@ -207,6 +300,7 @@ public actor GeminiTranscriptionClient {
                     audioDurationSeconds: audioDurationSeconds,
                     steeringPrompt: steeringPrompt,
                     apiKey: apiKey,
+                    uploadAuthorized: uploadAuthorized,
                     isRetry: true
                 )
             }
@@ -215,6 +309,9 @@ public actor GeminiTranscriptionClient {
             }
             throw GeminiTranscriptionError.networkError(error.localizedDescription)
         } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             if !isRetry {
                 DevTypeLog.app.info("Transient error, retrying: \(error.localizedDescription)")
                 return try await transcribeWithRetry(
@@ -223,6 +320,7 @@ public actor GeminiTranscriptionClient {
                     audioDurationSeconds: audioDurationSeconds,
                     steeringPrompt: steeringPrompt,
                     apiKey: apiKey,
+                    uploadAuthorized: uploadAuthorized,
                     isRetry: true
                 )
             }
@@ -262,33 +360,26 @@ public actor GeminiTranscriptionClient {
             return .invalidKey(reason: "Invalid API key format")
         }
 
-        // Probe the models endpoint with pageSize=1
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1") else {
-            return .networkError(reason: "Invalid endpoint URL")
-        }
-
-        var request = URLRequest(url: url)
+        // Probe the models endpoint with pageSize=1. The response is consumed through the same
+        // streaming byte-boundary discipline as transcription; provider error bodies are never
+        // rendered in Preferences.
+        var request = URLRequest(url: validationURL)
         request.httpMethod = "GET"
         request.addValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 6.0
 
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return .networkError(reason: "No HTTP response")
-            }
+            let httpResponse = try await boundedValidationResponse(for: request)
 
             switch httpResponse.statusCode {
             case 200...299:
                 return .valid(modelName: "gemini-3.5-transcribe")
 
             case 400, 401:
-                let errorMsg = extractErrorMessage(from: data) ?? "API key is invalid or unauthorized"
-                return .invalidKey(reason: errorMsg)
+                return .invalidKey(reason: "API key is invalid or unauthorized")
 
             case 403:
-                let errorMsg = extractErrorMessage(from: data) ?? "API key does not have permission"
-                return .invalidKey(reason: errorMsg)
+                return .invalidKey(reason: "API key does not have permission")
 
             case 429:
                 return .rateLimited
@@ -297,27 +388,61 @@ public actor GeminiTranscriptionClient {
                 return .quotaExhausted
 
             default:
-                let errorMsg = extractErrorMessage(from: data) ?? "HTTP \(httpResponse.statusCode)"
-                return .networkError(reason: errorMsg)
+                return .networkError(reason: "HTTP status \(httpResponse.statusCode)")
             }
+        } catch GeminiTranscriptionError.responseTooLarge {
+            return .networkError(reason: "Validation response exceeded the safe size limit")
+        } catch is CancellationError {
+            return .networkError(reason: "Validation was cancelled")
         } catch let error as URLError {
             if error.code == .timedOut {
                 return .networkError(reason: "Request timed out")
             } else if error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
                 return .networkError(reason: "No internet connection")
             }
-            return .networkError(reason: error.localizedDescription)
+            return .networkError(reason: "Network request failed (code \(error.code.rawValue))")
         } catch {
-            return .networkError(reason: error.localizedDescription)
+            return .networkError(reason: "Validation request failed")
         }
     }
 
-    private func extractErrorMessage(from data: Data) -> String? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let errorObj = json["error"] as? [String: Any],
-              let message = errorObj["message"] as? String else {
-            return nil
+    private func boundedValidationResponse(for request: URLRequest) async throws -> HTTPURLResponse {
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            bytes.task.cancel()
+            throw URLError(.badServerResponse)
         }
-        return message
+
+        // Status alone is sufficient for every validation verdict. Refuse rather than buffer a
+        // provider-controlled error document, which can contain arbitrary text and has no value
+        // to the user-facing decision.
+        guard (200...299).contains(httpResponse.statusCode) else {
+            bytes.task.cancel()
+            return httpResponse
+        }
+
+        guard maximumValidationResponseBytes > 0 else {
+            bytes.task.cancel()
+            throw GeminiTranscriptionError.responseTooLarge
+        }
+        if response.expectedContentLength > Int64(maximumValidationResponseBytes) {
+            bytes.task.cancel()
+            throw GeminiTranscriptionError.responseTooLarge
+        }
+
+        var byteCount = 0
+        for try await _ in bytes {
+            if Task.isCancelled {
+                bytes.task.cancel()
+                throw CancellationError()
+            }
+            guard byteCount < maximumValidationResponseBytes else {
+                bytes.task.cancel()
+                throw GeminiTranscriptionError.responseTooLarge
+            }
+            byteCount += 1
+        }
+        try Task.checkCancellation()
+        return httpResponse
     }
 }

@@ -25,13 +25,13 @@ public final class LiveSpeechStream: @unchecked Sendable {
     public static let maxConsecutiveEmptyRestarts = 8
 
     private let lock = UnfairLock()
-    private let recognizer: SFSpeechRecognizer?
+    private let runtime: AppleOnDeviceSpeechRuntime?
 
     private let onSegment: @Sendable (SpeechSegment) -> Void
     private let onFailure: @Sendable (VoiceFailure) -> Void
 
     private var activeRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var activeTask: SFSpeechRecognitionTask?
+    private var activeTask: AppleSpeechTaskHandle?
     private var pendingBuffers: [AVAudioPCMBuffer] = []
 
     private var taskGeneration = 0
@@ -43,17 +43,32 @@ public final class LiveSpeechStream: @unchecked Sendable {
     private var consecutiveEmptyRestarts = 0
     private var isFinished = false
 
-    public init(
+    public convenience init(
         locale: Locale = Locale.current,
+        contextualStrings: [String] = [],
+        onSegment: @escaping @Sendable (SpeechSegment) -> Void,
+        onFailure: @escaping @Sendable (VoiceFailure) -> Void = { _ in }
+    ) {
+        self.init(
+            runtime: AppleOnDeviceSpeechRuntime.system(
+                locale: locale,
+                includeEnglishFallback: true
+            ),
+            contextualStrings: contextualStrings,
+            onSegment: onSegment,
+            onFailure: onFailure
+        )
+    }
+
+    init(
+        runtime: AppleOnDeviceSpeechRuntime?,
         contextualStrings: [String] = [],
         onSegment: @escaping @Sendable (SpeechSegment) -> Void,
         onFailure: @escaping @Sendable (VoiceFailure) -> Void = { _ in }
     ) {
         self.onSegment = onSegment
         self.onFailure = onFailure
-        self.recognizer = SFSpeechRecognizer(locale: locale)
-            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-            ?? SFSpeechRecognizer()
+        self.runtime = runtime
         self.contextualStrings = contextualStrings
 
         lock.withLock { startTaskLocked() }
@@ -116,7 +131,31 @@ public final class LiveSpeechStream: @unchecked Sendable {
             return
         }
 
-        guard let recognizer, recognizer.isAvailable else {
+        guard let runtime else {
+            let failure = VoiceFailure(
+                stage: .recognition,
+                code: .endpointUnreachable,
+                redactedDetail: "SFSpeechRecognizer unavailable for live capture"
+            )
+            let emit = onFailure
+            DispatchQueue.global(qos: .userInitiated).async { emit(failure) }
+            return
+        }
+
+        // This preview is optional even when the final provider is Local Whisper or
+        // Gemini. If Apple would require its network service, disable preview silently
+        // instead of leaking microphone buffers or aborting the independent final pass.
+        guard runtime.supportsOnDeviceRecognition else {
+            isFinished = true
+            pendingBuffers.removeAll()
+            DevTypeLog.voice.error("[Voice] live recognition disabled: on-device Apple Speech unsupported")
+            VoiceDiagnosticsRecorder.shared.record(
+                "stream.unavailable", note: "onDeviceRecognitionUnsupported"
+            )
+            return
+        }
+
+        guard runtime.isAvailable else {
             let failure = VoiceFailure(
                 stage: .recognition,
                 code: .endpointUnreachable,
@@ -140,12 +179,8 @@ public final class LiveSpeechStream: @unchecked Sendable {
         if !contextualStrings.isEmpty {
             request.contextualStrings = contextualStrings
         }
-        if #available(macOS 13.0, *) {
-            request.addsPunctuation = true
-            if recognizer.supportsOnDeviceRecognition {
-                request.requiresOnDeviceRecognition = true
-            }
-        }
+        request.addsPunctuation = true
+        request.requiresOnDeviceRecognition = true
         activeRequest = request
 
         // Replay buffers captured while no request was live, so the restart window
@@ -155,9 +190,21 @@ public final class LiveSpeechStream: @unchecked Sendable {
         }
         pendingBuffers.removeAll(keepingCapacity: true)
 
-        activeTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            self?.handle(generation: generation, result: result, error: error)
+        guard let task = runtime.startOnDeviceRecognition(
+            with: request,
+            resultHandler: { [weak self] result, error in
+                self?.handle(generation: generation, result: result, error: error)
+            }
+        ) else {
+            isFinished = true
+            activeRequest = nil
+            pendingBuffers.removeAll()
+            VoiceDiagnosticsRecorder.shared.record(
+                "stream.unavailable", note: "onDevicePolicyRejectedStart"
+            )
+            return
         }
+        activeTask = task
     }
 
     private func handle(generation: Int, result: SFSpeechRecognitionResult?, error: Error?) {

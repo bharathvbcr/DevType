@@ -65,6 +65,45 @@ public enum DevTypeLog {
         return "listen=\(listen) ax=\(ax) post=\(post) (\(missing))"
     }
 
+    /// Public-safe metadata for arbitrary errors. `localizedDescription`, `NSError.domain`, and
+    /// `String(describing:)` can contain provider response bodies, user-selected paths, prompts,
+    /// or text. A concrete type plus numeric code keeps failures distinguishable without making
+    /// any free-form payload public in OSLog or the mirrored support report.
+    public static func errorMetadata(_ error: Error) -> String {
+        let fullType = String(reflecting: type(of: error))
+        let boundedType = String(fullType.prefix(96))
+        return "type=\(boundedType) code=\((error as NSError).code)"
+    }
+
+    /// Shape-only projection for an unavoidable free-form framework string (for example an
+    /// `NSException.reason`). The process-random salt permits correlation inside one report but
+    /// prevents copied hashes of short values from becoming a reusable lookup table.
+    public static func publicTextMetadata(_ value: String?) -> String {
+        guard let value, !value.isEmpty else { return "text=absent" }
+        return DiagnosticPrivacy.textShape(value, label: "text", domain: "public-error-text")
+    }
+
+    /// Shape-only public-log projection for a filesystem path. Paths routinely contain account
+    /// names and private directory structure, so even normal-sized values are never emitted
+    /// verbatim. The salted hash remains useful for correlating repeated failures in one run.
+    public static func publicPathMetadata(_ value: String?) -> String {
+        guard let value, !value.isEmpty else { return "path=absent" }
+        return DiagnosticPrivacy.textShape(value, label: "path", domain: "public-file-path")
+    }
+
+    /// OS-provided identifiers are useful verbatim at ordinary sizes. A malformed application can
+    /// still advertise a hostile-length name or bundle ID, so oversized values become bounded
+    /// shape metadata instead of dominating OSLog and its in-process mirror.
+    public static func boundedPublicIdentifier(_ value: String?, label: String) -> String {
+        guard let value, !value.isEmpty else { return "(unknown)" }
+        return DiagnosticPrivacy.boundedIdentifier(
+            value,
+            label: label,
+            domain: "public-identifier-\(label)",
+            maxUTF8Bytes: 256
+        )
+    }
+
     public static func kindName(_ kind: PermissionKind) -> String {
         switch kind {
         case .accessibility: return "Accessibility"

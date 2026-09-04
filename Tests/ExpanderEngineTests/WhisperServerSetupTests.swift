@@ -25,7 +25,7 @@ final class WhisperServerSetupTests: XCTestCase {
         let steps = WhisperServerSetup.steps(for: .notInstalled, endpoint: endpoint)
         guard let run = steps.last else { return XCTFail("No run step") }
 
-        XCTAssertTrue(run.command.hasPrefix("whisper-server "), "Wrong binary: \(run.command)")
+        XCTAssertTrue(run.command.hasPrefix("'whisper-server' "), "Wrong binary: \(run.command)")
         XCTAssertTrue(run.command.contains("--host 127.0.0.1"))
         XCTAssertTrue(run.command.contains("--port 9090"), "Port not taken from the endpoint")
         XCTAssertTrue(run.command.contains("-m "), "No model flag")
@@ -48,7 +48,16 @@ final class WhisperServerSetupTests: XCTestCase {
     func testRunStepUsesTheDetectedBinaryPath() {
         let binary = "/opt/homebrew/bin/whisper-cpp-server"
         let steps = WhisperServerSetup.steps(for: .installedNotRunning(binaryPath: binary))
-        XCTAssertTrue(steps.last!.command.hasPrefix("\(binary) "))
+        XCTAssertTrue(steps.last!.command.hasPrefix("'\(binary)' "))
+    }
+
+    func testRunStepShellQuotesTheDetectedBinaryPath() {
+        let binary = "/tmp/whisper server'custom"
+        let steps = WhisperServerSetup.steps(for: .installedNotRunning(binaryPath: binary))
+        XCTAssertTrue(
+            steps.last!.command.hasPrefix("'/tmp/whisper server'\"'\"'custom' "),
+            "Detected executable was not shell quoted: \(steps.last!.command)"
+        )
     }
 
     func testModelDownloadUsesTheGgmlRepository() {
@@ -71,6 +80,52 @@ final class WhisperServerSetupTests: XCTestCase {
         XCTAssertTrue(download.command.contains("mkdir -p"), "Download would fail on a clean machine")
         XCTAssertTrue(download.command.contains("curl"))
         XCTAssertTrue(download.command.contains(WhisperServerSetup.modelDownloadURL().absoluteString))
+        XCTAssertTrue(download.command.contains("--disable"), "A user curlrc could weaken the policy")
+        XCTAssertTrue(download.command.contains("--proto-redir '=https'"))
+        XCTAssertTrue(download.command.contains("--max-filesize 147964211"))
+        XCTAssertTrue(download.command.contains("%{url_effective}"))
+        XCTAssertTrue(download.command.contains("https://*.hf.co/*"))
+        XCTAssertTrue(download.command.contains("stat -f%z"))
+        XCTAssertTrue(download.command.contains("147964211"))
+        XCTAssertTrue(download.command.contains("shasum -a 256"))
+        XCTAssertTrue(
+            download.command.contains(
+                "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+            )
+        )
+        XCTAssertTrue(download.command.contains("mktemp"))
+        XCTAssertTrue(download.command.contains("mv -f"))
+    }
+
+    func testUnsupportedModelCannotEnterGeneratedShellCommands() {
+        let untrustedModel = "base.en'; touch /tmp/devtype-model-command-injection; echo '"
+        let steps = WhisperServerSetup.steps(
+            for: .installedNotRunning(binaryPath: "/usr/local/bin/whisper-server"),
+            model: untrustedModel,
+            modelStatus: .missing
+        )
+
+        XCTAssertEqual(steps[1].command, steps[2].command)
+        XCTAssertTrue(steps[1].command.contains("No verified download manifest"))
+        XCTAssertFalse(steps[1].command.contains(untrustedModel))
+        XCTAssertFalse(steps[2].command.contains("touch"))
+    }
+
+    func testGeneratedDownloadCommandHasValidShellSyntax() throws {
+        let command = WhisperServerSetup.steps(for: .notInstalled)[1].command
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-n", "-c", command]
+        let errors = Pipe()
+        process.standardError = errors
+
+        try process.run()
+        process.waitUntilExit()
+        let errorText = String(
+            decoding: errors.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+        XCTAssertEqual(process.terminationStatus, 0, errorText)
     }
 
     // MARK: - Step pending state
@@ -97,11 +152,11 @@ final class WhisperServerSetupTests: XCTestCase {
     func testPendingCommandsOmitCompletedSteps() {
         let running = WhisperServerSetup.pendingCommands(for: .running)
         XCTAssertFalse(running.contains("brew install"))
-        XCTAssertFalse(running.contains("whisper-server --host"))
+        XCTAssertFalse(running.contains("--host 127.0.0.1"))
 
         let fresh = WhisperServerSetup.pendingCommands(for: .notInstalled)
         XCTAssertTrue(fresh.contains("brew install whisper-cpp"))
-        XCTAssertTrue(fresh.contains("whisper-server --host"))
+        XCTAssertTrue(fresh.contains("'whisper-server' --host"))
     }
 
     // MARK: - Detection
@@ -196,5 +251,37 @@ final class WhisperServerSetupTests: XCTestCase {
             pcm: Data(), sampleRate: 16000, channels: 1, bitsPerSample: 16
         )
         XCTAssertEqual(wav.count, 44)
+    }
+
+    func testWavConversionAcceptsExactBudgetAndRejectsTheNextByteBeforeAppending() throws {
+        let inputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whisper-payload-boundary-\(UUID().uuidString).wav")
+        let pcm = Data(repeating: 0, count: 200)
+        try WhisperAudioPayload.wavContainer(
+            pcm: pcm,
+            sampleRate: 16000,
+            channels: 1,
+            bitsPerSample: 16
+        ).write(to: inputURL)
+        defer { try? FileManager.default.removeItem(at: inputURL) }
+
+        let exactSize = 44 + pcm.count
+        let exact = try WhisperAudioPayload.wav16kMono(
+            from: inputURL,
+            maximumWAVBytes: exactSize
+        )
+        XCTAssertEqual(exact.count, exactSize)
+
+        XCTAssertThrowsError(
+            try WhisperAudioPayload.wav16kMono(
+                from: inputURL,
+                maximumWAVBytes: exactSize - 1
+            )
+        ) { error in
+            let failure = error as? VoiceFailure
+            XCTAssertEqual(failure?.stage, .recognition)
+            XCTAssertEqual(failure?.code, .captureBackpressure)
+            XCTAssertEqual(failure?.artifactState, .durable)
+        }
     }
 }

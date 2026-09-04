@@ -13,13 +13,15 @@ This guide explains why each permission is needed, how to grant and maintain the
 | **Input Monitoring** | `kTCCServiceListenEvent` | `CGPreflightListenEventAccess()` | **Required** to intercept typed keystrokes and swallow trigger abbreviations before they render on screen. |
 | **Accessibility** | `kTCCServiceAccessibility` | `AXIsProcessTrustedWithOptions()` | **Required** to perform atomic text range replacement directly inside focused text fields via macOS Accessibility APIs (`AXUIElement`). |
 | **Post Events** | `kTCCServicePostEvent` | `CGPreflightPostEventAccess()` | *Optional / Fallback* to synthesize backspaces (`kVK_Delete`), `⌘V` paste events, and arrow navigation when Accessibility APIs are blocked. |
-| **Microphone** | `kTCCServiceMicrophone` | `AVCaptureDevice.authorizationStatus(for: .audio)` | **Required for Voice Dictation** to capture audio via 16kHz PCM streaming. With Apple Speech, Local AI, or Local Whisper selected, no audio leaves your Mac; the opt-in Gemini cloud engine uploads audio only once you supply your own API key. |
-| **Speech Recognition** | `kTCCServiceSpeechRecognition` | `SFSpeechRecognizer.authorizationStatus()` | *Optional Fallback* for on-device speech transcription via Apple Speech Framework. |
+| **Microphone** | `kTCCServiceMicrophone` | `AVCaptureDevice.authorizationStatus(for: .audio)` | **Required for Voice Dictation** to capture audio via 16kHz PCM streaming. With Apple Speech, Local AI, or Local Whisper selected, no audio leaves your Mac; the opt-in Gemini cloud engine uploads audio only after you supply your own API key and separately grant cloud-audio consent. |
+| **Speech Recognition** | `kTCCServiceSpeechRecognition` | `SFSpeechRecognizer.authorizationStatus()` | **Required** when Apple Speech supplies the final transcript. For Gemini or Local Whisper it is optional and used only for the live preview, which both "While you speak" modes other than *Show nothing, insert at the end* rely on. |
 
 The capabilities are deliberately partitioned:
 - Core text expansion requires **Input Monitoring + Accessibility** together.
 - Post Events powers the synthetic-injection fallback without tearing down the tap.
 - Voice Dictation requires **Microphone** permission on-demand when push-to-talk (`⌘⌥V`) is activated, with prompt dialogs governed by `NSMicrophoneUsageDescription` in `Info.plist`.
+- Apple Speech and Local AI request **Speech Recognition** before recording because they use Apple Speech for the final transcript. Gemini and Local Whisper continue without that grant unless a "While you speak" mode that shows a live preview is selected.
+- Selecting Gemini is not permission to upload audio: DevType also requires a separate, explicit cloud-audio consent in Preferences before capture can start.
 
 ---
 
@@ -42,6 +44,11 @@ When you first launch DevType, the **Permission Onboarding Wizard** will open au
 1. Trigger Smart Dictation with `⌘⌥V` or open **Preferences** (`⌘,`) → **Voice** → **Request Access**.
 2. When the macOS system modal appears (*"DevType would like to access the microphone"*), click **Allow**.
 3. You can also view or change this in **System Settings** → **Privacy & Security** → **Microphone**.
+
+### 4. Enable Speech Recognition (for Apple Speech or Local AI)
+1. Select **Apple Speech** or **Local AI** in **Preferences** → **Voice**, then start Smart Dictation.
+2. When macOS asks whether DevType may use Speech Recognition, click **Allow**.
+3. You can review the grant in **System Settings** → **Privacy & Security** → **Speech Recognition**. Gemini and Local Whisper need this grant only when a "While you speak" mode that shows a live preview is selected.
 
 ---
 
@@ -91,3 +98,4 @@ If text expansion or microphone capture stops responding:
    ```bash
    ./Scripts/reset-tcc.sh
    ```
+   The script resets Input Monitoring, Accessibility, Post Events, Microphone, and Speech Recognition, and exits non-zero if any reset fails.

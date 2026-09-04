@@ -16,6 +16,38 @@ struct SnippetAppScope: Equatable {
     var isScoped: Bool { !includeApps.isEmpty || !excludeApps.isEmpty }
 }
 
+/// Canonical normalization and duplicate detection for both typed bundle IDs and multi-selection
+/// from NSOpenPanel. The working set grows as additions are accepted, so duplicates inside one
+/// batch are rejected with the same case-insensitive rule as already-saved entries.
+struct SnippetAppScopeEntryPlan: Equatable {
+    let additions: [String]
+    let duplicateCount: Int
+
+    init(rawValues: [String], existing: [String]) {
+        var accepted = existing.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var additions: [String] = []
+        var duplicateCount = 0
+
+        for raw in rawValues {
+            let candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !candidate.isEmpty else { continue }
+            if accepted.contains(where: {
+                $0.caseInsensitiveCompare(candidate) == .orderedSame
+            }) {
+                duplicateCount += 1
+            } else {
+                accepted.append(candidate)
+                additions.append(candidate)
+            }
+        }
+
+        self.additions = additions
+        self.duplicateCount = duplicateCount
+    }
+}
+
 /// Editor for `SnippetModel.includeApps` / `excludeApps`.
 ///
 /// The matcher has honoured these lists on every keystroke since §4.4
@@ -77,7 +109,7 @@ enum SnippetAppScopeSheet {
 
 // MARK: - Controller
 
-private final class AppScopeController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class AppScopeController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
 
     /// Which of the two lists is on screen. Both are kept in memory either way.
     private enum Mode: Int {
@@ -88,7 +120,10 @@ private final class AppScopeController: NSViewController, NSTableViewDataSource,
     private var includeApps: [String]
     private var excludeApps: [String]
     private let loc: LocalizationManager
+    private let announcement: (String) -> Void
+    private let feedbackSound: () -> Void
     private let onFinish: (SnippetAppScope?) -> Void
+    private var validationFeedback: String?
 
     private var mode: Mode = .only
     private let modeControl = NSSegmentedControl()
@@ -102,11 +137,15 @@ private final class AppScopeController: NSViewController, NSTableViewDataSource,
     init(
         scope: SnippetAppScope,
         loc: LocalizationManager,
+        announcement: @escaping (String) -> Void = DevTypeAccessibility.announce,
+        feedbackSound: @escaping () -> Void = { NSSound.beep() },
         onFinish: @escaping (SnippetAppScope?) -> Void
     ) {
         self.includeApps = scope.includeApps
         self.excludeApps = scope.excludeApps
         self.loc = loc
+        self.announcement = announcement
+        self.feedbackSound = feedbackSound
         self.onFinish = onFinish
         super.init(nibName: nil, bundle: nil)
         // Open on whichever list already has entries, so an imported exclude-only snippet does
@@ -122,6 +161,10 @@ private final class AppScopeController: NSViewController, NSTableViewDataSource,
         set {
             if mode == .only { includeApps = newValue } else { excludeApps = newValue }
         }
+    }
+
+    var scope: SnippetAppScope {
+        SnippetAppScope(includeApps: includeApps, excludeApps: excludeApps)
     }
 
     override func loadView() {
@@ -247,11 +290,12 @@ private final class AppScopeController: NSViewController, NSTableViewDataSource,
 
     @objc private func modeChanged() {
         mode = Mode(rawValue: modeControl.selectedSegment) ?? .only
+        validationFeedback = nil
         refresh()
     }
 
     @objc private func addTyped() {
-        add(bundleField.stringValue)
+        addEntries([bundleField.stringValue])
         bundleField.stringValue = ""
     }
 
@@ -268,22 +312,23 @@ private final class AppScopeController: NSViewController, NSTableViewDataSource,
         guard let window = view.window else { return }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .OK else { return }
-            for url in panel.urls {
-                if let id = Bundle(url: url)?.bundleIdentifier { self.add(id) }
-            }
+            self.addEntries(panel.urls.compactMap { Bundle(url: $0)?.bundleIdentifier })
         }
     }
 
-    private func add(_ raw: String) {
-        let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !id.isEmpty else { return }
-        // Case-insensitive, matching `SnippetModel.appliesTo`, so the list cannot hold two
-        // spellings of one app that the matcher would treat as the same.
-        guard !currentList.contains(where: { $0.caseInsensitiveCompare(id) == .orderedSame }) else {
-            NSSound.beep()
-            return
+    func addEntries(_ rawValues: [String]) {
+        let plan = SnippetAppScopeEntryPlan(rawValues: rawValues, existing: currentList)
+        guard !plan.additions.isEmpty || plan.duplicateCount > 0 else { return }
+
+        currentList.append(contentsOf: plan.additions)
+        if plan.duplicateCount > 0 {
+            let message = loc.s("appscope.bundleID.duplicate")
+            validationFeedback = message
+            feedbackSound()
+            announcement(message)
+        } else {
+            validationFeedback = nil
         }
-        currentList.append(id)
         refresh()
     }
 
@@ -293,13 +338,14 @@ private final class AppScopeController: NSViewController, NSTableViewDataSource,
         currentList = currentList.enumerated()
             .filter { !rows.contains($0.offset) }
             .map(\.element)
+        validationFeedback = nil
         refresh()
     }
 
     @objc private func cancelTapped() { onFinish(nil) }
 
     @objc private func doneTapped() {
-        onFinish(SnippetAppScope(includeApps: includeApps, excludeApps: excludeApps))
+        onFinish(scope)
     }
 
     // MARK: - Rendering
@@ -307,9 +353,22 @@ private final class AppScopeController: NSViewController, NSTableViewDataSource,
     private func refresh() {
         tableView.reloadData()
         removeButton?.isEnabled = !tableView.selectedRowIndexes.isEmpty
-        summaryLabel.stringValue = SnippetAppScopeSummary.explanation(
-            include: includeApps, exclude: excludeApps, loc: loc
-        )
+        if let validationFeedback {
+            summaryLabel.stringValue = validationFeedback
+            summaryLabel.textColor = DevTypeTheme.statusOrange
+            summaryLabel.setAccessibilityLabel(validationFeedback)
+            summaryLabel.setAccessibilityHelp(validationFeedback)
+        } else {
+            let explanation = SnippetAppScopeSummary.explanation(
+                include: includeApps,
+                exclude: excludeApps,
+                loc: loc
+            )
+            summaryLabel.stringValue = explanation
+            summaryLabel.textColor = DevTypeTheme.textTertiary
+            summaryLabel.setAccessibilityLabel(explanation)
+            summaryLabel.setAccessibilityHelp(nil)
+        }
     }
 
     // MARK: - Table

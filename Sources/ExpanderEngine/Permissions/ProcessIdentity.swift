@@ -196,6 +196,42 @@ public final class ProcessIdentity {
         )
     }
 
+    /// Diagnostic-only streaming view of other running DevType identities. Unlike `siblingPaths`,
+    /// this does not first map, deduplicate, and sort every running application. Each qualifying
+    /// process is counted and offered directly to the report's bounded builder; repeated paths are
+    /// intentionally retained because multiple live processes at one path are relevant evidence.
+    func siblingPathDiagnosticProjection(
+        itemLimit: Int = DiagnosticReport.headerProjectionItemLimit,
+        byteLimit: Int = DiagnosticReport.headerProjectionByteLimit
+    ) -> DiagnosticReport.HeaderProjection {
+        let current = Self.normalizedBundlePath(bundlePath)
+        var builder = DiagnosticReport.HeaderProjectionBuilder(
+            itemLimit: itemLimit,
+            byteLimit: byteLimit
+        )
+        for app in NSWorkspace.shared.runningApplications {
+            let id = app.bundleIdentifier
+            let matchesID = id == bundleIdentifier
+                || id == Self.expectedBundleIdentifier
+                || id == Self.legacyStaleBundleIdentifier
+            let matchesName = (id == nil || id?.isEmpty == true)
+                && (app.localizedName ?? "").localizedCaseInsensitiveContains("DevType")
+            guard matchesID || matchesName,
+                  let rawPath = app.bundleURL?.path,
+                  !rawPath.isEmpty else { continue }
+            let path = Self.normalizedBundlePath(rawPath)
+            guard path != current else { continue }
+            builder.observe(
+                DiagnosticPrivacy.boundedIdentifier(
+                    path,
+                    label: "siblingPath",
+                    domain: "sibling-devtype-path"
+                )
+            )
+        }
+        return builder.finish()
+    }
+
     // MARK: - Pure helpers
 
     public static func isPackagedAppBundle(bundlePath: String) -> Bool {
@@ -521,7 +557,7 @@ public final class ProcessIdentity {
         let hash = parseCDHash(fromCodesignOutput: result.output)
         if hash == nil {
             DevTypeLog.identity.notice(
-                "[Identity] CDHash unavailable for path=\(path, privacy: .public) exit=\(result.exitCode, privacy: .public) timedOut=\(result.timedOut, privacy: .public)"
+                "[Identity] CDHash unavailable \(DevTypeLog.publicPathMetadata(path), privacy: .public) exit=\(result.exitCode, privacy: .public) timedOut=\(result.timedOut, privacy: .public)"
             )
         }
         return hash
@@ -649,7 +685,7 @@ public final class ProcessIdentity {
         if changed {
             defaults.set(normalizedBundlePath(currentPath), forKey: onboardingPathDefaultsKey)
             DevTypeLog.identity.info(
-                "[Identity] reconciled onboarding identity path=\(normalizedBundlePath(currentPath), privacy: .public) cdHash=\(currentCDHash ?? "nil", privacy: .public) requirement=\(currentRequirement ?? "nil", privacy: .public)"
+                "[Identity] reconciled onboarding identity \(DevTypeLog.publicPathMetadata(normalizedBundlePath(currentPath)), privacy: .public) cdHash=\(currentCDHash ?? "nil", privacy: .public) requirement=\(DevTypeLog.publicTextMetadata(currentRequirement), privacy: .public)"
             )
         }
         return changed
@@ -672,7 +708,7 @@ public final class ProcessIdentity {
             defaults.set(requirement, forKey: onboardingDesignatedRequirementDefaultsKey)
         }
         DevTypeLog.identity.info(
-            "[Identity] onboardingCompleted=true path=\(normalizedBundlePath(path), privacy: .public) cdHash=\(cdHash ?? "nil", privacy: .public)"
+            "[Identity] onboardingCompleted=true \(DevTypeLog.publicPathMetadata(normalizedBundlePath(path)), privacy: .public) cdHash=\(cdHash ?? "nil", privacy: .public)"
         )
     }
 
@@ -695,7 +731,7 @@ public final class ProcessIdentity {
             defaults.set(requirement, forKey: onboardingDesignatedRequirementDefaultsKey)
         }
         DevTypeLog.identity.info(
-            "[Identity] updated onboarding identity path=\(normalizedBundlePath(path), privacy: .public) cdHash=\(cdHash ?? "nil", privacy: .public)"
+            "[Identity] updated onboarding identity \(DevTypeLog.publicPathMetadata(normalizedBundlePath(path)), privacy: .public) cdHash=\(cdHash ?? "nil", privacy: .public)"
         )
     }
 

@@ -111,17 +111,31 @@ public enum TEImporter {
             home.appendingPathComponent("Dropbox/TextExpander/Settings.textexpandersettings"),
         ]
         let backupsDir = home.appendingPathComponent("Library/Application Support/TextExpander/Backups")
-        if let backups = try? FileManager.default.contentsOfDirectory(
-            at: backupsDir, includingPropertiesForKeys: [.contentModificationDateKey]
+        if let enumerator = FileManager.default.enumerator(
+            at: backupsDir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
         ) {
-            let sorted = backups
-                .filter { $0.lastPathComponent.hasSuffix(".textexpanderbackup") }
-                .sorted { a, b in
-                    let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                    let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                    return da > db
+            var inspected = 0
+            var newest: (url: URL, date: Date)?
+            var overflowed = false
+            for case let backup as URL in enumerator {
+                inspected += 1
+                guard inspected <= SnippetImporter.ResourceLimits.production.maxFileCount else {
+                    overflowed = true
+                    break
                 }
-            if let newest = sorted.first { candidates.append(newest) }
+                guard backup.lastPathComponent.hasSuffix(".textexpanderbackup") else { continue }
+                let date = (try? backup.resourceValues(
+                    forKeys: [.contentModificationDateKey]
+                ).contentModificationDate) ?? .distantPast
+                if newest == nil || date > newest!.date {
+                    newest = (backup, date)
+                }
+            }
+            // A truncated discovery scan cannot truthfully claim which backup is
+            // newest. Keep the fixed locations but omit the ambiguous candidate.
+            if !overflowed, let newest { candidates.append(newest.url) }
         }
         return candidates.filter { url in
             var isDir: ObjCBool = false
@@ -129,15 +143,35 @@ public enum TEImporter {
         }
     }
 
-    public static func importFolder(_ folder: URL) throws -> ImportResult {
+    public static func importFolder(
+        _ folder: URL,
+        limits: SnippetImporter.ResourceLimits = .production
+    ) throws -> ImportResult {
+        try importFolder(folder, budget: SnippetImporter.ResourceBudget(limits: limits))
+    }
+
+    internal static func importFolder(
+        _ folder: URL,
+        budget: SnippetImporter.ResourceBudget
+    ) throws -> ImportResult {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else {
             throw ImportError.folderNotFound(folder.path)
         }
-        let files = try FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: nil)
-        let groupFiles = files.filter {
-            $0.lastPathComponent.contains("group_") && $0.pathExtension == "xml"
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        ) else {
+            throw ImportError.noGroupFiles(folder.path)
+        }
+        var groupFiles: [URL] = []
+        for case let url as URL in enumerator {
+            try budget.registerFile(url)
+            if url.lastPathComponent.contains("group_") && url.pathExtension.lowercased() == "xml" {
+                groupFiles.append(url)
+            }
         }
         guard !groupFiles.isEmpty else {
             throw ImportError.noGroupFiles(folder.path)
@@ -153,15 +187,15 @@ public enum TEImporter {
 
         var bestByUUID: [String: Candidate] = [:]
         var skippedOversized = 0
-        for url in groupFiles {
+        for url in groupFiles.sorted(by: { $0.path < $1.path }) {
             // Import files are untrusted input: refuse to read absurdly large
             // sources rather than ballooning memory in the plist parser.
-            if Self.fileSize(at: url) > SnippetImporter.SnippetImportLimits.maxSourceFileBytes {
+            guard let data = try boundedSourceData(at: url) else {
                 skippedOversized += 1
                 continue
             }
-            guard let data = try? Data(contentsOf: url),
-                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+            try budget.consumeBytes(data.count, from: url)
+            guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                   let uuid = plist["uuidString"] as? String
             else { continue }
             let name = url.lastPathComponent
@@ -202,8 +236,10 @@ public enum TEImporter {
             let requireWordBoundary = expandAfter.requiresWordBoundary
 
             var snippets: [SnippetModel] = []
+            let rawSnippetEntries = plist["snippetPlists"] as? [Any] ?? []
+            try budget.consumeSnippets(rawSnippetEntries.count)
 
-            for raw in plist["snippetPlists"] as? [[String: Any]] ?? [] {
+            for case let raw as [String: Any] in rawSnippetEntries {
                 let abbreviation = raw["abbreviation"] as? String ?? ""
                 guard !abbreviation.isEmpty else {
                     skippedEmpty += 1
@@ -273,10 +309,19 @@ public enum TEImporter {
         )
     }
 
-    /// File size in bytes; 0 when the file cannot be stat'ed (the read itself will fail).
-    private static func fileSize(at url: URL) -> Int64 {
+    /// Reads at most one byte beyond the per-file ceiling. A stat check alone is
+    /// insufficient because an untrusted source can grow between stat and read.
+    private static func boundedSourceData(at url: URL) throws -> Data? {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        return (attributes?[.size] as? Int64) ?? 0
+        guard attributes?[.type] as? FileAttributeType == .typeRegular else { return nil }
+        let byteCount = (attributes?[.size] as? Int64) ?? 0
+        guard byteCount <= SnippetImporter.SnippetImportLimits.maxSourceFileBytes else { return nil }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(
+            upToCount: SnippetImporter.SnippetImportLimits.maxSourceFileBytes + 1
+        ) ?? Data()
+        return data.count > SnippetImporter.SnippetImportLimits.maxSourceFileBytes ? nil : data
     }
 
     // MARK: - Plist helpers

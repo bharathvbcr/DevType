@@ -71,17 +71,28 @@ public actor CorrectionProviderRegistry {
     /// full timeout before falling back.
     public func resolveActiveCorrector(
         preferredID: String?,
+        fallbackIDs: [String] = [],
         privacyRoute: PrivacyRoute
     ) async -> TranscriptCorrector? {
         guard let preferredID, preferredID != Self.disabledID else { return nil }
 
-        if let preferred = providers[preferredID],
-           privacyRoute.permits(preferred.descriptor.privacyRoute),
-           await preferred.probe().isReady {
-            return preferred
+        var visited = Set<String>()
+        for providerID in [preferredID] + fallbackIDs {
+            guard providerID != DeterministicCorrector.providerID,
+                  visited.insert(providerID).inserted,
+                  let candidate = providers[providerID],
+                  privacyRoute.permits(candidate.descriptor.privacyRoute),
+                  await candidate.probe().isReady else {
+                continue
+            }
+            return candidate
         }
 
-        return providers[DeterministicCorrector().descriptor.id]
+        guard let floor = providers[DeterministicCorrector.providerID],
+              privacyRoute.permits(floor.descriptor.privacyRoute) else {
+            return nil
+        }
+        return floor
     }
 
 }

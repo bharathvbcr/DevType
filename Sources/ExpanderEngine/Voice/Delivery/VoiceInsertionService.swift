@@ -50,21 +50,72 @@ public final class VoiceInsertionService {
         return leasePID != frontmostPID
     }
 
+    /// Whether a finished transcript may *replace* the text live typing already put on
+    /// screen, rather than being reconciled against it.
+    ///
+    /// A proofread pass legitimately rewrites words behind the commit barrier, so it is let
+    /// past. The danger is that a transcript which has *lost* most of the session looks
+    /// identical to a proofread at this call site — and applying it erases what the user
+    /// dictated. That is exactly how a three-utterance session came to be replaced by its
+    /// last sentence: recognition dropped two utterances, correction proofread what was
+    /// left, and delivery faithfully deleted the rest.
+    ///
+    /// So the replacement must stay inside the same deletion ceiling the correction policy
+    /// already declares for itself. Past that it is not a proofread, whatever produced it,
+    /// and dictation keeps the words the user can see. Losing formatting is recoverable;
+    /// losing the sentences is not.
+    ///
+    /// Content characters only — a proofread changes case, punctuation and spacing freely,
+    /// and none of that is evidence about whether the words survived.
+    ///
+    /// Expressed as a static so the rule is table-testable rather than buried in a
+    /// `@MainActor` singleton that reaches the real injection pipeline.
+    nonisolated public static func replacementPreservesDictatedText(
+        owned: String,
+        replacement: String,
+        maxDeletionRatio: Double
+    ) -> Bool {
+        let ownedContent = contentCharacterCount(owned)
+        // Below a few words there is not enough signal, and a wrong refusal costs more than
+        // a wrong acceptance on text this short.
+        guard ownedContent >= 24 else { return true }
+
+        let retained = Double(contentCharacterCount(replacement)) / Double(ownedContent)
+        let floor = 1.0 - max(0, min(1, maxDeletionRatio))
+        return retained >= floor
+    }
+
+    /// Letters and digits only, case-insensitively — the characters that carry words.
+    nonisolated private static func contentCharacterCount(_ text: String) -> Int {
+        text.reduce(into: 0) { count, character in
+            if character.isLetter || character.isNumber { count += 1 }
+        }
+    }
+
     /// Clears all ownership. Called when a dictation starts, so a new session never
     /// believes it owns text left over from the last one.
     public func beginSession(targetLease: TargetLease? = nil) {
         reconciler.reset()
         assembler.reset()
         self.targetLease = targetLease
-        DevTypeLog.voice.info("[Voice] session begin realTimeTyping=\(VoicePreferences.isRealTimeTypingEnabled)")
+        DevTypeLog.voice.info("[Voice] session begin liveDelivery=\(VoicePreferences.liveDeliveryMode.rawValue)")
         VoiceDiagnosticsRecorder.shared.beginSession(
             engine: VoicePreferences.effectiveEngine.rawValue,
-            realTimeTyping: VoicePreferences.isRealTimeTypingEnabled
+            liveDeliveryMode: VoicePreferences.liveDeliveryMode.rawValue
         )
     }
 
-    /// Text dictation currently believes it has typed.
+    /// Text dictation currently believes it has typed into the document.
+    ///
+    /// Empty in the modes that do not type while speaking — use `recognizedText` for the HUD.
     public var ownedText: String { reconciler.ownedText }
+
+    /// Everything the recognizer has produced this session, whether or not it was typed.
+    ///
+    /// The HUD needs this rather than `ownedText`: in `previewInHUD` the whole point is that
+    /// the words are visible while the document is left alone, and a HUD reading the typed
+    /// text would sit blank through the entire session.
+    public var recognizedText: String { assembler.cumulativeText }
 
     // MARK: - Progressive typing
 
@@ -84,9 +135,10 @@ public final class VoiceInsertionService {
             cumulative: assembler.cumulativeText
         )
 
-        // With progressive typing off, nothing is on screen yet; the assembler still tracks
-        // the transcript so final delivery knows it owns nothing.
-        guard VoicePreferences.isRealTimeTypingEnabled else { return }
+        // Outside `typeAsYouSpeak` nothing goes on screen yet. The assembler still ingested
+        // the segment above, so the HUD has a transcript to show and final delivery knows it
+        // owns nothing — the whole proofread text then lands in one insertion.
+        guard VoicePreferences.liveDeliveryMode.typesWhileSpeaking else { return }
         guard changed else { return }
 
         // Same gate `deliver` has always had, which live typing was missing entirely: an
@@ -172,7 +224,8 @@ public final class VoiceInsertionService {
         targetLease: TargetLease,
         sessionID: VoiceSessionID,
         generation: SessionGeneration,
-        replacingOwnedText: Bool = false
+        replacingOwnedText: Bool = false,
+        maxDeletionRatio: Double = CorrectionPolicy.defaultMaxDeletionRatio
     ) async -> DeliveryReceipt {
         let startTime = Date()
 
@@ -193,7 +246,32 @@ public final class VoiceInsertionService {
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if replacingOwnedText, !trimmed.isEmpty, trimmed != reconciler.ownedText {
+        let mayReplace = replacingOwnedText && Self.replacementPreservesDictatedText(
+            owned: reconciler.ownedText,
+            replacement: trimmed,
+            maxDeletionRatio: maxDeletionRatio
+        )
+
+        if replacingOwnedText && !mayReplace {
+            // Fail closed, and loudly. Something upstream lost most of the session; the one
+            // thing dictation must not do about that is delete the rest from the user's
+            // document. Fall through to the reconciling path, which cannot erase behind the
+            // commit barrier, so the user keeps every word they can see.
+            DevTypeLog.voice.error(
+                """
+                [Voice] refusing destructive replacement: transcript retains too little of \
+                the dictated text owned=\(self.reconciler.ownedText.count) replacement=\(trimmed.count)
+                """
+            )
+            VoiceDiagnosticsRecorder.shared.record(
+                "deliver.replaceRefused",
+                cumulative: trimmed,
+                erase: self.reconciler.ownedText.count,
+                suppressed: true
+            )
+        }
+
+        if mayReplace, !trimmed.isEmpty, trimmed != reconciler.ownedText {
             // One deliberate replacement of everything dictation owns. Bounded by
             // `rollbackAll`, so the erase can only ever cover text this session typed.
             let removed = reconciler.rollbackAll()

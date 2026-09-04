@@ -5,6 +5,27 @@ import Security
 public enum GeminiAPIKeyStore {
     public static let defaultServiceName = "com.devtype.gemini-api-key"
     public static let accountName = "GeminiAPIKey"
+
+    public enum ReadFailure: Equatable, Sendable {
+        case keychainStatus(OSStatus)
+        case invalidData
+    }
+
+    public enum ReadState: Equatable, Sendable {
+        case available(String)
+        case missing
+        case unavailable(ReadFailure)
+
+        public var hasKey: Bool {
+            if case .available = self { return true }
+            return false
+        }
+    }
+
+    typealias CopyMatching = (
+        CFDictionary,
+        UnsafeMutablePointer<CFTypeRef?>?
+    ) -> OSStatus
     
     /// Saves the API key to the keychain
     public static func save(_ key: String, serviceName: String = defaultServiceName) throws {
@@ -45,8 +66,17 @@ public enum GeminiAPIKeyStore {
         }
     }
     
-    /// Loads the API key from the keychain
-    public static func load(serviceName: String = defaultServiceName) -> String? {
+    /// Reads the API key without collapsing an absent item and an inaccessible Keychain into
+    /// the same `nil`. Callers deciding provider readiness must use this typed state so a locked
+    /// Keychain cannot silently switch the user's selected speech provider.
+    public static func readState(serviceName: String = defaultServiceName) -> ReadState {
+        readState(serviceName: serviceName, copyMatching: SecItemCopyMatching)
+    }
+
+    static func readState(
+        serviceName: String = defaultServiceName,
+        copyMatching: CopyMatching
+    ) -> ReadState {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
@@ -55,14 +85,24 @@ public enum GeminiAPIKeyStore {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
-        var dataTypeRef: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
-        
-        if status == errSecSuccess, let data = dataTypeRef as? Data {
-            return String(data: data, encoding: .utf8)
+        var dataTypeRef: CFTypeRef?
+        let status = copyMatching(query as CFDictionary, &dataTypeRef)
+
+        if status == errSecItemNotFound { return .missing }
+        guard status == errSecSuccess else {
+            return .unavailable(.keychainStatus(status))
         }
-        
-        return nil
+        guard let data = dataTypeRef as? Data,
+              let key = String(data: data, encoding: .utf8) else {
+            return .unavailable(.invalidData)
+        }
+        return .available(key)
+    }
+
+    /// Compatibility accessor for the network adapter. UI/readiness code uses `readState()`.
+    public static func load(serviceName: String = defaultServiceName) -> String? {
+        guard case .available(let key) = readState(serviceName: serviceName) else { return nil }
+        return key
     }
     
     /// Deletes the API key from the keychain
@@ -81,6 +121,6 @@ public enum GeminiAPIKeyStore {
     
     /// Returns true if an API key is stored
     public static var hasKey: Bool {
-        return load() != nil
+        readState().hasKey
     }
 }

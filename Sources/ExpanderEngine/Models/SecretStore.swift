@@ -45,7 +45,52 @@ public final class SecretStore {
         }
     }
 
+    /// Aggregate, value-free result of an orphan cleanup pass.
+    ///
+    /// Account names are deliberately absent: even UUID-only keychain accounts are stable
+    /// identifiers that do not belong in diagnostics. Callers can surface and retry the count
+    /// without learning which secret failed to delete.
+    public struct PurgeSummary: Equatable {
+        public let attempted: Int
+        public let removed: Int
+        public let failed: Int
+
+        public init(attempted: Int = 0, removed: Int = 0, failed: Int = 0) {
+            self.attempted = attempted
+            self.removed = removed
+            self.failed = failed
+        }
+    }
+
+    /// Keeps a just-staged secret out of an orphan sweep until its library transaction either
+    /// commits or compensates. The lease carries no value or account text and releases itself if
+    /// a caller exits early.
+    public final class OrphanPurgeLease {
+        private let lock = NSLock()
+        private var release: (() -> Void)?
+
+        fileprivate init(release: @escaping () -> Void) {
+            self.release = release
+        }
+
+        public func end() {
+            lock.lock()
+            let callback = release
+            release = nil
+            lock.unlock()
+            callback?()
+        }
+
+        deinit { end() }
+    }
+
     private let backing: SecretBackingStore
+    private let orphanPurgeExecutionLock = NSLock()
+    private let orphanProtectionCondition = NSCondition()
+    private var orphanProtectionCounts: [UUID: Int] = [:]
+    /// Exact IDs currently past the last reversible orphan decision. A lease for the same ID waits;
+    /// leases for every unrelated ID continue immediately even if securityd stalls the delete.
+    private var orphanDeletionsInFlight: Set<UUID> = []
 
     /// §8.11: the live store is file-first with the keychain reduced to one master-key item.
     /// Tests always inject a backing — the default touches the real keychain and filesystem.
@@ -72,6 +117,10 @@ public final class SecretStore {
     @discardableResult
     public func store(_ secret: String, for id: UUID) -> Result<Void, Failure> {
         guard !secret.isEmpty else { return .failure(.emptyValue) }
+        // Install protection before waiting for a possibly stalled backing operation. An in-flight
+        // same-ID orphan delete finishes first, then this later write deterministically wins.
+        let lease = protectFromOrphanPurge(id)
+        defer { lease.end() }
         let status = backing.set(secret, account: Self.account(for: id))
         return status == errSecSuccess ? .success(()) : .failure(.keychain(status))
     }
@@ -82,11 +131,11 @@ public final class SecretStore {
     /// distinction is "have a value" vs "do not". `SecretAccessDiagnostics` carries the detail
     /// for the diagnostic report.
     public func secret(for id: UUID) -> String? {
-        backing.value(account: Self.account(for: id))
+        return backing.value(account: Self.account(for: id))
     }
 
     public func hasSecret(for id: UUID) -> Bool {
-        backing.contains(account: Self.account(for: id))
+        return backing.contains(account: Self.account(for: id))
     }
 
     /// Snippet IDs whose secrets still live in the legacy service (§8.10). Non-empty means the
@@ -120,8 +169,59 @@ public final class SecretStore {
     /// One value-free line for the diagnostic report describing where secrets live.
     public func storageDescription() -> String { backing.storageDescription() }
 
+    /// Protects a secret staged before its snippet-library write. Protection acquisition is
+    /// serialized with purge candidate selection and deletion, closing both orderings of the
+    /// race: a sweep either finishes before staging starts or observes the protected ID.
+    public func protectFromOrphanPurge(_ id: UUID) -> OrphanPurgeLease {
+        protectFromOrphanPurge([id])
+    }
+
+    /// Batch form used by a library commit. One brief lock acquisition protects the complete set,
+    /// so a large secret library does not perform one synchronization round-trip per row.
+    public func protectFromOrphanPurge(_ ids: Set<UUID>) -> OrphanPurgeLease {
+        orphanProtectionCondition.lock()
+        while !ids.isDisjoint(with: orphanDeletionsInFlight) {
+            orphanProtectionCondition.wait()
+        }
+        return installOrphanProtectionLocked(for: ids)
+    }
+
+    /// Nonblocking batch form for callers that already hold a broader serialization lock.
+    /// Waiting there for a same-ID securityd delete would indirectly stall unrelated mutations,
+    /// so an intersecting in-flight claim is refused and the caller must fail the publication.
+    func tryProtectFromOrphanPurge(_ ids: Set<UUID>) -> OrphanPurgeLease? {
+        orphanProtectionCondition.lock()
+        guard ids.isDisjoint(with: orphanDeletionsInFlight) else {
+            orphanProtectionCondition.unlock()
+            return nil
+        }
+        return installOrphanProtectionLocked(for: ids)
+    }
+
+    /// Requires `orphanProtectionCondition` to be locked. The returned lease owns the unlock so
+    /// both blocking and fail-fast acquisition use exactly the same accounting path.
+    private func installOrphanProtectionLocked(for ids: Set<UUID>) -> OrphanPurgeLease {
+        for id in ids { orphanProtectionCounts[id, default: 0] += 1 }
+        orphanProtectionCondition.unlock()
+        return OrphanPurgeLease { [weak self] in
+            guard let self else { return }
+            self.orphanProtectionCondition.lock()
+            for id in ids {
+                let remaining = (self.orphanProtectionCounts[id] ?? 1) - 1
+                if remaining > 0 {
+                    self.orphanProtectionCounts[id] = remaining
+                } else {
+                    self.orphanProtectionCounts.removeValue(forKey: id)
+                }
+            }
+            self.orphanProtectionCondition.unlock()
+        }
+    }
+
     @discardableResult
     public func remove(for id: UUID) -> Result<Void, Failure> {
+        let lease = protectFromOrphanPurge(id)
+        defer { lease.end() }
         let status = backing.delete(account: Self.account(for: id))
         // Deleting something that is not there is the desired end state, not an error.
         if status == errSecSuccess || status == errSecItemNotFound { return .success(()) }
@@ -132,17 +232,65 @@ public final class SecretStore {
     ///
     /// Without this, deleting a secret snippet leaves its password in the keychain forever — the
     /// user believes they removed it, and nothing in the UI would ever show them otherwise.
-    /// Returns the number of items removed.
+    /// Returns aggregate counts so a keychain refusal cannot masquerade as an empty sweep.
     @discardableResult
-    public func purgeOrphans(keeping liveIDs: Set<UUID>) -> Int {
-        // Through `orphanAccounts`, which owns the rule the loop here once skipped: an account
-        // that does not parse as a UUID is *not* ours to delete. Latent until §8.11 put the
-        // master key — the first non-UUID account — under the same service.
+    public func purgeOrphans(keeping liveIDs: Set<UUID>) -> PurgeSummary {
+        purgeOrphans(keepingLatest: { liveIDs })
+    }
+
+    /// Store-owned cleanup variant. Account enumeration can stall in securityd, so the caller's
+    /// canonical live-ID projection is evaluated only after that scan and immediately before each
+    /// irreversible delete.
+    ///
+    /// The check→delete window is closed without holding the snippet RMW lock: candidate selection
+    /// and the per-ID in-flight claim are one condition-locked transition. Every library commit
+    /// leases all live secret IDs before writing. A same-ID lease therefore either wins before the
+    /// claim (and the delete is skipped) or waits until the delete finishes; unrelated leases and
+    /// mutations never wait behind slow backing I/O. The provider must be value-free and must not
+    /// call back into `SecretStore`.
+    @discardableResult
+    func purgeOrphans(keepingLatest latestLiveIDs: () -> Set<UUID>?) -> PurgeSummary {
+        orphanPurgeExecutionLock.lock()
+        defer { orphanPurgeExecutionLock.unlock() }
+
+        // Enumerate outside the protection condition. A slow metadata query must not prevent a newly
+        // staged secret from installing its lease, and every candidate is re-evaluated below.
+        let storedAccounts = backing.accounts()
         var removed = 0
-        for account in Self.orphanAccounts(stored: backing.accounts(), liveIDs: liveIDs) {
-            if backing.delete(account: account) == errSecSuccess { removed += 1 }
+        var failed = 0
+        var attempted = 0
+        for account in storedAccounts.sorted() {
+            guard let id = Self.snippetID(forAccount: account) else { continue }
+
+            // This decision and claim publication are atomic with lease acquisition. Missing
+            // canonical state is not an empty library: retain everything and retry later.
+            orphanProtectionCondition.lock()
+            guard let liveIDs = latestLiveIDs(),
+                  !liveIDs.contains(id),
+                  orphanProtectionCounts[id] == nil else {
+                orphanProtectionCondition.unlock()
+                continue
+            }
+            orphanDeletionsInFlight.insert(id)
+            orphanProtectionCondition.unlock()
+
+            attempted += 1
+            let status = backing.delete(account: account)
+
+            orphanProtectionCondition.lock()
+            orphanDeletionsInFlight.remove(id)
+            orphanProtectionCondition.broadcast()
+            orphanProtectionCondition.unlock()
+
+            // A concurrent cleanup reaching the item first has already achieved the desired
+            // state, so deletion remains idempotent.
+            if status == errSecSuccess || status == errSecItemNotFound {
+                removed += 1
+            } else {
+                failed += 1
+            }
         }
-        return removed
+        return PurgeSummary(attempted: attempted, removed: removed, failed: failed)
     }
 
     /// Pure policy: which stored accounts are orphans, given the live snippet IDs?
@@ -1170,8 +1318,12 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         }
         guard archivePhaseComplete else { return errSecIO }
         let tierStatus = tier.delete(account: account)
+        // A surviving tier copy is still the secret. Do not let successful archive removal
+        // mask a Keychain refusal: consolidation can legitimately leave both copies when its
+        // post-verify tier cleanup was denied, and callers need the failure to retain/retry debt.
+        if tierStatus != errSecSuccess, tierStatus != errSecItemNotFound { return tierStatus }
         if archiveHadEntry || tierStatus == errSecSuccess { return errSecSuccess }
-        return tierStatus
+        return errSecItemNotFound
     }
 
     public func accounts() -> Set<String> {

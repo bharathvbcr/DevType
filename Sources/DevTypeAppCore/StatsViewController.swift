@@ -1,6 +1,211 @@
 import AppKit
 import ExpanderEngine
 
+enum StatsTimePeriod: Int, CaseIterable, Hashable {
+    case all = 0
+    case today = 1
+    case sevenDays = 2
+    case thirtyDays = 3
+
+    var usagePeriod: UsageStatsStore.Period {
+        switch self {
+        case .all: return .all
+        case .today: return .today
+        case .sevenDays: return .sevenDays
+        case .thirtyDays: return .thirtyDays
+        }
+    }
+}
+
+/// Pure projection consumed by the Statistics view. Its cards, insights, lists,
+/// and sparkline all come from the same immutable period snapshot.
+struct StatsPresentationSnapshot {
+    struct SnippetUsage: Equatable {
+        let snippet: SnippetModel
+        let usageCount: Int
+        let lastUsedAt: Date?
+    }
+
+    let generatedAt: Date
+    let totalUses: Int
+    let charactersProduced: Int
+    let keystrokesSaved: Int
+    let singleUseCount: Int
+    let mostValuableSnippet: SnippetModel?
+    let mostValuableKeystrokesSaved: Int
+    let top: [SnippetUsage]
+    let recent: [SnippetUsage]
+    let sparklineCounts: [Int]
+    /// Exact lifetime usage whose timestamps were intentionally evicted from the bounded sidecar.
+    /// Cards remain exact; only the timeline is partial when this is non-zero.
+    let unbucketedUsageCount: Int
+
+    static func make(
+        snippets: [SnippetModel],
+        usage: UsageStatsStore.PeriodSnapshot,
+        listLimit: Int = 8
+    ) -> StatsPresentationSnapshot {
+        var snippetsByID: [UUID: SnippetModel] = [:]
+        var orderedSnippets: [SnippetModel] = []
+        for snippet in snippets where snippetsByID[snippet.id] == nil {
+            snippetsByID[snippet.id] = snippet
+            orderedSnippets.append(snippet)
+        }
+
+        var totalUses = 0
+        var charactersProduced = 0
+        var keystrokesSaved = 0
+        var singleUseCount = 0
+        var mostValuableSnippet: SnippetModel?
+        var mostValuableKeystrokesSaved = 0
+
+        for snippet in orderedSnippets {
+            let count = usage.usageCount(for: snippet.id)
+            guard count > 0 else { continue }
+            totalUses = addingClamped(totalUses, count)
+            if count == 1 { singleUseCount += 1 }
+
+            let producedPerUse = snippet.isImageSnippet ? 0 : snippet.replacementText.count
+            let savedPerUse = max(0, producedPerUse - snippet.triggerKeyword.count)
+            charactersProduced = addingClamped(
+                charactersProduced,
+                multiplyingClamped(count, producedPerUse)
+            )
+            let saved = multiplyingClamped(count, savedPerUse)
+            keystrokesSaved = addingClamped(keystrokesSaved, saved)
+            if saved > mostValuableKeystrokesSaved {
+                mostValuableSnippet = snippet
+                mostValuableKeystrokesSaved = saved
+            }
+        }
+
+        let safeLimit = max(0, listLimit)
+        let top = usage.topSnippetIDs(limit: safeLimit).compactMap { id -> SnippetUsage? in
+            guard let snippet = snippetsByID[id], let stat = usage.entries[id] else { return nil }
+            return SnippetUsage(
+                snippet: snippet,
+                usageCount: stat.usageCount,
+                lastUsedAt: stat.lastUsedAt
+            )
+        }
+        let recent = usage.recentSnippetIDs(limit: safeLimit).compactMap { id -> SnippetUsage? in
+            guard let snippet = snippetsByID[id], let stat = usage.entries[id] else { return nil }
+            return SnippetUsage(
+                snippet: snippet,
+                usageCount: stat.usageCount,
+                lastUsedAt: stat.lastUsedAt
+            )
+        }
+
+        return StatsPresentationSnapshot(
+            generatedAt: usage.generatedAt,
+            totalUses: totalUses,
+            charactersProduced: charactersProduced,
+            keystrokesSaved: keystrokesSaved,
+            singleUseCount: singleUseCount,
+            mostValuableSnippet: mostValuableSnippet,
+            mostValuableKeystrokesSaved: mostValuableKeystrokesSaved,
+            top: top,
+            recent: recent,
+            sparklineCounts: usage.timeline.map(\.usageCount),
+            unbucketedUsageCount: max(0, usage.unbucketedUsageCount)
+        )
+    }
+
+    private static func addingClamped(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : sum
+    }
+
+    private static func multiplyingClamped(_ lhs: Int, _ rhs: Int) -> Int {
+        let (product, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        return overflow ? Int.max : product
+    }
+}
+
+/// Locale-explicit formatting for every value projected by the Statistics screen. The formatter
+/// resolves the effective app language on each call so changing the in-app language takes effect
+/// without relying on, or mutating, the process locale.
+struct StatsLocalizedFormatter {
+    static let maximumAccessibilitySummaryLength = 160
+
+    let localization: LocalizationManager
+
+    private var locale: Locale {
+        Locale(identifier: localization.effectiveLanguageCode())
+    }
+
+    func number(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.locale = locale
+        formatter.numberStyle = .decimal
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
+    }
+
+    func relativeDate(_ date: Date, relativeTo referenceDate: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = locale
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: referenceDate)
+    }
+
+    func duration(minutes: Double) -> String {
+        let safeMinutes = minutes.isFinite ? max(0, minutes) : 0
+        let seconds = safeMinutes * 60
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.allowedUnits = seconds >= 3_600 ? [.hour, .minute] : [.minute, .second]
+        formatter.maximumUnitCount = 2
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = locale
+        formatter.calendar = calendar
+        return formatter.string(from: seconds) ?? number(0)
+    }
+
+    func sparklineAccessibilitySummary(
+        points: [Int],
+        unbucketedUsageCount: Int = 0
+    ) -> String {
+        let base: String
+        if points.isEmpty {
+            base = localization.s("stats.chart.accessibility.empty")
+        } else {
+            var total = 0
+            var peak = 0
+            for point in points {
+                let safePoint = max(0, point)
+                peak = max(peak, safePoint)
+                let (next, overflow) = total.addingReportingOverflow(safePoint)
+                total = overflow ? Int.max : next
+            }
+            if total > 0 {
+                base = localization.s(
+                    "stats.chart.accessibility.summary",
+                    number(points.count),
+                    number(total),
+                    number(peak)
+                )
+            } else {
+                base = localization.s("stats.chart.accessibility.empty")
+            }
+        }
+
+        let omitted = max(0, unbucketedUsageCount)
+        guard omitted > 0 else { return bounded(base) }
+        return bounded(
+            base + " " + localization.s(
+                "stats.chart.accessibility.partial",
+                number(omitted)
+            )
+        )
+    }
+
+    private func bounded(_ value: String) -> String {
+        guard value.count > Self.maximumAccessibilitySummaryLength else { return value }
+        return String(value.prefix(Self.maximumAccessibilitySummaryLength - 1)) + "…"
+    }
+}
+
 /// §2: Actionable Insights & Statistics Dashboard.
 ///
 /// Features time-period filtering (All Time, Today, 7D, 30D),
@@ -9,17 +214,11 @@ import ExpanderEngine
 final class StatsViewController: NSViewController {
     private static let charactersPerMinute = 200.0
 
-    private enum TimePeriod: Int, CaseIterable {
-        case all = 0
-        case today = 1
-        case sevenDays = 2
-        case thirtyDays = 3
-    }
-
     private let store: SnippetStore
-    private let loc = LocalizationManager.shared
+    private let loc: LocalizationManager
+    private let formatter: StatsLocalizedFormatter
 
-    private var selectedPeriod: TimePeriod = .all
+    private var selectedPeriod: StatsTimePeriod = .all
     private var refreshTimer: Timer?
 
     private let periodControl = NSSegmentedControl()
@@ -28,7 +227,12 @@ final class StatsViewController: NSViewController {
     private let timeValue = StatsViewController.makeValueLabel()
     private let keystrokesValue = StatsViewController.makeValueLabel()
 
-    private let sparklineView = StatsSparklineView()
+    private let chartTitleLabel = DevTypeTheme.makeLabel(
+        "",
+        font: DevTypeTheme.font(10.5, .semibold),
+        color: DevTypeTheme.textSecondary
+    )
+    private let sparklineView: StatsSparklineView
     private let insightsStack = NSStackView()
     private let topStack = NSStackView()
     private let recentStack = NSStackView()
@@ -39,8 +243,14 @@ final class StatsViewController: NSViewController {
         wrapping: true
     )
 
-    init(store: SnippetStore = .shared) {
+    init(
+        store: SnippetStore = .shared,
+        localization: LocalizationManager = .shared
+    ) {
         self.store = store
+        self.loc = localization
+        self.formatter = StatsLocalizedFormatter(localization: localization)
+        self.sparklineView = StatsSparklineView(localization: localization)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -71,11 +281,9 @@ final class StatsViewController: NSViewController {
 
         // Time Period Selector
         periodControl.segmentCount = 4
-        periodControl.setLabel(loc.s("stats.period.all"), forSegment: 0)
-        periodControl.setLabel(loc.s("stats.period.today"), forSegment: 1)
-        periodControl.setLabel(loc.s("stats.period.sevenDays"), forSegment: 2)
-        periodControl.setLabel(loc.s("stats.period.thirtyDays"), forSegment: 3)
+        periodControl.trackingMode = .selectOne
         periodControl.selectedSegment = 0
+        updatePeriodControlLocalization()
         periodControl.target = self
         periodControl.action = #selector(periodChanged)
         periodControl.translatesAutoresizingMaskIntoConstraints = false
@@ -107,6 +315,8 @@ final class StatsViewController: NSViewController {
         metrics.translatesAutoresizingMaskIntoConstraints = false
 
         // Sparkline View
+        chartTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        chartTitleLabel.stringValue = loc.s("stats.chart.title")
         sparklineView.translatesAutoresizingMaskIntoConstraints = false
 
         // Actionable Insights Stack
@@ -133,6 +343,7 @@ final class StatsViewController: NSViewController {
         root.addSubview(topHeaderRow)
         root.addSubview(subtitle)
         root.addSubview(metrics)
+        root.addSubview(chartTitleLabel)
         root.addSubview(sparklineView)
         root.addSubview(insightsStack)
         root.addSubview(lists)
@@ -150,7 +361,11 @@ final class StatsViewController: NSViewController {
             metrics.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             metrics.trailingAnchor.constraint(equalTo: root.trailingAnchor),
 
-            sparklineView.topAnchor.constraint(equalTo: metrics.bottomAnchor, constant: 10),
+            chartTitleLabel.topAnchor.constraint(equalTo: metrics.bottomAnchor, constant: 10),
+            chartTitleLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            chartTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
+
+            sparklineView.topAnchor.constraint(equalTo: chartTitleLabel.bottomAnchor, constant: 4),
             sparklineView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sparklineView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             sparklineView.heightAnchor.constraint(equalToConstant: 44),
@@ -188,7 +403,8 @@ final class StatsViewController: NSViewController {
     }
 
     @objc private func periodChanged() {
-        selectedPeriod = TimePeriod(rawValue: periodControl.selectedSegment) ?? .all
+        selectedPeriod = StatsTimePeriod(rawValue: periodControl.selectedSegment) ?? .all
+        updatePeriodControlAccessibilityValue()
         refresh()
     }
 
@@ -199,73 +415,55 @@ final class StatsViewController: NSViewController {
     // MARK: Data & Calculations
 
     func refresh() {
+        updatePeriodControlLocalization()
         let groups = store.loadGroups()
         let snippets = groups.flatMap(\.snippets)
-
-        var totalUses = 0
-        var charactersTyped = 0
-        var keystrokesSaved = 0
-        var singleUseCount = 0
-        var mostValuableSnippet: SnippetModel?
-        var maxKeystrokesForSnippet = 0
-
-        let calendar = Calendar.current
         let now = Date()
+        let usage = store.usageStatsStore.snapshot(
+            period: selectedPeriod.usagePeriod,
+            snippetIDs: Set(snippets.map(\.id)),
+            now: now,
+            calendar: .current
+        )
+        let presentation = StatsPresentationSnapshot.make(snippets: snippets, usage: usage)
 
-        for snippet in snippets {
-            let uses = store.usageCount(for: snippet)
-            guard uses > 0 else { continue }
-
-            if uses == 1 { singleUseCount += 1 }
-
-            if let lastDate = store.lastUsedAt(forSnippetID: snippet.id) {
-                switch selectedPeriod {
-                case .all:
-                    break
-                case .today:
-                    if !calendar.isDateInToday(lastDate) { continue }
-                case .sevenDays:
-                    if let d = calendar.date(byAdding: .day, value: -7, to: now), lastDate < d { continue }
-                case .thirtyDays:
-                    if let d = calendar.date(byAdding: .day, value: -30, to: now), lastDate < d { continue }
-                }
-            }
-
-            totalUses += uses
-            let produced = snippet.isImageSnippet ? 0 : snippet.replacementText.count
-            let typed = snippet.triggerKeyword.count
-            let savedPerUse = max(0, produced - typed)
-            let snippetSaved = uses * savedPerUse
-
-            charactersTyped += uses * produced
-            keystrokesSaved += snippetSaved
-
-            if snippetSaved > maxKeystrokesForSnippet {
-                maxKeystrokesForSnippet = snippetSaved
-                mostValuableSnippet = snippet
-            }
-        }
-
-        expansionsValue.stringValue = format(totalUses)
-        charactersValue.stringValue = format(charactersTyped)
-        keystrokesValue.stringValue = format(keystrokesSaved)
-        timeValue.stringValue = formatDuration(
-            minutes: Double(keystrokesSaved) / Self.charactersPerMinute
+        expansionsValue.stringValue = formatter.number(presentation.totalUses)
+        charactersValue.stringValue = formatter.number(presentation.charactersProduced)
+        keystrokesValue.stringValue = formatter.number(presentation.keystrokesSaved)
+        timeValue.stringValue = formatter.duration(
+            minutes: Double(presentation.keystrokesSaved) / Self.charactersPerMinute
         )
 
-        // Sparkline sample points
-        let top = store.topUsedSnippets(limit: 8)
-        let sparkCounts = top.map { store.usageCount(for: $0) }
-        sparklineView.setPoints(sparkCounts)
+        let timelineIsPartial = presentation.unbucketedUsageCount > 0
+        chartTitleLabel.stringValue = loc.s(
+            timelineIsPartial ? "stats.chart.title.partial" : "stats.chart.title"
+        )
+        sparklineView.setPoints(
+            presentation.sparklineCounts,
+            unbucketedUsageCount: presentation.unbucketedUsageCount
+        )
 
         // Populate Actionable Insights
-        populateInsights(singleUseCount: singleUseCount, mostValuable: mostValuableSnippet, maxSaved: maxKeystrokesForSnippet)
+        populateInsights(
+            singleUseCount: presentation.singleUseCount,
+            mostValuable: presentation.mostValuableSnippet,
+            maxSaved: presentation.mostValuableKeystrokesSaved
+        )
 
-        let recent = store.recentlyUsedSnippets(limit: 8)
-        fill(topStack, with: top, showsRelativeDate: false)
-        fill(recentStack, with: recent, showsRelativeDate: true)
+        fill(
+            topStack,
+            with: presentation.top,
+            showsRelativeDate: false,
+            relativeTo: presentation.generatedAt
+        )
+        fill(
+            recentStack,
+            with: presentation.recent,
+            showsRelativeDate: true,
+            relativeTo: presentation.generatedAt
+        )
 
-        let hasData = totalUses > 0
+        let hasData = presentation.totalUses > 0
         emptyLabel.stringValue = hasData ? "" : loc.s("stats.empty")
         emptyLabel.isHidden = hasData
     }
@@ -287,7 +485,9 @@ final class StatsViewController: NSViewController {
         }
 
         if let mostValuable {
-            let timeSavedStr = formatDuration(minutes: Double(maxSaved) / Self.charactersPerMinute)
+            let timeSavedStr = formatter.duration(
+                minutes: Double(maxSaved) / Self.charactersPerMinute
+            )
             let valCard = makeInsightCard(
                 title: loc.s("stats.insight.valuable.title"),
                 desc: loc.s("stats.insight.valuable.desc", mostValuable.triggerKeyword, timeSavedStr),
@@ -362,17 +562,31 @@ final class StatsViewController: NSViewController {
         (NSApp.delegate as? AppDelegate)?.openSnippetManager(nil)
     }
 
-    private func fill(_ stack: NSStackView, with snippets: [SnippetModel], showsRelativeDate: Bool) {
+    private func fill(
+        _ stack: NSStackView,
+        with snippets: [StatsPresentationSnapshot.SnippetUsage],
+        showsRelativeDate: Bool,
+        relativeTo referenceDate: Date
+    ) {
         for subview in stack.arrangedSubviews {
             stack.removeArrangedSubview(subview)
             subview.removeFromSuperview()
         }
         for snippet in snippets {
-            stack.addArrangedSubview(makeSnippetRow(snippet, showsRelativeDate: showsRelativeDate))
+            stack.addArrangedSubview(makeSnippetRow(
+                snippet,
+                showsRelativeDate: showsRelativeDate,
+                relativeTo: referenceDate
+            ))
         }
     }
 
-    private func makeSnippetRow(_ snippet: SnippetModel, showsRelativeDate: Bool) -> NSView {
+    private func makeSnippetRow(
+        _ item: StatsPresentationSnapshot.SnippetUsage,
+        showsRelativeDate: Bool,
+        relativeTo referenceDate: Date
+    ) -> NSView {
+        let snippet = item.snippet
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
@@ -384,18 +598,15 @@ final class StatsViewController: NSViewController {
         trigger.translatesAutoresizingMaskIntoConstraints = false
         trigger.lineBreakMode = .byTruncatingTail
 
-        let uses = store.usageCount(for: snippet)
         let detail: String
         if showsRelativeDate {
-            if let date = store.lastUsedAt(forSnippetID: snippet.id) {
-                let formatter = RelativeDateTimeFormatter()
-                formatter.unitsStyle = .abbreviated
-                detail = formatter.localizedString(for: date, relativeTo: Date())
+            if let date = item.lastUsedAt {
+                detail = formatter.relativeDate(date, relativeTo: referenceDate)
             } else {
                 detail = loc.s("stats.never")
             }
         } else {
-            detail = loc.p("stats.uses", count: uses, uses)
+            detail = loc.p("stats.uses", count: item.usageCount, item.usageCount)
         }
         let detailLabel = DevTypeTheme.makeLabel(
             detail,
@@ -507,29 +718,60 @@ final class StatsViewController: NSViewController {
         return card
     }
 
-    private func format(_ value: Int) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        return formatter.string(from: NSNumber(value: value)) ?? String(value)
+    private func updatePeriodControlLocalization() {
+        periodControl.setLabel(loc.s("stats.period.all"), forSegment: StatsTimePeriod.all.rawValue)
+        periodControl.setLabel(
+            loc.s("stats.period.today"),
+            forSegment: StatsTimePeriod.today.rawValue
+        )
+        periodControl.setLabel(
+            loc.s("stats.period.sevenDays"),
+            forSegment: StatsTimePeriod.sevenDays.rawValue
+        )
+        periodControl.setLabel(
+            loc.s("stats.period.thirtyDays"),
+            forSegment: StatsTimePeriod.thirtyDays.rawValue
+        )
+        periodControl.setAccessibilityLabel(loc.s("stats.period.accessibility.label"))
+        updatePeriodControlAccessibilityValue()
     }
 
-    private func formatDuration(minutes: Double) -> String {
-        let seconds = max(0, minutes * 60)
-        let formatter = DateComponentsFormatter()
-        formatter.unitsStyle = .abbreviated
-        formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute, .second]
-        formatter.maximumUnitCount = 2
-        return formatter.string(from: seconds) ?? "0"
+    private func updatePeriodControlAccessibilityValue() {
+        let selectedLabel = periodControl.label(forSegment: selectedPeriod.rawValue)
+        periodControl.setAccessibilityValue(selectedLabel)
     }
 }
 
 /// Custom lightweight activity sparkline visualizer.
-private final class StatsSparklineView: NSView {
+final class StatsSparklineView: NSView {
     private var points: [Int] = []
+    private var unbucketedUsageCount = 0
+    private let formatter: StatsLocalizedFormatter
 
-    func setPoints(_ points: [Int]) {
-        self.points = points
+    init(localization: LocalizationManager = .shared) {
+        self.formatter = StatsLocalizedFormatter(localization: localization)
+        super.init(frame: .zero)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.image)
+        updateAccessibility()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setPoints(_ points: [Int], unbucketedUsageCount: Int = 0) {
+        self.points = points.map { max(0, $0) }
+        self.unbucketedUsageCount = max(0, unbucketedUsageCount)
+        updateAccessibility()
         needsDisplay = true
+    }
+
+    private func updateAccessibility() {
+        setAccessibilityLabel(formatter.localization.s("stats.chart.accessibility.label"))
+        setAccessibilityValue(formatter.sparklineAccessibilitySummary(
+            points: points,
+            unbucketedUsageCount: unbucketedUsageCount
+        ))
     }
 
     override func draw(_ dirtyRect: NSRect) {

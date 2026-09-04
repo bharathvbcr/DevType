@@ -5,7 +5,7 @@ import Foundation
 /// A swallowing `defaultTap` needs **Input Monitoring and Accessibility**. Missing either
 /// blocks tap install. Post Events is inject-only (HID paste / cursor); dropping it degrades
 /// inject and must not tear down a running tap.
-public struct PermissionSnapshot: Equatable {
+public struct PermissionSnapshot: Codable, Equatable, Sendable {
     public let canListenTap: Bool
     public let canUseAX: Bool
     public let canPostEvents: Bool

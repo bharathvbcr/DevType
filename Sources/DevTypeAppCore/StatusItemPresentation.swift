@@ -1,6 +1,75 @@
 import AppKit
 import ExpanderEngine
 
+/// Localized, user-facing projection of the engine's diagnostic state.
+///
+/// `EngineDisplayStatus` deliberately retains its stable English strings for logs and support
+/// bundles. AppKit must not render those diagnostic strings directly: doing so left the menu-bar
+/// tooltip and Permission Recovery summary in English after the user selected Korean or Japanese.
+struct EngineDisplayPresentation: Equatable {
+    let statusName: String
+    let toolTip: String
+
+    init(
+        display: EngineDisplayStatus,
+        snapshot: PermissionSnapshot,
+        urgentInject: Bool,
+        loc: LocalizationManager = .shared
+    ) {
+        statusName = Self.statusName(for: display, urgentInject: urgentInject, loc: loc)
+        let permissionCopy = PermissionCopy.localized(using: loc)
+
+        switch display {
+        case .needsPermissions:
+            let missing = permissionCopy.missingCapabilityNames(snapshot)
+            if missing.isEmpty {
+                toolTip = loc.s("status.tooltip.needsPermissions.generic")
+            } else {
+                var text = loc.s(
+                    "status.tooltip.needsPermissions",
+                    permissionCopy.missingCapabilitiesSummary(snapshot)
+                )
+                if !snapshot.canListenTap || !snapshot.canUseAX {
+                    text += " " + loc.s("status.tooltip.eventTapRequirements")
+                }
+                toolTip = text
+            }
+        case .tapFailed:
+            toolTip = permissionCopy.tapCreateFailedDespiteListenGuidance
+        case .paused:
+            toolTip = loc.s("status.tooltip.paused")
+        case .secure:
+            toolTip = loc.s("status.secure.copyHelp", loc.s("menu.copySecret"))
+        case .active:
+            if urgentInject {
+                toolTip = loc.s("status.tooltip.injectIssue")
+            } else if snapshot.isDegradedInject {
+                toolTip = loc.s(
+                    "status.tooltip.degraded",
+                    permissionCopy.missingCapabilitiesSummary(snapshot)
+                )
+            } else {
+                toolTip = loc.s("status.tooltip.active")
+            }
+        }
+    }
+
+    static func statusName(
+        for display: EngineDisplayStatus,
+        urgentInject: Bool,
+        loc: LocalizationManager = .shared
+    ) -> String {
+        if urgentInject, display == .active { return loc.s("status.injectIssue") }
+        switch display {
+        case .active: return loc.s("status.active")
+        case .secure: return loc.s("status.secure")
+        case .paused: return loc.s("status.paused")
+        case .needsPermissions: return loc.s("status.needsPermissions")
+        case .tapFailed: return loc.s("status.tapFailed")
+        }
+    }
+}
+
 /// The menu's copy affordance is independent of engine permission/pause diagnostics:
 /// choosing a secret uses the existing authenticated clipboard path, not the event tap.
 struct StatusItemPresentation {
@@ -26,7 +95,13 @@ struct StatusItemPresentation {
         loc: LocalizationManager = .shared
     ) {
         let urgent = urgentInject || snapshot.isDegradedInject
-        statusName = Self.statusName(for: display, urgent: urgentInject, loc: loc)
+        let enginePresentation = EngineDisplayPresentation(
+            display: display,
+            snapshot: snapshot,
+            urgentInject: urgentInject,
+            loc: loc
+        )
+        statusName = enginePresentation.statusName
         statusColor = Self.statusColor(for: display, urgent: urgent)
         needsAttention = display.requiresAction || urgent
         offersCopySecret = isSecureInputActive
@@ -40,9 +115,12 @@ struct StatusItemPresentation {
             image = DevTypeTheme.menuIcon("key.fill", description: action)
                 ?? DevTypeTheme.statusItemImage(badge: nil, highlighted: highlighted, accessibilityLabel: action)
             let help = loc.s("status.secure.copyHelp", action)
-            toolTip = needsAttention ? "\(help)\n\(display.toolTip(snapshot: snapshot))" : help
+            let showsSeparateDiagnosis = needsAttention && enginePresentation.toolTip != help
+            toolTip = showsSeparateDiagnosis ? "\(help)\n\(enginePresentation.toolTip)" : help
             accessibilityValue = action
-            accessibilityHelp = needsAttention ? "\(help) \(statusName)" : help
+            accessibilityHelp = showsSeparateDiagnosis
+                ? "\(help) \(statusName). \(enginePresentation.toolTip)"
+                : help
         } else {
             let kind = Self.statusKind(for: display)
             let quiet = display == .active && !urgent
@@ -53,7 +131,7 @@ struct StatusItemPresentation {
             )
             let showsText = differentiateWithoutColor || needsAttention || libraryUnhealthy
             title = showsText ? " \(statusName)" : ""
-            toolTip = display.toolTip(snapshot: snapshot)
+            toolTip = enginePresentation.toolTip
             accessibilityValue = statusName
             accessibilityHelp = loc.s("ax.status.item.help", statusName)
         }
@@ -95,17 +173,6 @@ struct StatusItemPresentation {
         case .paused: return .paused
         case .needsPermissions: return .needsPermissions
         case .tapFailed: return .tapFailed
-        }
-    }
-
-    private static func statusName(for display: EngineDisplayStatus, urgent: Bool, loc: LocalizationManager) -> String {
-        if urgent, display == .active { return loc.s("status.injectIssue") }
-        switch display {
-        case .active: return loc.s("status.active")
-        case .secure: return loc.s("status.secure")
-        case .paused: return loc.s("status.paused")
-        case .needsPermissions: return loc.s("status.needsPermissions")
-        case .tapFailed: return loc.s("status.tapFailed")
         }
     }
 

@@ -1,6 +1,16 @@
 import AppKit
 import ExpanderEngine
 
+extension SnippetStore.ImportPreview.Status {
+    var localizationKey: String {
+        switch self {
+        case .isNew: return "import.preview.status.new"
+        case .isUpdate: return "import.preview.status.update"
+        case .isConflict: return "import.preview.status.conflict"
+        }
+    }
+}
+
 /// §15: Snippet Import Preview Sheet.
 ///
 /// Previews incoming snippets before committing them to the library,
@@ -10,14 +20,12 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
 
     public static func present(
         from window: NSWindow?,
-        incomingGroups: [SnippetGroup],
-        existingGroups: [SnippetGroup],
-        onConfirm: @escaping (SnippetImportMode, [SnippetGroup]) -> Void,
+        preview: SnippetStore.ImportPreview,
+        onConfirm: @escaping (SnippetImportMode) -> Void,
         onCancel: (() -> Void)? = nil
     ) {
         let vc = SnippetImportPreviewSheet(
-            incomingGroups: incomingGroups,
-            existingGroups: existingGroups,
+            preview: preview,
             onConfirm: onConfirm,
             onCancel: onCancel
         )
@@ -37,9 +45,8 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
         }
     }
 
-    private let incomingGroups: [SnippetGroup]
-    private let existingGroups: [SnippetGroup]
-    private let onConfirm: (SnippetImportMode, [SnippetGroup]) -> Void
+    private let preview: SnippetStore.ImportPreview
+    private let onConfirm: (SnippetImportMode) -> Void
     private let onCancel: (() -> Void)?
     private let loc = LocalizationManager.shared
 
@@ -48,28 +55,12 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
     private var didConfirm = false
     private var didCancel = false
 
-    private struct PreviewItem {
-        let snippet: SnippetModel
-        let groupName: String
-        let status: Status
-
-        enum Status {
-            case isNew
-            case isUpdate
-            case isConflict
-        }
-    }
-
-    private var previewItems: [PreviewItem] = []
-
     init(
-        incomingGroups: [SnippetGroup],
-        existingGroups: [SnippetGroup],
-        onConfirm: @escaping (SnippetImportMode, [SnippetGroup]) -> Void,
+        preview: SnippetStore.ImportPreview,
+        onConfirm: @escaping (SnippetImportMode) -> Void,
         onCancel: (() -> Void)?
     ) {
-        self.incomingGroups = incomingGroups
-        self.existingGroups = existingGroups
+        self.preview = preview
         self.onConfirm = onConfirm
         self.onCancel = onCancel
         super.init(nibName: nil, bundle: nil)
@@ -95,20 +86,17 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
         )
         header.translatesAutoresizingMaskIntoConstraints = false
 
-        let totalSnippets = incomingGroups.flatMap(\.snippets).count
         let countLabel = DevTypeTheme.makeLabel(
-            loc.s("import.preview.count", totalSnippets, incomingGroups.count),
+            loc.s("import.preview.count", preview.plan.snippetCount, preview.plan.groupCount),
             font: DevTypeTheme.font(12),
             color: DevTypeTheme.textSecondary
         )
         countLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        buildPreviewItems()
-
         // Stat Badges Row
-        let newCount = previewItems.filter { $0.status == .isNew }.count
-        let updateCount = previewItems.filter { $0.status == .isUpdate }.count
-        let conflictCount = previewItems.filter { $0.status == .isConflict }.count
+        let newCount = preview.newCount
+        let updateCount = preview.updateCount
+        let conflictCount = preview.conflictCount
 
         let newPill = PillBadgeView(text: loc.s("import.preview.stat.new", newCount), tint: DevTypeTheme.statusGreen)
         let updatePill = PillBadgeView(text: loc.s("import.preview.stat.updated", updateCount), tint: DevTypeTheme.statusBlue)
@@ -124,6 +112,7 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
         modePopup.addItem(withTitle: loc.s("import.preview.mode.merge"))
         modePopup.addItem(withTitle: loc.s("import.preview.mode.skip"))
         modePopup.addItem(withTitle: loc.s("import.preview.mode.duplicate"))
+        modePopup.setAccessibilityLabel(loc.s("import.preview.mode"))
         modePopup.translatesAutoresizingMaskIntoConstraints = false
 
         let modeLabel = DevTypeTheme.makeLabel(
@@ -175,7 +164,7 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
         root.addSubview(header)
         root.addSubview(countLabel)
         root.addSubview(statsRow)
-        root.addSubview(modePopup)
+        root.addSubview(modeRow)
         root.addSubview(scroll)
         root.addSubview(buttonsRow)
 
@@ -189,8 +178,9 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
             statsRow.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: 10),
             statsRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
 
-            modePopup.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            modePopup.centerYAnchor.constraint(equalTo: statsRow.centerYAnchor),
+            modeRow.leadingAnchor.constraint(greaterThanOrEqualTo: statsRow.trailingAnchor, constant: 12),
+            modeRow.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            modeRow.centerYAnchor.constraint(equalTo: statsRow.centerYAnchor),
 
             scroll.topAnchor.constraint(equalTo: statsRow.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
@@ -202,34 +192,6 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
         ])
 
         view = root
-    }
-
-    private func buildPreviewItems() {
-        var existingTriggers: [String: SnippetModel] = [:]
-        for g in existingGroups {
-            for s in g.snippets {
-                existingTriggers[s.triggerKeyword.lowercased()] = s
-            }
-        }
-
-        var items: [PreviewItem] = []
-        for group in incomingGroups {
-            for snippet in group.snippets {
-                let lower = snippet.triggerKeyword.lowercased()
-                let status: PreviewItem.Status
-                if let existing = existingTriggers[lower] {
-                    if existing.id == snippet.id || existing.triggerKeyword == snippet.triggerKeyword {
-                        status = .isUpdate
-                    } else {
-                        status = .isConflict
-                    }
-                } else {
-                    status = .isNew
-                }
-                items.append(PreviewItem(snippet: snippet, groupName: group.name, status: status))
-            }
-        }
-        previewItems = items
     }
 
     @objc private func cancelTapped() {
@@ -246,7 +208,7 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
         default: mode = .merge
         }
         closeSheet()
-        onConfirm(mode, incomingGroups)
+        onConfirm(mode)
     }
 
     private func finishCancelledIfNeeded() {
@@ -266,27 +228,25 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
     // MARK: - Table
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        previewItems.count
+        preview.items.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard previewItems.indices.contains(row) else { return nil }
-        let item = previewItems[row]
+        guard preview.items.indices.contains(row) else { return nil }
+        let item = preview.items[row]
 
         let cell = NSTableCellView()
         let pill = PillBadgeView(text: item.snippet.triggerKeyword, tint: DevTypeTheme.accent, font: DevTypeTheme.mono(11, .bold))
         let titleLabel = DevTypeTheme.makeLabel(item.snippet.displayTitle, font: DevTypeTheme.font(12, .medium), color: DevTypeTheme.textPrimary)
         let groupLabel = DevTypeTheme.makeLabel(item.groupName, font: DevTypeTheme.font(10.5), color: DevTypeTheme.textTertiary)
 
-        let statusPill: PillBadgeView
+        let statusTint: NSColor
         switch item.status {
-        case .isNew:
-            statusPill = PillBadgeView(text: "New", tint: DevTypeTheme.statusGreen)
-        case .isUpdate:
-            statusPill = PillBadgeView(text: "Update", tint: DevTypeTheme.statusBlue)
-        case .isConflict:
-            statusPill = PillBadgeView(text: "Conflict", tint: DevTypeTheme.statusOrange)
+        case .isNew: statusTint = DevTypeTheme.statusGreen
+        case .isUpdate: statusTint = DevTypeTheme.statusBlue
+        case .isConflict: statusTint = DevTypeTheme.statusOrange
         }
+        let statusPill = PillBadgeView(text: loc.s(item.status.localizationKey), tint: statusTint)
 
         let leftStack = NSStackView(views: [pill, titleLabel, groupLabel])
         leftStack.orientation = .horizontal

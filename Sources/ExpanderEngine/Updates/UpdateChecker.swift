@@ -161,14 +161,15 @@ public actor UpdateChecker {
         do {
             release = try await fetchLatestRelease()
         } catch let error as UpdateCheckError {
-            DevTypeLog.updates.error("update check failed: \(String(describing: error), privacy: .public)")
+            DevTypeLog.updates.error(
+                "update check failed \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
             return .failed(error)
         } catch {
             return .failed(.malformedResponse(reason: "unexpected error"))
         }
 
-        UpdatePreferences.lastSuccessfulCheck = Date()
-        UpdatePreferences.lastFoundVersion = release.version.rawValue
+        UpdatePreferences.recordSuccessfulCheck(latestVersion: release.version)
 
         guard AppVersion.compare(release.version, currentVersion) == .orderedDescending else {
             DevTypeLog.updates.info("up to date (local ahead of or equal to latest release)")

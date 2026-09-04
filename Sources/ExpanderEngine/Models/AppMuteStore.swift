@@ -54,6 +54,37 @@ public final class AppMuteStore {
         return mutedBundleIDs.sorted()
     }
 
+    /// Bounded diagnostic view of the mute set. Production reports need the complete observed
+    /// count, but copying and sorting every persisted identifier lets a hostile/imported file make
+    /// report construction allocate in proportion to the whole set. Select only the stable
+    /// lexicographic prefix while locked, then sort that bounded subset.
+    func mutedIdentifierProjection(
+        limit: Int
+    ) -> (identifiers: [String], observedCount: Int) {
+        let resolvedLimit = max(0, limit)
+        var retained: [String] = []
+        retained.reserveCapacity(min(resolvedLimit, 64))
+        var observedCount = 0
+
+        lock.lock()
+        for identifier in mutedBundleIDs {
+            if observedCount < Int.max { observedCount += 1 }
+            guard resolvedLimit > 0 else { continue }
+            if retained.count < resolvedLimit {
+                retained.append(identifier)
+                continue
+            }
+            guard let greatestIndex = retained.indices.max(by: {
+                retained[$0] < retained[$1]
+            }), identifier < retained[greatestIndex] else { continue }
+            retained[greatestIndex] = identifier
+        }
+        lock.unlock()
+
+        retained.sort()
+        return (retained, observedCount)
+    }
+
     public func mute(_ bundleID: String) {
         guard !bundleID.isEmpty else { return }
         persistSynchronized { locked in
@@ -138,7 +169,7 @@ public final class AppMuteStore {
             try data.write(to: fileURL, options: .atomic)
         } catch {
             DevTypeLog.store.error(
-                "[Store] Failed to save muted apps: \(error.localizedDescription, privacy: .public)"
+                "[Store] Failed to save muted apps \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
         }
     }

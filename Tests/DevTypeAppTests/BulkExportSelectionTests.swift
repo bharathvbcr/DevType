@@ -15,6 +15,13 @@ import ExpanderEngine
 /// panel itself is not exercised here — `present` needs an `NSSavePanel` and a window.
 final class BulkExportSelectionTests: XCTestCase {
 
+    private static var repositoryRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
     private func snippet(_ trigger: String) -> SnippetModel {
         SnippetModel(title: trigger, triggerKeyword: trigger, replacementText: "body-\(trigger)")
     }
@@ -91,6 +98,71 @@ final class BulkExportSelectionTests: XCTestCase {
         let decoded = try SnippetStore.decodeSnippets(from: data)
 
         XCTAssertEqual(decoded.map(\.triggerKeyword), ["aaa"])
+    }
+
+    func testSlowExportIsSingleFlightVisibleAndDoesNotExposeRawErrors() throws {
+        let sourceURL = Self.repositoryRoot
+            .appendingPathComponent("Sources/DevTypeAppCore/LibraryExporter.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("SnippetOperationGate"))
+        XCTAssertTrue(source.contains("DevTypeProgressPresentation.present("))
+        XCTAssertTrue(source.contains("export.progress.title"))
+        XCTAssertTrue(source.contains("DispatchQueue.global(qos: .userInitiated).async"))
+        XCTAssertFalse(
+            source.contains("message: error.localizedDescription"),
+            "Filesystem and serializer descriptions can include paths or source payloads."
+        )
+        XCTAssertFalse(
+            source.contains("loc.s(\"export.done.body\", count, url.path)"),
+            "Success should identify the safe format without echoing an absolute destination path."
+        )
+    }
+
+    func testExportFailureMessagesDiscardPathsAndSerializerPayloads() {
+        let loc = LocalizationManager()
+        let privateDetail = "/Users/private/export/token-secret"
+        let failures: [Error] = [
+            CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: privateDetail]),
+            CocoaError(.fileWriteOutOfSpace, userInfo: [NSFilePathErrorKey: privateDetail]),
+            SnippetExporter.ExportError.yamlSerializationFailed(privateDetail),
+            NSError(
+                domain: "private.provider.\(privateDetail)",
+                code: 99,
+                userInfo: [NSLocalizedDescriptionKey: privateDetail]
+            )
+        ]
+
+        for failure in failures {
+            let message = LibraryExporter.failureMessage(
+                for: failure,
+                choice: .espansoYAML,
+                loc: loc
+            )
+            XCTAssertFalse(message.contains(privateDetail), "Private export detail leaked: \(message)")
+            XCTAssertFalse(message.contains("/Users/private"), "Private export path leaked: \(message)")
+            XCTAssertNotEqual(message, failure.localizedDescription)
+            XCTAssertGreaterThan(message.count, 20, "Failure guidance should remain actionable.")
+        }
+    }
+
+    func testFilesystemFailureThrowsInsteadOfProducingAnExportReceipt() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("devtype-export-failure-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let blocker = root.appendingPathComponent("not-a-directory")
+        try Data("blocker".utf8).write(to: blocker)
+        let target = blocker.appendingPathComponent("snippets.json")
+
+        XCTAssertThrowsError(
+            try LibraryExporter.write(
+                choice: .json,
+                groups: [group("One", [snippet("aaa")])],
+                to: target
+            )
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
     }
 }
 

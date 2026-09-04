@@ -500,6 +500,225 @@ enum SnippetFilterChip: Int, CaseIterable {
     }
 }
 
+/// Canonical construction for both single-item and bulk duplication.
+///
+/// A duplicate preserves authored behavior and metadata, while identity metadata starts fresh.
+/// Triggers are reserved as copies are planned so two items duplicated in the same batch cannot
+/// collide with one another. Secret values deliberately cannot cross the UUID/keychain boundary:
+/// a secret becomes a disabled plain draft for the user to fill explicitly.
+struct SnippetDuplicationPlanner {
+    struct Target: Equatable {
+        let groupIndex: Int
+        let snippet: SnippetModel
+    }
+
+    private var occupiedTriggers: Set<String>
+
+    init(existing: [SnippetModel]) {
+        occupiedTriggers = Set(existing.map { $0.triggerKeyword.lowercased() })
+    }
+
+    /// Resolves the rendered selection against the latest library without guessing across a
+    /// malformed duplicate UUID. Group UUIDs are intentionally irrelevant: an array index is the
+    /// only unambiguous destination when two imported groups carry the same identity.
+    static func validatedTargets(
+        for selected: [SnippetModel],
+        in groups: [SnippetGroup]
+    ) -> [Target]? {
+        guard !selected.isEmpty,
+              Set(selected.map(\.id)).count == selected.count else { return nil }
+
+        var targets: [Target] = []
+        targets.reserveCapacity(selected.count)
+        for expected in selected {
+            let matches = groups.enumerated().flatMap { groupIndex, group in
+                group.snippets
+                    .filter { $0.id == expected.id }
+                    .map { Target(groupIndex: groupIndex, snippet: $0) }
+            }
+            guard matches.count == 1, matches[0].snippet == expected else { return nil }
+            targets.append(matches[0])
+        }
+        return targets
+    }
+
+    mutating func duplicate(
+        _ source: SnippetModel,
+        id: UUID = UUID(),
+        timestamp: Date = Date(),
+        duplicateImage: (String) throws -> String
+    ) throws -> SnippetModel {
+        let trigger = nextTrigger(basedOn: source.triggerKeyword)
+        let isSecretDraft = source.isSecret
+        let imagePath: String
+        if source.isImageSnippet {
+            imagePath = try duplicateImage(source.imagePath)
+            guard !imagePath.isEmpty else {
+                throw ImageAttachmentStore.StoreError.saveFailed(source.imagePath)
+            }
+        } else {
+            imagePath = ""
+        }
+
+        occupiedTriggers.insert(trigger.lowercased())
+        return SnippetModel(
+            id: id,
+            title: source.title,
+            label: source.label,
+            triggerKeyword: trigger,
+            replacementText: isSecretDraft ? "" : source.replacementText,
+            isCaseSensitive: source.isCaseSensitive,
+            requireWordBoundary: source.requireWordBoundary,
+            isPlainText: source.isPlainText,
+            enabled: isSecretDraft ? false : source.enabled,
+            imagePath: imagePath,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            usageCount: 0,
+            tags: source.tags,
+            includeApps: source.includeApps,
+            excludeApps: source.excludeApps,
+            aiTransform: isSecretDraft ? "" : source.aiTransform,
+            isSecret: false
+        )
+    }
+
+    private func nextTrigger(basedOn base: String) -> String {
+        let limit = AbbreviationMatcher.matchableTriggerLimit
+        let stem = base.isEmpty ? "copy" : base
+        var attempt = 1
+        var candidate = boundedCandidate(stem: stem, sourceWasEmpty: base.isEmpty, attempt: attempt, limit: limit)
+        while occupiedTriggers.contains(candidate.lowercased()) {
+            attempt += 1
+            candidate = boundedCandidate(stem: stem, sourceWasEmpty: base.isEmpty, attempt: attempt, limit: limit)
+        }
+        return candidate
+    }
+
+    private func boundedCandidate(stem: String, sourceWasEmpty: Bool, attempt: Int, limit: Int) -> String {
+        let suffix: String
+        if sourceWasEmpty {
+            suffix = attempt == 1 ? "" : String(attempt)
+        } else {
+            suffix = attempt == 1 ? "-copy" : "-copy\(attempt)"
+        }
+        return String(stem.prefix(max(0, limit - suffix.count))) + suffix
+    }
+}
+
+/// Commits one manager mutation without letting an optimistic UI state outrun durable storage.
+///
+/// The manager owns whole-library model changes, while the snippet editor owns staged Keychain
+/// and attachment edits. Duplication is the one manager action that stages a new attachment before
+/// persistence, so refused or no-op writes must compensate it. Conversely, attachments removed by
+/// a successful delete are cleaned only after the new library is durable. A model-only undo is
+/// offered only when the UUID-to-resource mapping is identical before and after; otherwise undo
+/// could recreate a secret without its Keychain value, or redo an image snippet after its file was
+/// deleted.
+enum SnippetManagerMutationCommitter {
+    enum Outcome: Equatable {
+        case unchanged(cleanupFailures: Int)
+        case committed(allowsModelOnlyUndo: Bool, cleanupFailures: Int)
+        case stale(cleanupFailures: Int)
+        case refused(SnippetStore.SaveOutcome, cleanupFailures: Int)
+    }
+
+    private struct ResourceIdentity: Equatable {
+        let id: UUID
+        let isSecret: Bool
+        let imagePath: String
+    }
+
+    static func finish(
+        _ result: SnippetStore.GroupMutationResult,
+        stagedImagePaths: [String] = [],
+        deleteImage: (String) -> Bool
+    ) -> Outcome {
+        switch result {
+        case .unchanged:
+            return .unchanged(cleanupFailures: cleanup(stagedImagePaths, using: deleteImage))
+        case .rejected:
+            return .stale(cleanupFailures: cleanup(stagedImagePaths, using: deleteImage))
+        case .refused(let outcome):
+            return .refused(
+                outcome,
+                cleanupFailures: cleanup(stagedImagePaths, using: deleteImage)
+            )
+        case .saved(let before, let after):
+            let beforeImages = imagePaths(in: before)
+            let afterImages = imagePaths(in: after)
+            let removedImages = beforeImages.subtracting(afterImages).sorted()
+            let cleanupFailures = cleanup(removedImages, using: deleteImage)
+            return .committed(
+                allowsModelOnlyUndo: resourceProjection(in: before) == resourceProjection(in: after),
+                cleanupFailures: cleanupFailures
+            )
+        }
+    }
+
+    private static func resourceProjection(in groups: [SnippetGroup]) -> [ResourceIdentity] {
+        groups.flatMap(\.snippets).compactMap { snippet in
+            guard snippet.isSecret || !snippet.imagePath.isEmpty else { return nil }
+            return ResourceIdentity(
+                id: snippet.id,
+                isSecret: snippet.isSecret,
+                imagePath: snippet.imagePath
+            )
+        }.sorted { left, right in
+            if left.id != right.id { return left.id.uuidString < right.id.uuidString }
+            if left.isSecret != right.isSecret { return !left.isSecret && right.isSecret }
+            return left.imagePath < right.imagePath
+        }
+    }
+
+    private static func imagePaths(in groups: [SnippetGroup]) -> Set<String> {
+        Set(groups.flatMap(\.snippets).map(\.imagePath).filter { !$0.isEmpty })
+    }
+
+    private static func cleanup(_ paths: [String], using deleteImage: (String) -> Bool) -> Int {
+        paths.reduce(into: 0) { failures, path in
+            if !deleteImage(path) { failures += 1 }
+        }
+    }
+}
+
+/// Drag rows only when their indexes are the indexes in persistent storage.
+enum SnippetReorderEligibility {
+    static func isAllowed(
+        sortMode: SnippetSortMode,
+        hasConcreteGroup: Bool,
+        filterText: String,
+        filterChip: SnippetFilterChip
+    ) -> Bool {
+        sortMode == .manual
+            && hasConcreteGroup
+            && filterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && filterChip == .all
+    }
+}
+
+/// Transient, user-authored manager state carried across a runtime language rebuild. None of it is
+/// library data: the replacement controller reloads the canonical store, then restores navigation,
+/// filtering, selection, density, sort, and scroll positions around that current library.
+struct SnippetManagerLocalizationState: Equatable {
+    let selectedGroupID: UUID?
+    let selectedSnippetIDs: Set<UUID>
+    let filterText: String
+    let filterChip: SnippetFilterChip
+    let isCompactDensity: Bool
+    let sortMode: SnippetSortMode
+    let groupScrollOrigin: NSPoint
+    let snippetScrollOrigin: NSPoint
+}
+
+/// Stable target for undo blocks across a localized controller rebuild. `NSUndoManager` does not
+/// retain block targets, so the active controller retains this object and rebinds its weak owner;
+/// previously registered actions then reach the replacement controller without retaining the old
+/// view hierarchy.
+final class SnippetManagerUndoTarget: NSObject {
+    weak var owner: SnippetManagerViewController?
+}
+
 // MARK: - Snippet Manager (Crimson Glass)
 
 final class SnippetManagerViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
@@ -527,6 +746,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     private let selectedCountLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(12, .bold), color: DevTypeTheme.textPrimary)
     private var primaryActionBar: NSStackView?
     private var utilityActionBar: NSStackView?
+    private weak var bulkOverflowButton: NSPopUpButton?
 
     // §4.6: sorting + undo.
     private var sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -534,17 +754,20 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         let raw = UserDefaults.standard.integer(forKey: SnippetSortMode.defaultsKey)
         return SnippetSortMode(rawValue: raw) ?? .manual
     }()
+    private let restorationState: SnippetManagerLocalizationState?
+    private var pendingRestoredSnippetIDs: Set<UUID> = []
+    private var hasResolvedInitialGroupSelection: Bool
 
     /// §4.6: there was no `UndoManager` / `registerUndo` anywhere in `Sources/`.
     /// Delete was a modal confirm and then gone forever, and the Edit menu's ⌘Z
     /// only ever reached `NSTextView`'s field editor.
     ///
-    /// Undo here is snapshot-based: each mutation records the whole `groups`
-    /// array before the change. That is a few kilobytes per step for a realistic
-    /// library and it means every operation — add, edit, delete, duplicate, move,
-    /// reorder, toggle, group edits, even Reset Defaults — is undoable without
-    /// hand-writing an inverse for each one.
-    private let snippetUndoManager = UndoManager()
+    /// Undo here is snapshot-based for model-only mutations whose UUID-to-resource
+    /// projection is unchanged. Resource-changing operations still commit safely, but are
+    /// deliberately withheld from the undo stack so undo cannot recreate a secret without its
+    /// Keychain value or an image snippet after its attachment was deleted.
+    let snippetUndoManager: UndoManager
+    let snippetUndoTarget: SnippetManagerUndoTarget
 
     /// §0.3: non-modal banner for an unreadable / unwritable / conflicted library.
     private let healthBanner = LibraryHealthBannerView()
@@ -554,6 +777,36 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     /// Edit ▸ Undo item (and ⌘Z) reach snippet edits when the table has focus,
     /// while a focused text field still gets its own field-editor undo.
     override var undoManager: UndoManager? { snippetUndoManager }
+
+    init(
+        restorationState: SnippetManagerLocalizationState? = nil,
+        snippetUndoManager: UndoManager = UndoManager(),
+        snippetUndoTarget: SnippetManagerUndoTarget = SnippetManagerUndoTarget()
+    ) {
+        self.restorationState = restorationState
+        self.snippetUndoManager = snippetUndoManager
+        self.snippetUndoTarget = snippetUndoTarget
+        self.hasResolvedInitialGroupSelection = restorationState != nil
+        super.init(nibName: nil, bundle: nil)
+        snippetUndoTarget.owner = self
+
+        guard let restorationState else { return }
+        selectedGroupID = restorationState.selectedGroupID
+        pendingRestoredSnippetIDs = restorationState.selectedSnippetIDs
+        activeFilterChip = restorationState.filterChip
+        isCompactDensity = restorationState.isCompactDensity
+        sortMode = restorationState.sortMode
+        filterField.stringValue = restorationState.filterText
+    }
+
+    required init?(coder: NSCoder) {
+        restorationState = nil
+        snippetUndoManager = UndoManager()
+        snippetUndoTarget = SnippetManagerUndoTarget()
+        hasResolvedInitialGroupSelection = false
+        super.init(coder: coder)
+        snippetUndoTarget.owner = self
+    }
 
     private lazy var groupContextMenu: NSMenu = {
         let menu = NSMenu()
@@ -603,7 +856,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         densityControl.segmentCount = 2
         densityControl.setLabel(loc.s("manager.density.comfortable"), forSegment: 0)
         densityControl.setLabel(loc.s("manager.density.compact"), forSegment: 1)
-        densityControl.selectedSegment = 0
+        densityControl.selectedSegment = isCompactDensity ? 1 : 0
         densityControl.target = self
         densityControl.action = #selector(densityChanged)
         densityControl.controlSize = .small
@@ -646,7 +899,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         let sidebarContent = sidebarCard.contentView
 
         let groupsCaption = DevTypeTheme.makeLabel(
-            "GROUPS",
+            loc.s("manager.groups.caption"),
             font: DevTypeTheme.font(10, .bold),
             color: DevTypeTheme.textTertiary
         )
@@ -655,12 +908,17 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
         let addGroupCaptionButton = NSButton()
         addGroupCaptionButton.isBordered = false
+        addGroupCaptionButton.title = ""
         addGroupCaptionButton.wantsLayer = true
         addGroupCaptionButton.layer?.cornerRadius = 4
         addGroupCaptionButton.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
         addGroupCaptionButton.image = DevTypeTheme.tintedSymbol("plus", size: 9, weight: .bold, color: DevTypeTheme.textSecondary)
         addGroupCaptionButton.imageScaling = .scaleProportionallyUpOrDown
+        addGroupCaptionButton.imagePosition = .imageOnly
         addGroupCaptionButton.toolTip = loc.s("manager.group.add")
+        addGroupCaptionButton.setAccessibilityElement(true)
+        addGroupCaptionButton.setAccessibilityRole(.button)
+        addGroupCaptionButton.setAccessibilityLabel(loc.s("manager.group.add"))
         addGroupCaptionButton.target = self
         addGroupCaptionButton.action = #selector(addGroup)
         addGroupCaptionButton.translatesAutoresizingMaskIntoConstraints = false
@@ -688,7 +946,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             self?.handleGroupKeyDown(event) ?? false
         }
         let groupCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("group"))
-        groupCol.title = "Groups"
+        groupCol.title = loc.s("manager.groups.caption")
         groupOutline.addTableColumn(groupCol)
         groupOutline.outlineTableColumn = groupCol
         groupScroll.documentView = groupOutline
@@ -740,8 +998,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         listCard.translatesAutoresizingMaskIntoConstraints = false
         let listContent = listCard.contentView
 
-        // Filter Chips Bar
+        // Filter Chips Bar. Nine localized labels cannot fit the list column at the
+        // window's supported 700pt minimum. Keep the direct, glanceable chips, but put
+        // them in an explicit horizontal overflow strip rather than letting Auto Layout
+        // push the last controls through the card edge.
         filterChipsStack.orientation = .horizontal
+        filterChipsStack.alignment = .centerY
         filterChipsStack.spacing = 6
         filterChipsStack.translatesAutoresizingMaskIntoConstraints = false
         for chip in SnippetFilterChip.allCases {
@@ -756,7 +1018,22 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             filterChipButtons[chip] = btn
             filterChipsStack.addArrangedSubview(btn)
         }
-        listContent.addSubview(filterChipsStack)
+        let filterOverflow = NSScrollView()
+        filterOverflow.identifier = NSUserInterfaceItemIdentifier("manager.filterOverflow")
+        filterOverflow.translatesAutoresizingMaskIntoConstraints = false
+        filterOverflow.hasHorizontalScroller = true
+        filterOverflow.hasVerticalScroller = false
+        filterOverflow.autohidesScrollers = true
+        filterOverflow.scrollerStyle = .overlay
+        filterOverflow.borderType = .noBorder
+        filterOverflow.drawsBackground = false
+        filterOverflow.horizontalScrollElasticity = .allowed
+        filterOverflow.verticalScrollElasticity = .none
+        filterOverflow.automaticallyAdjustsContentInsets = false
+        filterOverflow.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 14, right: 0)
+        filterOverflow.setAccessibilityLabel(loc.s("manager.filter"))
+        filterOverflow.documentView = filterChipsStack
+        listContent.addSubview(filterOverflow)
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
@@ -768,7 +1045,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         tableView.backgroundColor = .clear
         tableView.gridStyleMask = []
         tableView.headerView = nil
-        tableView.rowHeight = 52
+        tableView.rowHeight = isCompactDensity ? 38 : 52
         tableView.intercellSpacing = NSSize(width: 0, height: 2)
         tableView.selectionHighlightStyle = .regular
         tableView.allowsEmptySelection = true
@@ -796,11 +1073,18 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         mainView.addSubview(listCard)
 
         NSLayoutConstraint.activate([
-            filterChipsStack.topAnchor.constraint(equalTo: listContent.topAnchor, constant: 8),
-            filterChipsStack.leadingAnchor.constraint(equalTo: listContent.leadingAnchor, constant: 10),
-            filterChipsStack.trailingAnchor.constraint(lessThanOrEqualTo: listContent.trailingAnchor, constant: -10),
+            filterOverflow.topAnchor.constraint(equalTo: listContent.topAnchor, constant: 8),
+            filterOverflow.leadingAnchor.constraint(equalTo: listContent.leadingAnchor, constant: 10),
+            filterOverflow.trailingAnchor.constraint(equalTo: listContent.trailingAnchor, constant: -10),
+            filterOverflow.heightAnchor.constraint(equalToConstant: 42),
 
-            healthBanner.topAnchor.constraint(equalTo: filterChipsStack.bottomAnchor, constant: 4),
+            // Preserve the stack's intrinsic width: that width is the scrollable document.
+            // A trailing pin would instead compress every required-width capsule.
+            filterChipsStack.leadingAnchor.constraint(equalTo: filterOverflow.contentView.leadingAnchor),
+            filterChipsStack.topAnchor.constraint(equalTo: filterOverflow.contentView.topAnchor),
+            filterChipsStack.heightAnchor.constraint(equalToConstant: 28),
+
+            healthBanner.topAnchor.constraint(equalTo: filterOverflow.bottomAnchor, constant: 4),
             healthBanner.leadingAnchor.constraint(equalTo: listContent.leadingAnchor, constant: 8),
             healthBanner.trailingAnchor.constraint(equalTo: listContent.trailingAnchor, constant: -8),
 
@@ -838,20 +1122,6 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             target: self,
             action: #selector(deleteSnippet)
         )
-        let importButton = CapsuleButton(
-            title: loc.s("manager.import"),
-            symbol: "square.and.arrow.down",
-            style: .secondary,
-            target: self,
-            action: #selector(importSnippets)
-        )
-        let exportButton = CapsuleButton(
-            title: loc.s("manager.export"),
-            symbol: "square.and.arrow.up",
-            style: .secondary,
-            target: self,
-            action: #selector(exportSnippets)
-        )
         let statsButton = CapsuleButton(
             title: loc.s("manager.stats.button"),
             symbol: "chart.bar",
@@ -859,12 +1129,15 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             target: self,
             action: #selector(openStatistics)
         )
-        let resetButton = CapsuleButton(
-            title: loc.s("manager.reset"),
-            symbol: "arrow.counterclockwise",
-            style: .secondary,
-            target: self,
-            action: #selector(resetDefaults)
+        let utilityOverflow = makeActionOverflow(
+            identifier: "manager.utilityOverflow",
+            title: loc.s("manager.moreActions"),
+            symbol: "ellipsis.circle",
+            actions: [
+                (loc.s("manager.import"), #selector(importSnippets)),
+                (loc.s("manager.export"), #selector(exportSnippets)),
+                (loc.s("manager.reset"), #selector(resetDefaults))
+            ]
         )
 
         let primaryStack = NSStackView(views: [addButton, editButton, deleteButton])
@@ -874,7 +1147,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         primaryStack.setContentHuggingPriority(.required, for: .vertical)
         primaryActionBar = primaryStack
 
-        let utilityStack = NSStackView(views: [statsButton, importButton, exportButton, resetButton])
+        let utilityStack = NSStackView(views: [statsButton, utilityOverflow])
         utilityStack.orientation = .horizontal
         utilityStack.spacing = 10
         utilityStack.translatesAutoresizingMaskIntoConstraints = false
@@ -886,20 +1159,30 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         bulkBar.isHidden = true
         let bulkContent = bulkBar.contentView
 
-        let bulkEnableBtn = CapsuleButton(title: loc.s("manager.bulk.enable"), style: .secondary, target: self, action: #selector(bulkEnableSelected))
-        let bulkDisableBtn = CapsuleButton(title: loc.s("manager.bulk.disable"), style: .secondary, target: self, action: #selector(bulkDisableSelected))
-        let bulkMoveBtn = CapsuleButton(title: loc.s("manager.bulk.moveToGroup"), style: .secondary, target: self, action: #selector(bulkMoveSelected(_:)))
-        let bulkDuplicateBtn = CapsuleButton(title: loc.s("manager.bulk.duplicate"), style: .secondary, target: self, action: #selector(bulkDuplicateSelected))
-        let bulkPrefixSuffixBtn = CapsuleButton(title: loc.s("manager.bulk.prefixSuffix"), style: .secondary, target: self, action: #selector(bulkPrefixSuffixSelected))
-        let bulkExportBtn = CapsuleButton(title: loc.s("manager.bulk.export"), style: .secondary, target: self, action: #selector(bulkExportSelected))
         let bulkDeleteBtn = CapsuleButton(title: loc.s("manager.bulk.delete"), style: .destructive, target: self, action: #selector(bulkDeleteSelected))
         let bulkSelectAllBtn = CapsuleButton(title: loc.s("manager.bulk.selectAll"), style: .secondary, target: self, action: #selector(selectAllSnippets))
+        let bulkOverflow = makeActionOverflow(
+            identifier: "manager.bulkOverflow",
+            title: loc.s("manager.bulk.actions"),
+            symbol: "ellipsis.circle",
+            actions: [
+                (loc.s("manager.bulk.enable"), #selector(bulkEnableSelected)),
+                (loc.s("manager.bulk.disable"), #selector(bulkDisableSelected)),
+                (loc.s("manager.bulk.moveToGroup"), #selector(bulkMoveFromOverflow(_:))),
+                (loc.s("manager.bulk.duplicate"), #selector(bulkDuplicateSelected)),
+                (loc.s("manager.bulk.prefixSuffix"), #selector(bulkPrefixSuffixSelected)),
+                (loc.s("manager.bulk.export"), #selector(bulkExportSelected))
+            ]
+        )
+        bulkOverflowButton = bulkOverflow
 
-        let bulkLeftStack = NSStackView(views: [selectedCountLabel, bulkEnableBtn, bulkDisableBtn, bulkMoveBtn, bulkDuplicateBtn, bulkPrefixSuffixBtn, bulkExportBtn])
+        let bulkLeftStack = NSStackView(views: [selectedCountLabel, bulkOverflow])
         bulkLeftStack.orientation = .horizontal
         bulkLeftStack.spacing = 8
         bulkLeftStack.alignment = .centerY
         bulkLeftStack.translatesAutoresizingMaskIntoConstraints = false
+        selectedCountLabel.lineBreakMode = .byTruncatingTail
+        selectedCountLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let bulkRightStack = NSStackView(views: [bulkSelectAllBtn, bulkDeleteBtn])
         bulkRightStack.orientation = .horizontal
@@ -913,6 +1196,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         NSLayoutConstraint.activate([
             bulkLeftStack.leadingAnchor.constraint(equalTo: bulkContent.leadingAnchor, constant: 12),
             bulkLeftStack.centerYAnchor.constraint(equalTo: bulkContent.centerYAnchor),
+            bulkLeftStack.trailingAnchor.constraint(lessThanOrEqualTo: bulkRightStack.leadingAnchor, constant: -8),
 
             bulkRightStack.trailingAnchor.constraint(equalTo: bulkContent.trailingAnchor, constant: -12),
             bulkRightStack.centerYAnchor.constraint(equalTo: bulkContent.centerYAnchor)
@@ -964,6 +1248,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
             primaryStack.leadingAnchor.constraint(equalTo: mainView.leadingAnchor, constant: 20),
             primaryStack.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -16),
+            primaryStack.trailingAnchor.constraint(lessThanOrEqualTo: utilityStack.leadingAnchor, constant: -10),
 
             utilityStack.trailingAnchor.constraint(equalTo: mainView.trailingAnchor, constant: -20),
             utilityStack.bottomAnchor.constraint(equalTo: mainView.bottomAnchor, constant: -16),
@@ -975,6 +1260,39 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         ])
 
         self.view = mainView
+    }
+
+    /// A compact pull-down preserves every secondary action without forcing translated
+    /// button labels to compete for one horizontal row. The first item is a disabled
+    /// title; the remaining items retain their direct controller selectors.
+    private func makeActionOverflow(
+        identifier: String,
+        title: String,
+        symbol: String,
+        actions: [(title: String, action: Selector)]
+    ) -> NSPopUpButton {
+        let popup = NSPopUpButton(frame: .zero, pullsDown: true)
+        popup.identifier = NSUserInterfaceItemIdentifier(identifier)
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        popup.controlSize = .small
+        popup.bezelStyle = .rounded
+        popup.font = DevTypeTheme.font(11, .semibold)
+        popup.addItem(withTitle: title)
+        popup.item(at: 0)?.image = DevTypeTheme.tintedSymbol(
+            symbol,
+            size: 11,
+            weight: .semibold,
+            color: DevTypeTheme.textSecondary
+        )
+        popup.item(at: 0)?.isEnabled = false
+        for item in actions {
+            popup.addItem(withTitle: item.title)
+            popup.lastItem?.target = self
+            popup.lastItem?.action = item.action
+        }
+        popup.setAccessibilityLabel(title)
+        popup.toolTip = title
+        return popup
     }
 
     private var listenerToken: UUID?
@@ -995,6 +1313,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             }
         }
         reloadGroups()
+        restoreLocalizationStateWhenLaidOut()
     }
 
     override func viewWillAppear() {
@@ -1010,6 +1329,42 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         }
         if let healthToken {
             LibraryHealthMonitor.shared.removeObserver(healthToken)
+        }
+        if snippetUndoTarget.owner === self {
+            snippetUndoTarget.owner = nil
+        }
+    }
+
+    func localizationState() -> SnippetManagerLocalizationState {
+        let selectedIDs = Set(tableView.selectedRowIndexes.compactMap { row in
+            snippets.indices.contains(row) ? snippets[row].id : nil
+        })
+        return SnippetManagerLocalizationState(
+            selectedGroupID: selectedGroupID,
+            selectedSnippetIDs: selectedIDs,
+            filterText: filterField.stringValue,
+            filterChip: activeFilterChip,
+            isCompactDensity: isCompactDensity,
+            sortMode: sortMode,
+            groupScrollOrigin: groupScroll.contentView.bounds.origin,
+            snippetScrollOrigin: scrollView.contentView.bounds.origin
+        )
+    }
+
+    private func restoreLocalizationStateWhenLaidOut() {
+        guard let restorationState else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let selectedRows = IndexSet(self.snippets.indices.filter {
+                self.pendingRestoredSnippetIDs.contains(self.snippets[$0].id)
+            })
+            self.tableView.selectRowIndexes(selectedRows, byExtendingSelection: false)
+            self.pendingRestoredSnippetIDs.removeAll()
+
+            self.groupScroll.contentView.scroll(to: restorationState.groupScrollOrigin)
+            self.groupScroll.reflectScrolledClipView(self.groupScroll.contentView)
+            self.scrollView.contentView.scroll(to: restorationState.snippetScrollOrigin)
+            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
         }
     }
 
@@ -1066,14 +1421,16 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
     private func reloadGroups() {
         groups = SnippetStore.shared.loadGroups()
-        if selectedGroupID == nil, let first = groups.first {
+        if !hasResolvedInitialGroupSelection, let first = groups.first {
             selectedGroupID = first.id
+            hasResolvedInitialGroupSelection = true
         }
         groupOutline.reloadData()
         if let id = selectedGroupID,
            let index = groups.firstIndex(where: { $0.id == id }) {
             groupOutline.selectRowIndexes(IndexSet(integer: index + 1), byExtendingSelection: false)
         } else {
+            selectedGroupID = nil
             groupOutline.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
         applyFilterAndReloadTable()
@@ -1199,41 +1556,131 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         }
     }
 
-    /// §1.4: `saveGroups` returns a `SaveOutcome` that every caller used to
-    /// discard (`_ = SnippetStore.shared.saveGroups(groups)`), so the UI reported
-    /// success for writes that never landed. Blocked outcomes now reach the
-    /// health monitor, which raises the banner.
-    private func persistGroups() {
-        let outcome = SnippetStore.shared.saveGroups(groups)
-        if !outcome.didSave {
-            DevTypeLog.app.error("[Manager] save refused — surfacing banner")
-            LibraryHealthMonitor.shared.refresh()
+    // MARK: - §4.6 Undo
+    //
+    // Every mutation is computed against the store's latest snapshot under its RMW lock. Undo is
+    // conditional on the exact state this action committed, so a newer import/editor action is
+    // never erased by an old undo closure. Resource-changing edits deliberately do not enter this
+    // model-only undo stack.
+
+    @discardableResult
+    private func mutate(
+        _ actionName: String,
+        stagedImagePaths: [String] = [],
+        onCommit: (() -> Void)? = nil,
+        _ body: (inout [SnippetGroup]) -> Void
+    ) -> SnippetStore.GroupMutationResult {
+        mutateValidated(
+            actionName,
+            stagedImagePaths: stagedImagePaths,
+            onCommit: onCommit
+        ) { latest in
+            body(&latest)
+            return true
         }
     }
 
-    // MARK: - §4.6 Undo
-    //
-    // Every mutation funnels through here so undo/redo comes for free.
-    // `registerUndo` inside an undo *is* how redo gets registered — the manager
-    // is in its undoing state at that point and routes the new registration onto
-    // the redo stack.
+    @discardableResult
+    private func mutateValidated(
+        _ actionName: String,
+        stagedImagePaths: [String] = [],
+        onCommit: (() -> Void)? = nil,
+        _ body: (inout [SnippetGroup]) -> Bool
+    ) -> SnippetStore.GroupMutationResult {
+        let result = SnippetStore.shared.mutateGroups(body)
+        finishMutation(
+            result,
+            actionName: actionName,
+            stagedImagePaths: stagedImagePaths,
+            onCommit: onCommit
+        )
+        return result
+    }
 
-    private func mutate(_ actionName: String, _ body: (inout [SnippetGroup]) -> Void) {
-        let before = groups
-        body(&groups)
-        guard groups != before else { return }
-        registerUndo(restoring: before, actionName: actionName)
-        persistGroups()
+    private func finishMutation(
+        _ result: SnippetStore.GroupMutationResult,
+        actionName: String,
+        stagedImagePaths: [String] = [],
+        onCommit: (() -> Void)? = nil
+    ) {
+        let completion = SnippetManagerMutationCommitter.finish(
+            result,
+            stagedImagePaths: stagedImagePaths,
+            deleteImage: deleteManagedImage
+        )
+
+        switch (result, completion) {
+        case let (.saved(before, after), .committed(allowsUndo, cleanupFailures)):
+            if allowsUndo {
+                registerUndo(restoring: before, expectedCurrent: after, actionName: actionName)
+            }
+            onCommit?()
+            if cleanupFailures > 0 { presentResourceCleanupFailure(count: cleanupFailures) }
+
+        case let (.refused, .refused(_, cleanupFailures)):
+            DevTypeLog.app.error("[Manager] save refused — surfacing banner")
+            LibraryHealthMonitor.shared.refresh()
+            if cleanupFailures > 0 { presentResourceCleanupFailure(count: cleanupFailures) }
+
+        case let (.rejected, .stale(cleanupFailures)):
+            DevTypeLog.app.notice("[Manager] stale action refused")
+            DevTypeAlert.warn(
+                title: loc.s("library.save.title"),
+                message: loc.s("manager.action.stale.message"),
+                window: view.window
+            )
+            if cleanupFailures > 0 { presentResourceCleanupFailure(count: cleanupFailures) }
+
+        case let (.unchanged, .unchanged(cleanupFailures)):
+            // A staged duplicate becoming a no-op means its target disappeared while the action
+            // was in flight. The staged file was compensated; make the stale action visible.
+            if !stagedImagePaths.isEmpty {
+                DevTypeAlert.warn(
+                    title: loc.s("library.save.title"),
+                    message: loc.s("manager.action.stale.message"),
+                    window: view.window
+                )
+            }
+            if cleanupFailures > 0 { presentResourceCleanupFailure(count: cleanupFailures) }
+
+        default:
+            assertionFailure("Mutation result and cleanup projection diverged")
+        }
+
         reloadGroups()
     }
 
-    private func registerUndo(restoring snapshot: [SnippetGroup], actionName: String) {
-        snippetUndoManager.registerUndo(withTarget: self) { target in
-            let redoSnapshot = target.groups
-            target.groups = snapshot
-            target.registerUndo(restoring: redoSnapshot, actionName: actionName)
-            target.persistGroups()
-            target.reloadGroups()
+    private func deleteManagedImage(_ path: String) -> Bool {
+        let result = SnippetStore.shared.deleteImageIfUnreferenced(path) { candidate in
+            if case .success = SnippetEditResourceAccess.live.deleteImage(candidate) { return true }
+            return false
+        }
+        return result == .removed || result == .retainedReferenced
+    }
+
+    private func presentResourceCleanupFailure(count: Int) {
+        DevTypeLog.app.error(
+            "[Manager] attachment cleanup incomplete count=\(count, privacy: .public)"
+        )
+        DevTypeAlert.warn(
+            title: loc.s("manager.resources.cleanupFailed.title"),
+            message: loc.s("manager.resources.cleanupFailed.message", count),
+            window: view.window
+        )
+    }
+
+    private func registerUndo(
+        restoring snapshot: [SnippetGroup],
+        expectedCurrent: [SnippetGroup],
+        actionName: String
+    ) {
+        snippetUndoManager.registerUndo(withTarget: snippetUndoTarget) { target in
+            guard let owner = target.owner else { return }
+            let result = SnippetStore.shared.replaceGroups(
+                ifCurrent: expectedCurrent,
+                with: snapshot
+            )
+            owner.finishMutation(result, actionName: actionName)
         }
         snippetUndoManager.setActionName(actionName)
     }
@@ -1274,68 +1721,47 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             draft: draft,
             groups: groups,
             currentGroupID: selectedGroupID,
-            validate: { [weak self] trigger, caseSensitive in
-                self?.duplicateTriggerConflict(
-                    trigger: trigger,
-                    caseSensitive: caseSensitive,
-                    excludingID: existing?.id
-                )
-            },
-            completion: { [weak self] result, chosenGroupID in
-                guard let self, let snippet = result else { return }
-                let isEdit = existing != nil
-                // §4.6: undoable.
-                self.mutate(self.loc.s(isEdit ? "manager.undo.edit" : "manager.undo.add")) { groups in
-                    if isEdit {
-                        for gi in groups.indices {
-                            guard let si = groups[gi].snippets.firstIndex(where: { $0.id == snippet.id })
-                            else { continue }
-                            groups[gi].snippets[si] = snippet
-                            if let chosenGroupID,
-                               let destGI = groups.firstIndex(where: { $0.id == chosenGroupID }),
-                               destGI != gi {
-                                groups[gi].snippets.remove(at: si)
-                                groups[destGI].snippets.append(snippet)
-                            }
-                            break
-                        }
-                    } else {
-                        let targetGI: Int
-                        if let id = chosenGroupID ?? self.selectedGroupID,
-                           let gi = groups.firstIndex(where: { $0.id == id }) {
-                            targetGI = gi
-                        } else if let gi = groups.firstIndex(where: { $0.name == SnippetDocument.defaultGroupName }) {
-                            targetGI = gi
-                        } else if groups.isEmpty {
-                            groups = [SnippetGroup(name: SnippetDocument.defaultGroupName)]
-                            targetGI = 0
-                        } else {
-                            targetGI = 0
-                        }
-                        groups[targetGI].snippets.append(snippet)
-                    }
+            completion: { [weak self] snippet, chosenGroupID in
+                guard let self else {
+                    return .refused(.failed("Snippet manager is unavailable"))
                 }
+                let isEdit = existing != nil
+                let actionName = self.loc.s(isEdit ? "manager.undo.edit" : "manager.undo.add")
+                return .mutating(
+                    store: .shared,
+                    mutation: { latest in
+                        if let existing {
+                            guard latest.flatMap(\.snippets).first(where: { $0.id == existing.id }) == existing else {
+                                return false
+                            }
+                        }
+                        guard let after = SnippetLibraryEdit.applying(
+                            snippet: snippet,
+                            existingID: existing?.id,
+                            chosenGroupID: chosenGroupID,
+                            fallbackGroupID: self.selectedGroupID,
+                            to: latest
+                        ) else { return false }
+                        latest = after
+                        return true
+                    },
+                    finalize: { [weak self] before, after in
+                        guard let self else { return }
+                        // Undo is registered only after both the library and resources commit,
+                        // and only when the model-only undo stack can restore the full prior state.
+                        if SnippetLibraryEdit.supportsModelOnlyUndo(existing: existing, candidate: snippet) {
+                            self.registerUndo(
+                                restoring: before,
+                                expectedCurrent: after,
+                                actionName: actionName
+                            )
+                        }
+                        self.groups = after
+                        self.reloadGroups()
+                    }
+                )
             }
         )
-    }
-
-    private func duplicateTriggerConflict(trigger: String, caseSensitive: Bool, excludingID: UUID?) -> String? {
-        // User preference: conflict warnings off means the editor validates nothing here —
-        // the save proceeds and the matcher's normal collision rules apply.
-        guard SnippetStore.isConflictDetectionEnabled else { return nil }
-        for other in groups.flatMap(\.snippets) {
-            if let excludingID, other.id == excludingID { continue }
-            let collide: Bool
-            if caseSensitive && other.isCaseSensitive {
-                collide = other.triggerKeyword == trigger
-            } else {
-                collide = other.triggerKeyword.lowercased() == trigger.lowercased()
-            }
-            if collide {
-                return loc.s("editor.error.conflict", trigger, other.triggerKeyword)
-            }
-        }
-        return nil
     }
 
     @objc private func deleteSnippet() {
@@ -1359,13 +1785,15 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         ) { [weak self] in
             guard let self else { return }
             // §4.6: delete used to be a modal confirm and then gone forever.
-            self.mutate(self.loc.s("manager.undo.delete")) { groups in
+            self.mutateValidated(self.loc.s("manager.undo.delete")) { groups in
                 for gi in groups.indices {
                     if let si = groups[gi].snippets.firstIndex(where: { $0.id == snippet.id }) {
+                        guard groups[gi].snippets[si] == snippet else { return false }
                         groups[gi].snippets.remove(at: si)
-                        break
+                        return true
                     }
                 }
+                return false
             }
         }
     }
@@ -1373,53 +1801,79 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     @objc private func duplicateSelectedSnippet() {
         let row = tableView.selectedRow
         guard row >= 0, row < snippets.count else { return }
-        let source = snippets[row]
-        guard let (gi, _) = groupIndex(for: source.id) else { return }
-        // A duplicate gets a new UUID, so it cannot inherit the original's keychain entry — and
-        // copying the value across would be a second, unasked-for place the secret lives. The
-        // copy is deliberately a plain, empty snippet the user can fill in.
-        let copy = SnippetModel(
-            title: source.title,
-            label: source.label.isEmpty ? "" : source.label + " copy",
-            triggerKeyword: uniqueTrigger(basedOn: source.triggerKeyword),
-            replacementText: source.replacementText,
-            isCaseSensitive: source.isCaseSensitive,
-            requireWordBoundary: source.requireWordBoundary,
-            isPlainText: source.isPlainText,
-            enabled: source.enabled,
-            usageCount: 0
-        )
-        mutate(loc.s("manager.undo.duplicate")) { groups in
-            guard groups.indices.contains(gi) else { return }
-            groups[gi].snippets.append(copy)
+        let renderedSource = snippets[row]
+        var stagedImagePaths: [String] = []
+        var duplicationError: Error?
+        let result = SnippetStore.shared.mutateGroups { latest in
+            guard let target = SnippetDuplicationPlanner.validatedTargets(
+                for: [renderedSource],
+                in: latest
+            )?.first else { return false }
+            var planner = SnippetDuplicationPlanner(existing: latest.flatMap(\.snippets))
+            do {
+                let copy = try planner.duplicate(target.snippet) { path in
+                    let copied = try self.duplicateImageAttachment(path)
+                    stagedImagePaths.append(copied)
+                    return copied
+                }
+                latest[target.groupIndex].snippets.append(copy)
+                return true
+            } catch {
+                duplicationError = error
+                return false
+            }
         }
+        if let duplicationError {
+            finishFailedDuplication(duplicationError, stagedImagePaths: stagedImagePaths)
+            return
+        }
+        finishMutation(
+            result,
+            actionName: loc.s("manager.undo.duplicate"),
+            stagedImagePaths: stagedImagePaths
+        )
     }
 
-    private func uniqueTrigger(basedOn base: String) -> String {
-        let existing = Set(groups.flatMap(\.snippets).map { $0.triggerKeyword.lowercased() })
-        var candidate = base + "-copy"
-        var suffix = 2
-        while existing.contains(candidate.lowercased()) {
-            candidate = "\(base)-copy\(suffix)"
-            suffix += 1
+    private func duplicateImageAttachment(_ path: String) throws -> String {
+        guard let sourceURL = ImageAttachmentStore.shared.resolvedURL(forImagePath: path) else {
+            throw ImageAttachmentStore.StoreError.unreadableImage(path)
         }
-        return candidate
+        return try ImageAttachmentStore.shared.importImage(from: sourceURL)
+    }
+
+    private func presentDuplicationFailure(_ error: Error) {
+        DevTypeAlert.warn(
+            title: loc.s("manager.duplicate"),
+            message: error.localizedDescription,
+            window: view.window
+        )
+    }
+
+    private func finishFailedDuplication(_ error: Error, stagedImagePaths: [String]) {
+        let cleanupFailures = stagedImagePaths.reduce(into: 0) { failures, path in
+            if !deleteManagedImage(path) { failures += 1 }
+        }
+        presentDuplicationFailure(error)
+        if cleanupFailures > 0 { presentResourceCleanupFailure(count: cleanupFailures) }
+        reloadGroups()
     }
 
     @objc private func moveSelectedSnippetToGroup(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let destID = UUID(uuidString: raw),
-              let destGI = groups.firstIndex(where: { $0.id == destID }) else { return }
+              groups.contains(where: { $0.id == destID }) else { return }
         let row = tableView.selectedRow
         guard row >= 0, row < snippets.count else { return }
-        let snippet = snippets[row]
-        guard let (gi, si) = groupIndex(for: snippet.id), gi != destGI else { return }
+        let snippetID = snippets[row].id
         mutate(loc.s("manager.undo.move")) { groups in
-            guard groups.indices.contains(gi),
-                  groups[gi].snippets.indices.contains(si),
-                  groups.indices.contains(destGI) else { return }
-            groups[gi].snippets.remove(at: si)
-            groups[destGI].snippets.append(snippet)
+            guard let sourceGroup = groups.firstIndex(where: {
+                $0.snippets.contains(where: { $0.id == snippetID })
+            }),
+            let sourceSnippet = groups[sourceGroup].snippets.firstIndex(where: { $0.id == snippetID }),
+            let destinationGroup = groups.firstIndex(where: { $0.id == destID }),
+            sourceGroup != destinationGroup else { return }
+            let snippet = groups[sourceGroup].snippets.remove(at: sourceSnippet)
+            groups[destinationGroup].snippets.append(snippet)
         }
     }
 
@@ -1445,9 +1899,15 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
                     excludeApps: draft.scope.excludeApps,
                     snippets: []
                 )
-                self.selectedGroupID = group.id
-                self.mutate(self.loc.s("manager.undo.addGroup")) { groups in
+                self.mutateValidated(
+                    self.loc.s("manager.undo.addGroup"),
+                    onCommit: { self.selectedGroupID = group.id }
+                ) { groups in
+                    guard !groups.contains(where: {
+                        $0.name.caseInsensitiveCompare(group.name) == .orderedSame
+                    }) else { return false }
                     groups.append(group)
+                    return true
                 }
             }
         )
@@ -1469,14 +1929,20 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             },
             completion: { [weak self] draft in
                 guard let self, let draft else { return }
-                self.mutate(self.loc.s("manager.undo.editGroup")) { groups in
-                    guard let index = groups.firstIndex(where: { $0.id == group.id }) else { return }
+                self.mutateValidated(self.loc.s("manager.undo.editGroup")) { groups in
+                    guard let index = groups.firstIndex(where: { $0.id == group.id }),
+                          groups[index] == group else { return false }
+                    guard !groups.contains(where: {
+                        $0.id != group.id
+                            && $0.name.caseInsensitiveCompare(draft.name) == .orderedSame
+                    }) else { return false }
                     groups[index].name = draft.name
                     groups[index].symbol = draft.symbol
                     groups[index].colorHex = draft.colorHex
                     groups[index].enabled = draft.enabled
                     groups[index].includeApps = draft.scope.includeApps
                     groups[index].excludeApps = draft.scope.excludeApps
+                    return true
                 }
             }
         )
@@ -1508,10 +1974,17 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
         let removeGroup: () -> Void = { [weak self] in
             guard let self else { return }
-            if self.selectedGroupID == group.id { self.selectedGroupID = nil }
-            self.mutate(self.loc.s("manager.undo.deleteGroup")) { groups in
-                guard let index = groups.firstIndex(where: { $0.id == group.id }) else { return }
+            self.mutateValidated(
+                self.loc.s("manager.undo.deleteGroup"),
+                onCommit: {
+                    if self.selectedGroupID == group.id { self.selectedGroupID = nil }
+                }
+            ) { groups in
+                guard groups.count > 1,
+                      let index = groups.firstIndex(where: { $0.id == group.id }),
+                      groups[index] == group else { return false }
                 groups.remove(at: index)
+                return true
             }
         }
 
@@ -1542,18 +2015,26 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             switch index {
             case 0:
                 // Move snippets into the next available group, then remove this one.
-                self.mutate(self.loc.s("manager.undo.deleteGroup")) { groups in
+                var destinationID: UUID?
+                self.mutateValidated(
+                    self.loc.s("manager.undo.deleteGroup"),
+                    onCommit: {
+                        if self.selectedGroupID == group.id {
+                            self.selectedGroupID = destinationID
+                        }
+                    }
+                ) { groups in
                     guard let source = groups.firstIndex(where: { $0.id == group.id }),
+                          groups[source] == group,
                           let destination = groups.firstIndex(where: { $0.id != group.id })
-                    else { return }
+                    else { return false }
                     let moved = groups[source].snippets
                     groups.remove(at: source)
                     let adjusted = destination > source ? destination - 1 : destination
-                    guard groups.indices.contains(adjusted) else { return }
+                    guard groups.indices.contains(adjusted) else { return false }
                     groups[adjusted].snippets.append(contentsOf: moved)
-                    if self.selectedGroupID == group.id {
-                        self.selectedGroupID = groups[adjusted].id
-                    }
+                    destinationID = groups[adjusted].id
+                    return true
                 }
             case 1:
                 removeGroup()
@@ -1565,9 +2046,9 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
     // MARK: - Library actions
 
-    /// §4.6: "Reset Defaults" destroyed the whole library behind one alert with
-    /// no undo. It is still a confirm, but the copy now says what it costs and
-    /// the change goes through the undo stack.
+    /// §4.6: "Reset Defaults" still requires destructive confirmation and uses the canonical
+    /// resource-safe mutation path. It is registered for model-only undo only when the reset did
+    /// not change the UUID-to-secret/image projection.
     @objc private func resetDefaults() {
         DevTypeAlert.confirm(
             title: loc.s("alert.reset.title"),
@@ -1577,12 +2058,10 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             window: view.window
         ) { [weak self] in
             guard let self else { return }
-            let defaults = SnippetStore.shared.defaultSnippets()
-            self.mutate(self.loc.s("manager.undo.reset")) { groups in
-                groups = [
-                    SnippetGroup(name: SnippetDocument.defaultGroupName, snippets: defaults)
-                ]
-            }
+            self.finishMutation(
+                SnippetStore.shared.resetToDefaults(),
+                actionName: self.loc.s("manager.undo.reset")
+            )
         }
     }
 
@@ -1858,6 +2337,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     func outlineViewSelectionDidChange(_ notification: Notification) {
         let row = groupOutline.selectedRow
         guard row >= 0 else { return }
+        hasResolvedInitialGroupSelection = true
         if row == 0 {
             selectedGroupID = nil
         } else if row - 1 < groups.count {
@@ -1897,9 +2377,11 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
               let raw = info.draggingPasteboard.string(forType: .string),
               let id = UUID(uuidString: raw),
               let from = groups.firstIndex(where: { $0.id == id }) else { return false }
-        selectedGroupID = id
         // §4.6: undoable reorder.
-        mutate(loc.s("manager.undo.reorderGroups")) { groups in
+        mutate(
+            loc.s("manager.undo.reorderGroups"),
+            onCommit: { self.selectedGroupID = id }
+        ) { groups in
             guard let source = groups.firstIndex(where: { $0.id == id }) else { return }
             let group = groups.remove(at: source)
             var destination = index - 1
@@ -1957,9 +2439,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     /// Reordering only makes sense when the visible list *is* the stored order:
     /// one concrete group, no filter, manual sort.
     private var canReorderSnippets: Bool {
-        sortMode == .manual
-            && selectedGroupID != nil
-            && filterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        SnippetReorderEligibility.isAllowed(
+            sortMode: sortMode,
+            hasConcreteGroup: selectedGroupID != nil,
+            filterText: filterField.stringValue,
+            filterChip: activeFilterChip
+        )
     }
 
     // MARK: - Table
@@ -2062,6 +2547,13 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
     }
 
+    /// Menu items are not views, so anchor the destination chooser to the overflow
+    /// control that opened them instead of force-casting the item to `NSButton`.
+    @objc private func bulkMoveFromOverflow(_ sender: NSMenuItem) {
+        guard let bulkOverflowButton else { return }
+        bulkMoveSelected(bulkOverflowButton)
+    }
+
     @objc private func confirmBulkMove(_ sender: NSMenuItem) {
         guard let destID = sender.representedObject as? UUID else { return }
         let selectedRows = tableView.selectedRowIndexes
@@ -2082,34 +2574,63 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     @objc private func bulkDuplicateSelected() {
         let selectedRows = tableView.selectedRowIndexes
         guard !selectedRows.isEmpty else { return }
-        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+        let selectedSnippets = selectedRows.compactMap { $0 < snippets.count ? snippets[$0] : nil }
+        guard selectedSnippets.count == selectedRows.count else { return }
 
-        mutate(loc.s("manager.bulk.duplicate")) { groups in
-            for gi in groups.indices {
-                var duplicates: [SnippetModel] = []
-                for snippet in groups[gi].snippets where selectedIDs.contains(snippet.id) {
-                    let dup = SnippetModel(
-                        id: UUID(),
-                        title: snippet.displayTitle + " (Copy)",
-                        triggerKeyword: snippet.triggerKeyword + "copy",
-                        replacementText: snippet.replacementText,
-                        isCaseSensitive: snippet.isCaseSensitive,
-                        requireWordBoundary: snippet.requireWordBoundary,
-                        enabled: snippet.enabled,
-                        imagePath: snippet.imagePath,
-                        isSecret: snippet.isSecret
-                    )
-                    duplicates.append(dup)
+        var stagedImagePaths: [String] = []
+        var duplicationError: Error?
+        let result = SnippetStore.shared.mutateGroups { latest in
+            guard let targets = SnippetDuplicationPlanner.validatedTargets(
+                for: selectedSnippets,
+                in: latest
+            ) else { return false }
+
+            var planner = SnippetDuplicationPlanner(existing: latest.flatMap(\.snippets))
+            var duplicatesByGroupIndex: [Int: [SnippetModel]] = [:]
+            do {
+                for target in targets {
+                    let duplicate = try planner.duplicate(target.snippet) { path in
+                        let copied = try self.duplicateImageAttachment(path)
+                        stagedImagePaths.append(copied)
+                        return copied
+                    }
+                    duplicatesByGroupIndex[target.groupIndex, default: []].append(duplicate)
                 }
-                groups[gi].snippets.append(contentsOf: duplicates)
+                for groupIndex in latest.indices {
+                    latest[groupIndex].snippets.append(
+                        contentsOf: duplicatesByGroupIndex[groupIndex] ?? []
+                    )
+                }
+                return true
+            } catch {
+                duplicationError = error
+                return false
             }
         }
+        if let duplicationError {
+            finishFailedDuplication(duplicationError, stagedImagePaths: stagedImagePaths)
+            return
+        }
+        finishMutation(
+            result,
+            actionName: loc.s("manager.bulk.duplicate"),
+            stagedImagePaths: stagedImagePaths
+        )
     }
 
     @objc private func bulkDeleteSelected() {
         let selectedRows = tableView.selectedRowIndexes
         guard !selectedRows.isEmpty else { return }
-        let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
+        let selectedSnippets = selectedRows.compactMap { $0 < snippets.count ? snippets[$0] : nil }
+        let selectedIDs = Set(selectedSnippets.map(\.id))
+        guard selectedIDs.count == selectedSnippets.count else {
+            DevTypeAlert.warn(
+                title: loc.s("library.save.title"),
+                message: loc.s("manager.action.stale.message"),
+                window: view.window
+            )
+            return
+        }
 
         let alert = NSAlert()
         alert.alertStyle = .critical
@@ -2121,10 +2642,15 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         if let window = view.window {
             alert.beginSheetModal(for: window) { [weak self] response in
                 guard let self, response == .alertFirstButtonReturn else { return }
-                self.mutate(self.loc.s("manager.bulk.delete")) { groups in
+                self.mutateValidated(self.loc.s("manager.bulk.delete")) { groups in
+                    let liveByID = Dictionary(grouping: groups.flatMap(\.snippets), by: \.id)
+                    guard selectedSnippets.allSatisfy({ expected in
+                        liveByID[expected.id] == [expected]
+                    }) else { return false }
                     for gi in groups.indices {
                         groups[gi].snippets.removeAll(where: { selectedIDs.contains($0.id) })
                     }
+                    return true
                 }
             }
         }

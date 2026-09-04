@@ -203,7 +203,35 @@ final class LocalizationParityTests: XCTestCase {
             "voice.hud.failed",
             "voice.hud.status.failed",
             "voice.hud.ax",
-            "voice.hud.ax.title"
+            "voice.hud.ax.title",
+            "voice.error.noMicrophone",
+            "voice.error.microphoneDenied",
+            "voice.error.speechRecognitionDenied",
+            "voice.error.accessibilityDenied",
+            "voice.error.noSpeech",
+            "voice.error.audioInterrupted",
+            "voice.error.diskFull",
+            "voice.error.audioEncoding",
+            "voice.error.invalidAPIKey",
+            "voice.error.endpointUnreachable",
+            "voice.error.modelUnavailable",
+            "voice.error.modelIntegrity",
+            "voice.error.rateLimited",
+            "voice.error.quotaExhausted",
+            "voice.error.timeout",
+            "voice.error.transcriptValidation",
+            "voice.error.correctionRejected",
+            "voice.error.targetChanged",
+            "voice.error.secureInput",
+            "voice.error.sessionSave",
+            "voice.error.superseded",
+            "voice.result.copiedCharacters",
+            "voice.ai.empty.lastInsertion",
+            "voice.ai.empty.selection",
+            "voice.ai.empty.spoken",
+            "voice.ai.working",
+            "voice.ai.emptyOutput",
+            "voice.ai.failed"
         ]
 
         for (language, table) in concrete {
@@ -214,6 +242,154 @@ final class LocalizationParityTests: XCTestCase {
                 }
                 XCTAssertFalse(value.isEmpty, "\(language.rawValue) has empty value for \(key)")
                 XCTAssertNotEqual(value, key, "\(language.rawValue) key \(key) must not resolve to the key name itself")
+            }
+        }
+    }
+
+    func testActivityRecoveryAndCopyFailureKeysResolveInAllLanguages() {
+        let expectedKeys = [
+            "activity.clear.failed.title",
+            "activity.clear.failed.message",
+            "diagnostics.copy.failed.title",
+            "diagnostics.copy.failed.message",
+            "diagnostics.copy.filtered",
+            "prefs.voice.tracing.delete",
+            "prefs.voice.tracing.status.off",
+            "prefs.voice.tracing.status.on",
+            "prefs.voice.tracing.status.deleted",
+            "prefs.voice.tracing.status.deletedCapturing",
+            "prefs.voice.tracing.status.deleteFailed",
+            "prefs.voice.tracing.status.startFailed",
+            "prefs.voice.tracing.status.readFailed",
+            "prefs.voice.tracing.status.incomplete",
+            "prefs.voice.tracing.status.empty",
+            "prefs.voice.tracing.deleteFailed.title",
+            "prefs.voice.tracing.deleteFailed.message",
+            "prefs.voice.tracing.disableDeleteFailed.title",
+            "prefs.voice.tracing.disableDeleteFailed.message",
+            "prefs.voice.tracing.startFailed.title",
+            "prefs.voice.tracing.startFailed.message",
+            "prefs.voice.tracing.readFailed.title",
+            "prefs.voice.tracing.readFailed.message",
+            "prefs.voice.tracing.incomplete.title",
+            "prefs.voice.tracing.incomplete.message",
+            "activity.action.permissions",
+            "activity.action.manager",
+            "activity.action.settings",
+            "activity.action.testLab",
+            "activity.action.copyInfo",
+            "activity.action.review",
+            "activity.action.aiSettings",
+            "activity.action.voiceSettings",
+            "activity.action.hotkeySettings",
+            "activity.permission.required.title",
+            "activity.permission.tapFailed.title",
+            "activity.permission.tapFailed.details",
+            "activity.permission.degraded.title",
+            "activity.permission.degraded.details",
+            "activity.permission.ready.title",
+            "activity.permission.ready.details",
+            "activity.expansion.refused.title",
+            "activity.expansion.refused.details",
+            "activity.expansion.failed.title",
+            "activity.expansion.failed.details",
+            "activity.secureInput.active.title",
+            "activity.secureInput.active.details",
+            "activity.secureInput.released.title",
+            "activity.secureInput.released.details",
+            "activity.library.readBlocked.title",
+            "activity.library.readBlocked.details",
+            "activity.library.corrupted.title",
+            "activity.library.corrupted.details",
+            "activity.library.emptyFile.title",
+            "activity.library.emptyFile.details",
+            "activity.library.saveFailed.title",
+            "activity.library.saveFailed.details",
+            "activity.library.conflicts.title",
+            "activity.library.conflicts.details",
+            "activity.library.restored.title",
+            "activity.library.restored.details",
+            "activity.import.completed.title",
+            "activity.import.notSaved.title",
+            "activity.import.completed.details",
+            "activity.import.failed.title",
+            "activity.import.failed.details",
+            "activity.ai.failed.title",
+            "activity.ai.failed.details",
+            "activity.voice.failed.title",
+            "activity.voice.failed.details",
+            "activity.hotkey.failed.title",
+            "activity.hotkey.failed.details",
+            "activity.recovery.activityTitle",
+            "activity.recovery.activityDetails",
+            "activity.recovery.title",
+            "activity.recovery.subtitle",
+            "activity.recovery.guidance",
+            "activity.recovery.transcript",
+            "activity.recovery.copied",
+            "activity.recovery.copyFailed.title",
+            "activity.recovery.copyFailed.message",
+            "activity.recovery.delete.title",
+            "activity.recovery.delete.message",
+            "activity.recovery.deleteFailed.title",
+            "activity.recovery.deleteFailed.message"
+        ]
+
+        for (language, table) in concrete {
+            for key in expectedKeys {
+                let value = table[key]
+                XCTAssertNotNil(value, "\(language.rawValue) missing activity/recovery key: \(key)")
+                XCTAssertFalse(value?.isEmpty ?? true, "\(language.rawValue) has empty activity/recovery key: \(key)")
+            }
+        }
+    }
+
+    func testImportExportProgressAndFailureKeysResolveInAllLanguages() {
+        let expectedKeys = [
+            "alert.import.progress.parsing.title",
+            "alert.import.progress.parsing.message",
+            "alert.import.progress.committing.title",
+            "alert.import.progress.committing.message",
+            "alert.import.failed.unavailable",
+            "alert.import.failed.unsupported",
+            "alert.import.failed.empty",
+            "alert.import.failed.malformed",
+            "alert.import.failed.access",
+            "alert.import.failed.limit.files",
+            "alert.import.failed.limit.bytes",
+            "alert.import.failed.limit.snippets",
+            "alert.import.failed.generic",
+            "alert.import.note.richText.other",
+            "alert.import.note.script.other",
+            "alert.import.note.missingAbbreviation.other",
+            "alert.import.note.disabledGroup.other",
+            "alert.import.note.wordBoundary.other",
+            "alert.import.note.oversized.other",
+            "alert.import.note.imageImported.other",
+            "alert.import.note.imageSkipped.other",
+            "alert.import.note.markdown.other",
+            "alert.import.note.appScope.other",
+            "alert.import.note.propagateCase.other",
+            "alert.import.note.unsupported.other",
+            "alert.import.saveFailed.title",
+            "alert.import.saveFailed.remote",
+            "alert.import.saveFailed.schema",
+            "alert.import.saveFailed.generic",
+            "export.inprogress.title",
+            "export.inprogress.message",
+            "export.progress.title",
+            "export.progress.message",
+            "export.failed.access",
+            "export.failed.space",
+            "export.failed.encoding",
+            "export.failed.generic"
+        ]
+
+        for (language, table) in concrete {
+            for key in expectedKeys {
+                let value = table[key]
+                XCTAssertNotNil(value, "\(language.rawValue) missing import/export key: \(key)")
+                XCTAssertFalse(value?.isEmpty ?? true, "\(language.rawValue) has empty import/export key: \(key)")
             }
         }
     }

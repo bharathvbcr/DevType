@@ -51,7 +51,7 @@ final class SnippetImportLimitsTests: XCTestCase {
         let result = try SnippetImporter.importFrom(dir)
         XCTAssertEqual(result.snippetCount, 1, "only the normal snippet should be imported")
         XCTAssertEqual(result.groups.flatMap(\.snippets).first?.triggerKeyword, ";ok")
-        XCTAssertTrue(result.notes.contains { $0.contains("size limits") },
+        XCTAssertTrue(result.notes.contains(.oversizedItemSkipped(1)),
                       "the skip must be reported: \(result.notes)")
     }
 

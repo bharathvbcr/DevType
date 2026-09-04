@@ -171,6 +171,7 @@ graph LR
 - **Layered Output Defense & Markdown Policies**: `AIPromptLeakGuard` extracts instruction clauses corpus-wide and fails closed on injection-boundary verdicts; a per-generation echo stripper removes prompt framing the model repeats back; post-generation checks enforce script policy (e.g. romanized-only translations), line-structure preservation, and Markdown policies (`.strip`, `.stripPreservingLayout`, `.preserve` for code/JSON/SQL).
 - **Diagnostics Without Content**: `AIDiagnosticsStore` keeps a bounded ring of failure labels and selection-read evidence — bundle IDs, probe summaries, elapsed ms, character *counts* only — feeding the `-- On-device AI --` section of the diagnostic report. No selection text ever reaches logs.
 - **Undo Integration**: Transformed text can be reverted with standard `⌘Z` or DevType's AI Undo Store (**Undo last AI** in the Command Palette).
+- **Provider-specific correction transport**: correction endpoints are routed through adapter-aware contracts so Ollama and OpenAI-compatible paths are handled explicitly, not by speculative response-shape probing.
 
 ---
 
@@ -251,7 +252,16 @@ The Voice Dictation subsystem provides speech-to-text with semantic formatting, 
 - **Enforced Privacy Routes (`PrivacyRoute`)**: each engine implies `onDeviceOnly`, `localNetworkOnly`, or `cloudPermitted`; `SpeechProviderRegistry` filters and resolves providers against the session's route rather than trusting the call site.
 - **Audio Capture & Crash Journaling (`DurableVoiceCapture` / `CAFSessionWriter`)**: 16kHz mono 16-bit PCM written continuously to `capture.caf` in a per-session directory under `~/Library/Application Support/DevType/VoiceSessions/`, recoverable by `VoiceRecoveryService` after a crash mid-recording.
 - **Thought-Revision & Smart Polish (`CorrectionPipeline`)**: Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS), resolves spoken self-corrections mid-sentence, strips filler words/hesitations, replaces custom vocabulary jargon, and adapts tone (natural, email, chat, code, verbatim) — with `CorrectionValidator` holding the result to the session's `CorrectionPolicy` so a rewriting model cannot exceed what the user allowed.
+- **Local endpoint guardrails (`LocalEndpointSecurity` & `LocalCorrectionEndpointRoute`)**: local services are validated as loopback-only, refuse credentials in URL, reject redirects, and use explicit budgets by operation (`readiness`, `catalog`, inference). Local correction routing distinguishes Ollama chat/generate versus OpenAI completion contracts before decoding provider output.
 - **Voice Dictation HUD (`VoiceHUDPanel`)**: Floating non-activating AppKit HUD. On macOS 26+ uses runtime `NSGlassEffectView` Liquid Glass with an inset organic blob mask; older systems fall back to `NSVisualEffectView`. Expands with live STT transcript and meters mic RMS. Blob geometry is DevType-owned (`LiquidBlobGeometry`) — Apple does not provide Liquid Glass shader/orb assets for third-party porting.
+
+## 🧪 Privacy-Safe Diagnostics
+
+Three infrastructure pieces now define the boundary for diagnostics and failure observability:
+
+- **`DiagnosticPrivacy`**: strips raw user content from reports by emitting bounded shape metadata (lengths, format counts, bounded hash) for values like triggers and selections.
+- **`BoundedUTF8Tail`**: enforces explicit retention ceilings for textual evidence, with deterministic oversize/drop accounting.
+- **`VoiceTerminalDiagnostic`**: persists typed terminal outcomes (`failed`, `cancelled`, `superseded`) with stage/provider/locality metadata so recovery policy stays explicit and machine-readable.
 
 ---
 

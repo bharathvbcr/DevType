@@ -43,6 +43,45 @@ public final class PasteboardBroker {
 
     public typealias PasteboardSnapshot = [[NSPasteboard.PasteboardType: Data]]
 
+    /// Exact result of a deliberate user clipboard write. The public UI contract is the
+    /// `didWrite` boolean; the richer internal result keeps tests and diagnostics from collapsing
+    /// "write failed but the old board was recovered" into either success or silent data loss.
+    enum UserClipboardWriteOutcome: Equatable {
+        case written
+        case writeFailedPriorRestored
+        case writeFailedNoPriorSnapshot
+        case writeFailedRestoreFailed
+        case ownershipLost
+
+        var didWrite: Bool { self == .written }
+
+        fileprivate var diagnosticLabel: String {
+            switch self {
+            case .written: return "written"
+            case .writeFailedPriorRestored: return "writeFailedPriorRestored"
+            case .writeFailedNoPriorSnapshot: return "writeFailedNoPriorSnapshot"
+            case .writeFailedRestoreFailed: return "writeFailedRestoreFailed"
+            case .ownershipLost: return "ownershipLost"
+            }
+        }
+    }
+
+    enum UserClipboardRestoreOutcome: Equatable {
+        case restored
+        case ownershipLost
+        case failed
+    }
+
+    /// Fault-injectable boundary around AppKit's boolean-returning pasteboard writes. Production
+    /// supplies closures over `NSPasteboard.general`; tests can force each refusal and ownership
+    /// race without touching the user's real clipboard.
+    struct UserClipboardWriteOperations {
+        let clearContents: () -> Int
+        let currentChangeCount: () -> Int
+        let setString: (String) -> Bool
+        let restoreSnapshot: (PasteboardSnapshot, Int) -> UserClipboardRestoreOutcome
+    }
+
     /// nspasteboard.org markers: tell clipboard managers not to record our payload.
     public static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
     public static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
@@ -321,11 +360,86 @@ public final class PasteboardBroker {
     ///
     /// Invalidates any in-flight expansion restore so a later restore cannot clobber
     /// the copied text, and so `changeCount` tracking stays coherent with ownership.
-    public func writeUserClipboardString(_ string: String) {
-        invalidatePendingRestore()
+    @discardableResult
+    public func writeUserClipboardString(_ string: String) -> Bool {
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(string, forType: .string)
+        // Snapshot before invalidation: if an expansion payload is still on the board, the
+        // pending ticket owns the user's actual pre-expansion clipboard. Invalidating first would
+        // throw that only copy away and snapshot our generated payload as though it were theirs.
+        let priorSnapshot = acquireUserClipboardSnapshot(pasteboard: pasteboard)
+        let outcome = performUserClipboardWrite(
+            string,
+            priorSnapshot: priorSnapshot,
+            operations: UserClipboardWriteOperations(
+                clearContents: { pasteboard.clearContents() },
+                currentChangeCount: { pasteboard.changeCount },
+                setString: { pasteboard.setString($0, forType: .string) },
+                restoreSnapshot: { snapshot, ownedChangeCount in
+                    Self.restoreUserClipboardSnapshot(
+                        snapshot,
+                        ownedChangeCount: ownedChangeCount,
+                        currentChangeCount: { pasteboard.changeCount },
+                        writeObjects: { pasteboard.writeObjects($0) }
+                    )
+                }
+            )
+        )
+        return outcome.didWrite
+    }
+
+    /// One canonical clear → write → conditional recovery transaction.
+    ///
+    /// Recovery is deliberately immediate and single-attempt: returning `false` must be truthful
+    /// now, while retrying later would extend the interval in which another process can claim the
+    /// pasteboard. The snapshot itself is capped by `snapshotMaxItems` / `snapshotMaxBytes`.
+    @discardableResult
+    func performUserClipboardWrite(
+        _ string: String,
+        priorSnapshot: PasteboardSnapshot?,
+        operations: UserClipboardWriteOperations
+    ) -> UserClipboardWriteOutcome {
+        invalidatePendingRestore()
+        let ownedClearChangeCount = operations.clearContents()
+        let wrote = operations.setString(string)
+
+        let outcome: UserClipboardWriteOutcome
+        if wrote {
+            // AppKit normally keeps the clear's `changeCount` while adding representations. A
+            // different count means another owner arrived during the operation; never claim that
+            // their now-current board contains our string.
+            outcome = operations.currentChangeCount() == ownedClearChangeCount
+                ? .written
+                : .ownershipLost
+        } else if operations.currentChangeCount() != ownedClearChangeCount {
+            // Another writer already owns the board. Restoring here would destroy their copy.
+            outcome = .ownershipLost
+        } else if let priorSnapshot, !priorSnapshot.isEmpty {
+            switch operations.restoreSnapshot(priorSnapshot, ownedClearChangeCount) {
+            case .restored:
+                outcome = .writeFailedPriorRestored
+            case .ownershipLost:
+                outcome = .ownershipLost
+            case .failed:
+                outcome = .writeFailedRestoreFailed
+            }
+        } else {
+            // The old board was empty or intentionally unadoptable (for example a concealed
+            // secret whose expiry ownership must not be broken by resurrecting it).
+            outcome = .writeFailedNoPriorSnapshot
+        }
+
+        let characterCount = string.count
+        let snapshotItemCount = priorSnapshot?.count ?? 0
+        if outcome.didWrite {
+            DevTypeLog.inject.info(
+                "[Clipboard] user write outcome=written chars=\(characterCount, privacy: .public)"
+            )
+        } else {
+            DevTypeLog.inject.error(
+                "[Clipboard] user write outcome=\(outcome.diagnosticLabel, privacy: .public) chars=\(characterCount, privacy: .public) boundedSnapshotItems=\(snapshotItemCount, privacy: .public)"
+            )
+        }
+        return outcome
     }
 
     // MARK: - Text paste
@@ -492,6 +606,7 @@ public final class PasteboardBroker {
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteDeliverySettleDelay) {
+            let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
             let delivery = self.verifier.verifyFocusedTextDelivery(
                 expectedText: expectedText,
                 baseline: baseline,
@@ -516,7 +631,7 @@ public final class PasteboardBroker {
             if delivery == .failed, !trustFailure, failures == 1 {
                 DevTypeLog.inject.notice(
                     """
-                    [Inject] paste hold: AX says missing but \(bundleID ?? "(unknown)", privacy: .public) \
+                    [Inject] paste hold: AX says missing but \(safeBundleID, privacy: .public) \
                     is not a proven delivery witness — not re-pasting (would duplicate)
                     """
                 )
@@ -552,7 +667,7 @@ public final class PasteboardBroker {
                     """
                     [Inject] paste hold: AX readable but expected text missing after \
                     \(pasteAttemptsCompleted, privacy: .public) Cmd+V attempt(s) — \
-                    app=\(bundleID ?? "(unknown)", privacy: .public) \
+                    app=\(safeBundleID, privacy: .public) \
                     elapsed=\(Int(elapsed * 1000), privacy: .public)ms
                     """
                 )
@@ -578,7 +693,7 @@ public final class PasteboardBroker {
                 DevTypeLog.inject.notice(
                     """
                     [Inject] paste hold: retrying Cmd+V (attempt \(pasteAttemptsCompleted + 1, privacy: .public)) — \
-                    app=\(bundleID ?? "(unknown)", privacy: .public) \
+                    app=\(safeBundleID, privacy: .public) \
                     consecutiveMisses=\(failures, privacy: .public) \
                     elapsed=\(Int(elapsed * 1000), privacy: .public)ms
                     """
@@ -926,11 +1041,15 @@ public final class PasteboardBroker {
                 ceiling: max(residency.ceiling, residency.unverifiedHold)
             ) {
                 InjectTelemetryLog.shared.recordClipboardHoldExtension(bundleID: residency.bundleID)
+                let safeBundleID = DevTypeLog.boundedPublicIdentifier(
+                    residency.bundleID,
+                    label: "bundleID"
+                )
                 DevTypeLog.inject.notice(
                     """
                     [Inject] §8.12 holding the payload past its \
                     \(Int(residency.unverifiedHold * 1000), privacy: .public)ms residency — \
-                    \(residency.bundleID ?? "(unknown)", privacy: .public) has stopped answering AX, \
+                    \(safeBundleID, privacy: .public) has stopped answering AX, \
                     so it has not consumed ⌘V yet \
                     (elapsed=\(Int(elapsed * 1000), privacy: .public)ms)
                     """
@@ -1190,14 +1309,54 @@ public final class PasteboardBroker {
             || types.contains(transientType)
     }
 
-    /// Rebuilds `NSPasteboardItem`s from a bounded snapshot. Shared by both restore paths so
-    /// representation handling cannot drift between them.
-    private static func makeRestoredItems(_ snapshot: PasteboardSnapshot) -> [NSPasteboardItem] {
-        snapshot.map { itemDict in
-            let newItem = NSPasteboardItem()
-            itemDict.forEach { type, data in newItem.setData(data, forType: type) }
-            return newItem
+    /// Rebuilds `NSPasteboardItem`s from a bounded snapshot, atomically at the item-set level.
+    /// `NSPasteboardItem.setData` can refuse an individual representation. Returning an item with
+    /// only the successful flavors would let an outer `writeObjects` report success for an
+    /// incomplete restore, so one refusal rejects the entire reconstruction before any item is
+    /// published to the pasteboard.
+    private static func makeRestoredItems(
+        _ snapshot: PasteboardSnapshot,
+        setData: (NSPasteboardItem, Data, NSPasteboard.PasteboardType) -> Bool = {
+            item, data, type in item.setData(data, forType: type)
         }
+    ) -> [NSPasteboardItem]? {
+        guard !snapshot.isEmpty else { return nil }
+        var restoredItems: [NSPasteboardItem] = []
+        restoredItems.reserveCapacity(snapshot.count)
+        for itemDict in snapshot {
+            guard !itemDict.isEmpty else { return nil }
+            let newItem = NSPasteboardItem()
+            for (type, data) in itemDict {
+                guard setData(newItem, data, type) else { return nil }
+            }
+            restoredItems.append(newItem)
+        }
+        return restoredItems
+    }
+
+    /// Conditional complete-snapshot restore used by the deliberate user-write transaction.
+    /// Fault injection lives here so a representation refusal is tested through the same
+    /// ownership checks and outcome type as production.
+    static func restoreUserClipboardSnapshot(
+        _ snapshot: PasteboardSnapshot,
+        ownedChangeCount: Int,
+        currentChangeCount: () -> Int,
+        setData: (NSPasteboardItem, Data, NSPasteboard.PasteboardType) -> Bool = {
+            item, data, type in item.setData(data, forType: type)
+        },
+        writeObjects: ([NSPasteboardItem]) -> Bool
+    ) -> UserClipboardRestoreOutcome {
+        // Check both before and after rebuilding local items. Clipboard data providers can be
+        // non-trivial, and a newer external owner that arrives during reconstruction stays put.
+        guard currentChangeCount() == ownedChangeCount else { return .ownershipLost }
+        guard let restoredItems = makeRestoredItems(snapshot, setData: setData) else {
+            DevTypeLog.inject.error(
+                "[Clipboard] bounded snapshot reconstruction failed — no partial representation set was written"
+            )
+            return .failed
+        }
+        guard currentChangeCount() == ownedChangeCount else { return .ownershipLost }
+        return writeObjects(restoredItems) ? .restored : .failed
     }
 
     /// Writes a copy-capture snapshot back onto `pasteboard` with the same bounded retry policy
@@ -1217,7 +1376,20 @@ public final class PasteboardBroker {
             )
             return
         }
-        if pasteboard.writeObjects(Self.makeRestoredItems(snapshot)) {
+        guard let restoredItems = Self.makeRestoredItems(snapshot) else {
+            DevTypeLog.inject.error(
+                "[Inject] copy-capture clipboard restore refused — a snapshot representation could not be rebuilt"
+            )
+            return
+        }
+        // Re-check after rebuilding the local items as well as before it.
+        guard pasteboard.changeCount == ownedChangeCount || Self.holdsOurPayload(pasteboard) else {
+            DevTypeLog.inject.notice(
+                "[Inject] copy-capture restore abandoned — another owner wrote the pasteboard during reconstruction"
+            )
+            return
+        }
+        if pasteboard.writeObjects(restoredItems) {
             return
         }
         guard attempt + 1 < InjectTiming.maxPasteboardRestoreAttempts else {
@@ -1268,7 +1440,13 @@ public final class PasteboardBroker {
             return
         }
 
-        let restoredItems: [NSPasteboardItem] = Self.makeRestoredItems(oldItems)
+        guard let restoredItems = Self.makeRestoredItems(oldItems) else {
+            DevTypeLog.inject.error(
+                "[Inject] §1.7 clipboard restore refused — a snapshot representation could not be rebuilt"
+            )
+            clearPendingTicket(generation: ticket.generation)
+            return
+        }
         let wrote = pasteboard.writeObjects(restoredItems)
         if !wrote {
             if attempt + 1 < InjectTiming.maxPasteboardRestoreAttempts {

@@ -1,6 +1,86 @@
 import AppKit
 import ExpanderEngine
 
+/// Rebases slow, model-generated tag suggestions onto the current library. Suggestions are tied
+/// to the exact title/body/secret state and group context the model saw; unrelated changes such as
+/// enabled state may coexist, while moved, edited, deleted, already-tagged, or ambiguous duplicate
+/// UUID targets are skipped instead of restoring the minutes-old input snapshot.
+struct SnippetTagSuggestionMerge {
+    struct Summary: Equatable {
+        var applied: Int
+        var stale: Int
+    }
+
+    private struct Candidate {
+        let groupID: UUID
+        let groupName: String
+        let snippetID: UUID
+        let title: String
+        let replacementText: String
+        let isSecret: Bool
+        let priorTags: [String]
+        let suggestedTags: [String]
+    }
+
+    private let candidates: [Candidate]
+
+    init(baseline: [SnippetGroup], tagged: [SnippetGroup]) {
+        var changes: [Candidate] = []
+        for baselineGroup in baseline {
+            guard let taggedGroup = tagged.first(where: { $0.id == baselineGroup.id }) else { continue }
+            for baselineSnippet in baselineGroup.snippets {
+                guard let taggedSnippet = taggedGroup.snippets.first(where: {
+                    $0.id == baselineSnippet.id
+                }), taggedSnippet.tags != baselineSnippet.tags else { continue }
+                changes.append(Candidate(
+                    groupID: baselineGroup.id,
+                    groupName: baselineGroup.name,
+                    snippetID: baselineSnippet.id,
+                    title: baselineSnippet.title,
+                    replacementText: baselineSnippet.replacementText,
+                    isSecret: baselineSnippet.isSecret,
+                    priorTags: baselineSnippet.tags,
+                    suggestedTags: taggedSnippet.tags
+                ))
+            }
+        }
+        candidates = changes
+    }
+
+    func apply(to groups: inout [SnippetGroup]) -> Summary {
+        var summary = Summary(applied: 0, stale: 0)
+        for candidate in candidates {
+            var locations: [(group: Int, snippet: Int)] = []
+            for groupIndex in groups.indices {
+                for snippetIndex in groups[groupIndex].snippets.indices
+                where groups[groupIndex].snippets[snippetIndex].id == candidate.snippetID {
+                    locations.append((groupIndex, snippetIndex))
+                }
+            }
+
+            guard locations.count == 1, let location = locations.first else {
+                summary.stale += 1
+                continue
+            }
+            let group = groups[location.group]
+            let snippet = group.snippets[location.snippet]
+            guard group.id == candidate.groupID,
+                  group.name == candidate.groupName,
+                  snippet.title == candidate.title,
+                  snippet.replacementText == candidate.replacementText,
+                  snippet.isSecret == candidate.isSecret,
+                  snippet.tags == candidate.priorTags else {
+                summary.stale += 1
+                continue
+            }
+
+            groups[location.group].snippets[location.snippet].tags = candidate.suggestedTags
+            summary.applied += 1
+        }
+        return summary
+    }
+}
+
 // MARK: - §4.8 / §1.10 (UI half) — one import flow instead of two
 //
 // The open panel, the format hint, the "Import Complete" alert, and the failure
@@ -16,11 +96,10 @@ import ExpanderEngine
 
 enum SnippetImportFlow {
 
-    /// Serializes imports. Two overlapping flows (menu bar + Preferences sheet)
-    /// would race the store's read-modify-write merge and double-alert; the second
-    /// caller is told one is already running instead of queueing silently.
-    private static let stateLock = NSLock()
-    private static var isImporting = false
+    /// Serializes parse, preview, and commit as one user-visible operation. In particular, the
+    /// immutable prepared plan remains owned until the preview is cancelled or that exact plan is
+    /// committed; a second entry point can never race it with a second read-modify-write.
+    private static let operationGate = SnippetOperationGate()
 
     /// Presents the open panel, imports with `.merge`, and reports the result.
     /// `window` makes both the panel and the result alert sheets.
@@ -30,6 +109,15 @@ enum SnippetImportFlow {
         completion: (() -> Void)? = nil
     ) {
         let loc = LocalizationManager.shared
+        guard operationGate.begin() else {
+            DevTypeAlert.info(
+                title: loc.s("alert.import.inprogress.title"),
+                message: loc.s("alert.import.inprogress.message"),
+                window: window
+            )
+            return
+        }
+
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
@@ -44,7 +132,10 @@ enum SnippetImportFlow {
         }
 
         let finish: (NSApplication.ModalResponse) -> Void = { response in
-            guard response == .OK, let url = panel.url else { return }
+            guard response == .OK, let url = panel.url else {
+                resetImportState()
+                return
+            }
             perform(url: url, store: store, window: window, completion: completion)
         }
 
@@ -63,43 +154,37 @@ enum SnippetImportFlow {
         completion: (() -> Void)?
     ) {
         let loc = LocalizationManager.shared
-        stateLock.lock()
-        if isImporting {
-            stateLock.unlock()
-            DevTypeAlert.info(
-                title: loc.s("alert.import.inprogress.title"),
-                message: loc.s("alert.import.inprogress.message"),
-                window: window
-            )
-            return
-        }
-        isImporting = true
-        stateLock.unlock()
+        let parsingProgress = DevTypeProgressPresentation.present(
+            title: loc.s("alert.import.progress.parsing.title"),
+            message: loc.s("alert.import.progress.parsing.message"),
+            window: window
+        )
 
-        // Parse + preview + merge + save
+        // Parse once, preview that value, then commit the chosen mode.
         DispatchQueue.global(qos: .userInitiated).async { [store] in
             do {
-                let parsed = try SnippetImporter.importFrom(url)
+                let plan = try SnippetImporter.prepareImport(from: url)
+                let preview = store.previewImport(plan)
                 DispatchQueue.main.async {
+                    parsingProgress.dismiss()
                     SnippetImportPreviewSheet.present(
                         from: window,
-                        incomingGroups: parsed.groups,
-                        existingGroups: store.loadGroups()
-                    ) { mode, _ in
+                        preview: preview
+                    ) { mode in
+                        let committingProgress = DevTypeProgressPresentation.present(
+                            title: loc.s("alert.import.progress.committing.title"),
+                            message: loc.s("alert.import.progress.committing.message"),
+                            window: window
+                        )
                         DispatchQueue.global(qos: .userInitiated).async {
                             let outcome: Result<
                                 (result: SnippetImporter.ImportResult, summary: SnippetStore.ImportSummary),
                                 Error
                             >
-                            do {
-                                outcome = .success(try store.importSnippets(from: url, mode: mode))
-                            } catch {
-                                outcome = .failure(error)
-                            }
+                            outcome = .success(store.commitImport(preview.plan, mode: mode))
                             DispatchQueue.main.async {
-                                stateLock.lock()
-                                isImporting = false
-                                stateLock.unlock()
+                                committingProgress.dismiss()
+                                operationGate.finish()
                                 report(outcome, window: window, loc: loc, completion: completion)
                             }
                         }
@@ -109,9 +194,8 @@ enum SnippetImportFlow {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    stateLock.lock()
-                    isImporting = false
-                    stateLock.unlock()
+                    parsingProgress.dismiss()
+                    operationGate.finish()
                     report(.failure(error), window: window, loc: loc, completion: completion)
                 }
             }
@@ -132,20 +216,29 @@ enum SnippetImportFlow {
                 groups,
                 engine: SnippetTagSuggester.foundationModelsEngine()
             )
-            let outcome = SnippetStore.shared.saveGroups(updated)
+            let merge = SnippetTagSuggestionMerge(baseline: groups, tagged: updated)
+            var commitSummary = SnippetTagSuggestionMerge.Summary(applied: 0, stale: 0)
+            let mutation = SnippetStore.shared.mutateGroups { latest in
+                commitSummary = merge.apply(to: &latest)
+                return true
+            }
+            let outcome = mutation.saveOutcome ?? .blockedByRemoteChange
+            var reportedSummary = summary
+            reportedSummary.tagged = outcome.didSave ? commitSummary.applied : 0
+            reportedSummary.skipped += commitSummary.stale
 
             var message = loc.s(
                 "alert.import.tagResult",
-                summary.tagged,
-                summary.noSuggestion,
-                summary.skipped
+                reportedSummary.tagged,
+                reportedSummary.noSuggestion,
+                reportedSummary.skipped
             )
             // Never present a capped or cancelled run as full coverage.
-            if !summary.isComplete {
+            if !reportedSummary.isComplete {
                 message += "\n" + loc.p(
                     "alert.import.tagResult.partial",
-                    count: summary.notAttempted,
-                    summary.notAttempted
+                    count: reportedSummary.notAttempted,
+                    reportedSummary.notAttempted
                 )
             }
             if !outcome.didSave {
@@ -153,7 +246,7 @@ enum SnippetImportFlow {
                 message += "\n\n" + loc.s("library.save.banner")
             }
             DevTypeLog.app.info(
-                "[Import] tagged=\(summary.tagged, privacy: .public) none=\(summary.noSuggestion, privacy: .public) skipped=\(summary.skipped, privacy: .public) notAttempted=\(summary.notAttempted, privacy: .public) saved=\(outcome.didSave, privacy: .public)"
+                "[Import] tagged=\(reportedSummary.tagged, privacy: .public) none=\(reportedSummary.noSuggestion, privacy: .public) skipped=\(reportedSummary.skipped, privacy: .public) stale=\(commitSummary.stale, privacy: .public) notAttempted=\(reportedSummary.notAttempted, privacy: .public) saved=\(outcome.didSave, privacy: .public)"
             )
             DevTypeAlert.info(
                 title: loc.s("alert.import.tagResult.title"),
@@ -165,9 +258,7 @@ enum SnippetImportFlow {
     }
 
     private static func resetImportState() {
-        stateLock.lock()
-        isImporting = false
-        stateLock.unlock()
+        operationGate.finish()
     }
 
     private typealias ImportOutcome = Result<
@@ -183,6 +274,27 @@ enum SnippetImportFlow {
     ) {
         switch outcome {
         case .success(let (result, summary)):
+            guard summary.outcome.didSave else {
+                ActivityHistoryStore.publish(.importFailed)
+                LibraryHealthMonitor.shared.refresh()
+                DevTypeLog.app.error(
+                    "[Import] commit refused outcome=\(summary.outcome.diagnosticLabel, privacy: .public)"
+                )
+                DevTypeAlert.warn(
+                    title: loc.s("alert.import.saveFailed.title"),
+                    message: saveFailureMessage(for: summary.outcome, loc: loc),
+                    window: window
+                )
+                return
+            }
+            ActivityHistoryStore.publish(
+                .importCompleted(
+                    added: summary.snippetsAdded,
+                    updated: summary.snippetsUpdated,
+                    unchanged: summary.snippetsUnchanged,
+                    saved: true
+                )
+            )
             completion?()
 
             var body = loc.s(
@@ -197,18 +309,14 @@ enum SnippetImportFlow {
                 summary.snippetsUpdated,
                 summary.snippetsUnchanged
             )
-            body += "\n" + result.sourcePath
             if !result.notes.isEmpty {
-                body += "\n\n" + result.notes.joined(separator: "\n")
-            }
-            // §1.4: an import that could not be written must not read as success.
-            if !summary.outcome.didSave {
-                LibraryHealthMonitor.shared.refresh()
-                body += "\n\n" + loc.s("library.save.banner")
+                body += "\n\n" + result.notes
+                    .map { localizedNote($0, loc: loc) }
+                    .joined(separator: "\n")
             }
 
             DevTypeLog.app.info(
-                "[Import] kind=\(result.kind.rawValue, privacy: .public) added=\(summary.snippetsAdded, privacy: .public) updated=\(summary.snippetsUpdated, privacy: .public) saved=\(summary.outcome.didSave, privacy: .public)"
+                "[Import] kind=\(result.kind.rawValue, privacy: .public) added=\(summary.snippetsAdded, privacy: .public) updated=\(summary.snippetsUpdated, privacy: .public) saved=true"
             )
             // An import is the one moment a whole library arrives untagged: unless the source
             // carried `search_terms`, none of it is findable by tag or visible to the Tagged
@@ -236,14 +344,114 @@ enum SnippetImportFlow {
                 )
             }
         case .failure(let error):
+            ActivityHistoryStore.publish(.importFailed)
             DevTypeLog.app.error(
-                "[Import] failed: \(error.localizedDescription, privacy: .public)"
+                "[Import] failed \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             DevTypeAlert.warn(
                 title: loc.s("alert.import.failed.title"),
-                message: error.localizedDescription,
+                message: failureMessage(for: error, loc: loc),
                 window: window
             )
+        }
+    }
+
+    /// Maps typed importer/framework failures to a finite localized vocabulary. Associated path
+    /// and parser-detail strings are deliberately ignored: they may include account names,
+    /// private directory structure, or source content.
+    static func failureMessage(for error: Error, loc: LocalizationManager) -> String {
+        if let importError = error as? SnippetImporter.ImportError {
+            switch importError {
+            case .pathNotFound: return loc.s("alert.import.failed.unavailable")
+            case .unrecognizedSource: return loc.s("alert.import.failed.unsupported")
+            case .noImportableSnippets: return loc.s("alert.import.failed.empty")
+            case .resourceLimitExceeded(.fileCount):
+                return loc.s("alert.import.failed.limit.files")
+            case .resourceLimitExceeded(.aggregateBytes):
+                return loc.s("alert.import.failed.limit.bytes")
+            case .resourceLimitExceeded(.snippetCount):
+                return loc.s("alert.import.failed.limit.snippets")
+            case .attachmentCommitFailed:
+                return loc.s("alert.import.saveFailed.generic")
+            case .libraryCommitFailed:
+                return loc.s("alert.import.saveFailed.generic")
+            }
+        }
+        if let textExpanderError = error as? TEImporter.ImportError {
+            switch textExpanderError {
+            case .folderNotFound: return loc.s("alert.import.failed.unavailable")
+            case .noGroupFiles: return loc.s("alert.import.failed.empty")
+            }
+        }
+        if let espansoError = error as? EspansoImporter.ImportError {
+            switch espansoError {
+            case .pathNotFound: return loc.s("alert.import.failed.unavailable")
+            case .noMatchFiles: return loc.s("alert.import.failed.empty")
+            case .parseFailed: return loc.s("alert.import.failed.malformed")
+            }
+        }
+
+        let cocoaError = error as NSError
+        if cocoaError.domain == NSCocoaErrorDomain {
+            switch CocoaError.Code(rawValue: cocoaError.code) {
+            case .fileNoSuchFile:
+                return loc.s("alert.import.failed.unavailable")
+            case .fileReadNoPermission:
+                return loc.s("alert.import.failed.access")
+            case .fileReadCorruptFile, .fileReadInapplicableStringEncoding:
+                return loc.s("alert.import.failed.malformed")
+            default:
+                break
+            }
+        }
+        return loc.s("alert.import.failed.generic")
+    }
+
+    static func localizedNote(
+        _ note: SnippetImporter.ImportNote,
+        loc: LocalizationManager
+    ) -> String {
+        switch note {
+        case .richTextDowngraded(let count):
+            return loc.p("alert.import.note.richText", count: count, count)
+        case .scriptImportedLiterally(let count):
+            return loc.p("alert.import.note.script", count: count, count)
+        case .missingAbbreviationSkipped(let count):
+            return loc.p("alert.import.note.missingAbbreviation", count: count, count)
+        case .disabledGroupPreserved(let count):
+            return loc.p("alert.import.note.disabledGroup", count: count, count)
+        case .wordBoundaryPreserved(let count):
+            return loc.p("alert.import.note.wordBoundary", count: count, count)
+        case .oversizedItemSkipped(let count):
+            return loc.p("alert.import.note.oversized", count: count, count)
+        case .imageMatchImported(let count):
+            return loc.p("alert.import.note.imageImported", count: count, count)
+        case .imageMatchSkipped(let count):
+            return loc.p("alert.import.note.imageSkipped", count: count, count)
+        case .markdownImportedLiterally(let count):
+            return loc.p("alert.import.note.markdown", count: count, count)
+        case .appScopePreserved(let count):
+            return loc.p("alert.import.note.appScope", count: count, count)
+        case .propagateCaseNotAdapted(let count):
+            return loc.p("alert.import.note.propagateCase", count: count, count)
+        case .unsupportedMatchSkipped(let count):
+            return loc.p("alert.import.note.unsupported", count: count, count)
+        }
+    }
+
+    /// A prepared plan is not an imported library until its serialized store commit reaches disk.
+    /// The free-form `.failed` detail is intentionally never interpolated into UI.
+    static func saveFailureMessage(
+        for outcome: SnippetStore.SaveOutcome,
+        loc: LocalizationManager
+    ) -> String {
+        switch outcome {
+        case .blockedByRemoteChange:
+            return loc.s("alert.import.saveFailed.remote")
+        case .blockedByNewerSchema:
+            return loc.s("alert.import.saveFailed.schema")
+        case .failed, .saved:
+            return loc.s("alert.import.saveFailed.generic")
         }
     }
 }

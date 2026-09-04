@@ -9,6 +9,17 @@ import XCTest
 /// land had no way to find out. These tests would not compile against the old signature.
 final class SaveSnippetsOutcomeTests: XCTestCase {
 
+    func testFailureDiagnosticLabelNeverEchoesTheUserPathOrErrorDescription() {
+        let secret = "PRIVATE /Users/person/secret-library/provider-response-body"
+
+        let label = SnippetStore.SaveOutcome.failed(secret).diagnosticLabel
+
+        XCTAssertEqual(label, "failed")
+        XCTAssertFalse(label.contains(secret))
+        XCTAssertFalse(label.contains("/Users/person"))
+        XCTAssertFalse(label.contains("provider-response-body"))
+    }
+
     private func makeStore() -> (SnippetStore, URL) {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("DevTypeSaveOutcomeTests-\(UUID().uuidString)")

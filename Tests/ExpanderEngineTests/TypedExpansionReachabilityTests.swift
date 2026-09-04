@@ -351,10 +351,15 @@ final class TypedExpansionReachabilityTests: XCTestCase {
         let engine = EventTapEngine()
         engine.snippets = Self.realLibrary()
         let explained = engine.silentNoExpandDiagnostics()
-        for entry in Self.realTriggers where entry.secret {
-            XCTAssertTrue(
+        let secretEntries = Self.realTriggers.filter(\.secret)
+        let details = explained.filter { $0.contains("reason=secret-requires-explicit-action") }
+        XCTAssertEqual(details.count, secretEntries.count, "Every secret must be counted: \(explained)")
+        XCTAssertTrue(explained.contains { $0.contains("\(secretEntries.count) secret snippet(s)") })
+        XCTAssertTrue(details.allSatisfy { $0.contains("triggerHash=") })
+        for entry in secretEntries {
+            XCTAssertFalse(
                 explained.contains { $0.contains(entry.trigger) },
-                "\(entry.trigger) can never fire by typing and must be named in diagnostics."
+                "Secret trigger content leaked into diagnostics: \(explained)"
             )
         }
     }
@@ -397,11 +402,19 @@ final class TypedExpansionReachabilityTests: XCTestCase {
         let explained = engine.silentNoExpandDiagnostics()
         XCTAssertTrue(
             explained.contains { $0.contains("can never fire") },
-            "An unreachable overlong trigger must be named in diagnostics: \(explained)"
+            "An unreachable overlong trigger must be explained in diagnostics: \(explained)"
         )
         XCTAssertTrue(
+            explained.contains {
+                $0.contains("triggerHash=")
+                    && $0.contains("triggerChars=\(overlong.count)")
+                    && $0.contains("reason=exceeds-match-buffer")
+            },
+            "The diagnostics must retain a content-free identifier, length, and reason: \(explained)"
+        )
+        XCTAssertFalse(
             explained.contains { $0.contains(overlong) },
-            "The diagnostics must name the offending trigger itself, not just a count."
+            "The overlong trigger content leaked into diagnostics: \(explained)"
         )
     }
 

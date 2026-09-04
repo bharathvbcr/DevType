@@ -46,12 +46,15 @@ enum SnippetEditorSheet {
     /// First non-blank line of the body, truncated — the fallback when the user leaves the
     /// title empty. Lives here rather than on the private controller because the
     /// typed-repetition offer builds a draft without ever opening one.
-    static func derivedTitle(from replacement: String) -> String {
+    static func derivedTitle(
+        from replacement: String,
+        localization loc: LocalizationManager = .shared
+    ) -> String {
         let firstLine = replacement
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? ""
-        if firstLine.isEmpty { return "Untitled" }
+        if firstLine.isEmpty { return loc.s("editor.untitled") }
         return firstLine.count > 40 ? String(firstLine.prefix(40)) + "…" : firstLine
     }
     /// §1 / §3: sized once here so the panel and its glass container can never
@@ -87,8 +90,7 @@ enum SnippetEditorSheet {
         groups: [SnippetGroup],
         currentGroupID: UUID?,
         loc: LocalizationManager = .shared,
-        validate: @escaping (_ trigger: String, _ caseSensitive: Bool) -> String?,
-        completion: @escaping (SnippetModel?, UUID?) -> Void
+        completion: @escaping (SnippetModel, UUID?) -> SnippetEditorPersistenceReceipt
     ) {
         // Same single-instance contract as MacroPalettePanel.present: a second
         // presentation while one is up would overwrite the statics, and finishing
@@ -116,8 +118,8 @@ enum SnippetEditorSheet {
             groups: groups,
             currentGroupID: currentGroupID,
             loc: loc,
-            validate: validate,
-            onFinish: { result, groupID in
+            persist: completion,
+            onDismiss: {
                 // §2: a macro palette left open would outlive its host sheet.
                 MacroPalettePanel.dismiss()
                 if let host = hostWindow, panel.isSheet {
@@ -126,7 +128,6 @@ enum SnippetEditorSheet {
                 panel.close()
                 activePanel = nil
                 activeController = nil
-                completion(result, groupID)
             }
         )
         panel.contentView = controller.view
@@ -601,8 +602,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private let draft: SnippetModel?
     private let groups: [SnippetGroup]
     private let loc: LocalizationManager
-    private let validate: (String, Bool) -> String?
-    private let onFinish: (SnippetModel?, UUID?) -> Void
+    private let persist: (SnippetModel, UUID?) -> SnippetEditorPersistenceReceipt
+    private let onDismiss: () -> Void
+    private let resourceTransaction = SnippetEditTransaction()
 
     /// Values shown in the form: edit target, or template draft, or blank.
     private var seed: SnippetModel? { existing ?? draft }
@@ -661,6 +663,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private var attachedImagePath = ""
     /// Newly picked image file — copied into the store on save.
     private var pickedImageURL: URL?
+    /// Ordinary replacement text survives Secret on/off cycles for this sheet only. It is never
+    /// persisted while Secret is enabled and never copied into the secure field.
+    private var secretModeDraft: SnippetSecretModeDraft
 
     // MARK: - On-device tag suggestion (`SnippetTagSuggester`)
 
@@ -699,17 +704,18 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         groups: [SnippetGroup],
         currentGroupID: UUID?,
         loc: LocalizationManager,
-        validate: @escaping (String, Bool) -> String?,
-        onFinish: @escaping (SnippetModel?, UUID?) -> Void
+        persist: @escaping (SnippetModel, UUID?) -> SnippetEditorPersistenceReceipt,
+        onDismiss: @escaping () -> Void
     ) {
         self.existing = existing
         self.draft = draft
         self.groups = groups
         self.loc = loc
-        self.validate = validate
-        self.onFinish = onFinish
+        self.persist = persist
+        self.onDismiss = onDismiss
         self.initialGroupID = currentGroupID ?? groups.first?.id
         self.attachedImagePath = (existing ?? draft)?.imagePath ?? ""
+        self.secretModeDraft = SnippetSecretModeDraft(isSecret: (existing ?? draft)?.isSecret ?? false)
         // §1: never shown when editing an existing snippet, and the dismissal is
         // remembered across launches.
         self.guideVisible = (existing == nil) && !SnippetEditorGuideView.isDismissed
@@ -725,6 +731,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         // The task captures `self` weakly, so this is not a leak fix — it stops a model
         // request whose answer nothing will read from holding the adapter warm.
         suggestionTask?.cancel()
+        // Normally Cancel drains this before dismissal. This final best-effort pass covers app
+        // teardown after a failed compensation without ever staging anything new.
+        _ = resourceTransaction.cancel()
     }
 
     override func loadView() {
@@ -803,7 +812,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
         // Trigger (left) + Group (right), side by side
         let triggerCaption = caption(loc.s("editor.trigger"))
-        triggerField.placeholderAttributedString = placeholder("e.g. :eml")
+        triggerField.placeholderAttributedString = placeholder(loc.s("editor.trigger.placeholder"))
         triggerField.font = DevTypeTheme.mono(13, .medium)
         triggerField.stringValue = seed?.triggerKeyword ?? ""
         triggerField.delegate = self
@@ -891,6 +900,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         secretField.translatesAutoresizingMaskIntoConstraints = false
         secretField.font = DevTypeTheme.font(13, .regular)
         secretField.isHidden = !(seed?.isSecret ?? false)
+        secretField.setAccessibilityLabel(loc.s("editor.secret.toggle"))
+        secretField.setAccessibilityTitleUIElement(secretChip)
 
         let chipsRow = NSStackView(views: [enabledChip, caseChip, boundaryChip, plainChip, secretChip])
         // Suggestion chips are appended to this same row rather than given a row of their own:
@@ -1756,6 +1767,18 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     /// saves happily and then never fires; nothing used to say so.
     private func validateTriggerLive() {
         let trigger = triggerField.stringValue.trimmingCharacters(in: .whitespaces)
+        // Secrets are gesture-only and deliberately do not participate in typed matching.
+        // Switching modes must therefore release trigger validation without destroying the
+        // ordinary trigger draft the user may return to.
+        if secretChip?.isOn == true {
+            isTriggerValid = true
+            saveButton?.isEnabled = true
+            triggerStatusLabel.stringValue = ""
+            stage.setInvalid(false)
+            setError(nil)
+            setTriggerRule(loc.s("editor.secret.help"), isError: false)
+            return
+        }
         guard !trigger.isEmpty else {
             isTriggerValid = false
             saveButton?.isEnabled = false
@@ -1775,17 +1798,21 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             setTriggerRule(message, isError: true)
             return
         }
-        // Duplicate detection comes from the host's `validate` closure because it
-        // can exclude the snippet being edited. `SnippetStore.triggerConflicts()`
-        // reads the saved library only, so it would report this draft as
-        // colliding with its own stored copy.
-        if let conflict = validate(trigger, caseChip?.isOn ?? false) {
+        if let conflict = SnippetTriggerAuthoringValidator.conflict(
+            trigger: trigger,
+            caseSensitive: caseChip?.isOn ?? false,
+            requireWordBoundary: boundaryChip?.isOn ?? true,
+            enabled: enabledChip?.isOn ?? true,
+            excludingID: existing?.id,
+            groups: groups
+        ) {
+            let message = triggerConflictMessage(conflict)
             isTriggerValid = false
             saveButton?.isEnabled = false
             triggerStatusLabel.stringValue = ""
-            setError(conflict)
+            setError(message)
             stage.setInvalid(true)
-            setTriggerRule(loc.s("editor.error.duplicateLive"), isError: true)
+            setTriggerRule(message, isError: true)
         } else {
             isTriggerValid = true
             saveButton?.isEnabled = true
@@ -1803,6 +1830,23 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
                     loc: loc
                 ),
                 isError: false
+            )
+        }
+    }
+
+    private func triggerConflictMessage(_ conflict: SnippetStore.TriggerConflict) -> String {
+        switch conflict.kind {
+        case .emptyTrigger:
+            return loc.s("editor.error.emptyTrigger")
+        case .duplicateTrigger:
+            return loc.s("editor.error.conflict.duplicate", conflict.trigger)
+        case .caseShadow:
+            return loc.s("editor.error.conflict.caseShadow", conflict.trigger)
+        case .prefixShadow:
+            return loc.s(
+                "editor.error.conflict.prefixShadow",
+                conflict.trigger,
+                conflict.blockedTriggerSummary ?? triggerField.stringValue
             )
         }
     }
@@ -1882,6 +1926,18 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     /// §1: one click fills trigger *and* body, so the first thing a new user sees
     /// is a snippet that actually works.
     private func applyStarter(_ starter: SnippetStarterTemplate) {
+        guard !hasImage else {
+            confirmImageRemoval(
+                titleKey: "editor.image.removeConfirm.title",
+                messageKey: "editor.image.removeConfirm.message",
+                confirmKey: "editor.image.removeConfirm.confirm"
+            ) { [weak self] in
+                guard let self else { return }
+                self.clearImageDraft()
+                self.applyStarter(starter)
+            }
+            return
+        }
         triggerField.stringValue = starter.trigger
         if titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             titleField.stringValue = loc.s(starter.titleKey)
@@ -1890,9 +1946,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         lastTextLength = (replacementView.string as NSString).length
         placeholderRanges = []
         placeholderCursor = 0
-        // A starter is text; an attached image would hide it entirely.
-        pickedImageURL = nil
-        attachedImagePath = ""
         updateImageUI()
         triggerDidChange()
         view.window?.makeFirstResponder(replacementView)
@@ -2036,7 +2089,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.image]
-        panel.prompt = "Choose"
+        panel.prompt = loc.s("common.choose")
         guard let window = view.window else { return }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
@@ -2047,9 +2100,40 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     }
 
     @objc private func removeImage(_ sender: Any?) {
+        guard hasImage else { return }
+        confirmImageRemoval(
+            titleKey: "editor.image.removeConfirm.title",
+            messageKey: "editor.image.removeConfirm.message",
+            confirmKey: "editor.image.removeConfirm.confirm"
+        ) { [weak self] in
+            guard let self else { return }
+            self.clearImageDraft()
+            self.view.window?.makeFirstResponder(self.replacementView)
+        }
+    }
+
+    private func clearImageDraft() {
         pickedImageURL = nil
         attachedImagePath = ""
         updateImageUI()
+    }
+
+    private func confirmImageRemoval(
+        titleKey: String,
+        messageKey: String,
+        confirmKey: String,
+        onCancel: (() -> Void)? = nil,
+        onConfirm: @escaping () -> Void
+    ) {
+        DevTypeAlert.confirm(
+            title: loc.s(titleKey),
+            message: loc.s(messageKey),
+            confirmTitle: loc.s(confirmKey),
+            destructive: true,
+            window: view.window,
+            onCancel: onCancel,
+            onConfirm: onConfirm
+        )
     }
 
     private func updateImageUI() {
@@ -2073,11 +2157,59 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     // MARK: Actions
 
     @objc private func chipTapped(_ sender: ToggleChip) {
+        if sender === secretChip {
+            requestSecretModeTransition()
+            return
+        }
         sender.isOn.toggle()
         // Case sensitivity changes what counts as a conflict, and Word Boundary
         // changes the firing rule the guide explains — both re-run live.
-        if sender === caseChip || sender === boundaryChip { triggerDidChange() }
-        if sender === secretChip { applySecretVisibility() }
+        if sender === caseChip || sender === boundaryChip || sender === enabledChip {
+            triggerDidChange()
+        }
+    }
+
+    private func requestSecretModeTransition() {
+        switch SnippetSecretModeTransition.resolve(isSecret: secretChip.isOn, hasImage: hasImage) {
+        case .enable:
+            commitSecretMode(true)
+        case .disable:
+            commitSecretMode(false)
+        case .confirmImageRemoval:
+            confirmImageRemoval(
+                titleKey: "editor.secret.removeImage.title",
+                messageKey: "editor.secret.removeImage.message",
+                confirmKey: "editor.secret.removeImage.confirm",
+                onCancel: { [weak self] in
+                    self?.secretChip.isOn = false
+                },
+                onConfirm: { [weak self] in
+                    guard let self else { return }
+                    // This mutates only the sheet draft. The transaction retains the stored
+                    // attachment until the library save commits, and Cancel leaves it intact.
+                    self.clearImageDraft()
+                    self.commitSecretMode(true)
+                }
+            )
+        }
+    }
+
+    private func commitSecretMode(_ secret: Bool) {
+        replacementView.string = secretModeDraft.transition(
+            toSecret: secret,
+            currentReplacement: replacementView.string
+        )
+        lastTextLength = (replacementView.string as NSString).length
+        secretChip.isOn = secret
+        applySecretVisibility()
+        triggerDidChange()
+        scheduleTagSuggestion()
+        if secret {
+            view.window?.makeFirstResponder(secretField)
+        } else {
+            view.window?.makeFirstResponder(replacementView)
+            replacementView.setSelectedRange(NSRange(location: lastTextLength, length: 0))
+        }
     }
 
     func focusInitialField() {
@@ -2088,23 +2220,21 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         }
     }
 
-    @objc private func cancelTapped() { onFinish(nil, nil) }
+    @objc private func cancelTapped() {
+        switch resourceTransaction.cancel() {
+        case .clean:
+            onDismiss()
+        case .rollbackFailed:
+            showError(loc.s("editor.transaction.rollbackFailed"))
+        }
+    }
 
     /// A secret's value is typed into a secure field, never into the plain text view.
     ///
-    /// The text view is left in place but emptied and disabled: a value already typed there
-    /// before the toggle was flipped must not survive into the library, and the visible
-    /// transition is what tells the user where the value is now going.
+    /// The text view is hidden and disabled. `SnippetSecretModeDraft` owns its reversible draft;
+    /// this method changes presentation only and never destroys text or an attachment.
     private func applySecretVisibility() {
         let secret = secretChip?.isOn ?? false
-        // A secret and an image are mutually exclusive: `isImageSnippet` and the keychain lookup
-        // would each claim the snippet, and every consumer would pick a different winner. Turning
-        // Secret on drops the attachment, and the attach button is unavailable while it is on.
-        if secret, hasImage {
-            pickedImageURL = nil
-            attachedImagePath = ""
-            updateImageUI()
-        }
         imageButton?.isEnabled = !secret
         imageButton?.alphaValue = secret ? 0.4 : 1.0
         secretField.isHidden = !secret
@@ -2113,7 +2243,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         replacementScroll?.isHidden = secret
         replacementView.isEditable = !secret
         if secret {
-            replacementView.string = ""
             view.window?.makeFirstResponder(secretField)
         }
         refreshPreview()
@@ -2136,8 +2265,15 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             return
         }
         let caseSensitive = caseChip.isOn
-        if requiresTrigger, let conflict = validate(trigger, caseSensitive) {
-            showError(conflict)
+        if requiresTrigger, let conflict = SnippetTriggerAuthoringValidator.conflict(
+            trigger: trigger,
+            caseSensitive: caseSensitive,
+            requireWordBoundary: boundaryChip.isOn,
+            enabled: enabledChip.isOn,
+            excludingID: existing?.id,
+            groups: groups
+        ) {
+            showError(triggerConflictMessage(conflict))
             return
         }
 
@@ -2166,7 +2302,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             triggerKeyword: trigger,
             replacementText: replacement
         )
-        snippet.title = title.isEmpty ? Self.derivedTitle(from: replacement) : title
+        snippet.title = title.isEmpty
+            ? Self.derivedTitle(from: replacement, localization: loc)
+            : title
         snippet.triggerKeyword = trigger
 
         // Tags are rebuilt from the chips rather than appended to, so switching one off
@@ -2186,27 +2324,11 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         snippet.excludeApps = appScope.excludeApps
 
         if hasImage {
-            if let picked = pickedImageURL {
-                // Copy the picked file into the attachment store.
-                do {
-                    let stored = try ImageAttachmentStore.shared.importImage(from: picked)
-                    if let old = existing?.imagePath, !old.isEmpty, old != stored {
-                        ImageAttachmentStore.shared.deleteImage(path: old)
-                    }
-                    snippet.imagePath = stored
-                } catch {
-                    showError(error.localizedDescription)
-                    return
-                }
-            } else {
-                snippet.imagePath = attachedImagePath
-            }
+            // A picked file is copied by `SnippetEditTransaction`; until the host library save
+            // lands, the old stored attachment remains intact and this model carries no path.
+            snippet.imagePath = pickedImageURL == nil ? attachedImagePath : ""
             snippet.replacementText = ""
         } else {
-            // Image removed (or never attached): drop any stored attachment.
-            if let old = existing?.imagePath, !old.isEmpty {
-                ImageAttachmentStore.shared.deleteImage(path: old)
-            }
             snippet.imagePath = ""
             // Unreachable with an empty body: the guard above refused it (or a secret
             // is on, and `applySecret` overwrites this below).
@@ -2219,59 +2341,79 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         snippet.enabled = enabledChip.isOn
         snippet.aiTransform = selectedAITransform
 
-        if !applySecret(to: &snippet) { return }
+        let secretIntent: SnippetEditSecretIntent
+        let wantsSecret = secretChip?.isOn ?? false
+        let typedSecret = secretField.stringValue
+        if wantsSecret {
+            snippet.isSecret = true
+            snippet.replacementText = ""
+            snippet.imagePath = ""
+            if typedSecret.isEmpty {
+                guard existing?.isSecret == true,
+                      SecretStore.shared.hasSecret(for: snippet.id) else {
+                    showError(loc.s("editor.secret.placeholder"))
+                    view.window?.makeFirstResponder(secretField)
+                    return
+                }
+                secretIntent = .unchanged
+            } else {
+                secretIntent = .set(typedSecret)
+            }
+        } else {
+            snippet.isSecret = false
+            secretIntent = .remove
+        }
 
         snippet.updatedAt = Date()
-        onFinish(snippet, selectedGroupID)
-    }
-
-    /// Route the value to the keychain (or back out of it), returning false to abort the save.
-    ///
-    /// Ordering matters and is the whole point: the keychain write happens *before* the snippet is
-    /// handed on, so a refused write (locked keychain, denied prompt) stops the save instead of
-    /// producing a snippet that claims to hold a secret it never stored. The reverse direction —
-    /// un-ticking Secret — deletes the stored value rather than orphaning it.
-    private func applySecret(to snippet: inout SnippetModel) -> Bool {
-        let wantsSecret = secretChip?.isOn ?? false
-        let typed = secretField.stringValue
-
-        guard wantsSecret else {
-            if existing?.isSecret == true { SecretStore.shared.remove(for: snippet.id) }
-            snippet.isSecret = false
-            return true
-        }
-
-        snippet.isSecret = true
-        // The value never round-trips through the model, so a secret snippet's
-        // `replacementText` is empty from here on — including in the copy handed to listeners.
-        snippet.replacementText = ""
-
-        if typed.isEmpty {
-            // Untouched field on an existing secret: keep what is stored. On a *new* secret it
-            // means there is nothing to store, which is a snippet that would paste nothing.
-            if existing?.isSecret == true, SecretStore.shared.hasSecret(for: snippet.id) {
-                return true
-            }
-            showError(loc.s("editor.secret.placeholder"))
-            view.window?.makeFirstResponder(secretField)
-            return false
-        }
-
-        switch SecretStore.shared.store(typed, for: snippet.id) {
-        case .success:
-            // Clear the field so the value does not sit in a live NSSecureTextField after save.
+        switch resourceTransaction.save(
+            snippet: snippet,
+            existing: existing,
+            pickedImageURL: pickedImageURL,
+            secretIntent: secretIntent,
+            groupID: selectedGroupID,
+            persist: persist
+        ) {
+        case .committed:
             secretField.stringValue = ""
-            return true
-        case .failure(let failure):
-            let detail = failure.status.map(String.init) ?? "—"
+            onDismiss()
+        case .committedWithWarning:
+            secretField.stringValue = ""
             DevTypeAlert.present(
-                title: loc.s("secret.saveFailed.title"),
-                message: loc.s("secret.saveFailed.message", detail),
+                title: loc.s("editor.transaction.commitWarning.title"),
+                message: loc.s("editor.transaction.commitWarning.message"),
                 style: .warning,
                 buttons: [loc.s("common.ok")],
                 handler: nil
             )
-            return false
+            onDismiss()
+        case .failed(let failure):
+            showError(transactionMessage(for: failure))
+        }
+    }
+
+    private func transactionMessage(for failure: SnippetEditTransactionFailure) -> String {
+        switch failure {
+        case .imageStaging:
+            return loc.s("editor.transaction.imageStageFailed")
+        case .secretRead:
+            return loc.s("editor.transaction.secretReadFailed")
+        case .secretWrite:
+            return loc.s("editor.transaction.secretWriteFailed")
+        case .persistence(let outcome):
+            switch outcome {
+            case .saved:
+                return loc.s("editor.transaction.saveFailed")
+            case .blockedByNewerSchema:
+                return loc.s("editor.transaction.newerSchema")
+            case .blockedByRemoteChange:
+                return loc.s("editor.transaction.remoteChange")
+            case .failed:
+                return loc.s("editor.transaction.saveFailed")
+            }
+        case .commitCleanup:
+            return loc.s("editor.transaction.cleanupFailed")
+        case .rollback:
+            return loc.s("editor.transaction.rollbackFailed")
         }
     }
 
@@ -2286,9 +2428,12 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         triggerField.layer?.add(animation, forKey: "devtype.shake")
     }
 
-    /// A blank Title used to save as "Untitled". Deriving the first line of the
-    /// replacement (or the trigger) makes the manager list self-explanatory.
-    static func derivedTitle(from replacement: String) -> String {
-        SnippetEditorSheet.derivedTitle(from: replacement)
+    /// Derive a visible name from the first non-blank body line; content-free secret/image
+    /// snippets use the localized untitled fallback.
+    static func derivedTitle(
+        from replacement: String,
+        localization loc: LocalizationManager = .shared
+    ) -> String {
+        SnippetEditorSheet.derivedTitle(from: replacement, localization: loc)
     }
 }

@@ -423,6 +423,26 @@ final class BiometricGateTests: XCTestCase {
         XCTAssertEqual(outcome, .authorized, "An in-flight evaluation must not be cancelled by invalidate()")
     }
 
+    func testAnAuthorizationCompletedAfterInvalidationDoesNotReopenTheReuseWindow() {
+        var replies: [((Bool, Error?) -> Void)] = []
+        let authenticator = LocalAuthenticationAuthenticator(
+            availabilityProbe: { .biometry("Touch ID") },
+            evaluator: { _, _, _, completion in replies.append(completion) }
+        )
+        let gate = BiometricGate(authenticator: authenticator, clock: { self.now })
+
+        var outcomes: [BiometricGate.Outcome] = []
+        gate.authorize(reason: "first") { outcomes.append($0) }
+        gate.invalidate()
+        replies[0](true, nil)
+
+        gate.authorize(reason: "second") { outcomes.append($0) }
+
+        XCTAssertEqual(replies.count, 2, "A stale success after backgrounding must not seed reuse")
+        replies[1](true, nil)
+        XCTAssertEqual(outcomes, [.authorized, .authorized])
+    }
+
     func testEveryEvaluationUsesAFreshLAContext() {
         var contexts: [LAContext] = []
         let authenticator = LocalAuthenticationAuthenticator(

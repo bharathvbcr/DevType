@@ -16,16 +16,28 @@ public enum SpeechAuthorization {
         case authorized
         /// The user has not been asked yet. Only `request()` may change this.
         case notDetermined
-        /// Denied or restricted by policy; a prompt will not help.
-        case unavailable
+        /// The user denied access. A second prompt will not appear; Settings is the recovery path.
+        case denied
+        /// Device-management or parental policy prevents access.
+        case restricted
+
+        public var diagnosticLabel: String {
+            switch self {
+            case .authorized: return "authorized"
+            case .notDetermined: return "notDetermined"
+            case .denied: return "denied"
+            case .restricted: return "restricted"
+            }
+        }
     }
 
     public static func status() -> Status {
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized: return .authorized
         case .notDetermined: return .notDetermined
-        case .denied, .restricted: return .unavailable
-        @unknown default: return .unavailable
+        case .denied: return .denied
+        case .restricted: return .restricted
+        @unknown default: return .restricted
         }
     }
 

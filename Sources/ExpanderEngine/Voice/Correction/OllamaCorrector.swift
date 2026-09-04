@@ -27,10 +27,16 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
     }
 
     public func probe() async -> ProviderReadiness {
-        var req = URLRequest(url: endpointURL.deletingLastPathComponent().appendingPathComponent("tags"))
-        req.timeoutInterval = 2.0
+        let endpoint = endpointURL
+        guard LocalEndpointSecurity.isValid(endpoint) else {
+            return .requiresConfiguration(.invalidEndpointFormat)
+        }
         do {
-            let (_, response) = try await URLSession.shared.data(for: req)
+            let req = try Self.probeRequest(endpoint: endpoint)
+            let (_, response) = try await LocalEndpointSecurity.data(
+                for: req,
+                maximumResponseBytes: LocalEndpointSecurity.maximumReadinessResponseBytes
+            )
             if let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
                 let evidence = ProviderEvidence(
                     providerID: descriptor.id,
@@ -48,33 +54,25 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
     }
 
     public func correct(_ request: CorrectionRequest) async throws -> CorrectionCandidate {
+        let endpoint = endpointURL
+        guard LocalEndpointSecurity.isValid(endpoint) else {
+            throw VoiceFailure(
+                stage: .correction,
+                code: .endpointUnreachable,
+                providerID: descriptor.id,
+                retryClass: .afterUserAction,
+                artifactState: .durable,
+                userAction: .configureEndpoint,
+                redactedDetail: "Ollama refused a non-loopback endpoint"
+            )
+        }
         let startTime = Date()
+        let urlRequest = try Self.correctionRequest(request, endpoint: endpoint, model: modelName)
 
-        let systemInstruction = CorrectionPromptBuilder.systemPrompt(
-            policy: request.policy,
-            protectedSpans: request.protectedSpans,
-            locale: request.locale
+        let (data, response) = try await LocalEndpointSecurity.data(
+            for: urlRequest,
+            maximumResponseBytes: LocalEndpointSecurity.maximumCorrectionResponseBytes
         )
-
-        let prompt = systemInstruction + "\n\n" + CorrectionPromptBuilder.userPrompt(rawTranscript: request.rawTranscript)
-
-        let body: [String: Any] = [
-            "model": modelName,
-            "prompt": prompt,
-            "stream": false,
-            "options": [
-                "temperature": 0.0,
-                "num_predict": 1024
-            ]
-        ]
-
-        var urlRequest = URLRequest(url: endpointURL)
-        urlRequest.httpMethod = "POST"
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.timeoutInterval = max(1.0, request.deadline.timeIntervalSince(Date()))
-        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw VoiceFailure(
                 stage: .correction,
@@ -84,12 +82,8 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
             )
         }
 
-        struct OllamaResponse: Codable {
-            let response: String
-        }
-
-        let parsed = try JSONDecoder().decode(OllamaResponse.self, from: data)
-        var cleaned = parsed.response.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cleaned = try Self.responseText(from: data, endpoint: endpoint)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Strip enclosing quotes if model added them
         if cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"") && cleaned.count >= 2 {
@@ -113,4 +107,86 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
     }
 
     public func cancel(sessionID: VoiceSessionID) async {}
+
+    static func probeRequest(endpoint: URL) throws -> URLRequest {
+        let route = try LocalCorrectionEndpointRoute.resolve(endpoint)
+        guard route.isOllamaNative else {
+            throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath
+        }
+        var request = URLRequest(url: route.readinessURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 2.0
+        return request
+    }
+
+    static func correctionRequest(
+        _ request: CorrectionRequest,
+        endpoint: URL,
+        model: String
+    ) throws -> URLRequest {
+        let route = try LocalCorrectionEndpointRoute.resolve(endpoint)
+        guard route.isOllamaNative else {
+            throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath
+        }
+
+        let systemInstruction = CorrectionPromptBuilder.systemPrompt(
+            policy: request.policy,
+            protectedSpans: request.protectedSpans,
+            locale: request.locale
+        )
+        let userInstruction = CorrectionPromptBuilder.userPrompt(rawTranscript: request.rawTranscript)
+
+        let body: [String: Any]
+        switch route.api {
+        case .ollamaChat:
+            body = [
+                "model": model,
+                "messages": [
+                    ["role": "system", "content": systemInstruction],
+                    ["role": "user", "content": userInstruction]
+                ],
+                "stream": false,
+                "options": [
+                    "temperature": 0.0,
+                    "num_predict": 1024
+                ]
+            ]
+        case .ollamaGenerate:
+            body = [
+                "model": model,
+                "prompt": systemInstruction + "\n\n" + userInstruction,
+                "stream": false,
+                "options": [
+                    "temperature": 0.0,
+                    "num_predict": 1024
+                ]
+            ]
+        case .openAIChatCompletions:
+            throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath
+        }
+
+        var urlRequest = URLRequest(url: route.correctionURL)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.timeoutInterval = max(1.0, request.deadline.timeIntervalSince(Date()))
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return urlRequest
+    }
+
+    static func responseText(from data: Data, endpoint: URL) throws -> String {
+        let route = try LocalCorrectionEndpointRoute.resolve(endpoint)
+        switch route.api {
+        case .ollamaChat:
+            struct ChatResponse: Decodable {
+                struct Message: Decodable { let content: String }
+                let message: Message
+            }
+            return try JSONDecoder().decode(ChatResponse.self, from: data).message.content
+        case .ollamaGenerate:
+            struct GenerateResponse: Decodable { let response: String }
+            return try JSONDecoder().decode(GenerateResponse.self, from: data).response
+        case .openAIChatCompletions:
+            throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath
+        }
+    }
 }

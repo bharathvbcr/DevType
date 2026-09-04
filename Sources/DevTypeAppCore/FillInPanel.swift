@@ -6,6 +6,10 @@ private final class KeyablePanel: NSPanel {
     override var canBecomeMain: Bool { true }
 }
 
+private final class FillInFlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 private final class PanelCloseWatcher: NSObject, NSWindowDelegate {
     private let onClose: () -> Void
     init(onClose: @escaping () -> Void) { self.onClose = onClose }
@@ -148,7 +152,13 @@ private final class FillInFormController: NSViewController {
     private var popups: [Int: NSPopUpButton] = [:]
     private var toggles: [Int: NSSwitch] = [:]
 
-    var preferredSize: NSSize { NSSize(width: 460, height: min(540, max(220, 150 + fields.count * 58))) }
+    var preferredSize: NSSize {
+        let fieldHeight = fields.reduce(0) { total, field in
+            total + (field.kind == .area ? 112 : 54)
+        }
+        let spacing = max(0, fields.count - 1) * 12
+        return NSSize(width: 460, height: min(540, max(240, 150 + fieldHeight + spacing)))
+    }
 
     init(
         title: String,
@@ -198,7 +208,9 @@ private final class FillInFormController: NSViewController {
         root.addSubview(badge)
         root.addSubview(headerText)
 
-        // Field stack
+        // Field stack. Valid snippets can contain many fill-ins and multiline rows are taller
+        // than single-line rows, so the form body scrolls independently while its title and
+        // Insert/Cancel actions remain reachable.
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = 12
@@ -211,7 +223,20 @@ private final class FillInFormController: NSViewController {
         // §4: name the form container; each control inside is labelled below.
         stack.setAccessibilityRole(NSAccessibility.Role.group)
         stack.setAccessibilityLabel(loc.s("ax.fillin.form"))
-        root.addSubview(stack)
+
+        let document = FillInFlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(stack)
+
+        let formScroll = NSScrollView()
+        formScroll.translatesAutoresizingMaskIntoConstraints = false
+        formScroll.hasVerticalScroller = true
+        formScroll.autohidesScrollers = true
+        formScroll.hasHorizontalScroller = false
+        formScroll.borderType = .noBorder
+        formScroll.drawsBackground = false
+        formScroll.documentView = document
+        root.addSubview(formScroll)
 
         // Buttons
         let hairline = DevTypeTheme.makeHairline()
@@ -242,10 +267,16 @@ private final class FillInFormController: NSViewController {
             headerText.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
             headerText.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -20),
 
-            stack.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 16),
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: hairline.topAnchor, constant: -12),
+            formScroll.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 16),
+            formScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            formScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            formScroll.bottomAnchor.constraint(equalTo: hairline.topAnchor, constant: -12),
+
+            document.widthAnchor.constraint(equalTo: formScroll.contentView.widthAnchor),
+            stack.topAnchor.constraint(equalTo: document.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
 
             hairline.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             hairline.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
@@ -349,7 +380,10 @@ private final class FillInFormController: NSViewController {
                 scroll.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor, constant: -3),
                 scroll.bottomAnchor.constraint(equalTo: editorContainer.bottomAnchor, constant: -3),
                 editorContainer.widthAnchor.constraint(equalToConstant: 400),
-                editorContainer.heightAnchor.constraint(equalToConstant: 84)
+                // The 3 pt chrome inset on each edge leaves an 82 pt text viewport. Keep the
+                // editable region comfortably above the 80 pt usability floor rather than
+                // measuring only the decorative container.
+                editorContainer.heightAnchor.constraint(equalToConstant: 88)
             ])
             container.addArrangedSubview(editorContainer)
         case .popup(let options):

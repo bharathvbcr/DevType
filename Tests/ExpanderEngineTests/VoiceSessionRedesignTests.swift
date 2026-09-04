@@ -4,6 +4,39 @@ import AVFoundation
 
 final class VoiceSessionRedesignTests: XCTestCase {
 
+    func testCorrectionFallbackPlanRoundTripsAndLegacySnapshotDecodesEmpty() throws {
+        let snapshot = VoiceSessionSnapshot(
+            speechProvider: SpeechProviderDescriptor(
+                id: "speech",
+                displayName: "Speech",
+                modelVersion: "1",
+                privacyRoute: .onDeviceOnly
+            ),
+            correctionProvider: CorrectionProviderDescriptor(
+                id: VoiceSessionSnapshotFactory.ProviderID.appleFoundationModels,
+                displayName: "Apple Intelligence",
+                modelVersion: "1",
+                privacyRoute: .onDeviceOnly
+            ),
+            correctionFallbackProviderIDs: [
+                VoiceSessionSnapshotFactory.ProviderID.openAICompatibleCorrector
+            ],
+            privacyRoute: .localNetworkOnly,
+            targetLease: TargetLease(bundleIdentifier: "com.example.Target", processIdentifier: 42)
+        )
+
+        let encoded = try JSONEncoder().encode(snapshot)
+        XCTAssertEqual(try JSONDecoder().decode(VoiceSessionSnapshot.self, from: encoded), snapshot)
+
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "correctionFallbackProviderIDs")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let decodedLegacy = try JSONDecoder().decode(VoiceSessionSnapshot.self, from: legacyData)
+        XCTAssertEqual(decodedLegacy.correctionFallbackProviderIDs, [])
+    }
+
     // MARK: - Reducer Tests
 
     func testReducerHappyPath() {
@@ -80,6 +113,30 @@ final class VoiceSessionRedesignTests: XCTestCase {
         case .success:
             XCTFail("Should have failed on stale generation")
         }
+    }
+
+    func testMissingRawCorrectionCandidateUsesCompleteTerminalCommandPath() throws {
+        let snapshot = VoiceFixtures.snapshot()
+        var state = VoiceSessionState(snapshot: snapshot, phase: .correcting)
+        let candidate = CorrectionCandidate(
+            text: "must-not-enter-diagnostics",
+            providerID: "stub.corrector",
+            modelVersion: "1"
+        )
+
+        let commands = try VoiceSessionReducer.reduce(
+            state: &state,
+            event: .correctionCandidateReceived(candidate),
+            eventGeneration: snapshot.generation
+        ).get()
+
+        guard case .failed(let failure) = state.phase else {
+            return XCTFail("Missing raw transcript must terminally fail the session")
+        }
+        XCTAssertEqual(failure.stage, .correctionValidation)
+        XCTAssertTrue(commands.contains(.notifyHUD(phase: .failed(failure))))
+        XCTAssertTrue(commands.contains(.persistManifest(phase: .failed(failure))))
+        XCTAssertTrue(commands.contains(.cleanupResources))
     }
 
     func testReducerDeliversRawFallbackWithoutInventingCandidate() {

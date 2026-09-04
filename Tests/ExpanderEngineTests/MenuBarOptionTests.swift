@@ -142,14 +142,29 @@ final class MenuBarOptionTests: XCTestCase {
         )
     }
 
-    /// Both reporting surfaces must consult the switch: the editor's live duplicate validation
-    /// and the store's library-health report.
+    /// Both reporting surfaces must consult the switch. Editor hosts may not substitute their own
+    /// partial validator (or a permissive closure); one canonical owner applies the preference and
+    /// delegates exact, case-folded, and prefix semantics to the pure store detector.
     func testReportingSurfacesConsultThePreference() throws {
-        let manager = try appSource("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        let transaction = try appSource("Sources/DevTypeAppCore/SnippetEditTransaction.swift")
         XCTAssertTrue(
-            manager.contains("guard SnippetStore.isConflictDetectionEnabled else { return nil }"),
-            "The editor's duplicate validation must honour the switch."
+            transaction.contains("detectionEnabled: Bool = SnippetStore.isConflictDetectionEnabled"),
+            "The editor's canonical validator must honour the global switch."
         )
+        let editor = try appSource("Sources/DevTypeAppCore/SnippetEditorSheet.swift")
+        XCTAssertTrue(editor.contains("SnippetTriggerAuthoringValidator.conflict("))
+        XCTAssertFalse(editor.contains("validate: @escaping"))
+
+        for path in [
+            "Sources/DevTypeAppCore/AppDelegate.swift",
+            "Sources/DevTypeAppCore/HomeViewController.swift",
+            "Sources/DevTypeAppCore/SnippetManagerViewController.swift",
+        ] {
+            XCTAssertFalse(
+                try appSource(path).contains("validate: { _, _ in nil }"),
+                "\(path) must not bypass canonical trigger validation."
+            )
+        }
         let store = try appSource("Sources/ExpanderEngine/Models/SnippetStore.swift")
         XCTAssertTrue(
             store.contains("guard Self.isConflictDetectionEnabled else { return [] }"),

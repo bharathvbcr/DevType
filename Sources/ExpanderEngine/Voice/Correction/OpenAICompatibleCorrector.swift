@@ -26,10 +26,16 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
     }
 
     public func probe() async -> ProviderReadiness {
-        var req = URLRequest(url: endpointURL.deletingLastPathComponent().appendingPathComponent("models"))
-        req.timeoutInterval = 2.0
+        let endpoint = endpointURL
+        guard LocalEndpointSecurity.isValid(endpoint) else {
+            return .requiresConfiguration(.invalidEndpointFormat)
+        }
         do {
-            let (_, response) = try await URLSession.shared.data(for: req)
+            let req = try Self.probeRequest(endpoint: endpoint)
+            let (_, response) = try await LocalEndpointSecurity.data(
+                for: req,
+                maximumResponseBytes: LocalEndpointSecurity.maximumReadinessResponseBytes
+            )
             if let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
                 let evidence = ProviderEvidence(
                     providerID: descriptor.id,
@@ -47,31 +53,25 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
     }
 
     public func correct(_ request: CorrectionRequest) async throws -> CorrectionCandidate {
+        let endpoint = endpointURL
+        guard LocalEndpointSecurity.isValid(endpoint) else {
+            throw VoiceFailure(
+                stage: .correction,
+                code: .endpointUnreachable,
+                providerID: descriptor.id,
+                retryClass: .afterUserAction,
+                artifactState: .durable,
+                userAction: .configureEndpoint,
+                redactedDetail: "OpenAI-compatible correction refused a non-loopback endpoint"
+            )
+        }
         let startTime = Date()
+        let urlRequest = try Self.correctionRequest(request, endpoint: endpoint, model: modelName)
 
-        let systemInstruction = CorrectionPromptBuilder.systemPrompt(
-            policy: request.policy,
-            protectedSpans: request.protectedSpans,
-            locale: request.locale
+        let (data, response) = try await LocalEndpointSecurity.data(
+            for: urlRequest,
+            maximumResponseBytes: LocalEndpointSecurity.maximumCorrectionResponseBytes
         )
-
-        let body: [String: Any] = [
-            "model": modelName,
-            "messages": [
-                ["role": "system", "content": systemInstruction],
-                ["role": "user", "content": CorrectionPromptBuilder.userPrompt(rawTranscript: request.rawTranscript)]
-            ],
-            "temperature": 0.0,
-            "max_tokens": 1024
-        ]
-
-        var urlRequest = URLRequest(url: endpointURL)
-        urlRequest.httpMethod = "POST"
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.timeoutInterval = max(1.0, request.deadline.timeIntervalSince(Date()))
-        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw VoiceFailure(
                 stage: .correction,
@@ -81,27 +81,8 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
             )
         }
 
-        struct ChatCompletionResponse: Codable {
-            struct Choice: Codable {
-                struct Message: Codable {
-                    let content: String
-                }
-                let message: Message
-            }
-            let choices: [Choice]
-        }
-
-        let parsed = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
-        guard let firstChoice = parsed.choices.first else {
-            throw VoiceFailure(
-                stage: .correction,
-                code: .speechProtocolViolation,
-                providerID: descriptor.id,
-                redactedDetail: "No completion choices returned"
-            )
-        }
-
-        var cleaned = firstChoice.message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cleaned = try Self.responseText(from: data)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"") && cleaned.count >= 2 {
             cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -123,4 +104,69 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
     }
 
     public func cancel(sessionID: VoiceSessionID) async {}
+
+    static func probeRequest(endpoint: URL) throws -> URLRequest {
+        let route = try LocalCorrectionEndpointRoute.resolve(endpoint)
+        guard route.api == .openAIChatCompletions else {
+            throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath
+        }
+        var request = URLRequest(url: route.readinessURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 2.0
+        return request
+    }
+
+    static func correctionRequest(
+        _ request: CorrectionRequest,
+        endpoint: URL,
+        model: String
+    ) throws -> URLRequest {
+        let route = try LocalCorrectionEndpointRoute.resolve(endpoint)
+        guard route.api == .openAIChatCompletions else {
+            throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath
+        }
+
+        let systemInstruction = CorrectionPromptBuilder.systemPrompt(
+            policy: request.policy,
+            protectedSpans: request.protectedSpans,
+            locale: request.locale
+        )
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": systemInstruction],
+                ["role": "user", "content": CorrectionPromptBuilder.userPrompt(rawTranscript: request.rawTranscript)]
+            ],
+            "temperature": 0.0,
+            "max_tokens": 1024
+        ]
+
+        var urlRequest = URLRequest(url: route.correctionURL)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.timeoutInterval = max(1.0, request.deadline.timeIntervalSince(Date()))
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return urlRequest
+    }
+
+    static func responseText(from data: Data) throws -> String {
+        struct ChatCompletionResponse: Decodable {
+            struct Choice: Decodable {
+                struct Message: Decodable { let content: String }
+                let message: Message
+            }
+            let choices: [Choice]
+        }
+
+        let parsed = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
+        guard let firstChoice = parsed.choices.first else {
+            throw VoiceFailure(
+                stage: .correction,
+                code: .speechProtocolViolation,
+                providerID: "openaicompatible.corrector",
+                redactedDetail: "No completion choices returned"
+            )
+        }
+        return firstChoice.message.content
+    }
 }
