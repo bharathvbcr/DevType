@@ -3,11 +3,6 @@ import ExpanderEngine
 
 /// Sheet listing AI + general snippet templates. Selecting a row opens the editor pre-filled.
 enum SnippetTemplatePanel {
-    private final class KeyablePanel: NSPanel {
-        override var canBecomeKey: Bool { true }
-        override var canBecomeMain: Bool { false }
-    }
-
     private static var activePanel: NSPanel?
     private static var activeController: SnippetTemplateController?
 
@@ -26,6 +21,10 @@ enum SnippetTemplatePanel {
             backing: .buffered,
             defer: false
         )
+        // Usually presented with `beginSheet`, so the host window stays main; taking
+        // main-window status here is what the private subclass declined, and this
+        // preserves it on both the sheet and the standalone path.
+        panel.takesMainWindowStatus = false
         DevTypeTheme.styleFloatingPanel(panel)
 
         let controller = SnippetTemplateController(

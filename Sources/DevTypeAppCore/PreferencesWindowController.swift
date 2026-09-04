@@ -968,10 +968,6 @@ final class PreferencesWindowController: NSWindowController {
 
 // MARK: - Flipped scroll document
 
-private final class PrefsFlippedView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 /// Marker views let the shared card stack stretch rows and table areas while
 /// preserving intrinsic widths for individual controls and buttons.
 private final class PreferenceRowView: NSView {}
@@ -1705,7 +1701,7 @@ final class PreferencesViewController: NSViewController,
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
 
-        let document = PrefsFlippedView()
+        let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = document
 

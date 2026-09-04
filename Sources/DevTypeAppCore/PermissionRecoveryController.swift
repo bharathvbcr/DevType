@@ -1,11 +1,6 @@
 import AppKit
 import ExpanderEngine
 
-/// Flipped document so the recovery stack lays out top-to-bottom in the scroll view.
-private final class FlippedDocumentView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 /// Canonical Recovery window geometry shared by presentation and rendered regression tests.
 /// `contentMinSize` keeps both tabs usable while still allowing the status pane to scroll.
 enum PermissionRecoveryWindowLayout {
@@ -139,7 +134,7 @@ final class PermissionRecoveryController: NSViewController {
         scrollView.drawsBackground = false
         statusScrollView = scrollView
 
-        let document = FlippedDocumentView()
+        let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
         scrollView.documentView = document
 

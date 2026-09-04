@@ -22,11 +22,6 @@ import ExpanderEngine
 
 enum MacroPalettePanel {
 
-    private final class KeyablePanel: NSPanel {
-        override var canBecomeKey: Bool { true }
-        override var canBecomeMain: Bool { false }
-    }
-
     private static var activePanel: NSPanel?
     private static var activeController: MacroPaletteController?
     private static var activeHost: NSWindow?
@@ -50,6 +45,9 @@ enum MacroPalettePanel {
             backing: .buffered,
             defer: false
         )
+        // Presented with `beginSheet`, so the host window stays main; taking main-window
+        // status here is what the private subclass declined, and this preserves it.
+        panel.takesMainWindowStatus = false
         DevTypeTheme.styleFloatingPanel(panel)
         // `styleFloatingPanel` raises the level for free-floating palettes; a
         // sheet must sit at normal level or it detaches from its host.
