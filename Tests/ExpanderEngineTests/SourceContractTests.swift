@@ -905,6 +905,29 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(chrome.contains("contentView.heightAnchor.constraint(equalToConstant: size.height)"))
     }
 
+    /// The only reachable doorway to the interactive keychain pass. `migrateLegacy` repairs every
+    /// account needing authorization, but `SecretMenuFlow` gates on snippet UUIDs, so without this
+    /// control an unreadable master key has a repair nothing can invoke.
+    func testPreferencesOffersTheSecretStorageRepair() throws {
+        let prefs = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        XCTAssertTrue(
+            prefs.contains("#selector(repairSecretStorage)"),
+            "The maintenance card must wire the repair action."
+        )
+        XCTAssertTrue(
+            prefs.contains("SecretStore.shared.accountsNeedingAuthorizationCount()"),
+            "Gate on the unfiltered count; the snippet-filtered set is what hid the master key."
+        )
+        XCTAssertTrue(
+            prefs.contains("SecretStore.shared.migrateLegacy(allowInteraction: true)"),
+            "The repair has to run the interactive pass; a silent one cannot fix a re-partitioned ACL."
+        )
+        XCTAssertTrue(
+            prefs.contains("prefs.advanced.secretRepair.message"),
+            "The dialog count must be explained before any system prompt appears."
+        )
+    }
+
     /// The AI preview panel animates its frame in, so it cannot take the lock; its one free-form
     /// label (the error line) has to bound itself instead.
     func testAnimatedPreviewPanelBoundsItsErrorLabel() throws {

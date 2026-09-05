@@ -1158,6 +1158,7 @@ final class PreferencesViewController: NSViewController,
         wrapping: true
     )
     private var secretCleanupButton: NSButton?
+    private var repairSecretStorageButton: NSButton?
 
     // AI
     private let aiEnabledSwitch = NSSwitch()
@@ -4542,6 +4543,17 @@ final class PreferencesViewController: NSViewController,
             action: #selector(retrySecretCleanup)
         )
         secretCleanupButton = retrySecretCleanupButton
+        // The one place a user can ask for the interactive keychain pass. `migrateLegacy` already
+        // repairs every account needing authorization, but its only other caller gates on snippet
+        // IDs, so an unreadable master key had no reachable repair at all.
+        let repairButton = CapsuleButton(
+            title: loc.s("prefs.advanced.secretRepair"),
+            symbol: "wrench.and.screwdriver",
+            style: .secondary,
+            target: self,
+            action: #selector(repairSecretStorage)
+        )
+        repairSecretStorageButton = repairButton
         let maintenanceButtons = NSStackView(views: [
             CapsuleButton(
                 title: loc.s("prefs.advanced.orphans"),
@@ -4551,6 +4563,7 @@ final class PreferencesViewController: NSViewController,
                 action: #selector(collectOrphans)
             ),
             retrySecretCleanupButton,
+            repairButton,
             CapsuleButton(
                 title: loc.s("prefs.advanced.reset"),
                 symbol: "arrow.counterclockwise",
@@ -4615,6 +4628,44 @@ final class PreferencesViewController: NSViewController,
             ? loc.s("prefs.advanced.orphans.none")
             : loc.s("prefs.advanced.orphans.result", removed.count)
         maintenanceStatus.textColor = DevTypeTheme.statusGreen
+    }
+
+    /// Offers the one-time system password dialogs, then runs the only interactive keychain pass
+    /// in the app. Explained first and never automatic: a keychain prompt the user did not ask for
+    /// is exactly what `SecretMenuFlow` refuses to produce.
+    @objc private func repairSecretStorage() {
+        let pending = SecretStore.shared.accountsNeedingAuthorizationCount()
+        guard pending > 0 else {
+            maintenanceStatus.stringValue = loc.s("prefs.advanced.secretRepair.none")
+            maintenanceStatus.textColor = DevTypeTheme.statusGreen
+            return
+        }
+        DevTypeAlert.present(
+            title: loc.s("prefs.advanced.secretRepair.title"),
+            message: loc.s("prefs.advanced.secretRepair.message", "\(pending)"),
+            buttons: [loc.s("secret.migrate.continue"), loc.s("common.cancel")]
+        ) { [weak self] index in
+            guard let self, index == 0 else { return }
+            self.repairSecretStorageButton?.isEnabled = false
+            self.maintenanceStatus.stringValue = self.loc.s("prefs.advanced.secretRepair.running")
+            self.maintenanceStatus.textColor = DevTypeTheme.textSecondary
+            let summary = SecretStore.shared.migrateLegacy(allowInteraction: true)
+            self.repairSecretStorageButton?.isEnabled = true
+            let outstanding = summary.needsUser + summary.failed
+            if outstanding > 0 {
+                self.maintenanceStatus.stringValue = self.loc.s(
+                    "prefs.advanced.secretRepair.partial",
+                    "\(outstanding)"
+                )
+                self.maintenanceStatus.textColor = DevTypeTheme.accentBright
+            } else {
+                self.maintenanceStatus.stringValue = self.loc.s(
+                    "prefs.advanced.secretRepair.result",
+                    "\(summary.migrated)"
+                )
+                self.maintenanceStatus.textColor = DevTypeTheme.statusGreen
+            }
+        }
     }
 
     @objc private func retrySecretCleanup() {

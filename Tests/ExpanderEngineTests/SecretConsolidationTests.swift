@@ -411,6 +411,47 @@ final class SecretConsolidationTests: XCTestCase {
         )
     }
 
+    // MARK: - The repair the app could never offer
+
+    /// `SecretConsolidationTests.testUnreadableMasterKeyIsNeverOverwritten` ends "Day 3: the user
+    /// answers Always Allow, the ACL heals". In the shipping app nobody could ever reach Day 3
+    /// when the master key was the *only* casualty.
+    ///
+    /// `migrateLegacy` — the one interactive keychain pass — walks
+    /// `accountsNeedingAuthorization()`, which includes the master key. But its only caller,
+    /// `SecretMenuFlow.resolve`, gates on `snippetIDsPendingMigration()`, which maps accounts to
+    /// snippet UUIDs and therefore drops it. Every launch then re-read it, failed, reported
+    /// "present but UNREADABLE", and offered nothing. Same shape as the §8.10 v2 items whose
+    /// silent read "knew a dialog would fix it and nothing in the app could ever show one".
+    func testMasterKeyNeedingAuthorizationIsInvisibleToTheSnippetGateButVisibleToRepair() {
+        final class AuthNeededBacking: SecretBackingStore {
+            let inner = InMemorySecretBackingStore()
+            func set(_ value: String, account: String) -> OSStatus { inner.set(value, account: account) }
+            func value(account: String) -> String? { inner.value(account: account) }
+            func contains(account: String) -> Bool { inner.contains(account: account) }
+            func delete(account: String) -> OSStatus { inner.delete(account: account) }
+            func accounts() -> Set<String> { inner.accounts() }
+            /// The state a rebuild leaves behind: the master key needs the dialog, no snippet does.
+            func accountsNeedingAuthorization() -> [String] {
+                [ConsolidatedSecretBackingStore.masterKeyAccount]
+            }
+        }
+
+        let store = SecretStore(backing: AuthNeededBacking())
+
+        XCTAssertTrue(
+            store.snippetIDsPendingMigration().isEmpty,
+            "The master key is not a snippet UUID, so the snippet gate cannot see it — this is "
+                + "why the repair was unreachable, and it must stay true or every secret copy "
+                + "would route into the migration alert."
+        )
+        XCTAssertEqual(
+            store.accountsNeedingAuthorizationCount(), 1,
+            "Preferences ▸ Advanced ▸ Repair Secret Storage gates on this count, which is the "
+                + "unfiltered set, so an unreadable master key now has a reachable repair."
+        )
+    }
+
     // MARK: - "Could not run" is not "failed"
 
     /// `remaining` is documented as "keychain-resident secrets that could not be moved yet

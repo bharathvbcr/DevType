@@ -144,6 +144,19 @@ public final class SecretStore {
         Set(backing.accountsNeedingAuthorization().compactMap(Self.snippetID(forAccount:)))
     }
 
+    /// How many keychain accounts — snippet or not — cannot be read without the one-time dialog.
+    ///
+    /// `snippetIDsPendingMigration()` maps accounts to snippet UUIDs, which silently drops every
+    /// infrastructure account: above all the consolidated store's master key. `migrateLegacy`
+    /// already repairs those (it walks `accountsNeedingAuthorization()`), but its only caller
+    /// gates on the snippet-filtered set, so a master key whose ACL was re-partitioned by a
+    /// rebuild had a repair the app could never reach — the same shape as the v2 items fixed in
+    /// §8.10, one layer up. Preferences ▸ Advanced ▸ Repair Secret Storage uses this count to
+    /// offer the pass explicitly.
+    public func accountsNeedingAuthorizationCount() -> Int {
+        backing.accountsNeedingAuthorization().count
+    }
+
     /// Run the migration batch. See `KeychainSecretBackingStore.migrateLegacy` for the dialog
     /// contract: `allowInteraction: true` is the only way this app ever shows a keychain prompt.
     @discardableResult
