@@ -186,4 +186,103 @@ final class HardeningStressTests: XCTestCase {
             true
         )
     }
+
+    // MARK: - Paste selection-range policy
+
+    /// Seeded adversarial walk of every paste-gate combination: range churn must never abort
+    /// after mutation; a different field or pid always aborts; proven writers still see a
+    /// moved caret *before* mutation.
+    func testPasteSelectionPolicySurvivesAdversarialRangeAndFieldChurn() {
+        let original = AXUIElementCreateApplication(getpid())
+        let different = AXUIElementCreateApplication(1)
+        let captured = NSRange(location: 40, length: 0)
+        let target = PasteboardBroker.PasteTarget(pid: getpid(), element: original, range: captured)
+        let verdicts: [AXWriteCapabilityStore.Verdict?] = [.unknown, .falseSuccess, .trusted, nil]
+        let phases: [PasteboardBroker.SelectionRangeGate] = [.beforeMutation, .afterMutation]
+        let elapsed = timed {
+            for seed: UInt64 in [1, 7, 42, 2026, 0xDEAD_BEEF, 0xCAFE_F00D] {
+                var rng = SplitMix64(seed: seed)
+                for _ in 0..<2_000 {
+                    let verdict = verdicts[Int(rng.next() % UInt64(verdicts.count))]
+                    let bundleKnown = rng.next() % 2 == 0
+                    let phase = phases[Int(rng.next() % 2)]
+                    let checkRange = PasteboardBroker.verifySelectionRange(
+                        verdict: verdict, bundleKnown: bundleKnown, phase: phase
+                    )
+                    let currentRange: NSRange? = {
+                        switch rng.next() % 4 {
+                        case 0: return captured
+                        case 1: return NSRange(location: Int(rng.next() % 200), length: 0)
+                        case 2: return NSRange(location: 0, length: Int(rng.next() % 8))
+                        default: return nil
+                        }
+                    }()
+                    let sameField = target.matches(
+                        pid: getpid(), element: original, range: currentRange, checkRange: checkRange
+                    )
+                    if checkRange {
+                        XCTAssertEqual(sameField, currentRange == captured)
+                    } else {
+                        XCTAssertTrue(sameField)
+                    }
+                    XCTAssertFalse(
+                        target.matches(
+                            pid: getpid(), element: different, range: currentRange, checkRange: checkRange
+                        )
+                    )
+                    XCTAssertFalse(
+                        target.matches(
+                            pid: 1, element: original, range: currentRange, checkRange: checkRange
+                        )
+                    )
+                    XCTAssertFalse(
+                        target.matches(
+                            pid: nil, element: original, range: currentRange, checkRange: checkRange
+                        )
+                    )
+                    XCTAssertFalse(
+                        target.matches(
+                            pid: getpid(), element: nil, range: currentRange, checkRange: checkRange
+                        )
+                    )
+                }
+            }
+        }
+        XCTAssertLessThan(elapsed, StressWallClock.terminationGuard)
+    }
+
+    func testCmdVAbortPrioritySurvivesRepeatedShuffles() {
+        let elapsed = timed {
+            for seed: UInt64 in [3, 11, 99, 2026] {
+                var rng = SplitMix64(seed: seed)
+                for _ in 0..<512 {
+                    let generation = rng.next() % 2 == 0
+                    let owned = rng.next() % 2 == 0
+                    let shouldContinue = rng.next() % 2 == 0
+                    let canPost = rng.next() % 2 == 0
+                    let secure = rng.next() % 2 == 0
+                    let target = rng.next() % 2 == 0
+                    let reason = PasteboardBroker.cmdVAbortReason(
+                        generationMatches: generation,
+                        clipboardOwned: owned,
+                        shouldContinue: shouldContinue,
+                        canPost: canPost,
+                        secureInputBlocked: secure,
+                        targetCurrent: target
+                    )
+                    let expected: PasteboardBroker.CmdVAbortReason? = {
+                        if !generation { return .superseded }
+                        if !owned { return .clipboardOwnershipLost }
+                        if !shouldContinue { return .cancelled }
+                        if !canPost { return .postEventsDenied }
+                        if secure { return .secureInput }
+                        if !target { return .targetChanged }
+                        return nil
+                    }()
+                    XCTAssertEqual(reason, expected)
+                }
+            }
+        }
+        XCTAssertLessThan(elapsed, StressWallClock.quadraticCanary)
+    }
 }

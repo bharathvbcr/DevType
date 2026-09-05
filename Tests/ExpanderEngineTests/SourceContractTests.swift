@@ -29,7 +29,25 @@ final class SourceContractTests: XCTestCase {
         let next = try XCTUnwrap(pipeline.range(of: "private func performInject("))
         let gate = String(pipeline[check.lowerBound..<next.lowerBound])
         XCTAssertTrue(gate.contains("self.canContinue(context)"), "A stale AX retry must not erase after cancellation, input, or focus changes")
-        XCTAssertTrue(gate.contains("context.target.isCurrent(checkRange: true)"), "The original field and selection must still authorize erasure")
+        XCTAssertTrue(
+            gate.contains("phase: .beforeMutation"),
+            "Erase authorization may consult AX selectedRange only for proven writers — not after Electron range flicker"
+        )
+        XCTAssertFalse(
+            gate.contains("context.target.isCurrent(checkRange: true)"),
+            "A hardcoded selection-range check refuses valid expands in hosts whose AX range lies"
+        )
+        let injectOnMain = try XCTUnwrap(pipeline.range(of: "private func injectOnMain("))
+        let entry = String(pipeline[injectOnMain.lowerBound..<check.lowerBound])
+        XCTAssertTrue(
+            entry.contains("phase: .beforeMutation"),
+            "The inject entry gate must use the same before-mutation policy as the pre-erase backstop"
+        )
+        XCTAssertEqual(
+            pipeline.components(separatedBy: "phase: .beforeMutation").count - 1,
+            2,
+            "Inject entry and pre-erase must both consult the shared before-mutation range policy"
+        )
         XCTAssertTrue(gate.contains("allowKeyReplay: false"), "Cancellation must not replay a swallowed Return into a new target")
         XCTAssertTrue(gate.contains("refuseContext: .capture("), "The refusal must retain the original expansion gate")
         XCTAssertTrue(gate.contains("decision: decision"))
@@ -77,13 +95,45 @@ final class SourceContractTests: XCTestCase {
                 "\(label) paste must re-read Secure Input at paste time"
             )
             XCTAssertTrue(
+                body.contains("verifySelectionRange("),
+                "\(label) paste must use the shared selection-range policy"
+            )
+            XCTAssertTrue(
+                body.contains("phase: .afterMutation"),
+                "\(label) paste runs after HID erase; AX selectedRange is not a same-caret signal"
+            )
+            XCTAssertTrue(
+                body.contains("target.isCurrent(checkRange: verifySelection)"),
+                "\(label) paste must not require a stable AX range after our own mutation"
+            )
+            XCTAssertFalse(
                 body.contains("target.isCurrent(checkRange: true)"),
-                "\(label) paste must refuse a changed field or selection"
+                "\(label) paste must not hardcode a selection-range check that aborts Electron HID paste after erase"
+            )
+            XCTAssertTrue(
+                body.contains("pasteContinuation(ticket: ticket, target: target, checkRange: verifySelection"),
+                "\(label) Cmd+V continuation must use the same post-mutation policy as the immediate gate"
+            )
+            XCTAssertFalse(
+                PasteboardBroker.verifySelectionRange(
+                    verdict: .unknown, bundleKnown: true, phase: .afterMutation
+                ),
+                "\(label) post-mutation policy must ignore AX range even for unclassified hosts"
             )
             XCTAssertTrue(body.contains("\(prefix) — cancelled or superseded"))
             XCTAssertTrue(body.contains("\(prefix) — Post Events denied at paste time"))
             XCTAssertTrue(body.contains("\(prefix) — Secure Input active at paste time"))
             XCTAssertTrue(body.contains("\(prefix) — target element or selection changed before paste"))
+            if label == "text" {
+                XCTAssertTrue(
+                    body.contains("invalid hold timeout override"),
+                    "An invalid hold window must log its own refuse, not complete .notPosted silently"
+                )
+            }
+            XCTAssertTrue(
+                body.contains("self.logCmdVNotPosted("),
+                "\(label) paste must name the settle-delay Cmd+V abort instead of only restoring the trigger"
+            )
             XCTAssertFalse(
                 body.contains("guard shouldContinue(), CGPreflightPostEventAccess()"),
                 "\(label) paste must not collapse cancellation, Post Events, Secure Input, and target checks into one guard that always logs Post Events denied"

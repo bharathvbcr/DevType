@@ -518,16 +518,131 @@ public final class PasteboardBroker {
         }
     }
 
+    /// When AX `selectedRange` is a trustworthy same-caret signal.
+    ///
+    /// `beforeMutation` is the expand/erase gate: a proven native writer (`trusted`) can
+    /// still stop an expansion if the caret moved; unknown and false-success hosts cannot
+    /// — their range flickers, and treating that as a moved caret refuses a valid expand.
+    /// A process we cannot name fails closed (check the range).
+    ///
+    /// `afterMutation` is clipboard paste after HID erase (and the 15 ms settle before ⌘V).
+    /// Our own backspaces *are* supposed to move the caret; Electron then reports a
+    /// different or nil range for tens of milliseconds. Pid + focused element still catch
+    /// an app or field switch. Cursor 0.1.7 (165) aborted here with `notPosted` after a
+    /// successful erase and restored `` `push ``.
+    enum SelectionRangeGate: Equatable {
+        case beforeMutation
+        case afterMutation
+    }
+
+    static func verifySelectionRange(
+        verdict: AXWriteCapabilityStore.Verdict?,
+        bundleKnown: Bool,
+        phase: SelectionRangeGate
+    ) -> Bool {
+        switch phase {
+        case .afterMutation:
+            return false
+        case .beforeMutation:
+            guard bundleKnown else { return true }
+            return verdict == .trusted
+        }
+    }
+
+    static func verifySelectionRange(
+        bundleID: String?,
+        role: String?,
+        phase: SelectionRangeGate,
+        store: AXWriteCapabilityStore = .shared
+    ) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else {
+            return verifySelectionRange(verdict: nil, bundleKnown: false, phase: phase)
+        }
+        return verifySelectionRange(
+            verdict: store.verdict(for: bundleID, role: role),
+            bundleKnown: true,
+            phase: phase
+        )
+    }
+
+    /// Why Cmd+V was not posted after the clipboard payload was published. Distinct from the
+    /// immediate pre-paste guards so a settle-delay abort is not silent in diagnostics.
+    enum CmdVAbortReason: Equatable {
+        case superseded
+        case clipboardOwnershipLost
+        case cancelled
+        case postEventsDenied
+        case secureInput
+        case targetChanged
+
+        var logSuffix: String {
+            switch self {
+            case .superseded, .cancelled:
+                return "cancelled or superseded"
+            case .clipboardOwnershipLost:
+                return "clipboard ownership lost before Cmd+V"
+            case .postEventsDenied:
+                return "Post Events denied at paste time"
+            case .secureInput:
+                return "Secure Input active at paste time"
+            case .targetChanged:
+                return "target element or selection changed before paste"
+            }
+        }
+    }
+
+    static func cmdVAbortReason(
+        generationMatches: Bool,
+        clipboardOwned: Bool,
+        shouldContinue: Bool,
+        canPost: Bool,
+        secureInputBlocked: Bool,
+        targetCurrent: Bool
+    ) -> CmdVAbortReason? {
+        if !generationMatches { return .superseded }
+        if !clipboardOwned { return .clipboardOwnershipLost }
+        if !shouldContinue { return .cancelled }
+        if !canPost { return .postEventsDenied }
+        if secureInputBlocked { return .secureInput }
+        if !targetCurrent { return .targetChanged }
+        return nil
+    }
+
     private func pasteContinuation(
         ticket: ClipboardTicket, target: PasteTarget, checkRange: Bool,
         allowSecureInput: Bool, shouldContinue: () -> Bool
     ) -> Bool {
-        currentRestoreGeneration() == ticket.generation
-            && ticket.pasteboard.changeCount == ticket.targetChangeCount
-            && shouldContinue()
-            && CGPreflightPostEventAccess()
-            && (allowSecureInput || !AXContextChecker.isSecureEventInputEnabledLive())
-            && target.isCurrent(checkRange: checkRange)
+        cmdVAbortReason(ticket: ticket, target: target, checkRange: checkRange,
+                        allowSecureInput: allowSecureInput, shouldContinue: shouldContinue) == nil
+    }
+
+    private func cmdVAbortReason(
+        ticket: ClipboardTicket, target: PasteTarget, checkRange: Bool,
+        allowSecureInput: Bool, shouldContinue: () -> Bool
+    ) -> CmdVAbortReason? {
+        Self.cmdVAbortReason(
+            generationMatches: currentRestoreGeneration() == ticket.generation,
+            clipboardOwned: ticket.pasteboard.changeCount == ticket.targetChangeCount,
+            shouldContinue: shouldContinue(),
+            canPost: CGPreflightPostEventAccess(),
+            secureInputBlocked: !allowSecureInput && AXContextChecker.isSecureEventInputEnabledLive(),
+            targetCurrent: target.isCurrent(checkRange: checkRange)
+        )
+    }
+
+    private func logCmdVNotPosted(
+        prefix: String,
+        ticket: ClipboardTicket,
+        target: PasteTarget,
+        checkRange: Bool,
+        allowSecureInput: Bool,
+        shouldContinue: () -> Bool
+    ) {
+        let suffix = cmdVAbortReason(
+            ticket: ticket, target: target, checkRange: checkRange,
+            allowSecureInput: allowSecureInput, shouldContinue: shouldContinue
+        )?.logSuffix ?? "Cmd+V was not posted"
+        DevTypeLog.inject.error("\(prefix, privacy: .public) — \(suffix, privacy: .public)")
     }
 
     // MARK: - Text paste
@@ -542,10 +657,11 @@ public final class PasteboardBroker {
     /// expires (unverified). No ambiguous outcome authorizes another paste.
     ///
     /// - Parameters:
-    ///   - bundleID: frontmost app, used only for §3.4 timing adaptation. Captured by the caller at
+    ///   - bundleID: frontmost app, used for §3.4 timing adaptation and for whether AX
+    ///     selectedRange is a trustworthy same-caret signal before ⌘V. Captured by the caller at
     ///     paste time rather than read here, so an app switch mid-paste cannot mislabel the sample.
-    ///   - focusedRole: AX role of the original field, retained for role-scoped confirmation
-    ///     diagnostics. Historical confirmation counts never authorize corrective replay.
+    ///   - focusedRole: AX role of the original field, used with `bundleID` for delivery-trust
+    ///     (range gate and confirmation). Historical confirmation counts never authorize replay.
     ///   - staleProbe: text the caller *removed* from the field just before this paste (the
     ///     erased trigger). If a verification read still shows it, the mirror is stale by
     ///     construction and its "missing" answer is discarded.
@@ -573,10 +689,15 @@ public final class PasteboardBroker {
         if let holdTimeoutOverride,
            !holdTimeoutOverride.isFinite || holdTimeoutOverride < 0
             || holdTimeoutOverride > InjectTiming.secureClipboardPasteHoldTimeout {
+            DevTypeLog.inject.error("[Inject] paste refused — invalid hold timeout override")
             completion(.notPosted)
             return
         }
         let target = PasteTarget.capture(baseline: baseline)
+        // HID erase (or a no-AX secure paste) has already happened; AX selectedRange is settling.
+        let verifySelection = Self.verifySelectionRange(
+            bundleID: bundleID, role: focusedRole, phase: .afterMutation
+        )
         guard shouldContinue() else {
             DevTypeLog.inject.error("[Inject] paste refused — cancelled or superseded")
             completion(.notPosted)
@@ -592,7 +713,7 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        guard target.isCurrent(checkRange: true) else {
+        guard target.isCurrent(checkRange: verifySelection) else {
             DevTypeLog.inject.error("[Inject] paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
@@ -642,12 +763,17 @@ public final class PasteboardBroker {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.prePasteSettleDelay) {
             self.hid.postCmdVKeyEventsAsync(shouldContinue: {
-                self.pasteContinuation(ticket: ticket, target: target, checkRange: true,
+                self.pasteContinuation(ticket: ticket, target: target, checkRange: verifySelection,
                                        allowSecureInput: allowSecureInput, shouldContinue: shouldContinue)
             }) { posted in
                 guard posted else {
                     // No ⌘V exists, so nothing is waiting to read the board — only an explicit
                     // manual-paste window can keep the payload up.
+                    self.logCmdVNotPosted(
+                        prefix: "[Inject] paste refused",
+                        ticket: ticket, target: target, checkRange: verifySelection,
+                        allowSecureInput: allowSecureInput, shouldContinue: shouldContinue
+                    )
                     self.releaseOwnership(
                         ticket,
                         result: .notPosted,
@@ -802,6 +928,9 @@ public final class PasteboardBroker {
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
         let target = PasteTarget.capture()
+        let verifySelection = Self.verifySelectionRange(
+            bundleID: bundleID, role: nil, phase: .afterMutation
+        )
         guard shouldContinue() else {
             DevTypeLog.inject.error("[Inject] image paste refused — cancelled or superseded")
             completion(.notPosted)
@@ -817,7 +946,7 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        guard target.isCurrent(checkRange: true) else {
+        guard target.isCurrent(checkRange: verifySelection) else {
             DevTypeLog.inject.error("[Inject] image paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
@@ -858,10 +987,15 @@ public final class PasteboardBroker {
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.prePasteSettleDelay) {
             let baseline = self.verifier.captureFocusedTextObservation()
             self.hid.postCmdVKeyEventsAsync(shouldContinue: {
-                self.pasteContinuation(ticket: ticket, target: target, checkRange: true,
+                self.pasteContinuation(ticket: ticket, target: target, checkRange: verifySelection,
                                        allowSecureInput: false, shouldContinue: shouldContinue)
             }) { posted in
                 guard posted else {
+                    self.logCmdVNotPosted(
+                        prefix: "[Inject] image paste refused",
+                        ticket: ticket, target: target, checkRange: verifySelection,
+                        allowSecureInput: false, shouldContinue: shouldContinue
+                    )
                     self.releaseOwnership(ticket, result: .notPosted, residency: nil)
                     completion(.notPosted)
                     return

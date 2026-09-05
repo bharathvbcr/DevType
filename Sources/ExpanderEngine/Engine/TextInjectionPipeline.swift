@@ -1044,7 +1044,12 @@ public final class TextInjectionPipeline {
         completion: @escaping InjectionCompletion
     ) {
         guard operationIsCurrent(operation, revision: inputRevision, target: target,
-                                 allowSecureInput: secureClipboardPaste), target.isCurrent(checkRange: true) else {
+                                 allowSecureInput: secureClipboardPaste),
+              target.isCurrent(checkRange: PasteboardBroker.verifySelectionRange(
+                bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                role: AXContextChecker.shared.focusedElementRole(),
+                phase: .beforeMutation
+              )) else {
             completion(.refused("Expansion cancelled — operation or target changed"))
             return
         }
@@ -1161,7 +1166,13 @@ public final class TextInjectionPipeline {
         // §8.3: asynchronous, so the one-shot retry is available here (on main) without a 30 ms
         // `Thread.sleep` that would stall the event tap.
         eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched) { eraseCheck in
-            guard self.canContinue(context), context.target.isCurrent(checkRange: true) else {
+            guard self.canContinue(context), context.target.isCurrent(
+                checkRange: PasteboardBroker.verifySelectionRange(
+                    bundleID: context.frontBundleID,
+                    role: AXContextChecker.shared.focusedElementRole(),
+                    phase: .beforeMutation
+                )
+            ) else {
                 let reason = "Expansion cancelled — input or target application changed before erase"
                 self.refuseInject(
                     reason, path: "eraseContextChanged", swallowed: swallowed,
