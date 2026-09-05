@@ -577,10 +577,23 @@ public final class PasteboardBroker {
             return
         }
         let target = PasteTarget.capture(baseline: baseline)
-        guard shouldContinue(), CGPreflightPostEventAccess(),
-              allowSecureInput || !AXContextChecker.isSecureEventInputEnabledLive(),
-              target.isCurrent(checkRange: true) else {
+        guard shouldContinue() else {
+            DevTypeLog.inject.error("[Inject] paste refused — cancelled or superseded")
+            completion(.notPosted)
+            return
+        }
+        guard CGPreflightPostEventAccess() else {
             DevTypeLog.inject.error("[Inject] paste refused — Post Events denied at paste time")
+            completion(.notPosted)
+            return
+        }
+        guard allowSecureInput || !AXContextChecker.isSecureEventInputEnabledLive() else {
+            DevTypeLog.inject.error("[Inject] paste refused — Secure Input active at paste time")
+            completion(.notPosted)
+            return
+        }
+        guard target.isCurrent(checkRange: true) else {
+            DevTypeLog.inject.error("[Inject] paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
         }
@@ -789,9 +802,23 @@ public final class PasteboardBroker {
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
         let target = PasteTarget.capture()
-        guard shouldContinue(), CGPreflightPostEventAccess(),
-              !AXContextChecker.isSecureEventInputEnabledLive(), target.isCurrent(checkRange: true) else {
+        guard shouldContinue() else {
+            DevTypeLog.inject.error("[Inject] image paste refused — cancelled or superseded")
+            completion(.notPosted)
+            return
+        }
+        guard CGPreflightPostEventAccess() else {
             DevTypeLog.inject.error("[Inject] image paste refused — Post Events denied at paste time")
+            completion(.notPosted)
+            return
+        }
+        guard !AXContextChecker.isSecureEventInputEnabledLive() else {
+            DevTypeLog.inject.error("[Inject] image paste refused — Secure Input active at paste time")
+            completion(.notPosted)
+            return
+        }
+        guard target.isCurrent(checkRange: true) else {
+            DevTypeLog.inject.error("[Inject] image paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
         }

@@ -235,7 +235,7 @@ Muted apps are also reachable straight from the menu bar (**Mute Frontmost App**
 
 ## 11. Troubleshooting & FAQs
 
-- **Text is not expanding**: Press **`⌘⇧P`** to open Permission Recovery and inspect **Last inject**. A permission failure and an erase refusal need different remedies; see [expansion troubleshooting](../SUPPORT.md#1-snippets-are-not-expanding-when-i-type-what-should-i-do).
+- **Text is not expanding**: Press **`⌘⇧P`** to open Permission Recovery and inspect **Last inject**. A permission failure and an erase refusal need different remedies; see [expansion troubleshooting](../SUPPORT.md#1-snippets-are-not-expanding-when-i-type-what-should-i-do). A **⚠** on the menu bar item is shown on **Diagnostics** (`⇧⌘D`), not on Permission Recovery.
 - **Expansion cancelled after moving the cursor**: Refocus the intended field and retype the trigger. DevType rechecks the target field, selection, input and live permissions before delayed paste and cursor actions. Switching between fields in the same application can cancel the pending operation.
 - **Paste reported as unverified**: DevType posted the paste but could not confirm a relevant text change. Check the target before repeating the expansion; the app does not automatically replay an ambiguous paste.
 - **Library conflict recovery**: Recovery validates the selected library and saves verified recovery copies before removing alternate versions. An adoption failure keeps recovery alternatives. If the library was adopted but cleanup is pending, the dialog shows that status and the recovery folder; retry cleanup after the underlying file-access problem is resolved.

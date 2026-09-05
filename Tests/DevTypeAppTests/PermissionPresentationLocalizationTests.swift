@@ -171,12 +171,55 @@ final class PermissionPresentationLocalizationTests: XCTestCase {
         XCTAssertTrue(recovery.contains("EngineDisplayPresentation.statusName"))
         XCTAssertTrue(recovery.contains("permissionCopy.settingsToggleMismatchGuidance"))
         XCTAssertTrue(onboarding.contains("permissionCopy.settingsToggleMismatchGuidance"))
+        XCTAssertTrue(
+            appDelegate.contains("diagnosticsMenuItem?.title = \"\\(loc.s(\"menu.diagnostics\")) ⚠\""),
+            "The status-item attention glyph belongs on Diagnostics"
+        )
+        XCTAssertFalse(
+            appDelegate.contains("permissionRecoveryMenuItem?.title = \"\\(loc.s(\"menu.recovery\")) ⚠\""),
+            "Permission Recovery must not carry the attention glyph; that misdirects the user away from Diagnostics"
+        )
         for source in [recovery, onboarding] {
             XCTAssertTrue(source.contains("permissionCopy.unpackagedBinaryWarning"))
             XCTAssertTrue(source.contains("permissionCopy.duplicateProcessWarning"))
             XCTAssertFalse(source.contains("ProcessIdentity.unpackagedBinaryWarning"))
             XCTAssertFalse(source.contains("ProcessIdentity.duplicateProcessWarning"))
             XCTAssertFalse(source.contains("ProcessIdentity.settingsToggleMismatchGuidance"))
+        }
+    }
+
+    func testMenuWarningShowsOnDiagnosticsAndNotOnPermissionRecoveryWhenAttentionNeeded() throws {
+        _ = NSApplication.shared
+        let originalLanguage = LocalizationManager.shared.language
+        defer {
+            LocalizationManager.shared.language = originalLanguage
+        }
+
+        for language in AppLanguage.concreteCases {
+            LocalizationManager.shared.language = language
+            let appDelegate = AppDelegate()
+            appDelegate.rebuildMenuForTesting()
+            appDelegate.refreshStatusItemUIForTesting()
+
+            let loc = LocalizationManager.shared
+            let recoveryTitle = appDelegate.permissionRecoveryMenuItemForTesting?.title ?? ""
+            let diagnosticsTitle = appDelegate.diagnosticsMenuItemForTesting?.title ?? ""
+            let cleanDiagnostics = loc.s("menu.diagnostics")
+            let attentionDiagnostics = "\(cleanDiagnostics) ⚠"
+
+            XCTAssertEqual(
+                recoveryTitle,
+                loc.s("menu.recovery"),
+                "[\(language.rawValue)] Permission recovery title should remain the localized label"
+            )
+            XCTAssertFalse(
+                recoveryTitle.contains("⚠"),
+                "[\(language.rawValue)] Permission recovery must not show the attention glyph"
+            )
+            XCTAssertTrue(
+                diagnosticsTitle == cleanDiagnostics || diagnosticsTitle == attentionDiagnostics,
+                "[\(language.rawValue)] Diagnostics title must be the localized label, with ⚠ only when attention is needed; got \(diagnosticsTitle)"
+            )
         }
     }
 

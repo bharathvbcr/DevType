@@ -19,6 +19,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Shown only while `lastRecordedInjectOutcome` is a refuse/failure. See `refreshStatusItemUI`.
     private var restartEngineMenuItem: NSMenuItem?
     private var permissionRecoveryMenuItem: NSMenuItem?
+    private var diagnosticsMenuItem: NSMenuItem?
     private var openAtLoginMenuItem: NSMenuItem?
     private var inlineSearchMenuItem: NSMenuItem?
     private var smartDictationMenuItem: NSMenuItem?
@@ -619,13 +620,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Straight to the evidence tab — logs, identity, Copy Logs — without
         // walking through Status & Fix first.
-        menu.addItem(item(
+        let diagnosticsItem = item(
             loc.s("menu.diagnostics"),
             "waveform.path.ecg",
             #selector(openDiagnostics(_:)),
             key: "D",
             modifiers: [.command, .shift]
-        ))
+        )
+        menu.addItem(diagnosticsItem)
+        diagnosticsMenuItem = diagnosticsItem
 
         menu.addItem(item(loc.s("menu.diagnoseSecure"), "lock.shield", #selector(diagnoseSecureInput(_:)), key: "s", modifiers: []))
 
@@ -1982,10 +1985,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         menuHeaderAccessibilityHost?.setAccessibilityLabel(
             loc.s("ax.menu.header", menuHeaderVersion, name)
         )
+        permissionRecoveryMenuItem?.title = loc.s("menu.recovery")
         if needsAttention {
-            permissionRecoveryMenuItem?.title = "\(loc.s("menu.recovery")) ⚠"
+            diagnosticsMenuItem?.title = "\(loc.s("menu.diagnostics")) ⚠"
         } else {
-            permissionRecoveryMenuItem?.title = loc.s("menu.recovery")
+            diagnosticsMenuItem?.title = loc.s("menu.diagnostics")
         }
         refreshOpenAtLoginMenuItem()
     }
@@ -2344,3 +2348,13 @@ extension AppDelegate {
         )
     }
 }
+
+// MARK: - Internal test hooks
+
+extension AppDelegate {
+    var permissionRecoveryMenuItemForTesting: NSMenuItem? { permissionRecoveryMenuItem }
+    var diagnosticsMenuItemForTesting: NSMenuItem? { diagnosticsMenuItem }
+    func rebuildMenuForTesting() { rebuildMenu() }
+    func refreshStatusItemUIForTesting() { refreshStatusItemUI() }
+}
+

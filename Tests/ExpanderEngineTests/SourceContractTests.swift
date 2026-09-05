@@ -52,6 +52,45 @@ final class SourceContractTests: XCTestCase {
         XCTAssertLessThan(contextGuard.lowerBound, post.lowerBound)
     }
 
+    func testPasteRefusalsLogDistinctReasonsInsteadOfACombinedPostEventsMessage() throws {
+        let broker = try source("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
+        let textPaste = try XCTUnwrap(broker.range(of: "expectedText: String?,"))
+        let imagePaste = try XCTUnwrap(broker.range(of: "public func pasteImageViaClipboard("))
+        let holdLoop = try XCTUnwrap(broker.range(of: "private func runImageHoldLoop("))
+        let textBody = String(broker[textPaste.lowerBound..<imagePaste.lowerBound])
+        let imageBody = String(broker[imagePaste.lowerBound..<holdLoop.lowerBound])
+
+        for (label, body, prefix) in [
+            ("text", textBody, "[Inject] paste refused"),
+            ("image", imageBody, "[Inject] image paste refused"),
+        ] {
+            XCTAssertTrue(
+                body.contains("guard shouldContinue()"),
+                "\(label) paste must refuse cancelled or superseded work before posting"
+            )
+            XCTAssertTrue(
+                body.contains("guard CGPreflightPostEventAccess()"),
+                "\(label) paste must re-check Post Events at paste time"
+            )
+            XCTAssertTrue(
+                body.contains("AXContextChecker.isSecureEventInputEnabledLive()"),
+                "\(label) paste must re-read Secure Input at paste time"
+            )
+            XCTAssertTrue(
+                body.contains("target.isCurrent(checkRange: true)"),
+                "\(label) paste must refuse a changed field or selection"
+            )
+            XCTAssertTrue(body.contains("\(prefix) — cancelled or superseded"))
+            XCTAssertTrue(body.contains("\(prefix) — Post Events denied at paste time"))
+            XCTAssertTrue(body.contains("\(prefix) — Secure Input active at paste time"))
+            XCTAssertTrue(body.contains("\(prefix) — target element or selection changed before paste"))
+            XCTAssertFalse(
+                body.contains("guard shouldContinue(), CGPreflightPostEventAccess()"),
+                "\(label) paste must not collapse cancellation, Post Events, Secure Input, and target checks into one guard that always logs Post Events denied"
+            )
+        }
+    }
+
     func testStatusButtonUsesTheSecureInputPresentationAtTheLiveBoundary() throws {
         let app = try source("Sources/DevTypeAppCore/AppDelegate.swift")
         let start = try XCTUnwrap(app.range(of: "private func refreshStatusItemUI()"))
