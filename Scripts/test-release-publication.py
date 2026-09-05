@@ -95,11 +95,29 @@ class ReleaseWorkflowTests(unittest.TestCase):
         # group avoids cancelling/deadlocking the parent Release workflow.
         self.assertIn("group: ci-${{ github.workflow }}-${{ github.ref }}", ci)
 
+    def test_tag_push_does_not_start_a_second_ci_suite(self):
+        """Release already calls CI. A parallel `on.push.tags` suite contended
+        for macos-26 runners without adding a distinct gate."""
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        on_push, _, _ = ci.partition("\n  pull_request:")
+        self.assertNotIn("tags:", on_push)
+
+    def test_release_job_does_not_rerun_the_engine_suite(self):
+        """A green reusable CI job plus a flaky ci-local rerun failed v0.1.6 publish."""
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("./Scripts/ci-local.sh", workflow)
+        self.assertNotIn("swift test", workflow)
+        self.assertIn("./Scripts/ci-release-fixtures.sh", workflow)
+        lint = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("./Scripts/ci-release-fixtures.sh", lint)
+
     def test_workflow_uses_the_tested_publication_owner(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertNotIn("softprops/action-gh-release", workflow)
         self.assertIn('./Scripts/publish-release.sh "${GITHUB_REF_NAME}"', workflow)
-        self.assertIn("test-release-publication.py", (ROOT / "Scripts/ci-local.sh").read_text())
+        fixtures = (ROOT / "Scripts/ci-release-fixtures.sh").read_text()
+        self.assertIn("test-release-publication.py", fixtures)
+        self.assertIn("ci-release-fixtures.sh", (ROOT / "Scripts/ci-local.sh").read_text())
 
 
 class PublicationTests(unittest.TestCase):

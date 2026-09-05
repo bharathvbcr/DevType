@@ -49,6 +49,12 @@ fi
 
 NOTES="${ROOT}/docs/releases/${TAG}.md"
 [[ -s "${NOTES}" ]] || die "release notes are missing or empty: ${NOTES}"
+# publish-release.sh compares GitHub's stored body to these bytes. Command
+# substitution would strip a trailing newline; require the POSIX terminator
+# explicitly so an upload cannot succeed and then fail draft verification.
+python3 -c 'import pathlib, sys
+sys.exit(0 if pathlib.Path(sys.argv[1]).read_bytes().endswith(b"\n") else 1)
+' "${NOTES}" || die "release notes must end with a newline: ${NOTES}"
 
 echo "release preflight passed: ${TAG} at ${HEAD_COMMIT}"
 echo "release notes: ${NOTES}"

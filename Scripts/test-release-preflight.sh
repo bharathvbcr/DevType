@@ -57,4 +57,10 @@ git -C "${REPO}" commit -q --amend --no-edit
 git -C "${REPO}" tag -f v0.2.0 >/dev/null 2>&1
 expect_ok "release allowed once voice tracing defaults off" v0.2.0 "${REPO}"
 
+printf '%s' '# DevType v0.3.0' > "${REPO}/docs/releases/v0.3.0.md"
+git -C "${REPO}" add docs/releases/v0.3.0.md
+git -C "${REPO}" commit -q -m 'test: notes without terminating newline'
+git -C "${REPO}" tag v0.3.0
+expect_fail "notes without a terminating newline rejected" v0.3.0 "${REPO}"
+
 harness_summary "release preflight"

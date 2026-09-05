@@ -54,12 +54,12 @@ jobs:
       - name: Show toolchain
         run: swift --version && xcodebuild -version
 
-      - name: Run local CI release gate
-        # Verify source/build/package health before using the explicit
-        # unnotarized publication policy below.
-        env:
-          DEVTYPE_SKIP_AUTO_CERT: '1'
-        run: ./Scripts/ci-local.sh
+      - name: Run publication fixtures
+        # The reusable CI job already built and tested on macOS 14 and 26.
+        # Re-running `ci-local.sh` here re-executed the engine suite and failed
+        # a v0.1.6 publish after that suite had already passed. Fixtures are
+        # the remaining publication-specific gate.
+        run: ./Scripts/ci-release-fixtures.sh
 
       - name: Build & Package DMG
         env:

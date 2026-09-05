@@ -9,7 +9,9 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    # Release tags are owned by .github/workflows/release.yml, which calls this
+    # workflow. A second `v*` push here raced the reusable suite for macos-26
+    # runners and did not add a distinct gate.
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -160,11 +162,8 @@ jobs:
           plutil -lint Resources/DevType.entitlements
           for f in Resources/*.lproj/InfoPlist.strings; do plutil -lint "$f"; done
 
-      - name: Package signing cache and entitlement contract
-        run: ./Scripts/test-package-signing-contract.sh
-
-      - name: Recoverable installer and canonical-path cleanup
-        run: ./Scripts/test-install-app.sh
+      - name: Release, installer, and publication fixtures
+        run: ./Scripts/ci-release-fixtures.sh
 
       - name: Localization table parity
         # §6.1/§7.1 — a missing key in ko/ja silently falls back to English, and a
