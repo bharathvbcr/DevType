@@ -232,6 +232,8 @@ private final class LabSession: NSObject {
         container.addSubview(statusLabel)
         container.addSubview(closeButton)
         panel.contentView = container
+        // Titled but not resizable, and the caption quotes the snippet's plan label — hold it.
+        panel.dtLockContentSize(container.frame.size)
 
         NSLayoutConstraint.activate([
             badge.topAnchor.constraint(equalTo: container.topAnchor, constant: 28),

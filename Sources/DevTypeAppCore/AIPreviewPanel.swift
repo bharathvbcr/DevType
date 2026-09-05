@@ -8,6 +8,9 @@ import ExpanderEngine
 /// Buttons: Replace / Copy / Retry / Cancel. Cancel discards the pending result
 /// (generation may continue) and closes — late completions must not inject.
 enum AIPreviewPanel {
+    /// Sized once here so the panel and the labels that must fit inside it can never disagree.
+    static let panelSize = NSSize(width: 560, height: 460)
+
     private static var panel: NSPanel?
     private static var controller: AIPreviewController?
     /// This panel's claim on matching being suspended — see `EventTapEngine.MatchingSuspension`.
@@ -84,7 +87,7 @@ enum AIPreviewPanel {
         }
         #endif
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
+            contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -355,6 +358,12 @@ private final class AIPreviewController: NSViewController {
         errorLabel.isHidden = true
         errorLabel.lineBreakMode = .byWordWrapping
         errorLabel.maximumNumberOfLines = 3
+        // This panel animates its frame in, so it cannot take the fixed-size lock the sheets use;
+        // the one label fed by a free-form error message bounds itself instead. Without a
+        // preferred width a wrapping label measures single-line, and at the default resistance
+        // that width beat the window's and stretched the panel to fit the message.
+        errorLabel.preferredMaxLayoutWidth = AIPreviewPanel.panelSize.width - 36
+        errorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         root.addSubview(errorLabel)
 
         let hairline = DevTypeTheme.makeHairline()

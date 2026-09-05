@@ -22,6 +22,9 @@ import ExpanderEngine
 
 enum MacroPalettePanel {
 
+    /// Sized once here so the panel and the size lock can never disagree.
+    static let panelSize = NSSize(width: 580, height: 440)
+
     private static var activePanel: NSPanel?
     private static var activeController: MacroPaletteController?
     private static var activeHost: NSWindow?
@@ -40,7 +43,7 @@ enum MacroPalettePanel {
         if activePanel != nil { return true }
 
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 580, height: 440),
+            contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -63,6 +66,8 @@ enum MacroPalettePanel {
             onCancel: { dismiss() }
         )
         panel.contentView = controller.view
+        // Fixed-size sheet; the catalogue text inside truncates rather than resizing it.
+        panel.dtLockContentSize(panelSize)
 
         activePanel = panel
         activeController = controller
@@ -288,7 +293,7 @@ private final class MacroPaletteController: NSViewController,
             tint: DevTypeTheme.accent.withAlphaComponent(0.10),
             material: .popover
         )
-        glass.frame = NSRect(x: 0, y: 0, width: 580, height: 440)
+        glass.frame = NSRect(origin: .zero, size: MacroPalettePanel.panelSize)
         let root = glass.contentView
 
         // MARK: Search row

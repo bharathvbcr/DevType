@@ -103,14 +103,6 @@ enum SnippetEditorSheet {
             defer: false
         )
         DevTypeTheme.styleFloatingPanel(panel)
-        // This panel is a fixed-size, non-resizable sheet, and nothing inside it should be able to
-        // change that. Without the clamp, AppKit sizes a borderless window from its content view's
-        // *fitting* size, which counts every label's intrinsic width — so one label fed by
-        // user-typed text (the live preview) was enough to make the editor grow as you typed.
-        // The individual causes are fixed at the source; this makes the next one impossible.
-        let fixedSize = NSSize(width: panelWidth, height: panelHeight)
-        panel.contentMinSize = fixedSize
-        panel.contentMaxSize = fixedSize
 
         let controller = SnippetEditorController(
             existing: existing,
@@ -131,6 +123,15 @@ enum SnippetEditorSheet {
             }
         )
         panel.contentView = controller.view
+        // This panel is a fixed-size, non-resizable sheet, and nothing inside it may change that.
+        // A window under Auto Layout holds its size only at priority 500, below every label's
+        // default compression resistance, so any label fed by typed text — the trigger rule
+        // sentence carrying a conflict message, the live preview, a long group name — widened the
+        // editor with each keystroke until the buttons left the screen. The min/max clamp that
+        // used to sit here never entered the constraint solve. Required constraints do; see
+        // `dtLockContentSize`. The individual labels are also bounded at the source below, so
+        // they truncate legibly instead of merely losing the contest.
+        panel.dtLockContentSize(NSSize(width: panelWidth, height: panelHeight))
         // ⌘Return → Save, even while the multi-line replacement editor owns Return.
         panel.saveHandler = { [weak controller] in
             controller?.saveFromKeyboard()
@@ -810,6 +811,13 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         triggerStatusLabel.lineBreakMode = .byTruncatingTail
         triggerRuleLabel.translatesAutoresizingMaskIntoConstraints = false
         triggerRuleLabel.lineBreakMode = .byTruncatingTail
+        // Both carry text the user controls — the rule sentence embeds the typed trigger and, on
+        // a conflict, the full message naming every shadowed trigger. At the default resistance
+        // (750) their intrinsic width beat the window's 500 and pushed the panel wider; at low
+        // resistance they truncate in place. The rule label's tooltip and the inline error carry
+        // the full text.
+        triggerStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        triggerRuleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         triggerRuleLabel.setAccessibilityLabel(loc.s("ax.editor.triggerStatus"))
         root.addSubview(triggerCaption)
         root.addSubview(triggerStatusLabel)
@@ -1217,6 +1225,11 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         groupPopup.translatesAutoresizingMaskIntoConstraints = false
         groupPopup.pullsDown = false
         groupPopup.font = DevTypeTheme.font(12, .medium)
+        // A popup's intrinsic width is its *widest* item, and group names are user-typed: one
+        // long name widened the whole panel before anything was typed into it. It is pinned to
+        // its column by constraints; let it truncate there.
+        groupPopup.lineBreakMode = .byTruncatingTail
+        groupPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         // §4: the caption above it is a separate view.
         groupPopup.setAccessibilityLabel(loc.s("editor.group"))
         let menu = NSMenu()
@@ -1308,6 +1321,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
         imageNameLabel.translatesAutoresizingMaskIntoConstraints = false
         imageNameLabel.lineBreakMode = .byTruncatingMiddle
+        // A file name is user data too; it sits between the thumbnail and the Remove button.
+        imageNameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let hintLabel = DevTypeTheme.makeLabel(
             loc.s("editor.image.attached"),
@@ -1436,6 +1451,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
         imageButton = image
         charCountLabel.translatesAutoresizingMaskIntoConstraints = false
+        charCountLabel.lineBreakMode = .byTruncatingTail
+        charCountLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         container.addSubview(scroll)
         // The secret field occupies the replacement text view's own slot rather than a row of its
@@ -1469,7 +1486,10 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             image.centerYAnchor.constraint(equalTo: macro.centerYAnchor),
 
             charCountLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            charCountLabel.centerYAnchor.constraint(equalTo: macro.centerYAnchor)
+            charCountLabel.centerYAnchor.constraint(equalTo: macro.centerYAnchor),
+            // The count had no relation to the pills beside it; a long localized count in a
+            // narrow slot would have been drawn straight through the Image button.
+            charCountLabel.leadingAnchor.constraint(greaterThanOrEqualTo: image.trailingAnchor, constant: 8)
         ])
         return container
     }

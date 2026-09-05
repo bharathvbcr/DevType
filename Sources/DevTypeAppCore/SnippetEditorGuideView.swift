@@ -237,6 +237,21 @@ final class SnippetEditorGuideView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Horizontal inset of the rule sentence — the leading/trailing constants above.
+    private static let horizontalInset: CGFloat = 12
+
+    /// A wrapping label reports a single-line intrinsic size until it is told the width it will
+    /// actually be given. Left at zero, the sentence — which embeds the typed trigger — pushed the
+    /// editor panel wider and, once bounded, would have reported one line of height for two lines
+    /// of text. Deriving the width here keeps it right for every panel width and locale.
+    override func layout() {
+        let available = bounds.width - 2 * Self.horizontalInset
+        if available > 0, ruleLabel.preferredMaxLayoutWidth != available {
+            ruleLabel.preferredMaxLayoutWidth = available
+        }
+        super.layout()
+    }
+
     /// Re-renders the trigger rule for whatever the user has typed so far.
     func update(trigger: String, requireWordBoundary: Bool) {
         let text = TriggerRuleDescription.text(

@@ -60,6 +60,9 @@ struct SnippetAppScopeEntryPlan: Equatable {
 /// them as a single either/or choice would silently drop one on save, so the picker switches
 /// which list you are *looking at* and never discards the other.
 enum SnippetAppScopeSheet {
+    /// Sized once here so the panel, its glass container and the size lock can never disagree.
+    static let panelSize = NSSize(width: 420, height: 380)
+
     private static var activePanel: NSPanel?
     private static var activeController: AppScopeController?
 
@@ -72,7 +75,7 @@ enum SnippetAppScopeSheet {
         // Same single-instance contract as `GroupEditorSheet.present`.
         if activePanel != nil { return }
         let panel = AppScopeKeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 380),
+            contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -93,6 +96,9 @@ enum SnippetAppScopeSheet {
             }
         )
         panel.contentView = controller.view
+        // Fixed-size sheet: validation feedback quoting a bundle identifier must wrap inside it,
+        // never resize it. See `dtLockContentSize`.
+        panel.dtLockContentSize(panelSize)
 
         activePanel = panel
         activeController = controller
@@ -173,7 +179,7 @@ final class AppScopeController: NSViewController, NSTableViewDataSource, NSTable
             tint: DevTypeTheme.accent.withAlphaComponent(0.09),
             material: .popover
         )
-        glass.frame = NSRect(x: 0, y: 0, width: 420, height: 380)
+        glass.frame = NSRect(origin: .zero, size: SnippetAppScopeSheet.panelSize)
         let root = glass.contentView
 
         let badge = IconBadgeView(symbol: "macwindow.on.rectangle", tint: DevTypeTheme.accent, size: 34)
@@ -195,6 +201,10 @@ final class AppScopeController: NSViewController, NSTableViewDataSource, NSTable
         modeControl.setAccessibilityLabel(loc.s("appscope.mode.label"))
 
         summaryLabel.translatesAutoresizingMaskIntoConstraints = false
+        // A wrapping label measures itself single-line until told its width; the slot is the
+        // segmented control's width. Without this, feedback quoting a long bundle identifier
+        // widened the panel instead of wrapping.
+        summaryLabel.preferredMaxLayoutWidth = SnippetAppScopeSheet.panelSize.width - 40
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false

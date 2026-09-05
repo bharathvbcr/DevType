@@ -20,6 +20,9 @@ struct GroupDraft: Equatable {
 /// Glass sheet for creating / editing a snippet group: name, SF-symbol icon,
 /// color tag, and enable toggle. Validation errors render inline (crimson label).
 enum GroupEditorSheet {
+    /// Sized once here so the panel, its glass container and the size lock can never disagree.
+    static let panelSize = NSSize(width: 400, height: 476)
+
     private static var activePanel: NSPanel?
     private static var activeController: GroupEditorController?
 
@@ -36,7 +39,7 @@ enum GroupEditorSheet {
         // unclosable by any path but its own.
         if activePanel != nil { return }
         let panel = GroupEditorKeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 476),
+            contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -58,6 +61,9 @@ enum GroupEditorSheet {
             }
         )
         panel.contentView = controller.view
+        // Fixed-size sheet: a validation message or a long group name must truncate inside it,
+        // never resize it. See `dtLockContentSize`.
+        panel.dtLockContentSize(panelSize)
 
         activePanel = panel
         activeController = controller
@@ -262,7 +268,7 @@ private final class GroupEditorController: NSViewController {
             tint: DevTypeTheme.accent.withAlphaComponent(0.09),
             material: .popover
         )
-        glass.frame = NSRect(x: 0, y: 0, width: 400, height: 476)
+        glass.frame = NSRect(origin: .zero, size: GroupEditorSheet.panelSize)
         let root = glass.contentView
 
         // Header
@@ -403,6 +409,10 @@ private final class GroupEditorController: NSViewController {
         errorLabel.translatesAutoresizingMaskIntoConstraints = false
         errorLabel.isHidden = true
         errorLabel.maximumNumberOfLines = 2
+        errorLabel.lineBreakMode = .byWordWrapping
+        // A wrapping label measures itself single-line until told its width; the slot is the
+        // name field's width. Without this a long conflict message widened the panel.
+        errorLabel.preferredMaxLayoutWidth = GroupEditorSheet.panelSize.width - 40
         errorLabel.setAccessibilityRole(NSAccessibility.Role.staticText)
         root.addSubview(errorLabel)
 

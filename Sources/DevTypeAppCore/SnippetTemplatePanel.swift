@@ -3,6 +3,9 @@ import ExpanderEngine
 
 /// Sheet listing AI + general snippet templates. Selecting a row opens the editor pre-filled.
 enum SnippetTemplatePanel {
+    /// Sized once here so the panel and the size lock can never disagree.
+    static let panelSize = NSSize(width: 420, height: 480)
+
     private static var activePanel: NSPanel?
     private static var activeController: SnippetTemplateController?
 
@@ -16,7 +19,7 @@ enum SnippetTemplatePanel {
         // the first would then nil them out from under the second.
         if activePanel != nil { return }
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 480),
+            contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -42,6 +45,8 @@ enum SnippetTemplatePanel {
             }
         )
         panel.contentView = controller.view
+        // Fixed-size sheet; template titles and hints truncate rather than resizing it.
+        panel.dtLockContentSize(panelSize)
 
         activePanel = panel
         activeController = controller
@@ -90,7 +95,7 @@ private final class SnippetTemplateController: NSViewController, NSTableViewData
             tint: DevTypeTheme.accent.withAlphaComponent(0.09),
             material: .popover
         )
-        glass.frame = NSRect(x: 0, y: 0, width: 420, height: 480)
+        glass.frame = NSRect(origin: .zero, size: SnippetTemplatePanel.panelSize)
         let root = glass.contentView
 
         let badge = IconBadgeView(

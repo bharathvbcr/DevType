@@ -116,3 +116,33 @@ enum FloatingPanelChrome {
         ))
     }
 }
+
+// MARK: - Fixed-size panels
+
+extension NSWindow {
+    /// Holds a fixed-size panel at exactly `size`, in the one place that actually holds.
+    ///
+    /// Under Auto Layout a window keeps its current size only at
+    /// `NSLayoutConstraint.Priority.windowSizeStayPut` (500). Every label's intrinsic width resists
+    /// compression at 750 by default, so a single label fed by user text — a conflict message, a
+    /// long trigger, a group name in a popup — wins that contest and *widens the window* instead
+    /// of truncating. `contentMinSize` / `contentMaxSize` take no part in the constraint solve;
+    /// they bound the user's drag and `setContentSize`, which is why the snippet editor kept
+    /// growing as you typed with both of them set.
+    ///
+    /// Required width and height constraints on the content view do take part, and they outrank
+    /// every optional intrinsic size, so overflowing text is compressed and truncated where it
+    /// sits and the footer never leaves the panel. Call once the content view is installed.
+    func dtLockContentSize(_ size: NSSize) {
+        contentMinSize = size
+        contentMaxSize = size
+        guard let contentView else {
+            assertionFailure("dtLockContentSize(_:) must run after the content view is installed")
+            return
+        }
+        NSLayoutConstraint.activate([
+            contentView.widthAnchor.constraint(equalToConstant: size.width),
+            contentView.heightAnchor.constraint(equalToConstant: size.height)
+        ])
+    }
+}

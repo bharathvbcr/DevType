@@ -68,6 +68,9 @@ enum FillInPanel {
         )
         panel.contentView = controller.view
         panel.setContentSize(controller.preferredSize)
+        // Fixed for the life of the form: a snippet-authored title or field name must truncate
+        // inside the panel, never push the Insert / Cancel buttons off it. See `dtLockContentSize`.
+        panel.dtLockContentSize(controller.preferredSize)
         panel.center()
 
         NSApp.activate(ignoringOtherApps: true)
@@ -161,6 +164,8 @@ private final class FillInFormController: NSViewController {
         let titleLabel = DevTypeTheme.makeLabel(formTitle, font: DevTypeTheme.font(14, .bold), color: DevTypeTheme.textPrimary)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.lineBreakMode = .byTruncatingTail
+        // The title is snippet-authored; it truncates in the header rather than widening the panel.
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let subtitleLabel = DevTypeTheme.makeLabel(
             loc.s("fillin.subtitle"),
             font: DevTypeTheme.font(10.5),
@@ -304,6 +309,10 @@ private final class FillInFormController: NSViewController {
         // §4: the caption is a sibling view of the control, so it is decoration
         // for AX purposes — every control below carries `field.name` itself.
         caption.setAccessibilityElement(false)
+        // Snippet-authored, so unbounded: it truncates inside the form instead of pushing the
+        // scrolled document — and with it the panel — wider.
+        caption.lineBreakMode = .byTruncatingTail
+        caption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         container.addArrangedSubview(caption)
 
         switch field.kind {

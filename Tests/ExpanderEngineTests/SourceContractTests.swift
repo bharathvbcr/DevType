@@ -868,10 +868,12 @@ final class SourceContractTests: XCTestCase {
 
     // MARK: - Editor panel must not resize itself
 
-    /// The editor is a fixed-size borderless panel, and AppKit sizes such a window from its
-    /// content view's *fitting* size — which counts every label's intrinsic width. The live
-    /// preview strip is fed by the replacement text, so without these guards the panel grew wider
-    /// with every character typed.
+    /// The editor is a fixed-size borderless panel. A window under Auto Layout holds its size only
+    /// at priority 500, below every label's default compression resistance, so any label fed by
+    /// typed text widened the panel with each keystroke. `contentMaxSize` never took part in the
+    /// constraint solve — the v0.1.7 editor had it set and still grew — so the backstop is a
+    /// required content-view size (`dtLockContentSize`), and each user-fed label is bounded at the
+    /// source so it truncates legibly. `SnippetEditorPanelSizingTests` drives the live panel.
     func testEditorCannotBeGrownByItsOwnContent() throws {
         let editor = try source("Sources/DevTypeAppCore/SnippetEditorSheet.swift")
 
@@ -884,9 +886,58 @@ final class SourceContractTests: XCTestCase {
             "The stage must be handed a bounded string, not the whole replacement."
         )
         XCTAssertTrue(
-            editor.contains("panel.contentMaxSize = fixedSize"),
+            editor.contains("panel.dtLockContentSize(NSSize(width: panelWidth, height: panelHeight))"),
             "The backstop that makes the next such bug impossible rather than merely fixed."
         )
+        XCTAssertFalse(
+            editor.contains("panel.contentMaxSize = fixedSize"),
+            "The min/max clamp is not a layout constraint; it is what let the panel keep growing."
+        )
+        for label in ["triggerRuleLabel", "triggerStatusLabel", "imageNameLabel", "charCountLabel", "groupPopup"] {
+            XCTAssertTrue(
+                editor.contains("\(label).setContentCompressionResistancePriority(.defaultLow, for: .horizontal)"),
+                "\(label) carries user text; at default resistance its width beats the window's."
+            )
+        }
+
+        let chrome = try source("Sources/DevTypeAppCore/FloatingPanelChrome.swift")
+        XCTAssertTrue(chrome.contains("contentView.widthAnchor.constraint(equalToConstant: size.width)"))
+        XCTAssertTrue(chrome.contains("contentView.heightAnchor.constraint(equalToConstant: size.height)"))
+    }
+
+    /// The AI preview panel animates its frame in, so it cannot take the lock; its one free-form
+    /// label (the error line) has to bound itself instead.
+    func testAnimatedPreviewPanelBoundsItsErrorLabel() throws {
+        let preview = try source("Sources/DevTypeAppCore/AIPreviewPanel.swift")
+        XCTAssertTrue(preview.contains("errorLabel.preferredMaxLayoutWidth = AIPreviewPanel.panelSize.width - 36"))
+        XCTAssertTrue(preview.contains("errorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)"))
+        XCTAssertFalse(preview.contains("dtLockContentSize("), "an animated frame would fight a required size")
+    }
+
+    /// Every fixed-size panel built the same way shares the same failure, so every one of them
+    /// takes the same lock. Listing them here is what stops the next sheet from being added
+    /// without it.
+    func testEveryFixedSizePanelLocksItsContentSize() throws {
+        for path in [
+            "Sources/DevTypeAppCore/SnippetEditorSheet.swift",
+            "Sources/DevTypeAppCore/GroupEditorSheet.swift",
+            "Sources/DevTypeAppCore/SnippetAppScopeSheet.swift",
+            "Sources/DevTypeAppCore/MacroPalettePanel.swift",
+            "Sources/DevTypeAppCore/SnippetTemplatePanel.swift",
+            "Sources/DevTypeAppCore/FillInPanel.swift",
+            "Sources/DevTypeAppCore/TestExpansionLab.swift",
+        ] {
+            let text = try source(path)
+            XCTAssertTrue(text.contains("dtLockContentSize("), "\(path) is a fixed-size panel without the size lock.")
+            // The lock reads `contentView`, so it has to follow the assignment.
+            let assignment = text.range(of: "panel.contentView = ")
+            let lock = text.range(of: "dtLockContentSize(")
+            if let assignment, let lock {
+                XCTAssertLessThan(assignment.lowerBound, lock.lowerBound, "\(path): lock before the content view is installed")
+            } else {
+                XCTFail("\(path): expected both a content view assignment and a lock")
+            }
+        }
     }
 
     /// The behaviour chips outgrew the panel the moment a fifth was added, and the row had no
