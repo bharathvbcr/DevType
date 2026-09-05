@@ -223,6 +223,9 @@ final class StatsViewController: NSViewController {
 
     private var selectedPeriod: StatsTimePeriod = .all
     private var refreshTimer: Timer?
+    /// `UsageStatsStore.revision` as of the last `refresh()`. The poll skips recomputing when
+    /// it has not moved.
+    private var lastRefreshedUsageRevision: UInt64?
 
     private let periodControl = NSSegmentedControl()
     private let expansionsValue = StatsViewController.makeValueLabel()
@@ -394,8 +397,14 @@ final class StatsViewController: NSViewController {
         super.viewWillAppear()
         refresh()
         refreshTimer?.invalidate()
+        // The poll recomputes a full period snapshot every five seconds whether or not anything
+        // was recorded. `UsageStatsStore.revision` answers "did anything change" for free, so a
+        // pane left open on a quiet machine now costs a counter comparison per tick.
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            self?.refresh()
+            guard let self else { return }
+            let revision = UsageStatsStore.shared.revision
+            guard revision != self.lastRefreshedUsageRevision else { return }
+            self.refresh()
         }
     }
 
@@ -418,6 +427,9 @@ final class StatsViewController: NSViewController {
     // MARK: Data & Calculations
 
     func refresh() {
+        // Recorded before the work, so a change landing mid-refresh is picked up by the next
+        // tick rather than being swallowed.
+        lastRefreshedUsageRevision = UsageStatsStore.shared.revision
         updatePeriodControlLocalization()
         let groups = store.loadGroups()
         let snippets = groups.flatMap(\.snippets)

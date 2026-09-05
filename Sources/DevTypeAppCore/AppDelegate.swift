@@ -971,15 +971,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func copyToClipboard(_ snippet: SnippetModel) {
         let clipboard = NSPasteboard.general.string(forType: .string)
-        let lookup: (String) -> String? = { trigger in
-            // Secrets are excluded from nested `{{snippet:…}}` lookups: resolving one here would
-            // paste a password into whatever document the outer snippet lands in, with no
-            // explicit gesture naming it.
-            SnippetStore.shared.loadSnippets().first {
-                !$0.isSecret && ($0.triggerKeyword == trigger
-                    || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased()))
-            }?.replacementText
-        }
+        // Secrets are excluded from nested `{{snippet:…}}` lookups: resolving one here would
+        // paste a password into whatever document the outer snippet lands in, with no explicit
+        // gesture naming it.
+        let lookup = NestedSnippetResolver(
+            snippets: SnippetStore.shared.loadSnippets(),
+            excludingSecrets: true
+        ).lookup
 
         // Gated entry point: a secret asks for Touch ID here, before anything is read.
         SecretMenuFlow.resolve(
@@ -1019,6 +1017,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 ToastPanel.show(loc.s("snippet.copied.toast", snippet.displayTitle))
             }
+        case .failure(.macroFailed(let reason)):
+            ToastPanel.show(reason, symbol: "exclamationmark.triangle.fill")
         case .failure(.secretUnavailable):
             DevTypeAlert.present(
                 title: loc.s("secret.missing.title"),
@@ -1038,9 +1038,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
                 return
             }
-            PasteboardBroker.shared.invalidatePendingRestore()
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.writeObjects([image])
+            guard PasteboardBroker.shared.writeUserClipboardImage(image) else {
+                ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "exclamationmark.triangle.fill")
+                return
+            }
             SnippetStore.shared.incrementUsage(for: snippet.id)
             ToastPanel.show(loc.s("snippet.copied.toast", snippet.displayTitle), symbol: "photo")
 
@@ -1667,12 +1668,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // Inline search: erase 0, no quiescence (palette typing would always abort).
             let snapshot = PermissionCoordinator.shared.cachedSnapshot
             let clipboard = NSPasteboard.general.string(forType: .string)
-            let lookup: (String) -> String? = { trigger in
-                SnippetStore.shared.loadSnippets().first {
-                    $0.triggerKeyword == trigger
-                        || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased())
-                }?.replacementText
-            }
+            let lookup = NestedSnippetResolver(snippets: SnippetStore.shared.loadSnippets()).lookup
             // A secret is fetched at the moment of use and injected verbatim. Never through
             // `MacroRenderer`: a password containing `{{` or `%` is not a template, and expanding
             // one would corrupt it silently — or resolve a nested `{{snippet:…}}` inside it.
@@ -1723,10 +1719,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
+            let renderContext = MacroRenderContext(clipboardText: clipboard ?? "")
             let resolved = MacroRenderer.expand(
                 content: snippet.replacementText,
                 lookup: lookup,
-                clipboardText: clipboard
+                clipboardText: clipboard,
+                context: renderContext
             )
             if resolved.needsFillIn {
                 FillInPanel.present(title: snippet.displayTitle, fields: resolved.fillFields) { values in
@@ -1735,7 +1733,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                         content: snippet.replacementText,
                         fillValues: values,
                         lookup: lookup,
-                        clipboardText: clipboard
+                        clipboardText: clipboard,
+                        context: renderContext
                     )
                     self.injectSearchExpansion(snippet: snippet, resolved: filled, snapshot: snapshot)
                 }
@@ -1750,6 +1749,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         resolved: MacroExpansionResult,
         snapshot: PermissionSnapshot
     ) {
+        if let failure = resolved.failure {
+            ToastPanel.show(failure.message, symbol: "exclamationmark.triangle.fill")
+            return
+        }
         let needsCursor = InjectionPlanner.needsCursorHID(
             cursorOffset: resolved.cursorOffset,
             totalUTF16Length: resolved.text.utf16.count
@@ -2001,7 +2004,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             window.minSize = NSSize(width: 700, height: 460)
             // §6.1: window titles were hardcoded English.
             DevTypeTheme.styleWindow(window, title: loc.s("window.snippets"))
-            window.center()
+            window.dtRestoreFrame(named: "DevTypeSnippetManagerWindow")
             window.isReleasedWhenClosed = false
             snippetWindowController = NSWindowController(window: window)
             snippetManagerRenderedLanguage = loc.language
@@ -2079,7 +2082,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             PermissionRecoveryWindowLayout.apply(to: window)
             DevTypeTheme.styleWindow(window, title: loc.s("window.recovery"))
-            window.center()
+            window.dtRestoreFrame(named: "DevTypePermissionRecoveryWindow")
             window.isReleasedWhenClosed = false
             permissionWindowController = NSWindowController(window: window)
         }
@@ -2115,6 +2118,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.setContentSize(NSSize(width: 620, height: 640))
             DevTypeTheme.styleWindow(window, title: loc.s("window.setup"))
+            // Deliberately not frame-restoring: setup is a fixed-size, non-resizable, one-time
+            // flow, and centring is the right presentation every time it appears.
             window.center()
             window.isReleasedWhenClosed = false
             // Replace rather than accumulate: a re-created window would otherwise leave the

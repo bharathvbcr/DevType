@@ -375,7 +375,16 @@ public final class SnippetStore {
     private var saveFailureListeners: [UUID: (SaveOutcome?) -> Void] = [:]
     /// §1.13: lets the UI surface an iCloud conflict instead of losing a side.
     private var conflictListeners: [UUID: ([ConflictVersion]) -> Void] = [:]
-    private var _cachedGroups: [SnippetGroup]?
+    /// Bumps `_libraryRevision` on every assignment, including the ones a future caller
+    /// adds. Search's index cache keys on that counter instead of hashing every group and
+    /// snippet to discover nothing changed — which it did on every keystroke in the command
+    /// palette, at 627 µs per keystroke on a 2,000-snippet library.
+    private var _cachedGroups: [SnippetGroup]? {
+        didSet { _libraryRevision &+= 1 }
+    }
+    /// Monotonic, in-process only. Never persisted: it answers "is this the same library I
+    /// indexed a moment ago", which is a question about this process's memory.
+    private var _libraryRevision: UInt64 = 0
     private var _lastLoadIssue: LoadIssue?
     private var _saveBlocked: SaveOutcome?
     /// §0.3: latched when the library on disk could not be read/decoded. Blocks
@@ -730,14 +739,30 @@ public final class SnippetStore {
     }
 
     public func loadGroups() -> [SnippetGroup] {
+        loadGroupsWithRevision().groups
+    }
+
+    /// The library and the revision that identifies it, read together.
+    ///
+    /// Two separate calls would be a race: a save landing between them pairs a new revision
+    /// with the old groups, and a cache keyed on that would serve the old library forever.
+    public func loadGroupsWithRevision() -> (groups: [SnippetGroup], revision: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         if let cached = _cachedGroups {
-            return cached
+            return (cached, _libraryRevision)
         }
         let groups = loadGroupsUnlocked()
         _cachedGroups = groups
-        return groups
+        return (groups, _libraryRevision)
+    }
+
+    /// Monotonic counter identifying the in-memory library. Changes on every load, save,
+    /// external reload and relocation.
+    public var libraryRevision: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _libraryRevision
     }
 
     private struct Loaded {
@@ -1341,6 +1366,20 @@ public final class SnippetStore {
 
     /// Live usage count: sidecar value, falling back to the legacy in-library
     /// counter for snippets that have not been used since the migration.
+    /// Every recorded usage count in one read.
+    ///
+    /// The per-snippet accessor takes a lock inside `UsageStatsStore`, so filtering or sorting a
+    /// library through it cost one lock acquisition per snippet — two per comparison inside a
+    /// sort comparator. Callers working over a whole list should take this map once.
+    public func usageCountsByID() -> [UUID: Int] {
+        usageStatsStore.allStats().mapValues(\.usageCount)
+    }
+
+    /// Every recorded last-used timestamp in one read. Companion to `usageCountsByID()`.
+    public func lastUsedByID() -> [UUID: Date] {
+        usageStatsStore.allStats().compactMapValues(\.lastUsedAt)
+    }
+
     public func usageCount(for snippet: SnippetModel) -> Int {
         max(snippet.usageCount, usageStatsStore.usageCount(for: snippet.id))
     }
@@ -1597,32 +1636,106 @@ public final class SnippetStore {
         Self.unresolvedConflicts(at: fileURL)
     }
 
-    /// §1.13: keep this device's library. Marks every conflict version resolved,
-    /// removes the others, and force-writes the in-memory cache.
-    @discardableResult
-    public func resolveConflictsKeepingLocal() -> SaveOutcome {
-        Self.markConflictsResolved(at: fileURL)
-        setPendingConflicts([])
-        let groups = loadGroups()
-        let outcome = writeGroupsToDisk(groups, force: true, bypassHardFailure: true)
-        if outcome.didSave {
-            saveBlockLock.lock()
-            _hardFailure = nil
-            saveBlockLock.unlock()
-            publishSaveFailure(nil)
-        } else {
-            publishSaveFailure(outcome)
+    public enum ConflictChoice { case local, remote }
+
+    public enum ConflictResolutionOutcome: Equatable {
+        case adoptionFailed(String, recoveryURL: URL?)
+        case adopted(recoveryURL: URL)
+        case adoptedCleanupPending(String, recoveryURL: URL)
+
+        public var didAdopt: Bool {
+            if case .adoptionFailed = self { return false }
+            return true
         }
-        return outcome
     }
 
-    /// §1.13: accept whatever the current (winning) file holds and drop the others.
+    /// Compatibility adapters. UI callers use the typed result to surface pending cleanup.
+    @discardableResult
+    public func resolveConflictsKeepingLocal() -> SaveOutcome {
+        switch resolveConflicts(keeping: .local) {
+        case .adoptionFailed(let message, _): return .failed(message)
+        case .adopted, .adoptedCleanupPending: return .saved
+        }
+    }
+
     @discardableResult
     public func resolveConflictsKeepingRemote() -> Bool {
-        Self.markConflictsResolved(at: fileURL)
-        setPendingConflicts([])
-        reloadFromDisk()
-        return pendingConflicts().isEmpty
+        resolveConflicts(keeping: .remote).didAdopt
+    }
+
+    /// Capture, recovery copies, verified adoption, and version cleanup share the same mutation
+    /// lock and coordinated write. Observers are dispatched after releasing those boundaries.
+    @discardableResult
+    public func resolveConflicts(keeping choice: ConflictChoice) -> ConflictResolutionOutcome {
+        rmwLock.lock()
+        let result = resolveConflictsSerialized(keeping: choice)
+        rmwLock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.notifyConflictListeners()
+            if case .adoptionFailed(let message, _) = result {
+                self.publishSaveFailure(.failed(message))
+            } else {
+                self.publishSaveFailure(nil)
+                let groups = self.loadGroups()
+                let observers = self.lock.withLock { (self.listeners, self.groupListeners) }
+                let flat = Self.expandableSnippets(in: groups)
+                for listener in observers.0.values { listener(flat) }
+                for listener in observers.1.values { listener(groups) }
+            }
+        }
+        return result
+    }
+
+    private func resolveConflictsSerialized(keeping choice: ConflictChoice) -> ConflictResolutionOutcome {
+        let local: Data?
+        do {
+            local = choice == .local ? try Self.encodeLibrary(Self.sanitizeGroups(loadGroups())) : nil
+        } catch { return .adoptionFailed(error.localizedDescription, recoveryURL: nil) }
+        var result: LibraryConflictRecovery.Outcome?
+        var coordinationError: NSError?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(writingItemAt: fileURL, options: [.forReplacing], error: &coordinationError) { url in
+            let versions = (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []).map { version in
+                LibraryConflictRecovery.Version(url: version.url, remove: { try version.remove() })
+            }
+            result = LibraryConflictRecovery.resolve(
+                fileURL: url, recoveryRoot: localSupportDirectory.appendingPathComponent("ConflictRecovery", isDirectory: true),
+                localCandidate: local, versions: versions
+            ) { data in
+                let document = try Self.decodeDocument(from: data)
+                guard document.schemaVersion <= SnippetDocument.currentSchemaVersion else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+            }
+        }
+        guard let result else {
+            return .adoptionFailed(coordinationError?.localizedDescription ?? "File coordination did not run", recoveryURL: nil)
+        }
+        switch result {
+        case .adoptionFailed(let reason, let recoveryURL):
+            return .adoptionFailed(reason, recoveryURL: recoveryURL)
+        case .adopted(let data, let recoveryURL, let cleanupPending):
+            // Validation above guarantees decoding; still fail visibly if that contract changes.
+            let document: SnippetDocument
+            do { document = try Self.decodeDocument(from: data) }
+            catch { return .adoptionFailed(error.localizedDescription, recoveryURL: recoveryURL) }
+            let remaining = Self.unresolvedConflicts(at: fileURL)
+            storePendingConflicts(remaining)
+            let pending = cleanupPending ?? coordinationError?.localizedDescription
+                ?? (remaining.isEmpty ? nil : "Library adopted; additional conflict versions require review")
+            setLastKnownDigest(.sha(Self.sha256(of: data)))
+            saveBlockLock.lock()
+            _hardFailure = nil
+            _saveBlocked = pending == nil ? nil : .blockedByRemoteChange
+            saveBlockLock.unlock()
+            lock.lock()
+            _cachedGroups = document.groups
+            _lastLoadIssue = remaining.isEmpty ? nil : .conflicted(path: fileURL.path, versionCount: remaining.count)
+            lock.unlock()
+            if let pending { return .adoptedCleanupPending(pending, recoveryURL: recoveryURL) }
+            return .adopted(recoveryURL: recoveryURL)
+        }
     }
 
     /// Stores the snapshot without notifying. Safe to call while `lock` is held
@@ -1658,12 +1771,6 @@ public final class SnippetStore {
                 deviceName: $0.localizedNameOfSavingComputer
             )
         }
-    }
-
-    private static func markConflictsResolved(at url: URL) {
-        guard let versions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url) else { return }
-        for version in versions { version.isResolved = true }
-        try? NSFileVersion.removeOtherVersionsOfItem(at: url)
     }
 
     // MARK: - Writing
@@ -2561,14 +2668,20 @@ public final class SnippetStore {
         // This is invisible without the check: both snippets look fine individually, the
         // longer one simply never fires. Note it is asymmetric — only the *shorter* trigger's
         // firing rule matters, since the longer one is never reached.
-        for shadower in all where shadower.firesWithoutTerminator {
-            // Fold exactly as the matcher keys: case-insensitive triggers compare lowercased.
-            let shortKey = shadower.caseSensitive ? shadower.trigger : shadower.trigger.lowercased()
+        // Fold exactly as the matcher keys: case-insensitive triggers compare lowercased.
+        // Folded once here rather than inside the scan — the nested loop this replaces folded
+        // its candidate on every comparison, so a 1,000-trigger library allocated a million
+        // strings to answer a question about prefixes. 180 ms at 2,000 triggers, on the main
+        // thread, per keystroke while the Conflicts chip was active. See `TriggerPrefixScan`.
+        let foldedKeys = all.map { $0.caseSensitive ? $0.trigger : $0.trigger.lowercased() }
+        let scan = TriggerPrefixScan(foldedKeys: foldedKeys)
+        for (index, shadower) in all.enumerated() where shadower.firesWithoutTerminator {
             var shadowed: [Entry] = []
-            for candidate in all where candidate.id != shadower.id {
-                let longKey = candidate.caseSensitive ? candidate.trigger : candidate.trigger.lowercased()
-                guard longKey.count > shortKey.count, longKey.hasPrefix(shortKey) else { continue }
-                shadowed.append(candidate)
+            scan.forEachStrictExtension(of: index) { other in
+                // A duplicate UUID names the same snippet twice; the old scan skipped those by
+                // identity and this must keep doing so.
+                guard all[other].id != shadower.id else { return }
+                shadowed.append(all[other])
             }
             guard !shadowed.isEmpty else { continue }
             let ordered = shadowed.sorted { $0.trigger < $1.trigger }
@@ -2613,7 +2726,14 @@ public final class SnippetStore {
     }
 
     public func search(_ query: String, limit: Int? = nil) -> [SearchHit] {
-        SnippetSearch.run(query: query, in: loadGroups(), includeDisabled: false, limit: limit)
+        let snapshot = loadGroupsWithRevision()
+        return SnippetSearch.run(
+            query: query,
+            in: snapshot.groups,
+            includeDisabled: false,
+            limit: limit,
+            revision: snapshot.revision
+        )
     }
 
     // MARK: - Image housekeeping (§3.7)

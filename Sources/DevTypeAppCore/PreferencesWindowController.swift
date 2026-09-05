@@ -871,7 +871,7 @@ final class PreferencesWindowController: NSWindowController {
             newWindow.setContentSize(NSSize(width: 800, height: 680))
             newWindow.minSize = NSSize(width: 720, height: 560)
             DevTypeTheme.styleWindow(newWindow, title: LocalizationManager.shared.s("window.preferences"))
-            newWindow.center()
+            newWindow.dtRestoreFrame(named: "DevTypePreferencesWindow")
             newWindow.isReleasedWhenClosed = false
             self.window = newWindow
             renderedLanguage = LocalizationManager.shared.language
@@ -1075,6 +1075,12 @@ final class PreferencesViewController: NSViewController,
     private var navRows: [SidebarNavRow] = []
     private var selectedTab: PreferencesTab = .home
     private var panes: [PreferencesTab: NSView] = [:]
+    /// Host every pane is pinned into. Retained so panes can be built on first selection
+    /// rather than all at once: General, Snippets, Hotkeys, Voice (a 639-line builder), AI,
+    /// Advanced and the whole `HomeViewController` used to be constructed, constrained and
+    /// left resident before the window appeared, with six of seven merely `isHidden`. Most
+    /// users open one pane.
+    private weak var paneHostView: NSView?
     private var paneTitleLabel: NSTextField?
     private var paneSubtitleLabel: NSTextField?
     private var paneIconBadge: IconBadgeView?
@@ -1440,18 +1446,10 @@ final class PreferencesViewController: NSViewController,
         content.addSubview(paneHeader)
         content.addSubview(paneHost)
 
-        for tab in PreferencesTab.visibleCases {
-            let pane = makeScrollingPane(for: tab)
-            pane.isHidden = tab != selectedTab
-            paneHost.addSubview(pane)
-            panes[tab] = pane
-            NSLayoutConstraint.activate([
-                pane.topAnchor.constraint(equalTo: paneHost.topAnchor),
-                pane.leadingAnchor.constraint(equalTo: paneHost.leadingAnchor),
-                pane.trailingAnchor.constraint(equalTo: paneHost.trailingAnchor),
-                pane.bottomAnchor.constraint(equalTo: paneHost.bottomAnchor)
-            ])
-        }
+        paneHostView = paneHost
+        // Only the pane about to be shown. The rest are built by `ensurePane(_:)` the first
+        // time they are selected.
+        _ = ensurePane(selectedTab)
 
         root.addSubview(sidebar)
         root.addSubview(separator)
@@ -1526,9 +1524,47 @@ final class PreferencesViewController: NSViewController,
         applyTabSelection(sender.tab, animated: true)
     }
 
+    /// Returns the pane for `tab`, building and installing it on first use.
+    @discardableResult
+    private func ensurePane(_ tab: PreferencesTab) -> NSView? {
+        if let existing = panes[tab] { return existing }
+        guard let host = paneHostView else { return nil }
+        let pane = makeScrollingPane(for: tab)
+        pane.isHidden = tab != selectedTab
+        host.addSubview(pane)
+        panes[tab] = pane
+        NSLayoutConstraint.activate([
+            pane.topAnchor.constraint(equalTo: host.topAnchor),
+            pane.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            pane.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            pane.bottomAnchor.constraint(equalTo: host.bottomAnchor)
+        ])
+        // A pane built after `reloadAll()` has already run would otherwise show whatever its
+        // builder happened to set rather than current preferences. Populate it now — the
+        // reloads are idempotent, and `reloadVoice`/`reloadAI` already guard on the pane
+        // existing, which it does by this point.
+        reload(tab)
+        return pane
+    }
+
+    /// Repopulates one pane's controls from current preferences.
+    private func reload(_ tab: PreferencesTab) {
+        switch tab {
+        case .home: homeViewController?.refresh()
+        case .general: reloadGeneral()
+        case .snippets: reloadSnippets()
+        case .hotkeys: reloadHotkeys()
+        case .voice: reloadVoice()
+        case .ai: reloadAI()
+        case .advanced: reloadAdvanced()
+        }
+    }
+
     private func applyTabSelection(_ tab: PreferencesTab, animated: Bool) {
         let isFirstPresentation = tabsShownAtLeastOnce.insert(tab).inserted
         selectedTab = tab
+        // Must precede the reload/refresh calls below, which read the pane's controls.
+        ensurePane(tab)
         for row in navRows {
             let selected = row.tab == tab
             row.isSelectedRow = selected
@@ -1661,6 +1697,10 @@ final class PreferencesViewController: NSViewController,
         select(state.selectedTab)
 
         let scrollOrigins = state.scrollOrigins
+        // Rebuild every pane the previous controller had. Panes are built on first selection, so
+        // a pane carrying a scroll origin is one the user had opened — recreating it is what
+        // makes their position survive the language change rather than silently resetting.
+        for tab in scrollOrigins.keys { ensurePane(tab) }
         let restoreScrollPositions = { [weak self] in
             guard let self else { return }
             self.view.layoutSubtreeIfNeeded()
@@ -5009,7 +5049,7 @@ final class PreferencesViewController: NSViewController,
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        let rowView = RoundedSelectionRowView()
+        let rowView = RoundedSelectionRowView.dequeue(from: tableView, owner: self)
         rowView.selectionRadius = 5
         rowView.selectionInset = NSEdgeInsets(top: 1, left: 2, bottom: 1, right: 2)
         return rowView

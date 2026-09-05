@@ -45,10 +45,13 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
             longest = max(longest, key.count)
         }
 
-        for entry in entries where entry.firesWithoutTerminator {
-            for other in keys where other.count > entry.key.count && other.hasPrefix(entry.key) {
+        // One sorted view answers every query. The nested scan this replaces was O(n²) and
+        // ran synchronously on the main thread inside `EventTapEngine.snippets` on every
+        // library save — 118 ms at 2,000 triggers. See `TriggerPrefixScan`.
+        let scan = TriggerPrefixScan(foldedKeys: keys)
+        for (index, entry) in entries.enumerated() where entry.firesWithoutTerminator {
+            if scan.hasStrictExtension(of: index) {
                 ambiguous.insert(entry.key)
-                break
             }
         }
 

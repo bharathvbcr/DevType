@@ -167,7 +167,12 @@ public struct SnippetSearchIndex {
 
     let entries: [Entry]
     /// Cheap content fingerprint; the cached index is rebuilt when this changes.
+    /// Identifies the library this index was built from. Either a `SnippetStore` revision
+    /// (cheap, exact) or a content fingerprint (for callers holding groups from nowhere in
+    /// particular) — `stampIsRevision` says which, so the two numbering schemes can never be
+    /// mistaken for each other in a cache key.
     public let fingerprint: UInt64
+    public let stampIsRevision: Bool
     public let includesDisabled: Bool
 
     public var count: Int { entries.count }
@@ -180,11 +185,22 @@ public enum SnippetSearch {
     // MARK: Cached index (§2.8)
 
     private static let cacheLock = UnfairLock()
-    private static var cachedIndex: SnippetSearchIndex?
+    /// One slot per `includeDisabled` value. A single slot meant two callers that disagreed
+    /// about disabled snippets — the palette and the manager — evicted each other and paid a
+    /// full rebuild on every alternation.
+    private static var cachedIndices: [Bool: SnippetSearchIndex] = [:]
 
     private struct QueryCacheKey: Hashable {
         let query: String
         let fingerprint: UInt64
+        /// Distinguishes a store revision from a content fingerprint, so revision 7 and
+        /// fingerprint 7 cannot collide in this table.
+        let stampIsRevision: Bool
+        /// The same library searched with and without disabled snippets gives different
+        /// answers. This used to ride along inside the content fingerprint, which hashes it —
+        /// but a store revision names the library alone, so the distinction has to be carried
+        /// explicitly or the palette would serve the manager's results.
+        let includesDisabled: Bool
         let limit: Int?
         let statsRevision: UInt64
         /// Revision of whatever store the caller's `boost` closure actually reads. The shared
@@ -195,7 +211,10 @@ public enum SnippetSearch {
     }
 
     private static var queryCache: [QueryCacheKey: [SearchHit]] = [:]
-    private static var queryCacheKeys: [QueryCacheKey] = []
+    /// FIFO order as a ring: the previous `Array` was drained with `removeFirst()`, an O(n)
+    /// memmove on every eviction.
+    private static var queryCacheKeys: [QueryCacheKey?] = []
+    private static var queryCacheHead = 0
     private static let maxQueryCacheEntries = 128
 
     /// Fingerprint over the fields the index derives from. Deliberately hashes only short
@@ -203,6 +222,11 @@ public enum SnippetSearch {
     /// the index exists to remove, while still catching every realistic edit (`updatedAt` moves
     /// on save, and a body edit changes its length in all but pathological cases).
     public static func fingerprint(of groups: [SnippetGroup], includeDisabled: Bool) -> UInt64 {
+        #if DEBUG
+        fingerprintCallLock.lock()
+        fingerprintCallCountForTesting += 1
+        fingerprintCallLock.unlock()
+        #endif
         var hasher = Hasher()
         hasher.combine(includeDisabled)
         hasher.combine(groups.count)
@@ -226,10 +250,35 @@ public enum SnippetSearch {
 
     /// Builds a normalized index. Callers that hold a library for a while can keep this and pass
     /// it to `run(query:index:limit:boost:)`; `run(query:in:…)` caches one internally.
+    /// - Parameter revision: a `SnippetStore.libraryRevision`, when the caller has one. Supplying
+    ///   it replaces the content fingerprint — which hashes every group and snippet — with a
+    ///   counter comparison.
     public static func makeIndex(
         for groups: [SnippetGroup],
         includeDisabled: Bool = true,
-        locale: Locale? = Locale.current
+        locale: Locale? = Locale.current,
+        revision: UInt64? = nil
+    ) -> SnippetSearchIndex {
+        makeIndex(
+            for: groups,
+            includeDisabled: includeDisabled,
+            locale: locale,
+            stamp: revision ?? fingerprint(of: groups, includeDisabled: includeDisabled),
+            stampIsRevision: revision != nil
+        )
+    }
+
+    /// Builds with a stamp the caller has already resolved.
+    ///
+    /// `index(for:)` computes the stamp to check the cache and would otherwise pay for a second
+    /// identical content hash whenever the cache missed — the exact cost this whole path exists
+    /// to avoid, just moved one line down.
+    private static func makeIndex(
+        for groups: [SnippetGroup],
+        includeDisabled: Bool,
+        locale: Locale?,
+        stamp: UInt64,
+        stampIsRevision: Bool
     ) -> SnippetSearchIndex {
         var entries: [SnippetSearchIndex.Entry] = []
         for group in groups {
@@ -263,33 +312,115 @@ public enum SnippetSearch {
         }
         return SnippetSearchIndex(
             entries: entries,
-            fingerprint: fingerprint(of: groups, includeDisabled: includeDisabled),
+            fingerprint: stamp,
+            stampIsRevision: stampIsRevision,
             includesDisabled: includeDisabled
         )
     }
 
-    private static func index(for groups: [SnippetGroup], includeDisabled: Bool) -> SnippetSearchIndex {
-        let stamp = fingerprint(of: groups, includeDisabled: includeDisabled)
+    private static func index(
+        for groups: [SnippetGroup],
+        includeDisabled: Bool,
+        revision: UInt64?
+    ) -> SnippetSearchIndex {
+        // A revision comparison is O(1); the fingerprint hashes every snippet's id, trigger,
+        // title, tags and timestamp — 627 µs at 2,000 snippets, paid on every keystroke to
+        // discover the library had not changed.
+        let stamp = revision ?? fingerprint(of: groups, includeDisabled: includeDisabled)
+        let stampIsRevision = revision != nil
+
         cacheLock.lock()
-        if let cached = cachedIndex, cached.fingerprint == stamp, cached.includesDisabled == includeDisabled {
+        if let cached = cachedIndices[includeDisabled],
+           cached.fingerprint == stamp,
+           cached.stampIsRevision == stampIsRevision {
             cacheLock.unlock()
             return cached
         }
         cacheLock.unlock()
 
-        let fresh = makeIndex(for: groups, includeDisabled: includeDisabled)
+        let fresh = makeIndex(
+            for: groups,
+            includeDisabled: includeDisabled,
+            locale: Locale.current,
+            stamp: stamp,
+            stampIsRevision: stampIsRevision
+        )
         cacheLock.lock()
-        cachedIndex = fresh
+        cachedIndices[includeDisabled] = fresh
+        // Results computed against the library we just replaced can never be served again —
+        // their key no longer matches any live index — but nothing used to remove them, so
+        // they sat pinning `SnippetModel` copies (replacement text included) until FIFO
+        // eviction pushed them out 128 queries later.
+        pruneQueryCacheLocked()
         cacheLock.unlock()
         return fresh
+    }
+
+    /// Drops query results whose stamp belongs to no live index. Caller holds `cacheLock`.
+    private static func pruneQueryCacheLocked() {
+        let live = Set(cachedIndices.values.map { StampIdentity(value: $0.fingerprint, isRevision: $0.stampIsRevision) })
+        guard !queryCache.isEmpty else { return }
+        queryCache = queryCache.filter { key, _ in
+            live.contains(StampIdentity(value: key.fingerprint, isRevision: key.stampIsRevision))
+        }
+        // Rebuild the eviction ring from the survivors, oldest first.
+        var survivors: [QueryCacheKey?] = []
+        survivors.reserveCapacity(queryCache.count)
+        var seen: Set<QueryCacheKey> = []
+        for slot in queryCacheHead..<queryCacheKeys.count {
+            guard let key = queryCacheKeys[slot], queryCache[key] != nil else { continue }
+            // A key re-inserted after an earlier eviction can appear twice; keep the newest.
+            if seen.insert(key).inserted { survivors.append(key) }
+        }
+        queryCacheKeys = survivors
+        queryCacheHead = 0
+    }
+
+    private struct StampIdentity: Hashable {
+        let value: UInt64
+        let isRevision: Bool
+    }
+
+    #if DEBUG
+    private static let fingerprintCallLock = UnfairLock()
+    /// How many times the whole-library content hash has been computed. Debug-only, so a caller
+    /// that supplies a revision can be proven not to pay it.
+    private static var fingerprintCallCountForTesting = 0
+
+    static func resetFingerprintCountForTesting() {
+        fingerprintCallLock.lock()
+        fingerprintCallCountForTesting = 0
+        fingerprintCallLock.unlock()
+    }
+
+    static var fingerprintCountForTesting: Int {
+        fingerprintCallLock.lock()
+        defer { fingerprintCallLock.unlock() }
+        return fingerprintCallCountForTesting
+    }
+    #endif
+
+    /// Live query-cache entry count. Test seam for the pruning and bounding rules.
+    static var cachedQueryCountForTesting: Int {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return queryCache.count
+    }
+
+    /// Backing size of the eviction ring, which must not grow without bound.
+    static var queryCacheRingSizeForTesting: Int {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return queryCacheKeys.count
     }
 
     /// Drops the cached index. Only needed by tests and by "the library moved" handling.
     public static func invalidateIndexCache() {
         cacheLock.lock()
-        cachedIndex = nil
+        cachedIndices.removeAll(keepingCapacity: false)
         queryCache.removeAll(keepingCapacity: false)
         queryCacheKeys.removeAll(keepingCapacity: false)
+        queryCacheHead = 0
         cacheLock.unlock()
     }
 
@@ -300,9 +431,17 @@ public enum SnippetSearch {
         query: String,
         in groups: [SnippetGroup],
         includeDisabled: Bool = true,
-        limit: Int? = nil
+        limit: Int? = nil,
+        revision: UInt64? = nil
     ) -> [SearchHit] {
-        run(query: query, in: groups, includeDisabled: includeDisabled, limit: limit, boost: nil)
+        run(
+            query: query,
+            in: groups,
+            includeDisabled: includeDisabled,
+            limit: limit,
+            boost: nil,
+            revision: revision
+        )
     }
 
     /// §4.5/§4.7: ranked search with an optional usage boost.
@@ -317,11 +456,12 @@ public enum SnippetSearch {
         includeDisabled: Bool = true,
         limit: Int? = nil,
         boost: ((UUID) -> Int)?,
-        boostRevision: UInt64? = nil
+        boostRevision: UInt64? = nil,
+        revision: UInt64? = nil
     ) -> [SearchHit] {
         run(
             query: query,
-            index: index(for: groups, includeDisabled: includeDisabled),
+            index: index(for: groups, includeDisabled: includeDisabled, revision: revision),
             limit: limit,
             boost: boost,
             boostRevision: boostRevision
@@ -343,6 +483,8 @@ public enum SnippetSearch {
         let cacheKey = QueryCacheKey(
             query: trimmed,
             fingerprint: index.fingerprint,
+            stampIsRevision: index.stampIsRevision,
+            includesDisabled: index.includesDisabled,
             limit: limit,
             statsRevision: boost != nil ? statsRev : 0,
             boostRevision: boost != nil ? (boostRevision ?? 0) : 0
@@ -389,9 +531,21 @@ public enum SnippetSearch {
         }
 
         cacheLock.lock()
-        if queryCache.count >= maxQueryCacheEntries, !queryCacheKeys.isEmpty {
-            let oldest = queryCacheKeys.removeFirst()
-            queryCache.removeValue(forKey: oldest)
+        if queryCache.count >= maxQueryCacheEntries {
+            // Walk forward past keys a prune already dropped until one real eviction lands.
+            while queryCacheHead < queryCacheKeys.count {
+                let candidate = queryCacheKeys[queryCacheHead]
+                queryCacheKeys[queryCacheHead] = nil
+                queryCacheHead += 1
+                if let candidate, queryCache.removeValue(forKey: candidate) != nil { break }
+            }
+            // Reclaim the consumed prefix once it dominates the buffer, so the ring cannot
+            // grow without bound. Amortised to one compaction per `maxQueryCacheEntries`
+            // insertions rather than an O(n) memmove on every eviction.
+            if queryCacheHead >= maxQueryCacheEntries {
+                queryCacheKeys.removeFirst(queryCacheHead)
+                queryCacheHead = 0
+            }
         }
         queryCache[cacheKey] = result
         queryCacheKeys.append(cacheKey)

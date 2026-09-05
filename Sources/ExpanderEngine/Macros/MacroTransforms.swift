@@ -146,9 +146,8 @@ public enum MacroRandom {
 
 /// §3.5: Persistent named counters backing `%counter:name%` / `{{counter:name}}`.
 ///
-/// Values survive relaunch (stored as a single small `UserDefaults` dictionary). The store only
-/// ever *reports* values; advancing is driven by `MacroVolatileStore` so that the injection
-/// pipeline's preview pass and the real expansion observe the same number (see below).
+/// Values survive relaunch. A render operation reserves a value once; cancellation can leave
+/// a gap because output may already have escaped. Values are never rolled back on cancellation.
 public final class MacroCounterStore: @unchecked Sendable {
 
     public static let shared = MacroCounterStore()
@@ -156,6 +155,8 @@ public final class MacroCounterStore: @unchecked Sendable {
     public static let defaultDefaultsKey = "devtype.macroCounters"
 
     private let lock = UnfairLock()
+    // Serialize mutations through persistence; readers never wait on UserDefaults callbacks.
+    private let mutationLock = NSLock()
     private let defaults: UserDefaults
     private let defaultsKey: String
     private var values: [String: Int]
@@ -185,6 +186,8 @@ public final class MacroCounterStore: @unchecked Sendable {
     /// persisted to defaults.
     @discardableResult
     public func advance(_ name: String, by step: Int = 1) -> Int {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
         let key = Self.normalize(name)
         let snapshot: [String: Int]
         let next: Int
@@ -199,6 +202,8 @@ public final class MacroCounterStore: @unchecked Sendable {
     }
 
     public func set(_ name: String, to newValue: Int) {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
         let key = Self.normalize(name)
         let snapshot: [String: Int]
         lock.lock()
@@ -213,6 +218,8 @@ public final class MacroCounterStore: @unchecked Sendable {
     }
 
     public func resetAll() {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
         lock.lock()
         values.removeAll()
         lock.unlock()
@@ -222,86 +229,28 @@ public final class MacroCounterStore: @unchecked Sendable {
 
 // MARK: - Volatile value memoization
 
-/// §3.5: Short-window memo for macro values that are *not* pure functions of the template
-/// (`random`, `counter`).
-///
-/// This exists because one expansion runs the macro pipeline more than once: the event tap
-/// renders a preview to decide the injection strategy (`EventTapEngine` → `InjectionPlanner`),
-/// and the injection pipeline then renders the real payload a few milliseconds later. Without
-/// memoization a `{{random:1-100}}` snippet would plan against one string and inject another,
-/// and a counter would advance twice per expansion.
-///
-/// The window is deliberately short (0.5 s). Re-triggering the same snippet requires retyping a
-/// multi-character abbreviation, which takes far longer than that, so a genuine second expansion
-/// always sees a fresh value.
+/// Volatile values owned by one render operation. Production is serialized with publication,
+/// and a value never expires or gets evicted while that operation is alive.
 public final class MacroVolatileStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String: String] = [:]
 
-    public static let shared = MacroVolatileStore()
+    public init() {}
 
-    public static let defaultWindow: TimeInterval = 0.5
-
-    private struct Entry {
-        let value: String
-        let stamp: TimeInterval
-    }
-
-    private let lock = UnfairLock()
-    private var entries: [String: Entry] = [:]
-    private let window: TimeInterval
-    private let clock: () -> TimeInterval
-
-    /// Bounded so a long session cannot accumulate stale keys.
-    private static let capacity = 128
-
-    public init(
-        window: TimeInterval = MacroVolatileStore.defaultWindow,
-        clock: @escaping () -> TimeInterval = MacroVolatileStore.monotonicNow
-    ) {
-        self.window = window
-        self.clock = clock
-    }
-
-    public static func monotonicNow() -> TimeInterval {
-        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
-    }
-
-    /// Returns the memoized value for `key`, or produces (and stores) a fresh one.
     public func value(forKey key: String, produce: () -> String) -> String {
-        let now = clock()
         lock.lock()
-        if let existing = entries[key], now - existing.stamp <= window {
-            lock.unlock()
-            return existing.value
-        }
-        lock.unlock()
-
+        defer { lock.unlock() }
+        if let existing = entries[key] { return existing }
         let produced = produce()
-
-        lock.lock()
-        if entries.count >= Self.capacity {
-            entries = entries.filter { now - $0.value.stamp <= window }
-            if entries.count >= Self.capacity { entries.removeAll(keepingCapacity: true) }
-        }
-        entries[key] = Entry(value: produced, stamp: now)
-        lock.unlock()
+        entries[key] = produced
         return produced
-    }
-
-    public func invalidate() {
-        lock.lock()
-        entries.removeAll()
-        lock.unlock()
     }
 }
 
 // MARK: - Macro environment
 
-/// §3.5: Injectable collaborators for the macro renderers.
-///
-/// Everything defaults to the process-wide singletons, so existing call sites are unaffected;
-/// tests can substitute isolated stores. `memoSalt` scopes `MacroVolatileStore` keys to a single
-/// template so two different snippets expanded in the same half-second do not share a random
-/// value.
+/// Injectable collaborators. Each environment owns an operation memo by default; the counter
+/// store is shared because its persistent sequence spans operations.
 public struct MacroEnvironment {
     public var locale: Locale
     public var timeZone: TimeZone
@@ -313,8 +262,8 @@ public struct MacroEnvironment {
         locale: Locale = .current,
         timeZone: TimeZone = .current,
         counters: MacroCounterStore = .shared,
-        volatileValues: MacroVolatileStore = .shared,
-        memoSalt: String = ""
+        volatileValues: MacroVolatileStore = MacroVolatileStore(),
+        memoSalt: String = UUID().uuidString
     ) {
         self.locale = locale
         self.timeZone = timeZone
@@ -351,15 +300,16 @@ public struct MacroEnvironment {
         }
     }
 
-    /// Resolves a `uuid` token. Fixed width, so no memoization is needed for the preview pass to
-    /// agree with the injected payload on length.
-    public func uuidValue(spec: String) -> String {
-        let raw = UUID().uuidString
-        switch spec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "short": return String(raw.prefix(8))
-        case "lower", "lowercase": return raw.lowercased()
-        case "compact": return raw.replacingOccurrences(of: "-", with: "")
-        default: return raw
+    /// UUIDs, like random values, stay fixed for each occurrence in this operation.
+    public func uuidValue(spec: String, syntax: String = "direct", occurrence: Int = 0) -> String {
+        volatileValues.value(forKey: memoKey(syntax: syntax, kind: "uuid", spec: spec, occurrence: occurrence)) {
+            let raw = UUID().uuidString
+            switch spec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "short": return String(raw.prefix(8))
+            case "lower", "lowercase": return raw.lowercased()
+            case "compact": return raw.replacingOccurrences(of: "-", with: "")
+            default: return raw
+            }
         }
     }
 }

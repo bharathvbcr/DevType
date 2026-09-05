@@ -621,8 +621,19 @@ private final class MacroPaletteController: NSViewController,
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        guard rows.indices.contains(row), rows[row].isSelectable else { return NSTableRowView() }
-        return RoundedSelectionRowView()
+        // A non-selectable row (a section header) must not draw a selection, and a plain
+        // `NSTableRowView` is what says so. It is dequeued under its own identifier so both
+        // kinds recycle.
+        guard rows.indices.contains(row), rows[row].isSelectable else {
+            let identifier = NSUserInterfaceItemIdentifier("DevTypePlainRow")
+            if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableRowView {
+                return reused
+            }
+            let plain = NSTableRowView()
+            plain.identifier = identifier
+            return plain
+        }
+        return RoundedSelectionRowView.dequeue(from: tableView, owner: self)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {

@@ -171,6 +171,9 @@ final class P1UICompletionTests: XCTestCase {
         let controller = PreferencesViewController(hotkeyManager: nil)
         _ = controller.view
         defer { controller.viewWillDisappear() }
+        // Panes are built on first selection, so reach the Voice controls the way a user does.
+        // The labels under test belong to that pane; nothing here inspects any other.
+        controller.select(.voice)
 
         let views = descendants(of: controller.view)
         let secureField = try XCTUnwrap(views.compactMap { $0 as? NSSecureTextField }.first)

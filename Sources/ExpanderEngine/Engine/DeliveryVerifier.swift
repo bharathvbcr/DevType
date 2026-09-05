@@ -2,27 +2,38 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-/// §8.1: "did the text actually land in the field?" — and nothing else.
-///
-/// This is the only evidence the pipeline ever has that a paste worked: `CGEvent.post` returning
-/// is not delivery proof, and many hosts (Chrome, Electron, most terminals) cannot be read through
-/// AX at all. Everything here therefore has three outcomes, never two — `.unavailable` is a
-/// first-class answer and must never be collapsed into `.failed`, because `.failed` is what
-/// triggers a re-paste.
+/// Delivery evidence belongs to a pinned target and an observed insertion/replacement.
+/// Readable absence cannot prove an asynchronous paste will never arrive; it is unverified.
 public final class DeliveryVerifier {
     public static let shared = DeliveryVerifier()
 
     public struct FocusedTextObservation: Equatable {
         public let value: String?
         public let selectedText: String?
-        /// §2.6: `AXSelectedTextRange.location`, when it was worth one extra AX round trip to read
-        /// it (large fields only). Bounds the containment scan below.
         public let caretLocation: Int?
+        public let selectedRange: NSRange?
+        public let target: AXUIElement?
 
-        public init(value: String?, selectedText: String?, caretLocation: Int? = nil) {
+        public init(
+            value: String?, selectedText: String?, caretLocation: Int? = nil,
+            selectedRange: NSRange? = nil, target: AXUIElement? = nil
+        ) {
             self.value = value
             self.selectedText = selectedText
-            self.caretLocation = caretLocation
+            self.caretLocation = selectedRange?.location ?? caretLocation
+            self.selectedRange = selectedRange
+            self.target = target
+        }
+
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            let sameTarget: Bool
+            switch (lhs.target, rhs.target) {
+            case (nil, nil): sameTarget = true
+            case (let left?, let right?): sameTarget = CFEqual(left, right)
+            default: sameTarget = false
+            }
+            return sameTarget && lhs.value == rhs.value && lhs.selectedText == rhs.selectedText
+                && lhs.caretLocation == rhs.caretLocation && lhs.selectedRange == rhs.selectedRange
         }
     }
 
@@ -35,7 +46,7 @@ public final class DeliveryVerifier {
     /// §2.6: `value.contains(expectedText)` is O(n·m) over the *entire* focused field and ran on
     /// every 50 ms hold-loop tick. Above this size the scan is bounded to a window around the
     /// caret; with no caret available the answer degrades to "cannot judge" rather than to a
-    /// wrong `.failed` (which would re-paste and duplicate the user's text).
+    /// wrong `.failed` (historically used to authorize duplicate pastes; now treated as unavailable).
     public static let maxVerificationScanUTF16 = 32_768
     /// Slack around the caret when scanning a large field — hosts may place the caret a few units
     /// past the inserted text (trailing newline normalisation, autocorrect).
@@ -64,26 +75,32 @@ public final class DeliveryVerifier {
             selectedText = selectedTextRef as? String
         }
 
-        // §2.6 / §2.2: the caret read is one more AX IPC round trip (up to `messagingTimeout`), so
-        // only pay for it when the field is large enough that the unbounded scan would cost more.
-        var caretLocation: Int?
-        if let value, value.utf16.count > Self.maxVerificationScanUTF16 {
-            var rangeRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-               let rangeValue = rangeRef,
-               CFGetTypeID(rangeValue) == AXValueGetTypeID() {
-                var range = CFRange(location: 0, length: 0)
-                if AXValueGetValue(unsafeBitCast(rangeValue, to: AXValue.self), .cfRange, &range) {
-                    caretLocation = range.location
-                }
-            }
-        }
+        let selectedRange = Self.selectedRange(for: axElement)
 
         return FocusedTextObservation(
             value: value,
             selectedText: selectedText,
-            caretLocation: caretLocation
+            selectedRange: selectedRange,
+            target: axElement
         )
+    }
+
+    static func selectedRange(for axElement: AXUIElement) -> NSRange? {
+        // Attribution needs the range even for short fields. A matching string
+        // elsewhere in the field or an unrelated selection is not delivery evidence.
+        var selectedRange: NSRange?
+        var rangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+           let rangeValue = rangeRef,
+           CFGetTypeID(rangeValue) == AXValueGetTypeID() {
+            var range = CFRange(location: 0, length: 0)
+            if AXValueGetValue(unsafeBitCast(rangeValue, to: AXValue.self), .cfRange, &range),
+               range.location >= 0, range.length >= 0 {
+                selectedRange = NSRange(location: range.location, length: range.length)
+            }
+        }
+
+        return selectedRange
     }
 
     // MARK: - Verification
@@ -94,11 +111,13 @@ public final class DeliveryVerifier {
         staleProbe: String? = nil,
         staleProbeCaseInsensitive: Bool = false
     ) -> TextDeliveryVerification {
-        Self.verifyTextDelivery(
-            expectedText: expectedText,
-            baseline: baseline,
-            after: captureFocusedTextObservation(),
-            staleProbe: staleProbe,
+        guard let target = baseline?.target,
+              let current = AXContextChecker.shared.focusedElement(), CFEqual(target, current) else {
+            return .unavailable
+        }
+        return Self.verifyTextDelivery(
+            expectedText: expectedText, baseline: baseline,
+            after: focusedTextObservation(for: target), staleProbe: staleProbe,
             staleProbeCaseInsensitive: staleProbeCaseInsensitive
         )
     }
@@ -111,76 +130,50 @@ public final class DeliveryVerifier {
         staleProbeCaseInsensitive: Bool = false
     ) -> TextDeliveryVerification {
         guard !expectedText.isEmpty else { return .delivered }
-        guard let after else { return .unavailable }
-        if after.selectedText?.normalizedWhitespace == expectedText.normalizedWhitespace {
-            return .delivered
-        }
-        guard let value = after.value else {
+        guard let baseline, let after,
+              let beforeTarget = baseline.target, let afterTarget = after.target,
+              CFEqual(beforeTarget, afterTarget),
+              let beforeValue = baseline.value, let afterValue = after.value,
+              let insertion = baseline.selectedRange, let finalSelection = after.selectedRange else {
             return .unavailable
         }
-        // §2.6: bounded containment. `nil` means "too large to scan and no caret to bound it" —
-        // that is not evidence of failure.
-        guard let containsExpected = boundedContains(
-            expectedText,
-            in: value,
-            caretLocation: after.caretLocation
-        ) else {
-            return .unavailable
+        let before = beforeValue as NSString
+        let observed = afterValue as NSString
+        guard validRange(insertion, length: before.length),
+              validRange(finalSelection, length: observed.length),
+              Range(insertion, in: beforeValue) != nil,
+              Range(finalSelection, in: afterValue) != nil else { return .unavailable }
+
+        let payloadUnits = expectedText.utf16.count
+        let (finalLength, overflow) = (before.length - insertion.length).addingReportingOverflow(payloadUnits)
+        guard !overflow, observed.length == finalLength else { return .unavailable }
+        let (insertionEnd, endOverflow) = insertion.location.addingReportingOverflow(payloadUnits)
+        guard !endOverflow else { return .unavailable }
+        let collapsedAfterInsert = finalSelection.location == insertionEnd && finalSelection.length == 0
+        let insertedSelection = finalSelection.location == insertion.location && finalSelection.length == payloadUnits
+        guard collapsedAfterInsert || insertedSelection else { return .unavailable }
+
+        // Bound in the original UTF-16 coordinates before any normalization. No
+        // whole-field lowercasing or occurrence search can move this insertion window.
+        let prefixUnits = min(insertion.location, verificationCaretSlackUTF16)
+        let suffixUnits = min(before.length - insertion.location - insertion.length, verificationCaretSlackUTF16)
+        guard payloadUnits <= maxVerificationScanUTF16 - prefixUnits - suffixUnits else { return .unavailable }
+        let lower = insertion.location - prefixUnits
+        let prefix = before.substring(with: NSRange(location: lower, length: prefixUnits))
+        let suffix = before.substring(with: NSRange(location: insertion.location + insertion.length, length: suffixUnits))
+        let requiredWindow = (prefix + expectedText + suffix).normalizedWhitespace
+        if insertion.length == payloadUnits {
+            let oldWindow = before.substring(with: NSRange(location: lower, length: prefixUnits + insertion.length + suffixUnits))
+            guard oldWindow.normalizedWhitespace != requiredWindow else { return .unavailable }
         }
-        guard containsExpected else {
-            // The expected text is absent — but absence is only *evidence of a missed paste* if
-            // the field is otherwise unchanged. If anything moved since the baseline, something
-            // landed, and reporting `.failed` here makes the hold loop post a second Cmd+V that
-            // duplicates it. Virtualised web views (Electron, Chromium) routinely report a
-            // readable AXValue that never contains what was just pasted, which is exactly the
-            // case that produced doubled expansions.
-            if let baseline {
-                let baselineValue = baseline.value
-                if baselineValue != value || baseline.selectedText != after.selectedText {
-                    return .unavailable
-                }
-            }
-            // §8.4 staleness oracle: `staleProbe` is text the pipeline *provably removed* from
-            // the field before pasting (the erased trigger, deleted by counted backspaces). A
-            // read that still shows it is a stale mirror by construction — its "expected text
-            // missing" answer is testimony about a field state that no longer exists, and acting
-            // on it duplicates the paste. When the probe legitimately recurs elsewhere in the
-            // document this errs toward `.unavailable`, which suppresses corrections — the safe
-            // direction by design.
-            //
-            // Case-insensitive triggers carry the *snippet's* casing in the plan while the field
-            // held whatever the user typed ("SLML" vs "slml"), so the scan must fold case exactly
-            // like the erase-precondition comparison does — a probe the user's casing can dodge
-            // protects nothing.
-            if let staleProbe, !staleProbe.isEmpty {
-                let probeHit: Bool
-                if staleProbeCaseInsensitive {
-                    probeHit = boundedContains(
-                        staleProbe.lowercased(),
-                        in: value.lowercased(),
-                        caretLocation: after.caretLocation
-                    ) == true
-                } else {
-                    probeHit = boundedContains(
-                        staleProbe,
-                        in: value,
-                        caretLocation: after.caretLocation
-                    ) == true
-                }
-                if probeHit { return .unavailable }
-            }
-            return .failed
-        }
-        guard let baseline else {
-            return .delivered
-        }
-        let baselineContainsExpected = baseline.value.flatMap {
-            boundedContains(expectedText, in: $0, caretLocation: baseline.caretLocation)
-        } ?? false
-        if value != baseline.value || after.selectedText != baseline.selectedText || !baselineContainsExpected {
-            return .delivered
-        }
-        return .unavailable
+        let observedWindow = observed.substring(with: NSRange(location: lower, length: prefixUnits + payloadUnits + suffixUnits))
+        guard observedWindow.normalizedWhitespace == requiredWindow else { return .unavailable }
+        return .delivered
+    }
+
+    private static func validRange(_ range: NSRange, length: Int) -> Bool {
+        range.location >= 0 && range.length >= 0 && range.location <= length
+            && range.length <= length - range.location
     }
 
     /// §2.6: `needle` inside `value`, scanning at most a bounded window.

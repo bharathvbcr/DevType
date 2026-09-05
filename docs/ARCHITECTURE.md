@@ -15,7 +15,8 @@ graph TD
     
     subgraph ExpanderEngine Target
         Buffer --> MatchFound{Snippet Match?}
-        MatchFound -- Yes --> MacroEngine[DynamicTemplateEngine]
+        MatchFound -- Yes --> Prepare[Deferred preparation / MacroRenderContext]
+        Prepare --> MacroEngine[MacroParser + DynamicTemplateEngine]
         MacroEngine --> RenderedText[Evaluated Text / Image]
         RenderedText --> InjectPipeline[TextInjectionPipeline]
         
@@ -106,7 +107,11 @@ sequenceDiagram
 
 ### 2. Text Injection Pipeline
 
-Once a snippet match is triggered, `TextInjectionPipeline` coordinates text replacement:
+Once a snippet match is triggered, `TextInjectionPipeline` coordinates text replacement. Its existing completion guard owns the operation lifetime. A new injection cancels its predecessor; engine stop, watchdog expiry, user input, target changes, and live permission/Secure Input changes invalidate later actions. The target includes the application, AX element and original selection, so moving between fields in one app matters too.
+
+The broker checks operation lifetime, clipboard generation, original ownership count and target immediately before posting, including the Command-to-V modifier gap. HID key bursts check before each pair and release already-posted modifiers. Cursor positioning and trailing keys share the same lifetime. These checks reduce avoidable races; global keyboard events do not form an atomic transaction with another application.
+
+The available write paths are:
 
 1. **Accessibility Range Replacement (Primary)**:
    - `AXContextChecker` retrieves the focused `AXUIElement`.
@@ -116,7 +121,9 @@ Once a snippet match is triggered, `TextInjectionPipeline` coordinates text repl
 2. **HID Keystroke & Pasteboard Broker (Fallback)**:
    - If Accessibility write APIs are blocked (e.g. in some terminal emulators or web apps), the pipeline falls back to synthetic HID events.
    - `ErasePlan` / `EraseExecutor` posts synthetic backspaces (`kVK_Delete`) to erase the typed trigger.
-   - `PasteboardBroker` snapshots existing clipboard contents, places the snippet text on the clipboard, simulates `⌘V`, and restores the original clipboard content after paste confirmation.
+   - `PasteboardBroker` bounds the prior snapshot, prepares representations before clearing, captures the clear operation's ownership count, and requires every payload/marker write to succeed. Text, image, explicit copy and secret-copy paths share this checked publication policy. Failed publication never schedules a paste. Recovery replaces the owned item set, since `writeObjects` alone appends to partial contents.
+   - Delivery verification requires a relevant transition in the pinned field and range. Existing matching selections, unrelated edits, Unicode case-fold shifts and inconclusive expiry remain unverified; they never authorize automatic replay or corrective text insertion. Only attributed delivery trains latency estimates.
+   - Clipboard residency uses injectable monotonic time with bounded stall extensions. Unverified delivery retains the payload for its bounded residency before conditional restoration. Restoration never adopts another writer's count. Snapshot limits remain eight items and four MiB, excluding promised-file representations; this is bounded preservation, not complete clipboard fidelity.
 
 ---
 
@@ -128,7 +135,7 @@ Snippet bodies are rendered by two cooperating parsers — `MacroParser` (TextEx
   - `{{date}}`, `{{date:yyyy-MM-dd}}`: Named presets (16, e.g. `us`, `iso`, `eu`, `full`) or raw Unicode patterns.
   - `{{date:iso:+1d}}`, `{{date:+1w}}`: Date arithmetic through calendar-safe offsets (`y M w d h m s` units).
   - `{{time}}`: Localized timestamp.
-  - `{{clipboard}}`: Injects clipboard contents on demand. Clipboard text is sanitized first so pasted content can never re-trigger macros.
+  - `{{clipboard}}`: Injects clipboard contents on demand. Clipboard text is preserved as literal data so its template-shaped bytes never become macros.
   - `{{calc: <expr>}}`: Evaluates safe arithmetic via `SafeMathParser` (strictly bounded: ≤ 64 chars / 48 tokens, no arbitrary code execution; malformed input is left as literal text).
   - `{{cursor}}`: Calculates the final caret offset and posts arrow keys to reposition the cursor. First marker wins.
   - `{{snippet:<trigger>}}`: Recursively resolves nested snippets (depth limited to 10, plus a global budget of 10k substitutions / 2 MB output per pass).
@@ -144,6 +151,23 @@ Snippet bodies are rendered by two cooperating parsers — `MacroParser` (TextEx
   - `%%` escapes a literal `%` inside macro bodies; unknown `%…%` sequences pass through untouched.
 
 Both engines resolve nested snippets in place without disturbing sibling macros, and secret snippets are structurally excluded from nesting lookups.
+
+`MacroRenderContext` pins one source and its resolved nested dependencies, date, clipboard, and operation-owned volatile store. UUID/random/counter occurrences evaluate once even across a delayed fill-in render; a separate expansion creates a new context. Counter reservation can leave cancellation gaps, and counter persistence is serialized separately from its reader lock.
+
+`MacroDocument` carries literal provenance, pending transforms and cursor anchors through both parsers. Generated/external text is never reparsed. Nested transforms follow containment and resolve final UTF-16 anchors after length changes. Rendering has explicit size/work/structure failures consumed before erasure; public adapters drop both text and trailing actions on failure. The expansion lab passes its prepared result into injection instead of rendering volatile values twice.
+
+Event-tap matching uses conservative facts in the immutable match snapshot. Full nested/macro preparation runs on `processingQueue` after the final claim/gates, and the prepared payload is revalidated before erasure.
+
+### Library conflict recovery
+
+`SnippetStore.resolveConflicts(keeping:)` holds the existing mutation lock and one coordinated write across capture, verified backup, adoption and cleanup. `LibraryConflictRecovery` validates the chosen document, reads back recovery copies of the selected/current/alternate data, and journals its phase before adoption. It verifies the adopted bytes before removing individual captured `NSFileVersion` objects. Failed cleanup remains retryable and recovery directories are retained under local application support `ConflictRecovery`.
+
+The typed outcomes distinguish adoption failure, adoption success, and adoption with cleanup pending. Store cache/digest state changes only after verified adoption; pending cleanup keeps writes blocked. The UI runs this disk work off the main thread and shows the outcome and recovery location. Bounds are 32 alternate versions, 64 MiB per candidate and 256 MiB total recovery data. Temporary native-file-version and fresh-store tests cover the local mechanism; they do not establish live iCloud conflict behavior.
+
+### Bounded transcript comparison
+
+`TranscriptDiffEngine.compare` reports either compared segments or an explicit omitted reason. It bounds each input to 262,144 UTF-16 units and 4,096 tokens, trims common prefixes/suffixes, and limits the LCS matrix to 1,048,576 cells with cancellation checks. When comparison is omitted, the voice HUD keeps the complete cleaned text without presenting a partial diff as a complete comparison.
+
 
 ---
 

@@ -17,6 +17,10 @@ public final class SnippetMatchSnapshot {
     /// must never rebuild it. Lets the engine hold a match only when a longer trigger could
     /// still win, so unambiguous triggers keep firing with zero added latency.
     public let prefixIndex: TriggerPrefixIndex
+    /// Nested `{{snippet:…}}` resolution, built here for the same reason the matcher is: the
+    /// keystroke path must never rebuild it. The hand-written scan it replaces was linear in the
+    /// library *per nested reference*, inside the tap callback.
+    public let nestedResolver: NestedSnippetResolver
     /// Monotonic revision so observers can detect a swap without comparing arrays.
     public let revision: UInt64
 
@@ -24,6 +28,7 @@ public final class SnippetMatchSnapshot {
         self.snippets = snippets
         self.matcher = AbbreviationMatcher(snippets: snippets)
         self.prefixIndex = TriggerPrefixIndex(snippets: snippets)
+        self.nestedResolver = NestedSnippetResolver(snippets: snippets)
         self.revision = revision
     }
 

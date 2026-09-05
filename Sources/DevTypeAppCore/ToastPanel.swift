@@ -33,23 +33,87 @@ enum ToastPanel {
         override var canBecomeMain: Bool { false }
     }
 
+    /// Floor and ceiling for the length-scaled display time.
+    ///
+    /// Duration used to be constant regardless of message length, so the longest messages got
+    /// the least reading time per word.
+    static let minimumDuration: TimeInterval = 2.0
+    static let maximumDuration: TimeInterval = 7.0
+    /// Roughly 15 characters per second of reading, on top of the default.
+    static let secondsPerCharacter: TimeInterval = 1.0 / 15.0
+
+    /// Shortest a toast stays up before the next queued one may replace it.
+    static let minimumVisibleBeforeReplacement: TimeInterval = 0.9
+
     private static var panel: NSPanel?
     private static var dismissWorkItem: DispatchWorkItem?
     private static var monitors: [Any] = []
     private static var observers: [NSObjectProtocol] = []
+
+    private struct Pending {
+        let message: String
+        let detail: String?
+        let symbol: String
+        let duration: TimeInterval
+    }
+
+    /// Toasts waiting for the current one to have been visible long enough.
+    ///
+    /// `show` used to dismiss any live toast and replace it immediately, so an operation
+    /// reporting several outcomes displayed only the last one.
+    private static var queue: [Pending] = []
+    private static var shownAt: Date?
+    private static var drainWorkItem: DispatchWorkItem?
+
+    /// Display time for a message, scaled by how much there is to read.
+    static func duration(for message: String, detail: String?) -> TimeInterval {
+        let characters = message.count + (detail?.count ?? 0)
+        let scaled = defaultDuration + Double(characters) * secondsPerCharacter
+        return min(maximumDuration, max(minimumDuration, scaled))
+    }
 
     /// Show `message` (with an optional quieter second line) near the menu bar.
     static func show(
         _ message: String,
         detail: String? = nil,
         symbol: String = "checkmark.circle.fill",
-        duration: TimeInterval = defaultDuration
+        duration: TimeInterval? = nil
     ) {
+        let resolved = duration ?? self.duration(for: message, detail: detail)
         guard Thread.isMainThread else {
-            DispatchQueue.main.async { show(message, detail: detail, symbol: symbol, duration: duration) }
+            DispatchQueue.main.async { show(message, detail: detail, symbol: symbol, duration: resolved) }
             return
         }
-        dismiss()
+
+        // Announced whether or not anything is on screen. The panel is deliberately
+        // non-activating and `ignoresMouseEvents`, so VoiceOver never moves focus to it — an
+        // announcement is the only way a screen-reader user learns the action succeeded, and
+        // toasts are the app's primary transient feedback across every surface.
+        DevTypeAccessibility.announce([message, detail].compactMap { $0 }.joined(separator: ". "))
+
+        let pending = Pending(message: message, detail: detail, symbol: symbol, duration: resolved)
+
+        // A live toast that has not been up long enough to read yields to the next one only
+        // after it has. Without this an operation reporting several outcomes showed the last.
+        if let shownAt, panel != nil {
+            let visible = Date().timeIntervalSince(shownAt)
+            if visible < minimumVisibleBeforeReplacement {
+                queue.append(pending)
+                scheduleDrain(after: minimumVisibleBeforeReplacement - visible)
+                return
+            }
+        }
+        present(pending)
+    }
+
+    /// Presents `pending` immediately, replacing whatever is on screen.
+    private static func present(_ pending: Pending) {
+        assertMainThread()
+        dismiss(drainingQueue: false)
+
+        let message = pending.message
+        let detail = pending.detail
+        let symbol = pending.symbol
 
         let panel = NonActivatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 64),
@@ -66,32 +130,73 @@ enum ToastPanel {
 
         panel.contentView = makeContent(message: message, detail: detail, symbol: symbol)
         position(panel)
-        panel.alphaValue = 0
         panel.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            panel.animator().alphaValue = 1
+        // The only animation in the app that ignored Reduce Motion; every other animated
+        // surface checks it.
+        if DevTypeAccessibility.reduceMotion {
+            panel.alphaValue = 1
+        } else {
+            panel.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                panel.animator().alphaValue = 1
+            }
         }
 
         self.panel = panel
+        shownAt = Date()
         installDismissWatchers()
 
-        let work = DispatchWorkItem { dismiss() }
+        // Timing out hands over to the next queued toast; only a *user* gesture drops the run.
+        let work = DispatchWorkItem {
+            dismiss(drainingQueue: false)
+            if !queue.isEmpty { present(queue.removeFirst()) }
+        }
         dismissWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + pending.duration, execute: work)
+    }
+
+    /// Shows the next queued toast, if the current one has had its minimum time.
+    private static func scheduleDrain(after delay: TimeInterval) {
+        drainWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            drainWorkItem = nil
+            guard !queue.isEmpty else { return }
+            present(queue.removeFirst())
+        }
+        drainWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: work)
     }
 
     static func dismiss() {
+        dismiss(drainingQueue: true)
+    }
+
+    /// - Parameter drainingQueue: `false` while `present` swaps one toast for another, so the
+    ///   queue is not restarted underneath it.
+    private static func dismiss(drainingQueue: Bool) {
         guard Thread.isMainThread else {
-            DispatchQueue.main.async { dismiss() }
+            DispatchQueue.main.async { dismiss(drainingQueue: drainingQueue) }
             return
         }
         dismissWorkItem?.cancel()
         dismissWorkItem = nil
+        shownAt = nil
+        if drainingQueue {
+            drainWorkItem?.cancel()
+            drainWorkItem = nil
+            // A user gesture (click, keystroke, app switch) dismisses the whole run rather than
+            // stepping through a backlog they did not ask to read.
+            queue.removeAll()
+        }
         removeDismissWatchers()
 
         guard let panel else { return }
         self.panel = nil
+        if DevTypeAccessibility.reduceMotion {
+            panel.close()
+            return
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             panel.animator().alphaValue = 0

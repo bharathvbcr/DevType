@@ -354,7 +354,7 @@ extension SecretBackingStore {
 }
 
 /// What one consolidation pass achieved. `remaining` counts keychain-resident secrets that
-/// could not be moved yet (unreadable silently, or no master key while the keychain is locked).
+/// could not be moved yet (unreadable silently, no usable master key, or archive lock unavailable).
 public struct SecretConsolidationSummary: Equatable {
     public var moved: Int
     public var remaining: Int
@@ -1085,37 +1085,55 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         return .entries(entries)
     }
 
-    /// Cross-process exclusive lock around every read-modify-write of the archive. The
-    /// in-process `lock` already serializes this instance; this guards the window a *second
-    /// writer* (another DevType process, a probe, a future tool) could use to clobber a
-    /// load-modify-save in flight — the §8.11 post-mortem shape that cost one secret its
-    /// value. Never nested: callers hold it around the whole load→save→verify sequence.
+    /// One cross-process transaction covers both storage tiers: master-key discovery/creation,
+    /// source reads, archive load→save→verify, and tier cleanup. Locking only the file write
+    /// leaves key replacement, stale migration and delete resurrection possible across instances.
+    /// Callers already hold the instance lock; this lock is never nested.
     ///
-    /// Fail-open, but loud: if `open(2)` cannot produce a descriptor (descriptor
-    /// exhaustion, EISDIR on the lock path, a raced unlink) this used to proceed
-    /// *silently* without cross-process exclusion. Now it notes the failure,
-    /// retries once after a short delay, and if the lock still cannot be taken it
-    /// proceeds anyway with the second note recorded — single-process
-    /// functionality must survive a broken lock file, but the diagnostics trail
-    /// must show that exclusion was unavailable.
-    private func withArchiveLock<T>(_ body: () -> T) -> T {
+    /// Failure to acquire exclusion refuses the transaction. Running the body unlocked can
+    /// destroy the only surviving credential copy. Contention is bounded to five seconds;
+    /// diagnostics distinguish a refused transaction from an operation that ran.
+    private func withArchiveLock<T>(_ body: () -> T) -> T? {
         let directory = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let lockPath = fileURL.appendingPathExtension("lock").path
 
-        var fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        var fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         if fd < 0 {
             diagnostics.note("archive lock unavailable")
             Thread.sleep(forTimeInterval: 0.05)
-            fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
+            fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         }
         guard fd >= 0 else {
-            diagnostics.note("archive lock still unavailable — proceeding without cross-process exclusion")
-            return body()
+            diagnostics.note("archive lock still unavailable — transaction refused")
+            return nil
         }
-        defer { close(fd) }
-        _ = flock(fd, LOCK_EX)
-        defer { _ = flock(fd, LOCK_UN) }
+        defer {
+            if close(fd) != 0 { diagnostics.note("archive lock close failed") }
+        }
+        // A special file can open successfully and even accept flock on some platforms;
+        // it is not the persistent regular lock file shared by cooperating archive writers.
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+            diagnostics.note("archive lock file invalid — transaction refused")
+            return nil
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let error = errno
+            guard error == EINTR || error == EWOULDBLOCK else {
+                diagnostics.note("archive lock failed — transaction refused")
+                return nil
+            }
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                diagnostics.note("archive lock timed out — transaction refused")
+                return nil
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        defer {
+            if flock(fd, LOCK_UN) != 0 { diagnostics.note("archive unlock failed") }
+        }
         return body()
     }
 
@@ -1163,7 +1181,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         }
     }
 
-    // MARK: Master key (always under `lock`)
+    // MARK: Master key (always under the instance and archive locks)
 
     private func masterKey(createIfNeeded: Bool) -> SymmetricKey? {
         if let cachedKey { return cachedKey }
@@ -1238,7 +1256,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
             diagnostics.note("sealed into archive", account: account)
             _ = tier.delete(account: account)
             return errSecSuccess
-        }
+        } ?? errSecIO
     }
 
     /// The fallback save, with the staleness hole the fuzz found closed: a stale sealed copy
@@ -1261,29 +1279,30 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
 
     public func value(account: String) -> String? {
         lock.lock(); defer { lock.unlock() }
+        return withArchiveLock { () -> String? in
+            if case .entries(let entries) = loadArchive(), let blob = entries[account] {
+                guard let key = masterKey(createIfNeeded: false) else {
+                    // Sealed value present but no key: locked keychain (recoverable via the unlock
+                    // flow) or a deleted master key (not). The trail + report tell them apart.
+                    diagnostics.note("sealed value but master key unavailable", account: account)
+                    diagnostics.record(.failed(errSecInteractionNotAllowed))
+                    return nil
+                }
+                guard let value = EncryptedSecretArchive.open(blob, key: key) else {
+                    diagnostics.note("archive decrypt failed", account: account)
+                    diagnostics.record(.failed(errSecDecode))
+                    return nil
+                }
+                diagnostics.record(.ok)
+                return value
+            }
 
-        if case .entries(let entries) = loadArchive(), let blob = entries[account] {
-            guard let key = masterKey(createIfNeeded: false) else {
-                // Sealed value present but no key: locked keychain (recoverable via the unlock
-                // flow) or a deleted master key (not). The trail + report tell them apart.
-                diagnostics.note("sealed value but master key unavailable", account: account)
-                diagnostics.record(.failed(errSecInteractionNotAllowed))
-                return nil
-            }
-            guard let value = EncryptedSecretArchive.open(blob, key: key) else {
-                diagnostics.note("archive decrypt failed", account: account)
-                diagnostics.record(.failed(errSecDecode))
-                return nil
-            }
-            diagnostics.record(.ok)
+            // Hold exclusion before reading the source: a value captured outside the transaction
+            // could overwrite a newer save or resurrect a deletion while waiting to migrate.
+            guard let value = tier.value(account: account) else { return nil }
+            _ = consolidateLocked(account: account, value: value)
             return value
-        }
-
-        // Not in the archive: the keychain tier (with all its §8.10 healing) is the source —
-        // and a successful read is immediately consolidated so the next one never comes here.
-        guard let value = tier.value(account: account) else { return nil }
-        consolidateLocked(account: account, value: value)
-        return value
+        } ?? nil
     }
 
     public func contains(account: String) -> Bool {
@@ -1299,31 +1318,31 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// resolving the secret from the archive.
     public func delete(account: String) -> OSStatus {
         lock.lock(); defer { lock.unlock() }
-        var archiveHadEntry = false
-        let archivePhaseComplete: Bool = withArchiveLock {
+        return withArchiveLock {
+            var archiveHadEntry = false
             switch loadArchive() {
             case .entries(var entries):
-                guard entries.removeValue(forKey: account) != nil else { return true }
-                archiveHadEntry = true
-                return saveArchive(entries)
+                if entries.removeValue(forKey: account) != nil {
+                    archiveHadEntry = true
+                    guard saveArchive(entries) else { return errSecIO }
+                }
             case .missing:
-                return true
+                break
             case .unreadable:
                 // Bytes this build cannot vouch for may hold the account. Dropping the
                 // tier copy now would strand an unremovable sealed shadow behind a
                 // "gone" answer. Refuse; quarantine/recovery flows own this state.
                 diagnostics.note("delete refused — archive unreadable", account: account)
-                return false
+                return errSecIO
             }
-        }
-        guard archivePhaseComplete else { return errSecIO }
-        let tierStatus = tier.delete(account: account)
-        // A surviving tier copy is still the secret. Do not let successful archive removal
-        // mask a Keychain refusal: consolidation can legitimately leave both copies when its
-        // post-verify tier cleanup was denied, and callers need the failure to retain/retry debt.
-        if tierStatus != errSecSuccess, tierStatus != errSecItemNotFound { return tierStatus }
-        if archiveHadEntry || tierStatus == errSecSuccess { return errSecSuccess }
-        return errSecItemNotFound
+            // Keep the lock until BOTH copies are gone. A reader between the phases could
+            // otherwise re-consolidate the tier copy just before this delete removes it.
+            let tierStatus = tier.delete(account: account)
+            // A surviving tier copy is still the secret. Do not mask a Keychain refusal.
+            if tierStatus != errSecSuccess, tierStatus != errSecItemNotFound { return tierStatus }
+            if archiveHadEntry || tierStatus == errSecSuccess { return errSecSuccess }
+            return errSecItemNotFound
+        } ?? errSecIO
     }
 
     public func accounts() -> Set<String> {
@@ -1341,36 +1360,47 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
 
     /// Move one just-read value into the archive; the tier copy is dropped only after the
     /// entry is verified to decrypt **from the bytes on disk** (`verifiedOnDisk`), under the
-    /// cross-process archive lock. Best-effort: any failure leaves the tier copy untouched.
-    private func consolidateLocked(account: String, value: String) {
-        withArchiveLock {
-            var entries: [String: String]
-            switch loadArchive() {
-            case .entries(let existing): entries = existing
-            case .missing: entries = [:]
-            case .unreadable:
-                guard quarantineUnreadableArchive() else { return }
-                entries = [:]
-            }
-            guard let key = masterKey(createIfNeeded: true),
-                  let blob = EncryptedSecretArchive.seal(value, key: key),
-                  EncryptedSecretArchive.open(blob, key: key) == value else { return }
-            entries[account] = blob
-            guard saveArchive(entries),
-                  verifiedOnDisk(account: account, expecting: value, key: key) else { return }
-            diagnostics.note("consolidated into archive", account: account)
-            _ = tier.delete(account: account)
+    /// cross-process archive lock held by the caller since BEFORE reading the tier value.
+    /// Best-effort: any failure leaves the tier copy untouched. Success proves this value,
+    /// rather than inferring migration from an archive entry that might predate the attempt.
+    private func consolidateLocked(account: String, value: String) -> Bool {
+        var entries: [String: String]
+        switch loadArchive() {
+        case .entries(let existing): entries = existing
+        case .missing: entries = [:]
+        case .unreadable:
+            guard quarantineUnreadableArchive() else { return false }
+            entries = [:]
         }
+        guard let key = masterKey(createIfNeeded: true),
+              let blob = EncryptedSecretArchive.seal(value, key: key),
+              EncryptedSecretArchive.open(blob, key: key) == value else { return false }
+        entries[account] = blob
+        guard saveArchive(entries),
+              verifiedOnDisk(account: account, expecting: value, key: key) else { return false }
+        diagnostics.note("consolidated into archive", account: account)
+        _ = tier.delete(account: account)
+        return true
     }
 
     public func consolidateIntoFile() -> SecretConsolidationSummary {
         lock.lock(); defer { lock.unlock() }
-        var summary = SecretConsolidationSummary()
+        return withArchiveLock { consolidateAllLocked() }
+            ?? SecretConsolidationSummary(remaining: consolidationCandidates().count)
+    }
 
+    private func consolidationCandidates() -> [String] {
         // Snippet secrets only: anything else under the service is not ours to move.
-        let candidates = tier.accounts().sorted().filter {
+        tier.accounts().sorted().filter {
             $0 != masterAccount && SecretStore.snippetID(forAccount: $0) != nil
         }
+    }
+
+    /// The entire batch shares one transaction, including key creation and source enumeration.
+    private func consolidateAllLocked() -> SecretConsolidationSummary {
+        var summary = SecretConsolidationSummary()
+
+        let candidates = consolidationCandidates()
         // Settle the key once, before the loop. Without a usable one every candidate is
         // *deferred*, which is `remaining` by its own definition — a lossless fallback, not a
         // failure, and reporting it as `failed` puts a false alarm at the top of every
@@ -1386,9 +1416,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
                 summary.remaining += 1
                 continue
             }
-            let before = countLocked()
-            consolidateLocked(account: account, value: value)
-            if countLocked() > before || archiveHasLocked(account: account) {
+            if consolidateLocked(account: account, value: value) {
                 summary.moved += 1
             } else {
                 summary.failed += 1
@@ -1412,11 +1440,6 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     private func countLocked() -> Int {
         if case .entries(let entries) = loadArchive() { return entries.count }
         return 0
-    }
-
-    private func archiveHasLocked(account: String) -> Bool {
-        if case .entries(let entries) = loadArchive() { return entries[account] != nil }
-        return false
     }
 
     // MARK: Pass-through to the keychain tier

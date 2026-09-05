@@ -15,8 +15,21 @@ import ExpanderEngine
 
 private final class KeyCommandTableView: NSTableView {
     var onKeyDown: ((NSEvent) -> Bool)?
+    /// Applies a pending debounced filter before the list can be acted on.
+    ///
+    /// Search is coalesced on a short timer, so for a moment after the last keystroke the table
+    /// still shows the wider list. Taking focus or pressing a key is the earliest point at which
+    /// that difference could matter — Select All followed by Delete must operate on what the
+    /// user narrowed the list to, not on what happens to be drawn.
+    var onWillHandleInput: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        onWillHandleInput?()
+        return super.becomeFirstResponder()
+    }
 
     override func keyDown(with event: NSEvent) {
+        onWillHandleInput?()
         if onKeyDown?(event) == true { return }
         super.keyDown(with: event)
     }
@@ -87,6 +100,13 @@ private final class SnippetRowView: NSView {
     private let usageLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.mono(10, .medium), color: DevTypeTheme.textTertiary)
     private let textStack = NSStackView()
     private let metricsStack = NSStackView()
+    /// Thumbnail for image snippets. Zero-width for every other kind, so text rows are laid out
+    /// exactly as before.
+    private let thumbnail = NSImageView()
+    private var thumbnailWidth: NSLayoutConstraint?
+    /// Image path this cell is currently showing, so an async decode landing after the cell has
+    /// been recycled for a different snippet is discarded instead of drawn on the wrong row.
+    private var thumbnailPath: String = ""
 
     /// Kept on the row rather than read from the label, so a `configure` that
     /// recycles the cell under a stationary pointer resumes the scroll instead of
@@ -142,6 +162,13 @@ private final class SnippetRowView: NSView {
         separator.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
         separator.translatesAutoresizingMaskIntoConstraints = false
 
+        thumbnail.translatesAutoresizingMaskIntoConstraints = false
+        thumbnail.imageScaling = .scaleProportionallyDown
+        thumbnail.wantsLayer = true
+        thumbnail.layer?.cornerRadius = 4
+        thumbnail.layer?.masksToBounds = true
+        thumbnail.setAccessibilityElement(false)
+        addSubview(thumbnail)
         addSubview(enableSwitch)
         addSubview(textStack)
         addSubview(metricsStack)
@@ -164,18 +191,27 @@ private final class SnippetRowView: NSView {
             titleLabel.widthAnchor.constraint(equalTo: textStack.widthAnchor),
             previewLabel.widthAnchor.constraint(equalTo: textStack.widthAnchor),
 
-            textStack.leadingAnchor.constraint(equalTo: enableSwitch.trailingAnchor, constant: 12),
+            thumbnail.leadingAnchor.constraint(equalTo: enableSwitch.trailingAnchor, constant: 12),
+            thumbnail.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
+            thumbnail.heightAnchor.constraint(lessThanOrEqualToConstant: SnippetThumbnailCache.thumbnailEdge),
+
+            textStack.leadingAnchor.constraint(equalTo: thumbnail.trailingAnchor, constant: 0),
             textStack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
             textStack.trailingAnchor.constraint(equalTo: metricsStack.leadingAnchor, constant: -12),
 
             metricsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             metricsStack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: centreOffset),
 
-            separator.leadingAnchor.constraint(equalTo: textStack.leadingAnchor),
+            separator.leadingAnchor.constraint(equalTo: enableSwitch.trailingAnchor, constant: 12),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             separator.bottomAnchor.constraint(equalTo: bottomAnchor),
             separator.heightAnchor.constraint(equalToConstant: 1)
         ])
+
+        // Collapsed by default; `configure` widens it only for image snippets.
+        let width = thumbnail.widthAnchor.constraint(equalToConstant: 0)
+        width.isActive = true
+        thumbnailWidth = width
     }
 
     @available(*, unavailable)
@@ -213,6 +249,45 @@ private final class SnippetRowView: NSView {
         previewLabel.isScrolling = false
     }
 
+    /// Shows a cached thumbnail for image snippets and collapses to nothing for every other
+    /// kind, so text rows keep their previous layout exactly.
+    ///
+    /// Decoding happens off the main thread. The completion checks `thumbnailPath` before
+    /// drawing: a recycled cell that has moved on to a different snippet must not have the
+    /// previous row's image land on it.
+    private func configureThumbnail(for snippet: SnippetModel, isCompact: Bool) {
+        guard snippet.isImageSnippet, !isCompact else {
+            thumbnailPath = ""
+            thumbnail.image = nil
+            thumbnail.isHidden = true
+            thumbnailWidth?.constant = 0
+            return
+        }
+        let edge = SnippetThumbnailCache.thumbnailEdge
+        thumbnailPath = snippet.imagePath
+        thumbnail.isHidden = false
+        // Reserve the space before the image arrives so the row does not reflow under the user.
+        thumbnailWidth?.constant = edge + 10
+
+        let path = snippet.imagePath
+        if let cached = SnippetThumbnailCache.shared.thumbnail(for: path, edge: edge, completion: {
+            [weak self] image in
+            guard let self, self.thumbnailPath == path else { return }
+            self.thumbnail.image = image
+        }) {
+            thumbnail.image = cached
+        } else {
+            // Placeholder until the decode lands — and the permanent state for an image whose
+            // file has gone missing, which reads as "this is an image snippet, and it is broken".
+            thumbnail.image = DevTypeTheme.symbol(
+                "photo",
+                size: 16,
+                weight: .regular,
+                color: DevTypeTheme.textTertiary
+            )
+        }
+    }
+
     /// §4.5: `usageCount` is passed in rather than read from `snippet.usageCount`
     /// — usage now lives in a coalesced sidecar and the model field is legacy.
     func configure(with snippet: SnippetModel, usageCount: Int, isCompact: Bool = false) {
@@ -223,9 +298,14 @@ private final class SnippetRowView: NSView {
         titleLabel.font = isCompact ? DevTypeTheme.font(12, .semibold) : DevTypeTheme.font(13, .semibold)
         // A secret has no `replacementText` to show — by construction, not by redaction here.
         // The mask is so the row does not read as an empty snippet the user should go fix.
+        configureThumbnail(for: snippet, isCompact: isCompact)
+
         let preview: String
         if snippet.isImageSnippet {
-            preview = "🖼 \(snippet.imagePath)"
+            // The filename is the least informative thing about an image, and the thumbnail
+            // beside it now carries the identity. Say what the row *is*, and leave the path to
+            // the tooltip and the editor.
+            preview = loc.s("manager.preview.image")
         } else if snippet.isSecret {
             preview = "🔑 \(snippet.maskedReplacement)"
         } else {
@@ -727,6 +807,13 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     private var tableView = KeyCommandTableView()
     private var scrollView = NSScrollView()
     private var filterField = NSSearchField()
+    /// Trailing-edge coalescing for `filterChanged`. Short enough to feel immediate, long
+    /// enough that a burst of keystrokes runs the pipeline once.
+    private static let filterDebounceInterval: TimeInterval = 0.12
+    private var filterDebounce: DispatchWorkItem?
+    /// Conflict IDs for the `.conflicts` chip, cached against `SnippetStore.libraryRevision`.
+    private var cachedConflictIDs: Set<UUID>?
+    private var cachedConflictRevision: UInt64?
     private var groups: [SnippetGroup] = []
     private var selectedGroupID: UUID?
     private var snippets: [SnippetModel] = []
@@ -1059,6 +1146,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         tableView.setAccessibilityLabel(loc.s("ax.snippetsTable"))
         tableView.registerForDraggedTypes([.string])
         tableView.draggingDestinationFeedbackStyle = .gap
+        tableView.onWillHandleInput = { [weak self] in self?.flushPendingFilter() }
         tableView.onKeyDown = { [weak self] event in
             self?.handleSnippetKeyDown(event) ?? false
         }
@@ -1324,6 +1412,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     deinit {
+        filterDebounce?.cancel()
         if let token = listenerToken {
             SnippetStore.shared.removeListener(token: token)
         }
@@ -1336,6 +1425,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     func localizationState() -> SnippetManagerLocalizationState {
+        flushPendingFilter()
         let selectedIDs = Set(tableView.selectedRowIndexes.compactMap { row in
             snippets.indices.contains(row) ? snippets[row].id : nil
         })
@@ -1417,12 +1507,36 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         applyFilterAndReloadTable()
     }
 
+    /// Typing in the search field ran the whole pipeline — re-derive the pool, apply the chip
+    /// filter, apply the text filter, sort, rebuild the empty state, reload the table — on every
+    /// keystroke, with no coalescing. Trailing-edge debounce so a fast typist pays for it once.
     @objc private func filterChanged() {
+        filterDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.filterDebounce = nil
+            self?.applyFilterAndReloadTable()
+        }
+        filterDebounce = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.filterDebounceInterval,
+            execute: work
+        )
+    }
+
+    /// Applies any pending debounced filter immediately. Anything that acts on the current list
+    /// — pressing Return, opening the editor, a bulk action — must see what the user typed, not
+    /// what the table happens to be showing mid-debounce.
+    func flushPendingFilter() {
+        guard let pending = filterDebounce else { return }
+        pending.cancel()
+        filterDebounce = nil
         applyFilterAndReloadTable()
     }
 
     @objc private func clearFilter() {
         filterField.stringValue = ""
+        filterDebounce?.cancel()
+        filterDebounce = nil
         applyFilterAndReloadTable()
     }
 
@@ -1459,11 +1573,14 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
     private func applyFilterAndReloadTable() {
         let filter = filterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // Flattened once. The stats pill used to build a second copy of the whole library
+        // immediately after the pool did.
+        let all = groups.flatMap(\.snippets)
         let pool: [SnippetModel]
         if let id = selectedGroupID, let group = groups.first(where: { $0.id == id }) {
             pool = group.snippets
         } else {
-            pool = groups.flatMap(\.snippets)
+            pool = all
         }
 
         var filtered = pool
@@ -1481,10 +1598,14 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         case .macros:
             filtered = filtered.filter { $0.replacementText.contains("%") || $0.replacementText.contains("{{") }
         case .conflicts:
-            let conflictIDs = Set(SnippetStore.shared.triggerConflicts().flatMap(\.snippetIDs))
-            filtered = filtered.filter { conflictIDs.contains($0.id) }
+            // Cached against the library revision: this is the O(n²)-shaped whole-library
+            // analysis in `triggerConflicts()`, and running it inside the filter pass meant
+            // running it on every keystroke in the search field.
+            filtered = filtered.filter { conflictSnippetIDs().contains($0.id) }
         case .unused:
-            filtered = filtered.filter { SnippetStore.shared.usageCount(for: $0) == 0 }
+            // One dictionary read rather than one locked store call per snippet.
+            let counts = SnippetStore.shared.usageCountsByID()
+            filtered = filtered.filter { max($0.usageCount, counts[$0.id] ?? 0) == 0 }
         case .tagged:
             filtered = filtered.filter { !$0.tags.isEmpty }
         }
@@ -1492,9 +1613,13 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         if !filter.isEmpty {
             filtered = filtered.filter { SnippetManagerFilter.matches($0, query: filter) }
         }
+        // Selection survives the reload: refining a search after selecting rows for a bulk
+        // operation used to silently drop the selection, because `reloadData()` clears it.
+        let selectedIDs = Set(tableView.selectedRowIndexes.compactMap {
+            snippets.indices.contains($0) ? snippets[$0].id : nil
+        })
         snippets = sorted(filtered)
         tableView.sortDescriptors = sortMode.sortDescriptor.map { [$0] } ?? []
-        let all = groups.flatMap(\.snippets)
         let active = all.filter(\.enabled).count
         statsPill.update(text: loc.s("manager.stats", active, all.count), tint: DevTypeTheme.accent)
 
@@ -1531,7 +1656,33 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             )
         }
         tableView.reloadData()
+        restoreSelection(ids: selectedIDs)
         updateBulkBar()
+    }
+
+    /// Re-selects the rows still present after a filter or sort change.
+    ///
+    /// `reloadData()` clears selection, so without this every keystroke in the search field
+    /// discarded whatever the user had picked — including a multi-row selection they were
+    /// assembling for a bulk action.
+    private func restoreSelection(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        let rows = IndexSet(snippets.indices.filter { ids.contains(snippets[$0].id) })
+        guard !rows.isEmpty else { return }
+        tableView.selectRowIndexes(rows, byExtendingSelection: false)
+        if let first = rows.first { tableView.scrollRowToVisible(first) }
+    }
+
+    /// Snippet IDs in a trigger conflict, cached against the library revision.
+    private func conflictSnippetIDs() -> Set<UUID> {
+        let revision = SnippetStore.shared.libraryRevision
+        if let cached = cachedConflictIDs, cachedConflictRevision == revision {
+            return cached
+        }
+        let ids = Set(SnippetStore.shared.triggerConflicts().flatMap(\.snippetIDs))
+        cachedConflictIDs = ids
+        cachedConflictRevision = revision
+        return ids
     }
 
     private func updateBulkBar() {
@@ -1550,31 +1701,53 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
     /// §4.6: applies the active sort. `manual` preserves storage order, which is
     /// also the only mode where drag-to-reorder is meaningful.
+    /// Decorate, sort, undecorate.
+    ///
+    /// Every one of these comparators used to do its expensive work *inside* the comparison:
+    /// `.usage` and `.recentlyUsed` called into `SnippetStore` twice per comparison, each call
+    /// taking a lock in `UsageStatsStore` (roughly `2 n log n` lock acquisitions for one sort),
+    /// and `.title` / `.trigger` ran `localizedStandardCompare` — among the most expensive
+    /// comparisons Foundation offers — the same way. Computing each key once per element makes
+    /// it `n` reads instead.
     private func sorted(_ input: [SnippetModel]) -> [SnippetModel] {
-        let store = SnippetStore.shared
         switch sortMode {
         case .manual:
             return input
         case .title:
-            return input.sorted {
-                $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending
+            return sortedByKey(input, key: \.displayTitle) {
+                $0.localizedStandardCompare($1) == .orderedAscending
             }
         case .trigger:
-            return input.sorted {
-                $0.triggerKeyword.localizedStandardCompare($1.triggerKeyword) == .orderedAscending
+            return sortedByKey(input, key: \.triggerKeyword) {
+                $0.localizedStandardCompare($1) == .orderedAscending
             }
         case .usage:
             // §4.5: usage lives in the sidecar, not on the model.
-            return input.sorted { store.usageCount(for: $0) > store.usageCount(for: $1) }
+            let counts = SnippetStore.shared.usageCountsByID()
+            return sortedByKey(input, key: { max($0.usageCount, counts[$0.id] ?? 0) }, by: >)
         case .recentlyUsed:
-            return input.sorted {
-                let left = store.lastUsedAt(forSnippetID: $0.id) ?? Date.distantPast
-                let right = store.lastUsedAt(forSnippetID: $1.id) ?? Date.distantPast
-                return left > right
-            }
+            let lastUsed = SnippetStore.shared.lastUsedByID()
+            return sortedByKey(input, key: { lastUsed[$0.id] ?? Date.distantPast }, by: >)
         case .recentlyEdited:
-            return input.sorted { $0.updatedAt > $1.updatedAt }
+            return sortedByKey(input, key: \.updatedAt, by: >)
         }
+    }
+
+    /// Sorts by a key computed once per element. Ties keep their input order, so a re-sort of an
+    /// unchanged list does not reshuffle rows under the user.
+    private func sortedByKey<Key>(
+        _ input: [SnippetModel],
+        key: (SnippetModel) -> Key,
+        by areInIncreasingOrder: (Key, Key) -> Bool
+    ) -> [SnippetModel] {
+        input.enumerated()
+            .map { (offset: $0.offset, key: key($0.element), value: $0.element) }
+            .sorted { lhs, rhs in
+                if areInIncreasingOrder(lhs.key, rhs.key) { return true }
+                if areInIncreasingOrder(rhs.key, lhs.key) { return false }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.value)
     }
 
     // MARK: - §4.6 Undo
@@ -1676,6 +1849,10 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             if case .success = SnippetEditResourceAccess.live.deleteImage(candidate) { return true }
             return false
         }
+        if result == .removed {
+            // A path can be reused by a later import; a stale decode must not outlive its file.
+            SnippetThumbnailCache.shared.invalidate(path: path)
+        }
         return result == .removed || result == .retainedReferenced
     }
 
@@ -1730,6 +1907,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func editSelectedSnippet() {
+        flushPendingFilter()
         let selectedRow = tableView.selectedRow
         guard selectedRow >= 0 && selectedRow < snippets.count else { return }
         presentEditor(for: snippets[selectedRow], draft: nil)
@@ -1786,6 +1964,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func deleteSnippet() {
+        flushPendingFilter()
         let selectedRow = tableView.selectedRow
         guard selectedRow >= 0 && selectedRow < snippets.count else { return }
         let snippet = snippets[selectedRow]
@@ -2340,7 +2519,9 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             row.configure(
                 symbol: "square.stack.3d.up.fill",
                 name: loc.s("manager.group.all"),
-                count: groups.flatMap(\.snippets).count,
+                // Summed rather than flattened: this runs per outline row render, and the
+                // flattened array was allocated and discarded to produce one integer.
+                count: groups.reduce(0) { $0 + $1.snippets.count },
                 tint: DevTypeTheme.accent,
                 enabled: true
             )
@@ -2495,7 +2676,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        RoundedSelectionRowView()
+        RoundedSelectionRowView.dequeue(from: tableView, owner: self)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -2520,10 +2701,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     // MARK: - Bulk Operations
 
     @objc private func selectAllSnippets() {
+        flushPendingFilter()
         tableView.selectAll(nil)
     }
 
     @objc private func bulkEnableSelected() {
+        flushPendingFilter()
         let selectedRows = tableView.selectedRowIndexes
         guard !selectedRows.isEmpty else { return }
         let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
@@ -2539,6 +2722,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func bulkDisableSelected() {
+        flushPendingFilter()
         let selectedRows = tableView.selectedRowIndexes
         guard !selectedRows.isEmpty else { return }
         let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
@@ -2593,6 +2777,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func bulkDuplicateSelected() {
+        flushPendingFilter()
         let selectedRows = tableView.selectedRowIndexes
         guard !selectedRows.isEmpty else { return }
         let selectedSnippets = selectedRows.compactMap { $0 < snippets.count ? snippets[$0] : nil }
@@ -2640,6 +2825,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func bulkDeleteSelected() {
+        flushPendingFilter()
         let selectedRows = tableView.selectedRowIndexes
         guard !selectedRows.isEmpty else { return }
         let selectedSnippets = selectedRows.compactMap { $0 < snippets.count ? snippets[$0] : nil }
@@ -2678,6 +2864,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func bulkExportSelected() {
+        flushPendingFilter()
         let selectedRows = tableView.selectedRowIndexes
         guard !selectedRows.isEmpty else { return }
         let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })
@@ -2687,6 +2874,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func bulkPrefixSuffixSelected() {
+        flushPendingFilter()
         let selectedRows = tableView.selectedRowIndexes
         guard !selectedRows.isEmpty else { return }
         let selectedIDs = Set(selectedRows.compactMap { $0 < snippets.count ? snippets[$0].id : nil })

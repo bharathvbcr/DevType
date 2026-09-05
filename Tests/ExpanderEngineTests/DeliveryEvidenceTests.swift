@@ -156,7 +156,7 @@ final class DeliveryEvidenceTests: XCTestCase {
 
     // MARK: - Earning, scoping, and losing proof
 
-    func testConfirmedDeliveryEarnsProofAndUnlocksTheCorrectiveLadder() {
+    func testHistoricalDeliveryProofCannotUnlockReplay() {
         let store = AXWriteCapabilityStore()
         let app = "com.example.NativeApp"
         XCTAssertFalse(store.mayActOnDeliveryFailure(bundleID: app, role: "AXTextField"))
@@ -174,8 +174,8 @@ final class DeliveryEvidenceTests: XCTestCase {
                 consecutiveFailures: PasteboardBroker.requiredFailureConfirmations,
                 trustFailureVerdict: true
             ),
-            .retryPaste,
-            "A proven truthful witness re-arms the retry — genuine misses still self-heal."
+            .waitMore,
+            "A truthful historical observation cannot prove non-application of this paste."
         )
     }
 
@@ -286,8 +286,7 @@ final class DeliveryEvidenceTests: XCTestCase {
             "The mirror still shows the erased trigger — its 'missing' answer is testimony"
                 + " about the past."
         )
-        // Same observation without the probe: the historical semantics — a readable, unchanged
-        // field with the expansion absent is a confirmed miss.
+        // Absence is inconclusive even when a stale-text probe was not supplied.
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "the full expansion text",
@@ -295,7 +294,7 @@ final class DeliveryEvidenceTests: XCTestCase {
                 after: stale,
                 staleProbe: nil
             ),
-            .failed
+            .unavailable
         )
     }
 
@@ -314,8 +313,7 @@ final class DeliveryEvidenceTests: XCTestCase {
             ),
             .unavailable
         )
-        // Case-sensitive triggers keep the exact scan: "SLML" in the field is NOT the erased
-        // "slml", so it is not evidence of staleness.
+        // Case-sensitive absence likewise cannot prove non-application.
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "expansion body",
@@ -324,7 +322,7 @@ final class DeliveryEvidenceTests: XCTestCase {
                 staleProbe: "slml",
                 staleProbeCaseInsensitive: false
             ),
-            .failed
+            .unavailable
         )
     }
 
@@ -351,8 +349,8 @@ final class DeliveryEvidenceTests: XCTestCase {
     }
 
     func testFreshReadsStillProduceHonestVerdictsWithProbePresent() {
-        let baseline = DeliveryVerifier.FocusedTextObservation(value: "prose ", selectedText: nil)
-        // Trigger erased AND expansion absent AND probe gone: a genuine miss stays `.failed`.
+        let baseline = DeliveryObservationFixture.at("prose ", 6)
+        // Erased trigger and absent payload still cannot exclude pending delivery.
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "expansion",
@@ -360,30 +358,24 @@ final class DeliveryEvidenceTests: XCTestCase {
                 after: baseline,
                 staleProbe: "slml"
             ),
-            .failed
+            .unavailable
         )
         // Delivered text wins regardless of the probe.
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "expansion",
                 baseline: baseline,
-                after: DeliveryVerifier.FocusedTextObservation(
-                    value: "prose expansion",
-                    selectedText: nil
-                ),
+                after: DeliveryObservationFixture.at("prose expansion", 15),
                 staleProbe: "slml"
             ),
             .delivered
         )
     }
 
-    // MARK: - Hardening must not disrupt the existing recovery ladder
+    // MARK: - Host trust cannot establish current-operation non-application
 
-    /// The full corrective ladder for a *proven* app, walked end to end: waits below the
-    /// confirmation threshold, retries at it, and confirms failure once attempts are exhausted.
-    /// If hardening ever suppresses this path, genuine misses in truthful apps stop self-healing
-    /// — that regression must fail loudly here, not in the field.
-    func testProvenAppKeepsTheCompleteRecoveryLadder() {
+    /// All historical count states remain unverified until this operation has delivery evidence.
+    func testProvenAppStillRequiresOperationSpecificEvidence() {
         let store = AXWriteCapabilityStore()
         let app = "com.example.Truthful"
         store.recordDeliveryConfirmed(bundleID: app, role: "AXTextArea")
@@ -399,7 +391,7 @@ final class DeliveryEvidenceTests: XCTestCase {
             ),
             .waitMore
         )
-        // Confirmed run of misses with an attempt left: retry.
+        // Repeated misses with a legacy attempt budget still wait.
         XCTAssertEqual(
             PasteboardBroker.decidePasteHold(
                 delivery: .failed, pasteAttemptsCompleted: 1, maxAttempts: 2,
@@ -407,9 +399,9 @@ final class DeliveryEvidenceTests: XCTestCase {
                 consecutiveFailures: PasteboardBroker.requiredFailureConfirmations,
                 trustFailureVerdict: trusted
             ),
-            .retryPaste
+            .waitMore
         )
-        // Attempts exhausted, still missing: confirm the failure so the trigger is restored.
+        // Exhausting the legacy attempt budget cannot authorize a trigger restore.
         XCTAssertEqual(
             PasteboardBroker.decidePasteHold(
                 delivery: .failed, pasteAttemptsCompleted: 2, maxAttempts: 2,
@@ -417,7 +409,7 @@ final class DeliveryEvidenceTests: XCTestCase {
                 consecutiveFailures: PasteboardBroker.requiredFailureConfirmations,
                 trustFailureVerdict: trusted
             ),
-            .failConfirmed
+            .waitMore
         )
         // And a delivered read short-circuits to success at any point.
         XCTAssertEqual(

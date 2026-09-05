@@ -188,9 +188,19 @@ struct VoiceCorrectionDiffRequest: Sendable {
         let raw = transcripts.raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty, raw != finalText else { return nil }
 
-        let segments = TranscriptDiffEngine.segments(verbatim: raw, cleaned: finalText)
-        guard segments.contains(where: { $0.isCut }) else { return nil }
-        return segments
+        let comparison = TranscriptDiffEngine.compare(
+            verbatim: raw, cleaned: finalText,
+            isCancelled: { Task.isCancelled || !isLatestAttempt(attempt) }
+        )
+        switch comparison {
+        case .compared(let segments):
+            guard !Task.isCancelled, isLatestAttempt(attempt),
+                  segments.contains(where: { $0.isCut }) else { return nil }
+            return segments
+        case .omitted(let reason):
+            DevTypeLog.app.debug("[Voice] transcript comparison omitted: \(reason.rawValue, privacy: .public)")
+            return nil
+        }
     }
 }
 

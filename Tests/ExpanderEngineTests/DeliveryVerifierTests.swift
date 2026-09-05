@@ -96,14 +96,15 @@ final class DeliveryVerifierBoundedContainsTests: XCTestCase {
     }
 
     func testVerificationDetectsDeliveryAndMiss() {
-        let after = DeliveryVerifier.FocusedTextObservation(value: "hello world", selectedText: nil)
+        let before = DeliveryObservationFixture.at("hello ", 6)
+        let after = DeliveryObservationFixture.at("hello world", 11)
         XCTAssertEqual(
-            DeliveryVerifier.verifyTextDelivery(expectedText: "world", baseline: nil, after: after),
+            DeliveryVerifier.verifyTextDelivery(expectedText: "world", baseline: before, after: after),
             .delivered
         )
         XCTAssertEqual(
-            DeliveryVerifier.verifyTextDelivery(expectedText: "goodbye", baseline: nil, after: after),
-            .failed
+            DeliveryVerifier.verifyTextDelivery(expectedText: "goodbye", baseline: before, after: after),
+            .unavailable
         )
     }
 

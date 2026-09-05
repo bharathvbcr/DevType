@@ -69,16 +69,20 @@ public final class HIDKeyPoster: BackspacePosting {
     // MARK: - Trailing keys
 
     /// Posts `%key:` trailing keys after successful inject (enter/tab/…).
-    public func postTrailingKeys(_ names: [String]) {
+    public func postTrailingKeys(_ names: [String], shouldContinue: () -> Bool = { true }) {
         guard !names.isEmpty, CGPreflightPostEventAccess() else { return }
         let source = makeTaggedEventSource()
-        for name in names {
-            guard let keyCode = Self.keyCode(forTrailingKeyName: name) else { continue }
+        _ = Self.postKeyPairs(count: names.count, shouldContinue: {
+            CGPreflightPostEventAccess() && shouldContinue()
+        }) { index in
+            guard let keyCode = Self.keyCode(forTrailingKeyName: names[index]) else { return false }
             if let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
                let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) {
                 down.post(tap: .cghidEventTap)
                 up.post(tap: .cghidEventTap)
+                return true
             }
+            return false
         }
     }
 
@@ -160,47 +164,71 @@ public final class HIDKeyPoster: BackspacePosting {
         return true
     }
 
-    /// §2.7: same key sequence, scheduled instead of slept. Removes 30 ms of hard main-thread
-    /// block per paste (60 ms with the hold-loop retry). `completion` runs on main.
-    public func postCmdVKeyEventsAsync(completion: @escaping (Bool) -> Void) {
-        guard CGPreflightPostEventAccess() else {
-            DevTypeLog.inject.error(
-                "[Inject] Cmd+V refused — CGPreflightPostEventAccess false at post time"
-            )
+    /// A continuation check belongs at both the initial post and the modifier gap.
+    /// Key-up events are cleanup and must still run when continuation is refused.
+    public func postCmdVKeyEventsAsync(
+        shouldContinue: @escaping () -> Bool = { true },
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard let source = makeTaggedEventSource() else {
             completion(false)
             return
         }
-
-        let source = makeTaggedEventSource()
         let command = CGKeyCode(kVK_Command)
-        let vKeyCode = virtualKeyCode(for: "v") ?? CGKeyCode(kVK_ANSI_V)
-
-        var commandIsDown = false
-        if let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: true) {
-            cmdDown.flags = .maskCommand
-            cmdDown.post(tap: .cghidEventTap)
-            commandIsDown = true
+        let v = virtualKeyCode(for: "v") ?? CGKeyCode(kVK_ANSI_V)
+        // Prepare Command-up before Command-down, so cancellation never depends on
+        // allocating another event to release a modifier that is already pressed.
+        guard let commandDown = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: true),
+              let commandUp = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: false),
+              let vDown = CGEvent(keyboardEventSource: source, virtualKey: v, keyDown: true),
+              let vUp = CGEvent(keyboardEventSource: source, virtualKey: v, keyDown: false) else {
+            completion(false)
+            return
         }
+        commandDown.flags = .maskCommand
+        commandUp.flags = []
+        vDown.flags = .maskCommand
+        vUp.flags = .maskCommand
+        Self.performCommandChord(
+            shouldContinue: shouldContinue,
+            canPost: { CGPreflightPostEventAccess() },
+            postCommandDown: { commandDown.post(tap: .cghidEventTap); return true },
+            postLetter: { vDown.post(tap: .cghidEventTap); vUp.post(tap: .cghidEventTap); return true },
+            releaseCommand: { commandUp.post(tap: .cghidEventTap) },
+            schedule: { action in
+                DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.cmdVModifierGap, execute: action)
+            },
+            completion: completion
+        )
+    }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.cmdVModifierGap) {
-            guard let vDown = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: true),
-                  let vUp = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: false) else {
-                DevTypeLog.inject.error(
-                    "[Inject] Cmd+V CGEvent create failed — Post Events may be revoked or CG HID unavailable"
-                )
-                if commandIsDown {
-                    self.releaseCommand(source: source, command: command)
-                }
+    /// The same sequence is driven by injected event/scheduler operations in tests.
+    static func performCommandChord(
+        shouldContinue: @escaping () -> Bool,
+        canPost: @escaping () -> Bool,
+        postCommandDown: () -> Bool,
+        postLetter: @escaping () -> Bool,
+        releaseCommand: @escaping () -> Void,
+        schedule: @escaping (@escaping () -> Void) -> Void,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard canPost(), shouldContinue(), postCommandDown() else {
+            completion(false)
+            return
+        }
+        schedule {
+            guard canPost(), shouldContinue() else {
+                releaseCommand()
                 completion(false)
                 return
             }
-            vDown.flags = .maskCommand
-            vUp.flags = .maskCommand
-            vDown.post(tap: .cghidEventTap)
-            vUp.post(tap: .cghidEventTap)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.cmdVModifierGap) {
-                self.releaseCommand(source: source, command: command)
+            guard postLetter() else {
+                releaseCommand()
+                completion(false)
+                return
+            }
+            schedule {
+                releaseCommand()
                 completion(true)
             }
         }
@@ -287,6 +315,17 @@ public final class HIDKeyPoster: BackspacePosting {
         }
     }
 
+    /// Recheck authority before each pair; once key-down posts, key-up is cleanup.
+    static func postKeyPairs(count: Int, shouldContinue: () -> Bool, postPair: (Int) -> Bool) -> Int {
+        guard count > 0, count <= 4096 else { return 0 }
+        var posted = 0
+        for index in 0..<count {
+            guard shouldContinue(), postPair(index) else { break }
+            posted += 1
+        }
+        return posted
+    }
+
     // MARK: - Backspaces
 
     /// Posts `count` delete key pairs. Returns the number of **pairs actually posted** — zero
@@ -295,6 +334,11 @@ public final class HIDKeyPoster: BackspacePosting {
     /// "fewer than requested" as a failure, never assume the erase happened.
     @discardableResult
     public func sendBackspaces(count: Int) -> Int {
+        sendBackspaces(count: count, shouldContinue: { true })
+    }
+
+    @discardableResult
+    public func sendBackspaces(count: Int, shouldContinue: () -> Bool) -> Int {
         guard count > 0 else { return 0 }
         guard CGPreflightPostEventAccess() else {
             DevTypeLog.inject.error(
@@ -303,14 +347,16 @@ public final class HIDKeyPoster: BackspacePosting {
             return 0
         }
         let source = makeTaggedEventSource()
-        var posted = 0
-        for _ in 0..<count {
+        let posted = Self.postKeyPairs(count: count, shouldContinue: {
+            CGPreflightPostEventAccess() && shouldContinue()
+        }) { _ in
             if let bDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Delete), keyDown: true),
                let bUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Delete), keyDown: false) {
                 bDown.post(tap: .cghidEventTap)
                 bUp.post(tap: .cghidEventTap)
-                posted += 1
+                return true
             }
+            return false
         }
         if posted == 0 {
             DevTypeLog.inject.error(
@@ -328,20 +374,24 @@ public final class HIDKeyPoster: BackspacePosting {
     /// **every** requested backspace was handed to the HID tap; `completion(false)` means none or
     /// only some were, so the caller must refuse to build on the erased state.
     public func sendBackspacesAsync(count: Int, completion: @escaping (Bool) -> Void) {
+        sendBackspacesAsync(count: count, shouldContinue: { true }, completion: completion)
+    }
+
+    public func sendBackspacesAsync(count: Int, shouldContinue: @escaping () -> Bool, completion: @escaping (Bool) -> Void) {
         guard count > 0 else {
             completion(true)
             return
         }
-        let posted = sendBackspaces(count: count)
-        let settle = Double(count) * InjectTiming.backspacePerKeyDelay + InjectTiming.backspaceTrailingDelay
+        let posted = sendBackspaces(count: count, shouldContinue: shouldContinue)
+        let settle = Double(posted) * InjectTiming.backspacePerKeyDelay + InjectTiming.backspaceTrailingDelay
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
-            completion(posted == count)
+            completion(posted == count && shouldContinue())
         }
     }
 
     // MARK: - Left arrows
 
-    public func sendLeftArrows(count: Int) {
+    public func sendLeftArrows(count: Int, shouldContinue: () -> Bool = { true }) {
         guard count > 0 else { return }
         guard CGPreflightPostEventAccess() else {
             DevTypeLog.inject.error(
@@ -351,14 +401,16 @@ public final class HIDKeyPoster: BackspacePosting {
         }
         // §1.2: was a bare `CGEventSource(stateID:)`. Untagged arrows are visible to our own tap.
         let source = makeTaggedEventSource()
-        var posted = 0
-        for _ in 0..<count {
+        let posted = Self.postKeyPairs(count: count, shouldContinue: {
+            CGPreflightPostEventAccess() && shouldContinue()
+        }) { _ in
             if let aDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_LeftArrow), keyDown: true),
                let aUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_LeftArrow), keyDown: false) {
                 aDown.post(tap: .cghidEventTap)
                 aUp.post(tap: .cghidEventTap)
-                posted += 1
+                return true
             }
+            return false
         }
         if posted == 0 {
             DevTypeLog.inject.error(
@@ -371,12 +423,12 @@ public final class HIDKeyPoster: BackspacePosting {
         }
     }
 
-    public func sendLeftArrowsAsync(count: Int, completion: @escaping () -> Void) {
-        guard count > 0 else {
+    public func sendLeftArrowsAsync(count: Int, shouldContinue: @escaping () -> Bool = { true }, completion: @escaping () -> Void) {
+        guard count > 0, count <= 4096 else {
             completion()
             return
         }
-        sendLeftArrows(count: count)
+        sendLeftArrows(count: count, shouldContinue: shouldContinue)
         let settle = Double(count) * InjectTiming.arrowPerKeyDelay + InjectTiming.arrowTrailingDelay
         DispatchQueue.main.asyncAfter(deadline: .now() + settle, execute: completion)
     }

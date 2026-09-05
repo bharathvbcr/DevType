@@ -192,6 +192,7 @@ final class UserClipboardWriteTests: XCTestCase {
         let outcome = PasteboardBroker.restoreUserClipboardSnapshot(
             prior,
             ownedChangeCount: 42,
+            clearContents: { XCTFail("Invalid reconstruction must not clear"); return 43 },
             currentChangeCount: { 42 },
             setData: { item, data, type in
                 attemptedTypes.insert(type)
@@ -221,6 +222,7 @@ final class UserClipboardWriteTests: XCTestCase {
         let outcome = PasteboardBroker.restoreUserClipboardSnapshot(
             snapshot("old value"),
             ownedChangeCount: 42,
+            clearContents: { XCTFail("External ownership must not clear"); return 43 },
             currentChangeCount: { changeCount },
             setData: { item, data, type in
                 let accepted = item.setData(data, forType: type)

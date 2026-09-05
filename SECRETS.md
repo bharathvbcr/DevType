@@ -93,11 +93,19 @@ ways (details in the appendix):
 With the archive, the entire keychain dialog surface is **one item**, touched **once per
 launch**, at the moment it is most likely unlocked.
 
-### Fail-safe rules (each pinned by a source-contract test)
+### Fail-safe rules (covered by source-contract and behavioral tests)
 
 - A keychain copy is dropped **only after** the sealed replacement is saved and then
   **re-read from disk and proven to decrypt** — a save that merely returned success is not
-  proof. Every archive read-modify-write holds a cross-process `flock`.
+  proof. The cross-process `flock` covers the entire transaction: master-key discovery and
+  creation, source-tier reads, archive read-modify-write and verification, and tier cleanup.
+  Lazy reads and launch consolidation use the same boundary, so a delayed migration cannot
+  replace a newer value or restore a deleted secret.
+- Failure to open or acquire the archive lock **refuses the transaction**. Contention waits
+  at most five seconds; saves/deletes return `errSecIO`, value reads return `nil`, and a
+  consolidation pass reports its candidates as deferred (`remaining`). The value-free
+  diagnostic trail records the refusal. No archive or keychain value is changed by a refused
+  transaction, and a later operation can retry after the lock becomes available.
 - The master key is **never trusted without a read-back**: a keychain write can succeed
   against an item the app cannot read (open encrypt ACL, closed decrypt). No read-back → no
   key → per-item keychain fallback, which loses nothing.

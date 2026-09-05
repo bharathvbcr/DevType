@@ -1,16 +1,9 @@
 import XCTest
 @testable import ExpanderEngine
 
-/// Duplicate expansions ("ScholarLMScholarLM") came from the paste-hold loop re-posting Cmd+V.
-///
-/// `DeliveryVerifier` reports `.failed` when the AXValue is *readable* and does not contain the
-/// expected text. On hosts that return a readable-but-stale value immediately after a paste
-/// (WebKit, Electron), that is a false negative: the paste did land, AX just had not caught up.
-/// `decidePasteHold` treated one such observation as proof and posted a second Cmd+V, so the
-/// user got the replacement twice.
-///
-/// The asymmetry that drives the fix: an unnecessary re-read costs one settle delay, while an
-/// unnecessary re-paste corrupts the document. So `.failed` now needs confirming.
+/// Accessibility misses cannot prove that an asynchronous paste will never arrive.
+/// The old confirmation-count and timeout expectations intentionally change: repeated
+/// observations and historical host trust must not authorize automatic replay.
 final class PasteRetryConfirmationTests: XCTestCase {
 
     private func decide(
@@ -38,31 +31,31 @@ final class PasteRetryConfirmationTests: XCTestCase {
         )
     }
 
-    /// A real failure still gets its retry — the fix must not disable recovery.
-    func testConfirmedFailureStillRetries() {
+    /// Repeated readable misses still cannot exclude a pending paste.
+    func testRepeatedFailuresStillWaitForEvidence() {
         XCTAssertEqual(
             decide(.failed, failures: PasteboardBroker.requiredFailureConfirmations),
-            .retryPaste
+            .waitMore
         )
     }
 
-    func testConfirmedFailureWithNoAttemptsLeftIsFinal() {
+    func testAttemptCountCannotManufactureFailureProof() {
         XCTAssertEqual(
             decide(.failed, attempts: InjectTiming.pasteDeliveryMaxAttempts, failures: 2),
-            .failConfirmed,
-            "Once the attempt budget is spent, a confirmed failure must stop, not loop."
+            .waitMore,
+            "Attempt counts do not establish current-operation non-application."
         )
     }
 
     /// Waiting is bounded: an unconfirmed failure past the hold timeout must not wait forever.
-    func testUnconfirmedFailurePastTimeoutStopsWaiting() {
+    func testUnconfirmedFailurePastTimeoutStopsUnverified() {
         let decision = decide(
             .failed,
             elapsed: InjectTiming.pasteDeliveryHoldTimeout + 1,
             failures: 1
         )
         XCTAssertNotEqual(decision, .waitMore, "The confirmation wait must be time-bounded.")
-        XCTAssertEqual(decision, .retryPaste)
+        XCTAssertEqual(decision, .giveUpUnverified)
     }
 
     // MARK: - Unchanged behaviour
@@ -96,16 +89,15 @@ final class PasteRetryConfirmationTests: XCTestCase {
         }
     }
 
-    /// Callers that do not track the run keep the pre-fix behaviour, so the parameter's default
-    /// cannot silently change an untracked call site.
-    func testDefaultTreatsFailureAsAlreadyConfirmed() {
+    /// Legacy callers also receive the conservative evidence policy.
+    func testLegacyDefaultCannotAuthorizeReplay() {
         XCTAssertEqual(
             PasteboardBroker.decidePasteHold(
                 delivery: .failed,
                 pasteAttemptsCompleted: 1,
                 elapsed: 0.05
             ),
-            .retryPaste
+            .waitMore
         )
     }
 
@@ -118,10 +110,8 @@ final class PasteRetryConfirmationTests: XCTestCase {
 
     // MARK: - The verifier behaviour that made this necessary
 
-    /// Documents the false negative at its source: a readable-but-stale value is reported as
-    /// `.failed`, indistinguishable from a genuine miss. This is why the *decision* has to be
-    /// conservative — the verifier cannot tell these apart on its own.
-    func testStaleReadableValueIsReportedAsFailed() {
+    /// Stale reads and still-pending delivery remain indistinguishable.
+    func testStaleReadableValueIsReportedAsUnverified() {
         let baseline = DeliveryVerifier.FocusedTextObservation(
             value: "`slm",
             selectedText: nil,
@@ -139,18 +129,14 @@ final class PasteRetryConfirmationTests: XCTestCase {
                 baseline: baseline,
                 after: stale
             ),
-            .failed,
-            "A stale read is indistinguishable from a miss — hence confirmation before retry."
+            .unavailable,
+            "A stale read must not become authorization for another paste."
         )
     }
 
     func testGenuineDeliveryIsReportedAsDelivered() {
-        let baseline = DeliveryVerifier.FocusedTextObservation(
-            value: "`slm", selectedText: nil, caretLocation: 4
-        )
-        let after = DeliveryVerifier.FocusedTextObservation(
-            value: "ScholarLM", selectedText: nil, caretLocation: 9
-        )
+        let baseline = DeliveryObservationFixture.at("`slm", 0, 4)
+        let after = DeliveryObservationFixture.at("ScholarLM", 9)
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "ScholarLM", baseline: baseline, after: after
@@ -222,11 +208,11 @@ final class UntrustedPasteRetryTests: XCTestCase {
         )
     }
 
-    func testTrustedHostRetainsRecovery() {
+    func testHistoricalTrustCannotAuthorizeReplay() {
         XCTAssertEqual(
             decide(.failed, failures: PasteboardBroker.requiredFailureConfirmations, trust: true),
-            .retryPaste,
-            "The fix must not disable genuine recovery on apps whose AX can be believed."
+            .waitMore,
+            "Historical trust is not proof that this paste cannot still arrive."
         )
     }
 
@@ -258,8 +244,8 @@ final class UntrustedPasteRetryTests: XCTestCase {
         )
     }
 
-    /// The one case that still counts as failure: nothing moved at all.
-    func testTrulyUnchangedFieldIsStillFailed() {
+    /// Nothing moving can simply mean that the host has not consumed the event yet.
+    func testUnchangedFieldCannotProveNonApplication() {
         let observation = DeliveryVerifier.FocusedTextObservation(
             value: "`slm", selectedText: nil, caretLocation: 4
         )
@@ -267,8 +253,8 @@ final class UntrustedPasteRetryTests: XCTestCase {
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "ScholarLM", baseline: observation, after: observation
             ),
-            .failed,
-            "An untouched field is the only honest evidence that a paste missed."
+            .unavailable,
+            "An untouched field cannot distinguish a pending paste from a missed paste."
         )
     }
 

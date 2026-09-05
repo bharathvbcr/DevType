@@ -10,20 +10,65 @@ public struct MacroExpansionResult: Equatable {
     public let trailingKeys: [String]
     public let fillFields: [FillField]
     public let needsFillIn: Bool
+    public let failure: MacroRenderFailure?
 
     public init(
         text: String,
         cursorOffset: Int?,
         trailingKeys: [String],
         fillFields: [FillField],
-        needsFillIn: Bool
+        needsFillIn: Bool,
+        failure: MacroRenderFailure? = nil
     ) {
         self.text = text
         self.cursorOffset = cursorOffset
         self.trailingKeys = trailingKeys
         self.fillFields = fillFields
         self.needsFillIn = needsFillIn
+        self.failure = failure
     }
+}
+
+/// Explicit lifetime for preparation, including time and clipboard snapshots. Create one per
+/// user expansion and retain it while a fill-in panel is open or a preparation is retried.
+public final class MacroRenderContext {
+    public let operationID: UUID
+    public let now: Date
+    public let clipboardText: String
+    public let environment: MacroEnvironment
+    private let compileLock = NSLock()
+    private var compiled: (source: String, tokens: Result<[MacroToken], MacroRenderFailure>)?
+
+    public init(clipboardText: String, now: Date = Date(), environment: MacroEnvironment = .default) {
+        let id = UUID()
+        operationID = id
+        self.now = now
+        self.clipboardText = clipboardText
+        var scoped = environment
+        scoped.memoSalt = id.uuidString
+        scoped.volatileValues = MacroVolatileStore()
+        self.environment = scoped
+    }
+    func tokens(for source: String, lookup: (String) -> String?) -> Result<[MacroToken], MacroRenderFailure> {
+        compileLock.lock()
+        defer { compileLock.unlock() }
+        if let compiled {
+            return compiled.source == source ? compiled.tokens : .failure(.sourceChanged)
+        }
+        let budget = MacroParser.NestedSnippetBudget()
+        let nested = MacroParser.resolveNested(source, lookup: lookup, budget: budget)
+        let resolved = MacroRenderer.resolveMustacheNested(nested, lookup: lookup, budget: budget)
+        let result: Result<[MacroToken], MacroRenderFailure>
+        if resolved.utf16.prefix(MacroDocument.maximumUTF16 + 1).count > MacroDocument.maximumUTF16 {
+            result = .failure(.sizeLimit)
+        } else {
+            let tokens = MacroParser.parse(resolved)
+            result = tokens.count <= MacroDocument.maximumOperations ? .success(tokens) : .failure(.workLimit)
+        }
+        compiled = (source, result)
+        return result
+    }
+
 }
 
 /// Full expansion pipeline: TE parse → nested → fill-in → mustache → emit.
@@ -48,7 +93,8 @@ public enum MacroRenderer {
         lookup: @escaping (String) -> String? = { _ in nil },
         clipboardText: String? = nil,
         now: Date = Date(),
-        templateEngine: DynamicTemplateEngine = .shared
+        templateEngine: DynamicTemplateEngine = .shared,
+        context: MacroRenderContext? = nil
     ) -> MacroExpansionResult {
         expand(
             content: content,
@@ -57,17 +103,13 @@ public enum MacroRenderer {
             clipboardText: clipboardText,
             now: now,
             templateEngine: templateEngine,
-            environment: .default
+            environment: .default,
+            context: context
         )
     }
 
-    /// §3.5: expansion with injectable locale / counter / random collaborators.
-    ///
-    /// One user-visible expansion runs this pipeline more than once — `EventTapEngine` renders a
-    /// preview to pick an injection strategy, then `TextInjectionPipeline` renders the real
-    /// payload. `memoSalt` is derived from `content` so both passes agree on the value of any
-    /// `%random%` / `%counter%` token instead of planning against one string and injecting
-    /// another (see `MacroVolatileStore`).
+    /// An omitted context starts a new operation, even when content and timing match another
+    /// expansion. Repeated preparation explicitly passes the original context.
   public static func expand(
         content: String,
         fillValues: [Int: String] = [:],
@@ -75,18 +117,26 @@ public enum MacroRenderer {
         clipboardText: String? = nil,
         now: Date = Date(),
         templateEngine: DynamicTemplateEngine = .shared,
-        environment: MacroEnvironment
+        environment: MacroEnvironment,
+        context: MacroRenderContext? = nil
     ) -> MacroExpansionResult {
-        let clipboardSnapshot = clipboardText ?? (NSPasteboard.general.string(forType: .string) ?? "")
-
-        var environment = environment
-        if environment.memoSalt.isEmpty {
-            environment.memoSalt = "te:\(content.hashValue)"
+        guard content.utf16.prefix(MacroDocument.maximumUTF16 + 1).count <= MacroDocument.maximumUTF16 else {
+            return MacroExpansionResult(text: "", cursorOffset: nil, trailingKeys: [], fillFields: [], needsFillIn: false, failure: .sizeLimit)
         }
+        let context = context ?? MacroRenderContext(
+            clipboardText: clipboardText ?? (NSPasteboard.general.string(forType: .string) ?? ""),
+            now: now, environment: environment
+        )
+        let clipboardSnapshot = context.clipboardText
+        let now = context.now
+        let environment = context.environment
 
-        let teNested = MacroParser.resolveNested(content, lookup: lookup)
-        let fullyNested = resolveMustacheNested(teNested, lookup: lookup)
-        let tokens = MacroParser.parse(fullyNested)
+        let tokens: [MacroToken]
+        switch context.tokens(for: content, lookup: lookup) {
+        case .success(let compiled): tokens = compiled
+        case .failure(let reason):
+            return MacroExpansionResult(text: "", cursorOffset: nil, trailingKeys: [], fillFields: [], needsFillIn: false, failure: reason)
+        }
         let fields = MacroParser.fillFields(in: tokens)
         let needsFillIn = MacroParser.hasFillIns(tokens)
 
@@ -100,36 +150,20 @@ public enum MacroRenderer {
             )
         }
 
-        // §1.12: `MacroParser.render` routes `%clipboard` through
-        // `DynamicTemplateEngine.sanitizeClipboardText` before the mustache pass below sees it,
-        // so a clipboard containing `{{calc:…}}` / `{{cursor}}` can no longer inject templates.
-        let teResult = MacroParser.render(
-            tokens: tokens,
-            fillValues: fillValues,
-            clipboard: clipboardSnapshot,
-            now: now,
-            environment: environment
+        let teResult = MacroParser.renderDocument(
+            tokens: tokens, fillValues: fillValues, clipboard: clipboardSnapshot, now: now, environment: environment
         )
-
-        let mustacheResult = templateEngine.resolve(
-            teResult.text,
-            currentDate: now,
-            clipboardText: clipboardSnapshot,
-            environment: environment
-        )
-
-        let cursorOffset = mergeCursorOffsets(
-            teText: teResult.text,
-            teOffsetFromEnd: teResult.cursorOffsetFromEnd,
-            mustacheOffset: mustacheResult.cursorOffset
-        )
+        let document = templateEngine.render(teResult.document, currentDate: now, clipboardText: clipboardSnapshot,
+                                              environment: environment)
+        let mustacheResult = templateEngine.result(document)
 
         return MacroExpansionResult(
             text: mustacheResult.text,
-            cursorOffset: cursorOffset,
-            trailingKeys: teResult.trailingKeys,
+            cursorOffset: mustacheResult.cursorOffset,
+            trailingKeys: document.failure == nil ? teResult.trailingKeys : [],
             fillFields: fields,
-            needsFillIn: needsFillIn
+            needsFillIn: needsFillIn,
+            failure: mustacheResult.failure
         )
     }
 
@@ -172,20 +206,4 @@ public enum MacroRenderer {
         return result
     }
 
-    /// Prefer mustache `{{cursor}}` when present; otherwise convert TE `%|%` grapheme offset to UTF-16.
-    private static func mergeCursorOffsets(
-        teText: String,
-        teOffsetFromEnd: Int,
-        mustacheOffset: Int?
-    ) -> Int? {
-        if let mustacheOffset {
-            return mustacheOffset
-        }
-        guard teOffsetFromEnd > 0 else { return nil }
-        let graphemeCount = teText.count
-        let graphemeIndex = graphemeCount - teOffsetFromEnd
-        guard graphemeIndex >= 0, graphemeIndex <= graphemeCount else { return nil }
-        let prefix = String(teText.prefix(graphemeIndex))
-        return prefix.utf16.count
-    }
 }

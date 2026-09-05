@@ -85,6 +85,30 @@ public enum InjectTiming {
     public static let arrowPerKeyDelay: TimeInterval = 0.0015
     public static let arrowTrailingDelay: TimeInterval = 0.005
 
+    /// Most left-arrow presses one expansion may post to place the caret.
+    ///
+    /// The HID fallback runs wherever AX cannot set the caret — Chrome, VS Code, every Electron
+    /// host, which is the majority path — and nothing used to bound it. A 400-character snippet
+    /// with the cursor macro near the start posted 400 arrow keys and waited
+    /// `count * arrowPerKeyDelay` (~600 ms) before completing.
+    ///
+    /// The latency is the smaller problem. Four hundred arrow presses into an editor with vim
+    /// mode, an open autocomplete popup, or a multi-cursor selection do something other than
+    /// move the caret, and the user has no way to tell that is what happened. Past this bound
+    /// the snippet still lands correctly and the caret simply stays at the end — which is what
+    /// an expander without cursor support does anyway.
+    ///
+    /// 120 covers a line or two of prose, which is what `%|` is actually used for.
+    public static let maxCursorArrowKeys = 120
+
+    /// Whether a caret move of `count` arrow presses may be posted.
+    ///
+    /// Separated from the pipeline so the policy is testable without an event tap and a live
+    /// host, and so there is one place that answers it.
+    public static func allowsCursorArrows(count: Int) -> Bool {
+        count > 0 && count <= maxCursorArrowKeys
+    }
+
     // MARK: - Guards
 
     /// Settle delay before re-checking a failed erase precondition. Focus and AX state lag behind

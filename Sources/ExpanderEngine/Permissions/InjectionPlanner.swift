@@ -13,10 +13,16 @@ public enum InjectionPlan: Equatable {
 public struct InjectionPlanner: Sendable {
     public init() {}
 
+    /// - Parameters:
+    ///   - needsCursorHID: retained for API compatibility and inject-path logging. **Not read**
+    ///     — see the discards below. Defaulted so callers are not made to compute it: the
+    ///     keystroke path used to render the entire snippet, macros and nested lookups
+    ///     included, inside the CGEventTap callback purely to supply this and `isMultiLine`.
+    ///   - isMultiLine: same; also not read.
     public func plan(
         snapshot: PermissionSnapshot,
         isTerminal: Bool,
-        needsCursorHID: Bool,
+        needsCursorHID: Bool = false,
         isMultiLine: Bool = false
     ) -> InjectionPlan {
         if !snapshot.canUseAX {

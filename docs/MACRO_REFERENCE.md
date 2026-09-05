@@ -35,7 +35,7 @@ All 16 named presets: `us`, `uslong`, `iso`, `eu`, `full`, `long`, `medium`, `sh
 ### Dynamic System Macros
 | Macro Tag | Description |
 |---|---|
-| `{{clipboard}}` | Injects the plaintext contents of your current macOS pasteboard. Template markers inside clipboard text are stripped, so pasted content can never fire further macros. |
+| `{{clipboard}}` | Injects the plaintext contents of your current macOS pasteboard. Clipboard text is preserved literally, including template-shaped text such as `{{cursor}}`; those bytes are never interpreted as additional macros. |
 | `{{cursor}}` | Repositions the text insertion caret at this exact spot after expansion. If several appear, **the first wins**. |
 | `{{snippet:trigger_name}}` | Dynamically embeds another snippet. Nesting is capped at depth 10 and a global budget (10,000 substitutions / 2 MB output per pass) — over-budget references are left as literal text rather than hanging the engine. Secret snippets are never resolved through nesting. |
 
@@ -81,7 +81,7 @@ Best regards,
 | `%key:tab%` | Posts a Tab keystroke after insertion |
 | `%key:esc%` / `%key:escape%` | Posts an Escape keystroke after insertion |
 | `%key:space%` | Posts a Space keystroke after insertion |
-| `%clipboard` | Injects clipboard text (sanitized like `{{clipboard}}`; matched non-greedily, so `%clipboardless` stays literal) |
+| `%clipboard` | Injects literal clipboard text (like `{{clipboard}}`; matched non-greedily, so `%clipboardless` stays literal) |
 
 Key names keep their author casing — `%key:Enter%` round-trips through nesting unchanged.
 
@@ -164,7 +164,7 @@ Whole-number results print without a decimal point; fractional results keep thei
 
 ## 6. Generated Values (UUID / Random / Counter)
 
-Both syntaxes generate values at expansion time. Within one snippet, every `{{random:…}}` occurrence gets its own value; previews shown before injection match what lands in the document.
+Both syntaxes generate values during preparation. Each occurrence receives its own value. Preparation and the fill-in render share an explicit operation context, so a slow interaction retains its UUIDs, random choices, date, clipboard snapshot, and reserved counter values. Two separate expansions receive separate values even when they happen immediately after each other.
 
 ### UUID
 | Tag | Output Example | Description |
@@ -186,7 +186,7 @@ Both syntaxes generate values at expansion time. Within one snippet, every `{{ra
 | `letters:8` | 8 lowercase letters |
 
 ### Counter (`%counter:name%` / `{{counter:name}}`)
-Persistent named counters that increment on each expansion. An optional signed step changes the increment (`%counter:ticket:+5%`, `%counter:countdown:-1%`). Counters persist across launches.
+Persistent named counters that increment on each expansion. An optional signed step changes the increment (`%counter:ticket:+5%`, `%counter:countdown:-1%`). Counters persist across launches. A value is reserved once per occurrence in an expansion. Cancelling after preparation can leave a gap; reserved values are not rolled back because output may already have escaped. Counter mutations and their persisted snapshots are serialized.
 
 ---
 
@@ -272,3 +272,11 @@ Alex
 ```
 {{cursor}}
 ````
+
+## Rendering boundaries
+
+Clipboard text, fill-in values, and generated values remain literal data through both syntaxes. For example, copying `{{counter:invoice}}` and expanding `%clipboard` inserts those characters without advancing a counter. A surrounding case transform can change their letter case without interpreting them as syntax.
+
+Cursor markers remain anchors until all substitutions and case transforms finish. The first cursor position in the final text wins across both syntaxes. `{{upper:abc}}%|x` produces `ABCx` with the caret before `x`; length-changing Unicode transforms and emoji use final UTF-16 coordinates.
+
+Rendering is bounded to 1,048,576 UTF-16 units, 4,096 tokens/operations, and a cumulative transformation-work budget. The existing nested-reference depth/substitution/output limits also apply. A rendering-budget failure or overlapping transform structure refuses the expansion with an explicit error; it never sends partial text or trailing keys. Unknown tags and malformed math expressions retain their existing literal behavior.

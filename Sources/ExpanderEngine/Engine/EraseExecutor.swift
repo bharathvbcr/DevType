@@ -12,6 +12,14 @@ public protocol BackspacePosting: AnyObject {
     func sendBackspaces(count: Int) -> Int
     /// Async wrapper. `completion(true)` only when **every** requested backspace was posted.
     func sendBackspacesAsync(count: Int, completion: @escaping (Bool) -> Void)
+    func sendBackspacesAsync(count: Int, shouldContinue: @escaping () -> Bool, completion: @escaping (Bool) -> Void)
+}
+
+public extension BackspacePosting {
+    func sendBackspacesAsync(count: Int, shouldContinue: @escaping () -> Bool, completion: @escaping (Bool) -> Void) {
+        guard shouldContinue() else { completion(false); return }
+        sendBackspacesAsync(count: count) { completion($0 && shouldContinue()) }
+    }
 }
 
 /// §8.1: the destructive half of expansion — deciding how much to delete, proving it is safe to
@@ -284,7 +292,7 @@ public final class EraseExecutor {
         plan: ErasePlan,
         afterPossibleWrite: Bool,
         result: ErasePreconditionResult,
-        canProceed: () -> Bool = { true },
+        canProceed: @escaping () -> Bool = { true },
         onUnverifiableAfterWrite: ((String) -> Void)?,
         completion: @escaping (Bool) -> Void
     ) {
@@ -320,7 +328,7 @@ public final class EraseExecutor {
         // CGEvent creation failure). Reporting success here would inject the replacement on top
         // of an unerased trigger — the exact `trigger + replacement` corruption this executor
         // exists to prevent — so a short post is a refused expand, same as a mismatch.
-        hid.sendBackspacesAsync(count: plan.backspaceCount) { erased in
+        hid.sendBackspacesAsync(count: plan.backspaceCount, shouldContinue: canProceed) { erased in
             if erased {
                 completion(true)
                 return

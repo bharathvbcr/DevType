@@ -218,9 +218,17 @@ public enum PaletteToolRouter {
         }
 
         public let groupsProvider: @Sendable () -> [SnippetGroup]
+        /// Library revision matching whatever `groupsProvider` returns, so the search index
+        /// cache can identify it without hashing every snippet. `nil` means "unknown", which
+        /// falls back to the content fingerprint.
+        public let revisionProvider: @Sendable () -> UInt64?
 
-        public init(groupsProvider: @escaping @Sendable () -> [SnippetGroup] = { SnippetStore.shared.loadGroups() }) {
+        public init(
+            groupsProvider: @escaping @Sendable () -> [SnippetGroup] = { SnippetStore.shared.loadGroups() },
+            revisionProvider: @escaping @Sendable () -> UInt64? = { nil }
+        ) {
             self.groupsProvider = groupsProvider
+            self.revisionProvider = revisionProvider
         }
 
         public func call(arguments: Arguments) async throws -> String {
@@ -228,7 +236,8 @@ public enum PaletteToolRouter {
                 query: arguments.query,
                 in: groupsProvider(),
                 includeDisabled: false,
-                limit: 1
+                limit: 1,
+                revision: revisionProvider()
             )
             guard let hit = hits.first else { return "" }
             return hit.snippet.triggerKeyword

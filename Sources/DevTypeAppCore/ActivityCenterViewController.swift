@@ -132,7 +132,7 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
         window.setContentSize(NSSize(width: 540, height: 420))
         window.minSize = NSSize(width: 440, height: 320)
         DevTypeTheme.styleWindow(window, title: LocalizationManager.shared.s("activity.title"))
-        window.center()
+        window.dtRestoreFrame(named: "DevTypeActivityCenterWindow")
         window.isReleasedWhenClosed = false
 
         let wc = NSWindowController(window: window)

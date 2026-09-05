@@ -12,7 +12,17 @@ enum TestExpansionLab {
         let snippets = SnippetStore.shared.loadSnippets()
         let snippet = snippets.first { $0.triggerKeyword == ":test" }
             ?? SnippetModel(title: "Test", triggerKeyword: ":test", replacementText: "DevType OK")
-        let resolved = DynamicTemplateEngine.shared.resolve(snippet.replacementText)
+        let resolved = MacroRenderer.expand(content: snippet.replacementText,
+                                            lookup: NestedSnippetResolver(snippets: snippets, excludingSecrets: true).lookup)
+        if let failure = resolved.failure {
+            presentResult(hostWindow: hostWindow, title: loc.s("lab.refused.title"), body: failure.message, style: .warning)
+            return
+        }
+        guard !resolved.needsFillIn else {
+            presentResult(hostWindow: hostWindow, title: loc.s("lab.refused.title"),
+                          body: "Fill in this snippet before using the expansion lab.", style: .warning)
+            return
+        }
         let snapshot = PermissionProbe().snapshot()
         let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext()
         let plan = InjectionPlanner().plan(
@@ -59,7 +69,7 @@ enum TestExpansionLab {
 
         let session = LabSession(
             snippet: snippet,
-            expected: resolved.text,
+            prepared: resolved,
             plan: plan,
             planLabel: planLabel,
             hostWindow: hostWindow
@@ -85,7 +95,8 @@ enum TestExpansionLab {
 /// Retains itself while the lab panel is open.
 private final class LabSession: NSObject {
     private let snippet: SnippetModel
-    private let expected: String
+    private let prepared: MacroExpansionResult
+    private var expected: String { prepared.text }
     private let plan: InjectionPlan
     private let planLabel: String
     private weak var hostWindow: NSWindow?
@@ -106,13 +117,13 @@ private final class LabSession: NSObject {
 
     init(
         snippet: SnippetModel,
-        expected: String,
+        prepared: MacroExpansionResult,
         plan: InjectionPlan,
         planLabel: String,
         hostWindow: NSWindow?
     ) {
         self.snippet = snippet
-        self.expected = expected
+        self.prepared = prepared
         self.plan = plan
         self.planLabel = planLabel
         self.hostWindow = hostWindow
@@ -279,6 +290,9 @@ private final class LabSession: NSObject {
                     swallowedFinalKey: false,
                     lastEventCharacterCount: 0,
                     plan: self.plan,
+                    preResolvedText: self.prepared.text,
+                    preResolvedCursorOffset: self.prepared.cursorOffset,
+                    trailingKeys: self.prepared.trailingKeys,
                     completion: { [weak self] outcome in
                         DispatchQueue.main.async {
                             self?.evaluateResult(outcome: outcome)

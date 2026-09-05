@@ -334,8 +334,8 @@ final class WhitespaceFoldingStressTests: XCTestCase {
     func testVerifyTextDeliveryAcceptsSeparatorReencodedSelectedText() {
         let verification = DeliveryVerifier.verifyTextDelivery(
             expectedText: "pasted text ",
-            baseline: nil,
-            after: .init(value: nil, selectedText: "pasted\u{00A0}text\u{202F}")
+            baseline: DeliveryObservationFixture.at("", 0),
+            after: DeliveryObservationFixture.at("pasted\u{00A0}text\u{202F}", 0, 12, selectedText: "pasted\u{00A0}text\u{202F}")
         )
         XCTAssertEqual(verification, .delivered)
     }
@@ -343,8 +343,8 @@ final class WhitespaceFoldingStressTests: XCTestCase {
     func testVerifyTextDeliveryAcceptsParagraphSeparatorForNewline() {
         let verification = DeliveryVerifier.verifyTextDelivery(
             expectedText: "line1\nline2",
-            baseline: nil,
-            after: .init(value: "doc: line1\u{2029}line2", selectedText: nil)
+            baseline: DeliveryObservationFixture.at("doc: ", 5),
+            after: DeliveryObservationFixture.at("doc: line1\u{2029}line2", 16)
         )
         XCTAssertEqual(verification, .delivered)
     }

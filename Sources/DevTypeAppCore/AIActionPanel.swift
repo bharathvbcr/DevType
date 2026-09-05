@@ -702,7 +702,7 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        RoundedSelectionRowView()
+        RoundedSelectionRowView.dequeue(from: tableView, owner: self)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {

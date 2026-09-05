@@ -1758,8 +1758,39 @@ final class IconBadgeView: NSView {
 
 /// Row view that paints DevType's rounded crimson selection.
 final class RoundedSelectionRowView: NSTableRowView {
-    var selectionRadius: CGFloat = 9
-    var selectionInset = NSEdgeInsets(top: 2.5, left: 6, bottom: 2.5, right: 6)
+    static let defaultSelectionRadius: CGFloat = 9
+    static let defaultSelectionInset = NSEdgeInsets(top: 2.5, left: 6, bottom: 2.5, right: 6)
+
+    var selectionRadius: CGFloat = RoundedSelectionRowView.defaultSelectionRadius
+    var selectionInset = RoundedSelectionRowView.defaultSelectionInset
+
+    /// Identifier every table dequeues this row view under.
+    ///
+    /// All five `rowViewForRow` implementations used to `return RoundedSelectionRowView()` —
+    /// a new object, with no identifier, for every row that scrolled into view.
+    /// `NSTableView` recycles row views only through `makeView(withIdentifier:owner:)`, so
+    /// each scrolled row paid an allocation plus layer setup that the cell views beside it
+    /// (which were dequeued correctly) did not.
+    static let reuseIdentifier = NSUserInterfaceItemIdentifier("DevTypeRoundedSelectionRow")
+
+    /// Dequeues a recycled row view, or makes one and tags it so it can be recycled next time.
+    ///
+    /// Callers that customise `selectionRadius` / `selectionInset` must set them on the value
+    /// returned here: a recycled row carries whatever the previous table left on it, which is
+    /// why this resets both to the defaults first.
+    static func dequeue(from tableView: NSTableView, owner: Any?) -> RoundedSelectionRowView {
+        let row: RoundedSelectionRowView
+        if let reused = tableView.makeView(withIdentifier: reuseIdentifier, owner: owner)
+            as? RoundedSelectionRowView {
+            row = reused
+        } else {
+            row = RoundedSelectionRowView()
+            row.identifier = reuseIdentifier
+        }
+        row.selectionRadius = defaultSelectionRadius
+        row.selectionInset = defaultSelectionInset
+        return row
+    }
 
     override func drawSelection(in dirtyRect: NSRect) {
         let rect = NSRect(
@@ -1809,5 +1840,35 @@ final class GlassTextField: NSTextField {
         let result = super.becomeFirstResponder()
         needsDisplay = true
         return result
+    }
+}
+
+// MARK: - §X3 — window frame persistence
+
+extension NSWindow {
+    /// Remembers this window's size and position across launches.
+    ///
+    /// No window in DevType did. Every one was created at a fixed `setContentSize` and
+    /// `center()`ed, so a user who works in a wide Snippet Manager on a large display
+    /// re-established it every morning — the controllers are retained, so a resize survived
+    /// within a session and was discarded at quit.
+    ///
+    /// Two calls, in this order, because they do different jobs and it is easy to assume
+    /// otherwise: `setFrameUsingName` *restores* a saved frame and reports whether it found one,
+    /// while `setFrameAutosaveName` only *registers* the name so future moves are saved. Calling
+    /// the second alone — the obvious-looking one-liner — persists nothing on the way back in.
+    ///
+    /// Centring is folded in here and skipped when a frame was restored, so a first run keeps
+    /// the size the caller asked for and lands in the middle, exactly as before.
+    ///
+    /// A frame saved on a display that is no longer attached can restore off-screen, so it is
+    /// re-centred when it does not intersect any current screen.
+    func dtRestoreFrame(named name: String) {
+        let autosaveName = NSWindow.FrameAutosaveName(name)
+        let restored = setFrameUsingName(autosaveName)
+        setFrameAutosaveName(autosaveName)
+        if !restored || !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
+            center()
+        }
     }
 }

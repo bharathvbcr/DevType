@@ -891,11 +891,18 @@ public enum CommandPaletteCatalog {
         commandLimit: Int = 20,
         snippetLimit: Int = 40,
         boostRevision: UInt64? = nil,
+        libraryRevision: UInt64? = nil,
         routedResult: PaletteToolRouter.Routed? = nil,
         context: PaletteContext = .none
     ) -> [PaletteListRow] {
         let trimmed = boundedQuery(query)
-        let libStamp = SnippetSearch.fingerprint(of: groups, includeDisabled: false)
+        // A `SnippetStore` revision when the caller has one. The fingerprint below hashes every
+        // group and snippet — 627 µs at 2,000 snippets — and this function ran it on every
+        // keystroke in the palette, once here and once more inside `SnippetSearch`.
+        // The two numbering schemes share one cache table, so a revision is biased away from
+        // the fingerprint space rather than being used raw.
+        let libStamp = libraryRevision.map { $0 ^ 0x9E37_79B9_7F4A_7C15 }
+            ?? SnippetSearch.fingerprint(of: groups, includeDisabled: false)
         let cmdRev = CommandUsageStatsStore.shared.revision
         let snipRev = UsageStatsStore.shared.revision
         let clipHash = clipboardPreview?.hashValue ?? 0
@@ -975,7 +982,8 @@ public enum CommandPaletteCatalog {
                 includeDisabled: false,
                 limit: snippetLimit,
                 boost: usageBoost,
-                boostRevision: boostRevision
+                boostRevision: boostRevision,
+                revision: libraryRevision
             )
         }
 

@@ -100,7 +100,7 @@ final class ClipboardResidencyTests: XCTestCase {
     /// clipboard synchronously, before returning to the run loop.
     func testUnverifiedHoldMustNotRestoreTheClipboardImmediately() throws {
         let source = try brokerSource()
-        let window = branchWindow(after: "case .giveUpUnverified:", in: source)
+        let window = branchWindow(after: "case .giveUpUnverified, .failConfirmed, .retryPaste:", in: source)
 
         XCTAssertFalse(
             window.contains("deferBy: nil"),
@@ -121,7 +121,7 @@ final class ClipboardResidencyTests: XCTestCase {
     /// because the host has not got to the keystroke yet.
     func testConfirmedFailureMustNotRestoreTheClipboardImmediately() throws {
         let source = try brokerSource()
-        let window = branchWindow(after: "case .failConfirmed:", in: source, characters: 900)
+        let window = branchWindow(after: "case .giveUpUnverified, .failConfirmed, .retryPaste:", in: source, characters: 900)
 
         XCTAssertFalse(
             window.contains("deferBy: nil"),

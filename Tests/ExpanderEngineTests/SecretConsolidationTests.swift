@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import XCTest
 @testable import ExpanderEngine
 
@@ -506,6 +507,164 @@ final class SecretConsolidationTests: XCTestCase {
                 "account \(account.prefix(8))… lost — the two-writer clobber is back"
             )
         }
+    }
+
+    // MARK: - Deterministic two-writer transactions
+
+    /// Pause at real tier boundaries without production hooks or scheduler-dependent sleeps.
+    /// Each callback is consumed before invocation so the competing store can use this tier.
+    private final class InterleavingTier: SecretBackingStore {
+        let inner = InMemorySecretBackingStore()
+        var afterMissingMasterKey: (() -> Void)?
+        var afterValueRead: ((String) -> Void)?
+        var beforeDelete: ((String) -> Void)?
+        private(set) var masterKeyWrites = 0
+
+        func set(_ value: String, account: String) -> OSStatus {
+            if account == ConsolidatedSecretBackingStore.masterKeyAccount { masterKeyWrites += 1 }
+            return inner.set(value, account: account)
+        }
+
+        func value(account: String) -> String? {
+            let value = inner.value(account: account)
+            if account != ConsolidatedSecretBackingStore.masterKeyAccount {
+                let callback = afterValueRead
+                afterValueRead = nil
+                callback?(account)
+            }
+            return value
+        }
+
+        func contains(account: String) -> Bool {
+            let present = inner.contains(account: account)
+            if !present, account == ConsolidatedSecretBackingStore.masterKeyAccount {
+                let callback = afterMissingMasterKey
+                afterMissingMasterKey = nil
+                callback?()
+            }
+            return present
+        }
+
+        func delete(account: String) -> OSStatus {
+            let callback = beforeDelete
+            beforeDelete = nil
+            callback?(account)
+            return inner.delete(account: account)
+        }
+
+        func accounts() -> Set<String> { inner.accounts() }
+    }
+
+    /// An independent descriptor proves whether the competing writer can enter *now*.
+    /// If it can, execute the losing schedule synchronously; otherwise the caller runs the
+    /// competitor after the first transaction finishes. Both outcomes are bounded and exercise
+    /// real stores, archive bytes and encryption, with no expectation based on elapsed time.
+    private func interleaveIfUnlocked(at url: URL, _ operation: () -> Void) throws -> Bool {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let fd = open(url.appendingPathExtension("lock").path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { close(fd) }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let error = errno
+            guard error == EWOULDBLOCK else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(error))
+            }
+            return false
+        }
+        XCTAssertEqual(flock(fd, LOCK_UN), 0)
+        operation()
+        return true
+    }
+
+    func testTwoWritersCannotReplaceTheMasterKeyDuringConsolidation() throws {
+        let tier = InterleavingTier()
+        let (a, _, url) = makeStore(tier: tier)
+        let b = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+        let resident = UUID().uuidString
+        let competing = UUID().uuidString
+        XCTAssertEqual(tier.set("resident", account: resident), errSecSuccess)
+
+        var interleaved = false
+        let write = { XCTAssertEqual(b.set("competing", account: competing), errSecSuccess) }
+        tier.afterMissingMasterKey = {
+            do { interleaved = try self.interleaveIfUnlocked(at: url, write) }
+            catch { XCTFail("Lock probe failed: \(error)") }
+        }
+        XCTAssertEqual(a.consolidateIntoFile(), .init(moved: 1, remaining: 0, failed: 0))
+        XCTAssertNil(tier.afterMissingMasterKey, "The test must reach the key-creation boundary")
+        if !interleaved { write() }
+
+        XCTAssertEqual(tier.masterKeyWrites, 1, "A second key strands secrets sealed by the other writer")
+        let reopened = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+        XCTAssertEqual(reopened.value(account: resident), "resident")
+        XCTAssertEqual(reopened.value(account: competing), "competing")
+    }
+
+    func testLazyConsolidationCannotReplayAStaleTierRead() throws {
+        try assertTierReadCannotReplay(consolidating: false)
+    }
+
+    func testBatchConsolidationCannotReplayAStaleTierRead() throws {
+        try assertTierReadCannotReplay(consolidating: true)
+    }
+
+    private func assertTierReadCannotReplay(consolidating: Bool) throws {
+        for deleting in [false, true] {
+            let tier = InterleavingTier()
+            let url = directory.appendingPathComponent(UUID().uuidString).appendingPathComponent("secrets.enc")
+            let a = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+            let b = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+            // Settle the key first to isolate stale tier reads from master-key creation.
+            XCTAssertEqual(a.set("warmup", account: UUID().uuidString), errSecSuccess)
+            let account = UUID().uuidString
+            XCTAssertEqual(tier.set("old", account: account), errSecSuccess)
+            var interleaved = false
+            let mutate = {
+                XCTAssertEqual(deleting ? b.delete(account: account) : b.set("new", account: account),
+                               errSecSuccess)
+            }
+            tier.afterValueRead = { readAccount in
+                XCTAssertEqual(readAccount, account)
+                do { interleaved = try self.interleaveIfUnlocked(at: url, mutate) }
+                catch { XCTFail("Lock probe failed: \(error)") }
+            }
+            if consolidating {
+                XCTAssertEqual(a.consolidateIntoFile(), .init(moved: 1, remaining: 0, failed: 0))
+            }
+            else { XCTAssertEqual(a.value(account: account), "old") }
+            XCTAssertNil(tier.afterValueRead, "The test must reach the tier-read boundary")
+            XCTAssertFalse(tier.inner.contains(account: account), "Migration must actually finish")
+            if !interleaved { mutate() }
+
+            let reopened = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+            XCTAssertEqual(reopened.value(account: account), deleting ? nil : "new",
+                           "A delayed tier read must not undo a newer edit or resurrect a deletion")
+        }
+    }
+
+    func testDeleteKeepsBothTiersInOneTransaction() throws {
+        let tier = InterleavingTier()
+        let (a, _, url) = makeStore(tier: tier)
+        let b = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+        let account = UUID().uuidString
+        XCTAssertEqual(a.set("resident", account: account), errSecSuccess)
+        // Both copies can legitimately survive when consolidation's tier cleanup was denied.
+        XCTAssertEqual(tier.set("resident", account: account), errSecSuccess)
+        var interleaved = false
+        tier.beforeDelete = { deletedAccount in
+            XCTAssertEqual(deletedAccount, account)
+            do {
+                interleaved = try self.interleaveIfUnlocked(at: url) { _ = b.value(account: account) }
+            } catch { XCTFail("Lock probe failed: \(error)") }
+        }
+        XCTAssertEqual(a.delete(account: account), errSecSuccess)
+        XCTAssertNil(tier.beforeDelete, "The test must reach tier cleanup")
+        if !interleaved { XCTAssertNil(b.value(account: account)) }
+
+        let reopened = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
+        XCTAssertNil(reopened.value(account: account), "Consolidation must not resurrect a successful delete")
+        XCTAssertFalse(reopened.contains(account: account))
     }
 
     // MARK: - Fuzz

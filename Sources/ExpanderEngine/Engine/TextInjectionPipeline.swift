@@ -156,6 +156,8 @@ public final class TextInjectionPipeline {
     /// deletes one character of the arriving expansion, backspace #2 then triggers a blind erase
     /// computed from a caret that sits one unit left of where the record believes it does.
     private var _deliveryInputUnits = 0
+    private var inputRevision: UInt64 = 0
+    private var activeOperation: InjectCompletionGuard?
 
     public init() {
         hid = HIDKeyPoster.shared
@@ -373,6 +375,13 @@ public final class TextInjectionPipeline {
         eraseCaretVouched: Bool = true,
         completion: InjectionCompletion? = nil
     ) {
+        let operation = InjectCompletionGuard()
+        let revision = lastExpansionLock.withLock { () -> UInt64 in
+            activeOperation?.cancel()
+            activeOperation = operation
+            return inputRevision
+        }
+        let target = PasteboardBroker.PasteTarget.capture()
         injectQueue.async {
             // Prefer the fully-specified plan. Fall back to count-only planning for callers that
             // cannot supply the matched text (tests, Test Expansion Lab, physical Hangul overrides);
@@ -399,7 +408,7 @@ public final class TextInjectionPipeline {
             // set, so every keystroke was passed straight through. DevType stopped expanding until
             // relaunch, silently, with no log line. Both halves are now bounded and logged.
             let group = DispatchGroup()
-            let completionGuard = InjectCompletionGuard()
+            let completionGuard = operation
             group.enter()
 
             DispatchQueue.main.async {
@@ -414,7 +423,8 @@ public final class TextInjectionPipeline {
                     trailingKeys: trailingKeys,
                     snippetLookup: snippetLookup,
                     secureClipboardPaste: secureClipboardPaste,
-                    eraseCaretVouched: eraseCaretVouched
+                    eraseCaretVouched: eraseCaretVouched,
+                    operation: operation, inputRevision: revision, target: target
                 ) { outcome in
                     let invocation = completionGuard.markCompleted(outcome)
                     if invocation == 1 {
@@ -591,6 +601,7 @@ public final class TextInjectionPipeline {
     public func noteInputAfterExpansion(units: Int = 1) {
         guard units > 0 else { return }
         lastExpansionLock.lock()
+        inputRevision &+= 1
         if _lastExpansion != nil {
             _inputEventsSinceExpansion += units
         }
@@ -616,7 +627,34 @@ public final class TextInjectionPipeline {
         guard units > 0 else { return }
         lastExpansionLock.lock()
         _deliveryInputUnits += units
+        inputRevision &+= 1
         lastExpansionLock.unlock()
+    }
+
+    /// Invalidates queued work as well as callbacks already scheduled on main.
+    public func cancelCurrentInjection() {
+        lastExpansionLock.withLock {
+            activeOperation?.cancel()
+            activeOperation = nil
+        }
+    }
+
+    private func operationIsCurrent(
+        _ operation: InjectCompletionGuard, revision: UInt64, target: PasteboardBroker.PasteTarget,
+        allowSecureInput: Bool = false, observationOnly: Bool = false
+    ) -> Bool {
+        let current = lastExpansionLock.withLock {
+            activeOperation === operation && inputRevision == revision
+        }
+        return current && operation.allowsContinuation(observationOnly: observationOnly)
+            && (allowSecureInput || (AXContextChecker.shared.isProcessTrusted()
+                && !AXContextChecker.isSecureEventInputEnabledLive()))
+            && target.isCurrent(checkRange: false)
+    }
+
+    private func canContinue(_ context: InjectContext, observationOnly: Bool = false) -> Bool {
+        operationIsCurrent(context.operation, revision: context.inputRevision, target: context.target,
+                           observationOnly: observationOnly)
     }
 
     /// Internal test reader for the delivery-window counter. Not public API.
@@ -976,6 +1014,9 @@ public final class TextInjectionPipeline {
         let frontBundleID: String?
         let frontPID: pid_t?
         let deliveryInputUnits: Int
+        let operation: InjectCompletionGuard
+        let inputRevision: UInt64
+        let target: PasteboardBroker.PasteTarget
         /// False when the caller cannot promise the caret still sits immediately after
         /// `erasePlan.expectedText` — see `injectOnMain`.
         let eraseCaretVouched: Bool
@@ -999,8 +1040,14 @@ public final class TextInjectionPipeline {
         /// land); voice dictation cannot — segments arrive seconds apart and the user is free to
         /// click elsewhere in between. See `ErasePreconditionChecker.evaluate`.
         eraseCaretVouched: Bool = true,
+        operation: InjectCompletionGuard, inputRevision: UInt64, target: PasteboardBroker.PasteTarget,
         completion: @escaping InjectionCompletion
     ) {
+        guard operationIsCurrent(operation, revision: inputRevision, target: target,
+                                 allowSecureInput: secureClipboardPaste), target.isCurrent(checkRange: true) else {
+            completion(.refused("Expansion cancelled — operation or target changed"))
+            return
+        }
         // Re-check Secure Input / IME / focus at inject time (may have changed since match).
         let snapshot = PermissionCoordinator.shared.cachedSnapshot
 
@@ -1028,6 +1075,7 @@ public final class TextInjectionPipeline {
                 preResolvedText: preResolvedText,
                 trailingKeys: trailingKeys,
                 snippetLookup: snippetLookup,
+                shouldContinue: { self.operationIsCurrent(operation, revision: inputRevision, target: target, allowSecureInput: true) },
                 completion: completion
             )
             return
@@ -1102,6 +1150,7 @@ public final class TextInjectionPipeline {
             frontBundleID: frontBundleID,
             frontPID: frontApp?.processIdentifier,
             deliveryInputUnits: deliveryInputUnits,
+            operation: operation, inputRevision: inputRevision, target: target,
             eraseCaretVouched: eraseCaretVouched
         )
 
@@ -1112,9 +1161,7 @@ public final class TextInjectionPipeline {
         // §8.3: asynchronous, so the one-shot retry is available here (on main) without a 30 ms
         // `Thread.sleep` that would stall the event tap.
         eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched) { eraseCheck in
-            guard erasePlan.isEmpty || self.eraseContextIsCurrent(
-                inputUnits: context.deliveryInputUnits, targetPID: context.frontPID
-            ) else {
+            guard self.canContinue(context), context.target.isCurrent(checkRange: true) else {
                 let reason = "Expansion cancelled — input or target application changed before erase"
                 self.refuseInject(
                     reason, path: "eraseContextChanged", swallowed: swallowed,
@@ -1169,9 +1216,7 @@ public final class TextInjectionPipeline {
         let erasePlan = context.erasePlan
         let frontBundle = context.frontBundle
         let canProceed = {
-            erasePlan.isEmpty || self.eraseContextIsCurrent(
-                inputUnits: context.deliveryInputUnits, targetPID: context.frontPID
-            )
+            self.canContinue(context)
         }
 
         // Image snippets bypass all text/AX paths: erase the trigger with HID
@@ -1208,8 +1253,10 @@ public final class TextInjectionPipeline {
                 }
                 self.clipboard.pasteImageViaClipboard(
                     image: image,
-                    bundleID: context.frontBundleID
+                    bundleID: context.frontBundleID,
+                    shouldContinue: canProceed
                 ) { result in
+                    guard canProceed() else { completion(result == .notPosted ? .failedSilent : .postedUnverified); return }
                     // §3.4: the image path now reports what it actually observed instead of
                     // "posted, therefore succeeded".
                     let outcome: PermissionCoordinator.InjectOutcome
@@ -1234,7 +1281,7 @@ public final class TextInjectionPipeline {
 
         let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext()
         // Snapshot clipboard before any paste mutate when macros need it.
-        let clipboardArg = context.clipboardOverride.map { DynamicTemplateEngine.sanitizeClipboardText($0) }
+        let clipboardArg = context.clipboardOverride
         let cursorOffset: Int?
         let textToInject: String
         let keysToPress: [String]
@@ -1250,6 +1297,10 @@ public final class TextInjectionPipeline {
                 lookup: lookup,
                 clipboardText: clipboardArg
             )
+            if let failure = expanded.failure {
+                refuseInject(failure.message, path: "macroPreparation", swallowed: swallowed, completion: completion)
+                return
+            }
             if expanded.needsFillIn {
                 refuseInject(
                     "Fill-in required — present FillInPanel before inject",
@@ -1372,9 +1423,9 @@ public final class TextInjectionPipeline {
                     text: textToInject,
                     cursorOffset: cursorOffset,
                     totalUTF16Length: totalUTF16,
-                    allowHID: false
+                    allowHID: false,
+                    shouldContinue: canProceed
                 ) {
-                    self.hid.postTrailingKeys(keysToPress)
                     self.finishSucceeded(
                         outcome: .degradedAXOnly,
                         path: "axOnlyRange",
@@ -1429,9 +1480,10 @@ public final class TextInjectionPipeline {
                     text: textToInject,
                     cursorOffset: cursorOffset,
                     totalUTF16Length: totalUTF16,
-                    allowHID: true
+                    allowHID: true,
+                    shouldContinue: canProceed
                 ) {
-                    self.hid.postTrailingKeys(keysToPress)
+                    self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceed)
                     self.finishSucceeded(
                         outcome: .succeeded,
                         path: "axRange",
@@ -1498,7 +1550,7 @@ public final class TextInjectionPipeline {
                 }
             }
         ) { erased in
-            guard erased else {
+            guard erased, canProceed() else {
                 self.refuseInject(
                     "Erase precondition failed before paste — field no longer holds the trigger",
                     path: "guardedErase",
@@ -1539,9 +1591,10 @@ public final class TextInjectionPipeline {
                     text: textToInject,
                     cursorOffset: cursorOffset,
                     totalUTF16Length: totalUTF16,
-                    allowHID: true
+                    allowHID: true,
+                    shouldContinue: canProceed
                 ) {
-                    self.hid.postTrailingKeys(keysToPress)
+                    self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceed)
                     self.finishSucceeded(
                         outcome: .succeeded,
                         path: "axDirect",
@@ -1566,7 +1619,8 @@ public final class TextInjectionPipeline {
                 bundleID: context.frontBundleID,
                 focusedRole: focusedRole,
                 staleProbe: erasePlan.expectedText,
-                staleProbeCaseInsensitive: erasePlan.caseInsensitive
+                staleProbeCaseInsensitive: erasePlan.caseInsensitive,
+                shouldContinue: canProceed
             ) { result in
                 // #region agent log
                 TextInjectionPipeline.debugLogInject(
@@ -1604,6 +1658,7 @@ public final class TextInjectionPipeline {
         preResolvedText: String?,
         trailingKeys: [String],
         snippetLookup: ((String) -> String?)?,
+        shouldContinue: @escaping () -> Bool,
         completion: @escaping InjectionCompletion
     ) {
         if snippet.isImageSnippet {
@@ -1616,7 +1671,7 @@ public final class TextInjectionPipeline {
             return
         }
 
-        let clipboardArg = clipboardOverride.map { DynamicTemplateEngine.sanitizeClipboardText($0) }
+        let clipboardArg = clipboardOverride
         let textToInject: String
         let keysToPress: [String]
         if let preResolvedText {
@@ -1630,6 +1685,10 @@ public final class TextInjectionPipeline {
                 lookup: lookup,
                 clipboardText: clipboardArg
             )
+            if let failure = expanded.failure {
+                refuseInject(failure.message, path: "macroPreparation", swallowed: swallowed, completion: completion)
+                return
+            }
             if expanded.needsFillIn {
                 refuseInject(
                     "Fill-in required — present FillInPanel before inject",
@@ -1674,11 +1733,14 @@ public final class TextInjectionPipeline {
             bundleID: frontBundleID,
             leaveClipboardOnFailure: underSecureInput,
             holdTimeoutOverride: underSecureInput ? TextInjectionPipeline.secureClipboardPasteHoldTimeout : nil,
-            completeBeforeRestore: true
+            completeBeforeRestore: true,
+            allowSecureInput: true,
+            shouldContinue: shouldContinue
         ) { result in
+            guard shouldContinue() else { completion(result == .notPosted ? .failedSilent : .postedUnverified); return }
             switch result {
             case .delivered:
-                self.hid.postTrailingKeys(keysToPress)
+                self.hid.postTrailingKeys(keysToPress, shouldContinue: shouldContinue)
                 PermissionCoordinator.shared.recordInjectOutcome(
                     .succeeded,
                     refuseContext: nil,
@@ -1688,7 +1750,7 @@ public final class TextInjectionPipeline {
 
             case .unavailable:
                 // Cmd+V posted; password fields usually cannot confirm via AX.
-                self.hid.postTrailingKeys(keysToPress)
+                if underSecureInput { self.notifySecureClipboardManualPaste() }
                 PermissionCoordinator.shared.recordInjectOutcome(
                     .postedUnverified,
                     refuseContext: nil,
@@ -1697,30 +1759,10 @@ public final class TextInjectionPipeline {
                 completion(.postedUnverified)
 
             case .notPosted, .failed:
-                let completionOutcome: PermissionCoordinator.InjectOutcome
-                if underSecureInput {
-                    DevTypeLog.inject.notice(
-                        "[Inject] secure clipboard paste \(TextInjectionPipeline.pasteResultLabel(result), privacy: .public) under SI — leaving concealed clipboard for manual ⌘V"
-                    )
-                    self.notifySecureClipboardManualPaste()
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        .postedUnverified,
-                        refuseContext: nil,
-                        path: "secureClipboardPaste"
-                    )
-                    completionOutcome = .postedUnverified
-                } else {
-                    DevTypeLog.inject.error(
-                        "[Inject] secure clipboard paste \(TextInjectionPipeline.pasteResultLabel(result), privacy: .public)"
-                    )
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        .failedSilent,
-                        refuseContext: nil,
-                        path: "secureClipboardPaste"
-                    )
-                    completionOutcome = .failedSilent
-                }
-                completion(completionOutcome)
+                PermissionCoordinator.shared.recordInjectOutcome(
+                    .failedSilent, refuseContext: nil, path: "secureClipboardPaste"
+                )
+                completion(.failedSilent)
             }
         }
     }
@@ -1751,41 +1793,24 @@ public final class TextInjectionPipeline {
         trailingKeys: [String] = [],
         completion: @escaping InjectionCompletion
     ) {
+        guard canContinue(context) else { completion(result == .notPosted ? .failedSilent : .postedUnverified); return }
         let safeBundleID = DevTypeLog.boundedPublicIdentifier(
             context.frontBundleID,
             label: "bundleID"
         )
-        // §8.4 defense-in-depth: a `.failed` verdict may only drive the trigger restore when this
-        // `(bundle, role)` is a proven truthful witness. The hold loop applies the same gate
-        // before ever emitting `.failed`, but this function is reachable from more than one
-        // broker path and the proof can be revoked mid-flight — re-check at the point of harm.
-        // Suppressed failures are handled as `.unavailable`: outcome `postedUnverified`, field
-        // left alone, with the deferred re-verify still able to upgrade to success.
-        var result = result
-        if result == .failed,
-           !AXWriteCapabilityStore.shared.mayActOnDeliveryFailure(
-               bundleID: context.frontBundleID,
-               role: focusedRole
-           ) {
-            DevTypeLog.inject.notice(
-                """
-                [Inject] paste delivery: AX says missing but \
-                \(safeBundleID, privacy: .public) is not a proven delivery \
-                witness — leaving the field alone (restore would duplicate)
-                """
-            )
-            InjectTelemetryLog.shared.recordSuppressedMissVerdict(bundleID: context.frontBundleID)
-            result = .unavailable
-        }
+        // A readable miss cannot prove that an already-posted asynchronous paste
+        // will never arrive. Preserve the unverified result and do not replay text.
+        let result: PasteDeliveryResult = result == .failed ? .unavailable : result
         switch result {
         case .delivered:
             positionCursorIfNeeded(
                 text: expectedText,
                 cursorOffset: cursorOffset,
                 totalUTF16Length: totalUTF16Length,
-                allowHID: true
+                allowHID: true,
+                shouldContinue: { self.canContinue(context) }
             ) {
-                self.hid.postTrailingKeys(trailingKeys)
+                self.hid.postTrailingKeys(trailingKeys, shouldContinue: { self.canContinue(context) })
                 self.finishSucceeded(
                     outcome: .succeeded,
                     path: path,
@@ -1819,6 +1844,7 @@ public final class TextInjectionPipeline {
                 completion: completion
             )
             DispatchQueue.main.asyncAfter(deadline: .now() + TextInjectionPipeline.pasteReverifyDelay) {
+                guard self.canContinue(context, observationOnly: true) else { return }
                 let retry = self.verifier.verifyFocusedTextDelivery(
                     expectedText: expectedText,
                     baseline: baseline,
@@ -1836,41 +1862,7 @@ public final class TextInjectionPipeline {
                         refuseContext: nil,
                         path: path
                     )
-                case .failed where !AXWriteCapabilityStore.shared.mayActOnDeliveryFailure(
-                    bundleID: context.frontBundleID,
-                    role: focusedRole
-                ):
-                    // §8.1/§8.4: the other half of the duplicate report. The hold loop already
-                    // refuses to re-paste on this app's `.failed` verdict, but this deferred
-                    // re-read used to act on the very same false negative — writing the trigger
-                    // back *after* an expansion that did land. This is the most dangerous restore
-                    // in the pipeline (it fires ~a second after a paste that usually landed), so
-                    // it demands the strongest evidence: a proven, role-matched truthful witness.
-                    DevTypeLog.inject.notice(
-                        """
-                        [Inject] paste re-verify: AX says missing but \
-                        \(safeBundleID, privacy: .public) is not a proven \
-                        delivery witness — leaving the field alone (restoring the trigger would duplicate)
-                        """
-                    )
-                    InjectTelemetryLog.shared.recordSuppressedMissVerdict(bundleID: context.frontBundleID)
-                case .failed:
-                    // Late confirmation that paste never landed — escalate + restore trigger.
-                    DevTypeLog.inject.error("[Inject] paste re-verify: AX readable but text missing — treating as failed")
-                    // §3.1: the expansion did not happen, so there is nothing to undo. Matched on
-                    // the injected text so a *newer* expansion's undo point is not thrown away.
-                    self.clearLastExpansion(ifInjectedTextIs: expectedText)
-                    self.restoreTriggerAfterFailedPaste(
-                        erasePlan: context.erasePlan,
-                        swallowed: context.swallowed,
-                        bundleID: context.frontBundleID
-                    )
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        .failedSilent,
-                        refuseContext: nil,
-                        path: path
-                    )
-                case .unavailable:
+                case .failed, .unavailable:
                     // Neither provable: AX cannot read this field at all (common for
                     // Electron/terminal hosts). The outcome stays `postedUnverified` —
                     // but the ambiguity itself is logged, so a diagnostic report shows
@@ -1892,14 +1884,14 @@ public final class TextInjectionPipeline {
                 erasePlan: context.erasePlan,
                 swallowed: context.swallowed,
                 bundleID: context.frontBundleID,
-                countsAsDuplicateRisk: result != .notPosted
-            )
-            PermissionCoordinator.shared.recordInjectOutcome(
-                .failedSilent,
-                refuseContext: nil,
-                path: path
-            )
-            completion(.failedSilent)
+                countsAsDuplicateRisk: result != .notPosted,
+                shouldContinue: { self.canContinue(context) }
+            ) {
+                PermissionCoordinator.shared.recordInjectOutcome(
+                    .failedSilent, refuseContext: nil, path: path
+                )
+                completion(.failedSilent)
+            }
         }
     }
 
@@ -1911,8 +1903,11 @@ public final class TextInjectionPipeline {
         erasePlan: ErasePlan,
         swallowed: SwallowedKey,
         bundleID: String? = nil,
-        countsAsDuplicateRisk: Bool = true
+        countsAsDuplicateRisk: Bool = true,
+        shouldContinue: @escaping () -> Bool,
+        completion: @escaping () -> Void
     ) {
+        guard shouldContinue() else { completion(); return }
         if let text = erasePlan.expectedText, !text.isEmpty {
             // Counted, not just logged: a restore that runs after a paste which actually landed is
             // indistinguishable from a legitimate one in the outcome histogram, and both show up
@@ -1925,22 +1920,25 @@ public final class TextInjectionPipeline {
             // other AX site — in a learned false-success app this restore must not claim
             // success against a field it could not actually mutate.
             if ax.attemptAXDirectInjection(text: text, bundleID: bundleID) {
-                if swallowed.mustReinjectOnRefuse {
+                if shouldContinue(), swallowed.mustReinjectOnRefuse {
                     _ = reinjectSwallowedKey(swallowed)
                 }
+                completion()
                 return
             }
             // AX cannot restore — clipboard paste the trigger, then reinject the swallowed key.
-            clipboard.pasteViaClipboard(text: text) { _ in
-                if swallowed.mustReinjectOnRefuse {
+            clipboard.pasteViaClipboard(text: text, expectedText: nil, baseline: nil, bundleID: bundleID, shouldContinue: shouldContinue) { _ in
+                if shouldContinue(), swallowed.mustReinjectOnRefuse {
                     _ = self.reinjectSwallowedKey(swallowed)
                 }
+                completion()
             }
             return
         }
-        if swallowed.mustReinjectOnRefuse {
+        if shouldContinue(), swallowed.mustReinjectOnRefuse {
             _ = reinjectSwallowedKey(swallowed)
         }
+        completion()
     }
 
     /// §8.2: the single refuse path. There were nine near-identical eight-line call sites of this
@@ -1997,6 +1995,7 @@ public final class TextInjectionPipeline {
         undoable: Bool,
         completion: @escaping InjectionCompletion
     ) {
+        guard canContinue(context) else { completion(.postedUnverified); return }
         PermissionCoordinator.shared.recordInjectOutcome(
             outcome,
             refuseContext: nil,
@@ -2042,9 +2041,10 @@ public final class TextInjectionPipeline {
         cursorOffset: Int?,
         totalUTF16Length: Int,
         allowHID: Bool,
+        shouldContinue: @escaping () -> Bool,
         completion: @escaping () -> Void
     ) {
-        guard let offset = cursorOffset, offset <= totalUTF16Length else {
+        guard shouldContinue(), let offset = cursorOffset, offset >= 0, offset <= totalUTF16Length else {
             completion()
             return
         }
@@ -2055,7 +2055,8 @@ public final class TextInjectionPipeline {
         }
         // Prefer AX caret (works for AX-only Finish-without-Post); HID arrows only when allowed.
         // The AX path is unit-correct: AX ranges and `utf16FromEnd` are both UTF-16 code units.
-        if ax.attemptAXCaretPosition(utf16OffsetFromEnd: utf16FromEnd) {
+        if shouldContinue(), AXContextChecker.shared.isProcessTrusted(),
+           ax.attemptAXCaretPosition(utf16OffsetFromEnd: utf16FromEnd) {
             completion()
             return
         }
@@ -2073,9 +2074,19 @@ public final class TextInjectionPipeline {
             completion()
             return
         }
+        // Bounded: an unbounded burst of synthetic arrow keys is not caret placement in a host
+        // with vim mode or an open autocomplete popup — it is input the user cannot account
+        // for. Leaving the caret at the end is the honest failure, and the text still landed.
+        guard InjectTiming.allowsCursorArrows(count: arrowCount) else {
+            DevTypeLog.inject.notice(
+                "[Inject] cursor placement skipped — needs \(arrowCount, privacy: .public) arrows, over the \(InjectTiming.maxCursorArrowKeys, privacy: .public) cap; text delivered, caret left at end"
+            )
+            completion()
+            return
+        }
         // Fixed settle before HID arrows — best-effort; CGEvent.post success ≠ delivery proof.
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.preArrowSettleDelay) {
-            self.hid.sendLeftArrowsAsync(count: arrowCount, completion: completion)
+            self.hid.sendLeftArrowsAsync(count: arrowCount, shouldContinue: shouldContinue, completion: completion)
         }
     }
 
@@ -2219,10 +2230,11 @@ public final class TextInjectionPipeline {
 /// Two failure modes, both of which used to corrupt the serial inject queue silently: a path that
 /// never calls its completion (the queue blocks forever and `isExpanding` never clears), and a path
 /// that calls it twice (leaving a `DispatchGroup` more times than it was entered traps).
-private final class InjectCompletionGuard {
+final class InjectCompletionGuard {
     private let lock = UnfairLock()
     private var invocations = 0
     private var timedOut = false
+    private var cancelled = false
     private var outcome: PermissionCoordinator.InjectOutcome?
 
     /// Returns the 1-based invocation index. Only `1` may leave the group.
@@ -2244,6 +2256,12 @@ private final class InjectCompletionGuard {
             outcome = .failedSilent
         }
         lock.unlock()
+    }
+
+    func cancel() { lock.withLock { cancelled = true } }
+
+    func allowsContinuation(observationOnly: Bool = false) -> Bool {
+        lock.withLock { !cancelled && !timedOut && (observationOnly || invocations == 0) }
     }
 
     var didTimeOut: Bool {

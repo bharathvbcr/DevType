@@ -118,6 +118,7 @@ enum SecretMenuFlow {
             lookup: lookup ?? { _ in nil },
             clipboardText: clipboardText
         )
+        if let failure = rendered.failure { return .failure(.macroFailed(failure.message)) }
         guard !rendered.text.isEmpty else { return .failure(.emptySnippet) }
         return .success(rendered.text)
     }
@@ -129,6 +130,7 @@ enum SecretMenuFlow {
         case imageSnippet(String)
         /// A plain snippet that renders to nothing — copying "" would silently wipe the clipboard.
         case emptySnippet
+        case macroFailed(String)
         /// The user dismissed the Touch ID prompt. Their own decision, already visible to them:
         /// callers must stay silent rather than answer it with a dialog of our own.
         case authenticationCancelled

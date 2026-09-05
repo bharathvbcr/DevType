@@ -73,6 +73,7 @@ public struct RenderResult: Equatable {
     public var cursorOffsetFromEnd: Int
     /// Key names (e.g. "enter") to press after inserting the text.
     public var trailingKeys: [String]
+    public var failure: MacroRenderFailure? = nil
 }
 
 public enum MacroParser {
@@ -461,16 +462,37 @@ public enum MacroParser {
         now: Date = Date(),
         environment: MacroEnvironment
     ) -> RenderResult {
-        var out = ""
-        var cursorPosition: Int? = nil
+        let prepared = renderDocument(tokens: tokens, fillValues: fillValues, clipboard: clipboard(), now: now, environment: environment)
+        let document = DynamicTemplateEngine.shared.render(prepared.document, currentDate: now, clipboardText: "",
+                                                           environment: environment, resolveMustache: false)
+        if let failure = document.failure {
+            return RenderResult(text: "", cursorOffsetFromEnd: 0, trailingKeys: [], failure: failure)
+        }
+        let offset = document.cursors.min().map {
+            document.text.count - (document.text as NSString).substring(to: $0).count
+        } ?? 0
+        return RenderResult(text: document.failure == nil ? document.text : "", cursorOffsetFromEnd: offset,
+                            trailingKeys: prepared.trailingKeys, failure: document.failure)
+    }
+
+    static func renderDocument(
+        tokens: [MacroToken], fillValues: [Int: String], clipboard: String, now: Date,
+        environment: MacroEnvironment
+    ) -> (document: MacroDocument, trailingKeys: [String]) {
+        var out = MacroDocument()
+        guard tokens.count <= MacroDocument.maximumOperations else {
+            out.failure = .workLimit
+            return (out, [])
+        }
         var trailingKeys: [String] = []
         var fieldID = 0
         var skipDepth = 0
         var volatileOccurrence = 0
-        // §3.5: open `%case:…%` blocks as (transform, out.count when the block opened).
+        // Keep case spans and cursor anchors in the same UTF-16 document through both syntaxes.
         var caseStack: [(transform: TextCaseTransform, start: Int)] = []
 
         for token in tokens {
+            guard out.failure == nil else { break }
             if case .fillPartEnd = token {
                 if skipDepth > 0 { skipDepth -= 1 }
                 continue
@@ -496,65 +518,50 @@ public enum MacroParser {
             }
             switch token {
             case .text(let s):
-                out += s
+                out.append(s)
             case .fillText(_, let def), .fillArea(_, let def):
-                out += fillValues[fieldID] ?? def
+                out.append(fillValues[fieldID] ?? def, literal: true)
                 fieldID += 1
             case .fillPopup(_, let options, let def):
-                out += fillValues[fieldID] ?? (def.isEmpty ? (options.first ?? "") : def)
+                out.append(fillValues[fieldID] ?? (def.isEmpty ? (options.first ?? "") : def), literal: true)
                 fieldID += 1
             case .snippet(let abbrev):
-                out += "%snippet:\(abbrev)%"
+                out.append("%snippet:\(abbrev)%", literal: true)
             case .clipboard:
-                // §1.12: the mustache engine strips `{{…}}` out of clipboard content before
-                // substituting `{{clipboard}}`; this path used to insert the RAW clipboard and
-                // `MacroRenderer` then fed the result straight into the mustache engine, so a
-                // clipboard containing `{{calc:…}}` or `{{cursor}}` was evaluated. Same
-                // sanitizer, both paths.
-                out += DynamicTemplateEngine.sanitizeClipboardText(clipboard())
+                out.append(clipboard, literal: true)
             case .key(let k):
                 trailingKeys.append(k)
             case .cursor:
-                // §3.6: first marker wins, matching TextExpander and the mustache engine
-                // (`DynamicTemplateEngine` takes the first `{{cursor}}`). The two engines share
-                // one pipeline and must not disagree.
-                if cursorPosition == nil { cursorPosition = out.count }
+                out.cursor()
             case .date(let format):
                 // Named presets (us, full, iso, …), raw DateFormatter patterns, and `:+1d`
                 // offsets (§3.5).
-                out += DateFormatLibrary.format(
+                out.append(DateFormatLibrary.format(
                     format,
                     now: now,
                     locale: environment.locale,
                     timeZone: environment.timeZone
-                )
+                ), literal: true)
             case .uuid(let spec):
-                out += environment.uuidValue(spec: spec)
+                out.append(environment.uuidValue(spec: spec, syntax: "te", occurrence: volatileOccurrence), literal: true)
+                volatileOccurrence += 1
             case .random(let spec):
-                out += environment.randomValue(spec: spec, syntax: "te", occurrence: volatileOccurrence)
+                out.append(environment.randomValue(spec: spec, syntax: "te", occurrence: volatileOccurrence), literal: true)
                 volatileOccurrence += 1
             case .counter(let name, let step):
-                out += environment.counterValue(name: name, step: step)
+                out.append(environment.counterValue(name: name, step: step), literal: true)
             case .caseStart(let transform):
-                caseStack.append((transform: transform, start: out.count))
+                caseStack.append((transform: transform, start: out.length))
             case .caseEnd:
-                guard let open = caseStack.popLast(), open.start <= out.count else { break }
-                let head = String(out.prefix(open.start))
-                let body = String(out.dropFirst(open.start))
-                out = head + open.transform.apply(to: body, locale: environment.locale)
+                guard let open = caseStack.popLast() else { break }
+                out.addCase(open.transform, from: open.start)
             case .fillPartStart, .fillPartEnd:
                 break
             }
         }
 
-        // Unbalanced `%case:…%` — apply to everything that followed rather than dropping it.
-        while let open = caseStack.popLast(), open.start <= out.count {
-            let head = String(out.prefix(open.start))
-            let body = String(out.dropFirst(open.start))
-            out = head + open.transform.apply(to: body, locale: environment.locale)
-        }
-
-        let offsetFromEnd = cursorPosition.map { out.count - $0 } ?? 0
-        return RenderResult(text: out, cursorOffsetFromEnd: offsetFromEnd, trailingKeys: trailingKeys)
+        // Preserve the existing unbalanced-block convention: transform the remaining body.
+        while let open = caseStack.popLast() { out.addCase(open.transform, from: open.start) }
+        return (out, trailingKeys)
     }
 }

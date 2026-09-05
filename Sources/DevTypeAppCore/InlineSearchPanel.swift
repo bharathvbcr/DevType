@@ -521,6 +521,11 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     private let onCancel: () -> Void
 
     private var groups: [SnippetGroup] = []
+    /// `SnippetStore.libraryRevision` identifying `groups` — set only when `groups` *is* the
+    /// store's library. A filtered view (secrets-only mode) is a different list carrying the
+    /// same revision, and `SnippetSearch`'s index cache is process-wide, so that case must fall
+    /// back to fingerprinting rather than claim an identity it does not have.
+    private var groupsRevision: UInt64?
     private var rows: [PaletteListRow] = []
     private var selection = 0
     private var didFinish = false
@@ -729,13 +734,16 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        groups = visibleGroups(store.loadGroups())
+        adoptLibrary()
         refreshClipboardCache(force: true)
         aiDisabledReason = AILocaleSupport.disabledReason(loc: loc)
-        listenerToken = store.addGroupListener { [weak self] updated in
+        listenerToken = store.addGroupListener { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.groups = self.visibleGroups(updated)
+                // Re-read rather than adopt the delivered array: the groups and the revision
+                // that names them have to come from the same lock acquisition, or a save
+                // landing in between pairs a new revision with an old library.
+                self.adoptLibrary()
                 self.refreshHits()
             }
         }
@@ -840,6 +848,13 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         return SecretLibraryFilter.secretsOnly(groups)
     }
 
+    /// Takes the library and the revision naming it in one read.
+    private func adoptLibrary() {
+        let snapshot = store.loadGroupsWithRevision()
+        groups = visibleGroups(snapshot.groups)
+        groupsRevision = mode.showsOnlySecrets ? nil : snapshot.revision
+    }
+
     private func refreshHits() {
         refreshClipboardCache()
         let query = searchField.stringValue
@@ -860,6 +875,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             // The boost closures below read this panel's own store, not the shared singleton,
             // so the cache has to key on that store's revision or it serves stale rankings.
             boostRevision: store.usageStatsStore.revision,
+            libraryRevision: groupsRevision,
             routedResult: routedResult,
             context: context
         )
@@ -878,7 +894,9 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
         let selectableCount = rows.filter(\.isSelectable).count
         emptyState.isHidden = selectableCount > 0
-        let totalSnippets = groups.flatMap(\.snippets).count
+        // P12: `flatMap(\.snippets).count` allocated the whole flattened library — 50 µs at
+        // 2,000 snippets, on every keystroke — to produce one integer.
+        let totalSnippets = groups.reduce(0) { $0 + $1.snippets.count }
         countLabel.stringValue = loc.s("search.count", selectableCount, totalSnippets)
     }
 
@@ -1086,7 +1104,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        RoundedSelectionRowView()
+        RoundedSelectionRowView.dequeue(from: tableView, owner: self)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {

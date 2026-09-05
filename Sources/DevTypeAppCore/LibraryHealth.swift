@@ -474,21 +474,29 @@ enum LibraryHealthPresenter {
             ],
             window: window
         ) { index in
+            let choice: SnippetStore.ConflictChoice
             switch index {
-            case 0:
-                let outcome = store.resolveConflictsKeepingLocal()
-                DevTypeLog.app.notice(
-                    "[Library] conflict resolved keeping local saved=\(outcome.didSave, privacy: .public)"
-                )
-            case 1:
-                let ok = store.resolveConflictsKeepingRemote()
-                DevTypeLog.app.notice(
-                    "[Library] conflict resolved keeping remote ok=\(ok, privacy: .public)"
-                )
-            default:
-                return
+            case 0: choice = .local
+            case 1: choice = .remote
+            default: return
             }
-            LibraryHealthMonitor.shared.refresh()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let outcome = store.resolveConflicts(keeping: choice)
+                DispatchQueue.main.async {
+                    LibraryHealthMonitor.shared.refresh()
+                    let message: String
+                    switch outcome {
+                    case .adopted: return
+                    case .adoptionFailed(let reason, _): message = reason
+                    case .adoptedCleanupPending(let reason, let recoveryURL):
+                        message = reason + "\n\nRecovery copies: " + recoveryURL.path
+                    }
+                    DevTypeAlert.present(
+                        title: loc.s("library.conflict.title"), message: message, style: .warning,
+                        buttons: [loc.s("common.ok")], window: window
+                    ) { _ in }
+                }
+            }
         }
     }
 

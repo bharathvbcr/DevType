@@ -13,6 +13,7 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
         private(set) var changeCount = 0
         private(set) var currentString: String?
         var externalCopyDuringGeneratedMarker: String?
+        var externalCopyAfterString: String?
 
         init(failure: Failure) { self.failure = failure }
 
@@ -28,6 +29,7 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
             stringWrites += 1
             guard failure != .string else { return false }
             currentString = string
+            if let externalCopyAfterString { simulateExternalCopy(externalCopyAfterString) }
             return true
         }
 
@@ -171,4 +173,23 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
         XCTAssertEqual(writer.clearCount, 0)
         XCTAssertFalse(clipboard.hasOutstandingSecret)
     }
+
+    func testExternalOwnerBeforeFailedMarkerIsNotClearedOrScheduled() {
+        for failure in [Writer.Failure.concealed, .transient, .generated] {
+            let clipboard = SecretClipboard()
+            let writer = Writer(failure: failure)
+            writer.externalCopyAfterString = "external copy"
+            var scheduled = 0
+            let result = clipboard.copyResult(
+                "synthetic secret", pasteboardWriter: writer, broker: nil,
+                schedule: { _, _ in scheduled += 1 }
+            )
+            XCTAssertEqual(result, .writeFailed)
+            XCTAssertEqual(writer.clearCount, 1, "Cleanup authority belongs to the original clear count.")
+            XCTAssertEqual(writer.currentString, "external copy")
+            XCTAssertEqual(scheduled, 0)
+            XCTAssertFalse(clipboard.hasOutstandingSecret)
+        }
+    }
+
 }

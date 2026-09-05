@@ -1219,31 +1219,19 @@ public final class EventTapEngine {
             return Unmanaged.passUnretained(event)
         }
 
-        let activeSnippets = snapshotState.snippets
         let snapshot = PermissionCoordinator.shared.cachedSnapshot
-        let lookup: (String) -> String? = { trigger in
-            activeSnippets.first { $0.triggerKeyword == trigger || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased()) }?.replacementText
-        }
-        // Sync-safe shape for planner (no pasteboard; empty clipboard for refuse shape).
-        let preview = MacroRenderer.expand(
-            content: match.snippet.replacementText,
-            fillValues: [:],
-            lookup: lookup,
-            clipboardText: ""
-        )
-        let previewText = preview.needsFillIn ? match.snippet.replacementText : preview.text
-        let previewCursor = preview.needsFillIn ? nil : preview.cursorOffset
-        let needsCursor = InjectionPlanner.needsCursorHID(
-            cursorOffset: previewCursor,
-            totalUTF16Length: previewText.utf16.count
-        )
         // Dedicated terminals only on hot path (cached bundle ID); IDE shell needs AX → deferred.
         let isTerminal = context.isTerminal
+        // This used to render the whole snippet first — macros, nested `{{snippet:…}}` lookups
+        // and all — purely to derive `needsCursorHID` and `isMultiLine` for the call below.
+        // `InjectionPlanner.plan` discards both (`_ = needsCursorHID`, `_ = isMultiLine`): they
+        // are retained for API compatibility and inject-path logging, and are not refuse gates.
+        // The decision rests entirely on AX, Post and terminal-ness, so the render was a full
+        // macro expansion per expansion, inside the CGEventTap callback, for two values nobody
+        // read. The real render still happens on the inject path, where its result is used.
         let plan = InjectionPlanner().plan(
             snapshot: snapshot,
-            isTerminal: isTerminal,
-            needsCursorHID: needsCursor,
-            isMultiLine: previewText.contains(where: \.isNewline) || preview.needsFillIn
+            isTerminal: isTerminal
         )
         guard EventTapEngine.shouldSwallowTrigger(plan: plan) else {
             // InjectionPlanner refuse — must not swallow (pass key through).
@@ -1469,6 +1457,7 @@ public final class EventTapEngine {
     /// holds a keep-alive port) so a later `start()` does not have to churn threads; use
     /// `shutdownTapThread()` for a full teardown.
     public func stop() {
+        TextInjectionPipeline.shared.cancelCurrentInjection()
         let wasRunning = isTapRunning
         stopHealthMonitor()
 
@@ -2329,19 +2318,15 @@ public final class EventTapEngine {
         }
 
         let clipboardSnapshot = mainProbe.clipboard
-        let lookup: (String) -> String? = { [weak self] trigger in
-            guard let self else { return nil }
-            return self.snippets.first {
-                $0.triggerKeyword == trigger
-                    || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased())
-            }?.replacementText
-        }
+        let lookup = matchSnapshot.nestedResolver.lookup
+        let renderContext = MacroRenderContext(clipboardText: clipboardSnapshot ?? "")
 
         let firstPass = MacroRenderer.expand(
             content: snippet.replacementText,
             fillValues: [:],
             lookup: lookup,
-            clipboardText: clipboardSnapshot
+            clipboardText: clipboardSnapshot,
+            context: renderContext
         )
 
         if firstPass.needsFillIn {
@@ -2375,7 +2360,8 @@ public final class EventTapEngine {
                             content: snippet.replacementText,
                             fillValues: values,
                             lookup: lookup,
-                            clipboardText: clipboardSnapshot
+                            clipboardText: clipboardSnapshot,
+                            context: renderContext
                         )
                         self.finishDeferredInject(
                             snippet: snippet,
@@ -2686,6 +2672,11 @@ public final class EventTapEngine {
         swallowedFinalKey: Bool = true,
         textSuffix: String = ""
     ) {
+        if let failure = resolved.failure {
+            refuseAfterSwallow(reason: failure.message, swallowedUnicode: swallowedUnicode,
+                               swallowedKeyCode: swallowedKeyCode, swallowedFlags: swallowedFlags)
+            return
+        }
         if case .abort = inputClock.decide(quiescence) {
             refuseAfterSwallow(
                 reason: "User input after arm — expand aborted",
@@ -2734,13 +2725,7 @@ public final class EventTapEngine {
             return
         }
 
-        let lookup: (String) -> String? = { [weak self] trigger in
-            guard let self else { return nil }
-            return self.snippets.first {
-                $0.triggerKeyword == trigger
-                    || (!$0.isCaseSensitive && $0.triggerKeyword.lowercased() == trigger.lowercased())
-            }?.replacementText
-        }
+        let lookup = matchSnapshot.nestedResolver.lookup
 
         TextInjectionPipeline.shared.inject(
             snippet: snippet,

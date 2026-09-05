@@ -25,13 +25,29 @@ struct SnippetTagSuggestionMerge {
     private let candidates: [Candidate]
 
     init(baseline: [SnippetGroup], tagged: [SnippetGroup]) {
+        // Indexed once. The nested `first(where:)` this replaces rescanned the tagged library
+        // for every baseline snippet, so tagging a whole library was quadratic in its size.
+        var taggedGroupsByID: [UUID: SnippetGroup] = [:]
+        for group in tagged where taggedGroupsByID[group.id] == nil {
+            taggedGroupsByID[group.id] = group
+        }
+        var taggedSnippetsByGroup: [UUID: [UUID: SnippetModel]] = [:]
+        for (groupID, group) in taggedGroupsByID {
+            var byID: [UUID: SnippetModel] = [:]
+            // First occurrence wins, matching `first(where:)`.
+            for snippet in group.snippets where byID[snippet.id] == nil {
+                byID[snippet.id] = snippet
+            }
+            taggedSnippetsByGroup[groupID] = byID
+        }
+
         var changes: [Candidate] = []
         for baselineGroup in baseline {
-            guard let taggedGroup = tagged.first(where: { $0.id == baselineGroup.id }) else { continue }
+            guard taggedGroupsByID[baselineGroup.id] != nil,
+                  let taggedSnippets = taggedSnippetsByGroup[baselineGroup.id] else { continue }
             for baselineSnippet in baselineGroup.snippets {
-                guard let taggedSnippet = taggedGroup.snippets.first(where: {
-                    $0.id == baselineSnippet.id
-                }), taggedSnippet.tags != baselineSnippet.tags else { continue }
+                guard let taggedSnippet = taggedSnippets[baselineSnippet.id],
+                      taggedSnippet.tags != baselineSnippet.tags else { continue }
                 changes.append(Candidate(
                     groupID: baselineGroup.id,
                     groupName: baselineGroup.name,
@@ -49,15 +65,19 @@ struct SnippetTagSuggestionMerge {
 
     func apply(to groups: inout [SnippetGroup]) -> Summary {
         var summary = Summary(applied: 0, stale: 0)
-        for candidate in candidates {
-            var locations: [(group: Int, snippet: Int)] = []
-            for groupIndex in groups.indices {
-                for snippetIndex in groups[groupIndex].snippets.indices
-                where groups[groupIndex].snippets[snippetIndex].id == candidate.snippetID {
-                    locations.append((groupIndex, snippetIndex))
-                }
+        // Every occurrence of each snippet ID, found in one pass rather than one full scan of
+        // the library per candidate. A duplicate UUID still yields more than one location and
+        // is still refused below — this changes the cost, not the rule.
+        var locationsByID: [UUID: [(group: Int, snippet: Int)]] = [:]
+        for groupIndex in groups.indices {
+            for snippetIndex in groups[groupIndex].snippets.indices {
+                let id = groups[groupIndex].snippets[snippetIndex].id
+                locationsByID[id, default: []].append((groupIndex, snippetIndex))
             }
+        }
 
+        for candidate in candidates {
+            let locations = locationsByID[candidate.snippetID] ?? []
             guard locations.count == 1, let location = locations.first else {
                 summary.stale += 1
                 continue

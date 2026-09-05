@@ -201,14 +201,8 @@ final class ExpanderEngineTests: XCTestCase {
     }
 
     func testVerifyTextDeliverySucceedsWhenValueChangesToContainExpectedText() {
-        let before = TextInjectionPipeline.FocusedTextObservation(
-            value: "abc",
-            selectedText: nil
-        )
-        let after = TextInjectionPipeline.FocusedTextObservation(
-            value: "abcHello",
-            selectedText: nil
-        )
+        let before = DeliveryObservationFixture.at("abc", 3)
+        let after = DeliveryObservationFixture.at("abcHello", 8)
 
         XCTAssertEqual(
             TextInjectionPipeline.verifyTextDelivery(
@@ -220,7 +214,7 @@ final class ExpanderEngineTests: XCTestCase {
         )
     }
 
-    func testVerifyTextDeliveryFailsWhenReadableValueDoesNotContainExpectedText() {
+    func testReadableAbsenceRemainsUnverified() {
         let before = TextInjectionPipeline.FocusedTextObservation(
             value: "abc",
             selectedText: nil
@@ -236,7 +230,7 @@ final class ExpanderEngineTests: XCTestCase {
                 baseline: before,
                 after: after
             ),
-            .failed
+            .unavailable
         )
     }
 
@@ -260,9 +254,8 @@ final class ExpanderEngineTests: XCTestCase {
         )
     }
 
-    func testVerifyTextDeliveryDeliversWhenSelectedTextMatchesExpected() {
-        // After paste many apps leave the pasted text selected; this path confirms delivery
-        // even when the field value is not readable.
+    func testSelectedTextAloneCannotConfirmDelivery() {
+        // Matching selection without a relevant observed transition is ambiguous.
         let after = TextInjectionPipeline.FocusedTextObservation(
             value: nil,
             selectedText: "Hello"
@@ -273,7 +266,7 @@ final class ExpanderEngineTests: XCTestCase {
                 baseline: nil,
                 after: after
             ),
-            .delivered
+            .unavailable
         )
     }
 
@@ -318,7 +311,7 @@ final class ExpanderEngineTests: XCTestCase {
         )
     }
 
-    func testDecidePasteHoldRetriesOnceOnConfirmedFailure() {
+    func testRepeatedMissesDoNotAuthorizeReplay() {
         XCTAssertEqual(
             TextInjectionPipeline.decidePasteHold(
                 delivery: .failed,
@@ -326,7 +319,7 @@ final class ExpanderEngineTests: XCTestCase {
                 elapsed: 0.05,
                 holdTimeout: 0.35
             ),
-            .retryPaste
+            .waitMore
         )
         XCTAssertEqual(
             TextInjectionPipeline.decidePasteHold(
@@ -335,7 +328,7 @@ final class ExpanderEngineTests: XCTestCase {
                 elapsed: 0.10,
                 holdTimeout: 0.35
             ),
-            .failConfirmed
+            .waitMore
         )
     }
 
@@ -366,12 +359,13 @@ final class ExpanderEngineTests: XCTestCase {
         XCTAssertEqual(TextInjectionPipeline.pasteDeliveryMaxAttempts, 2)
     }
 
-    func testSanitizeClipboardStripsTemplateTokens() {
+    func testClipboardCompatibilityAdapterPreservesLiteralTokensWithoutExecutingThem() {
         let raw = "hello {{clipboard}} {{cursor}} {{calc:1+2}} {{date}} world"
-        let clean = DynamicTemplateEngine.sanitizeClipboardText(raw)
-        XCTAssertFalse(clean.contains("{{"))
-        XCTAssertTrue(clean.contains("hello"))
-        XCTAssertTrue(clean.contains("world"))
+        XCTAssertEqual(DynamicTemplateEngine.sanitizeClipboardText(raw), raw)
+        let result = DynamicTemplateEngine.shared.resolve("{{clipboard}}", clipboardText: raw)
+        XCTAssertEqual(result.text, raw)
+        XCTAssertNil(result.cursorOffset)
+        XCTAssertNil(result.failure)
     }
 
     func testSafeMathParserBoundsExpressionLength() {
