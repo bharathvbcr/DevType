@@ -103,11 +103,7 @@ final class PermissionDiagnosticsController: NSViewController {
         view = root
     }
 
-    private func makeCard() -> GlassCardView {
-        let card = GlassCardView(tint: DevTypeTheme.accent.withAlphaComponent(0.05))
-        card.translatesAutoresizingMaskIntoConstraints = false
-        return card
-    }
+    private func makeCard() -> GlassCardView { DevTypeTheme.makeGlassCard() }
 
     private func makeIdentityCard() -> GlassCardView {
         let card = makeCard()

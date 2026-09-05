@@ -151,7 +151,7 @@ public enum DebugTrace {
             self.fileURL = fileURL
             self.maxBytes = max(0, maxBytes)
             self.queue = DispatchQueue(label: "com.devtype.debugtrace", qos: .utility)
-            self.permissionSetter = permissionSetter ?? Self.setPOSIXPermissions
+            self.permissionSetter = permissionSetter ?? FilePermissions.setPOSIX
         }
 
         /// `recordData` is one complete JSON value without its line terminator.
@@ -259,13 +259,6 @@ public enum DebugTrace {
                 try? handle.close()
                 setFailure(operation)
             }
-        }
-
-        private static func setPOSIXPermissions(_ url: URL, _ mode: Int) throws {
-            try FileManager.default.setAttributes(
-                [.posixPermissions: mode],
-                ofItemAtPath: url.path
-            )
         }
 
         static func requiresRotation(

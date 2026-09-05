@@ -1,15 +1,6 @@
 import AppKit
 import ExpanderEngine
 
-private final class KeyablePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-}
-
-private final class FillInFlippedDocumentView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 private final class PanelCloseWatcher: NSObject, NSWindowDelegate {
     private let onClose: () -> Void
     init(onClose: @escaping () -> Void) { self.onClose = onClose }
@@ -24,8 +15,7 @@ enum FillInPanel {
     /// with — and pixel-identical centered forms make the stack invisible.
     private static var activePanel: NSPanel?
     private static var activeFinish: (([Int: String]?) -> Void)?
-    private static var dismissMonitors: [Any] = []
-    private static var dismissObservers: [NSObjectProtocol] = []
+    private static let dismissWatchers = PanelDismissWatchers()
 
     @discardableResult
     static func present(
@@ -97,36 +87,15 @@ enum FillInPanel {
     /// bar still shows Active and nothing on screen says why. Like the palettes,
     /// any outside interaction finishes the form as a cancellation.
     private static func installDismissWatchers(for panel: NSPanel) {
-        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-
-        let local = NSEvent.addLocalMonitorForEvents(matching: clicks) { event in
-            if event.window !== panel { dismissFromOutsideInteraction() }
-            return event
-        }
-        if let local { dismissMonitors.append(local) }
-
-        let global = NSEvent.addGlobalMonitorForEvents(matching: clicks) { _ in
-            dismissFromOutsideInteraction()
-        }
-        if let global { dismissMonitors.append(global) }
-
-        DispatchQueue.main.async {
-            guard activePanel === panel else { return }
-            dismissObservers.append(
-                NotificationCenter.default.addObserver(
-                    forName: NSWindow.didResignKeyNotification,
-                    object: panel,
-                    queue: .main
-                ) { _ in dismissFromOutsideInteraction() }
-            )
-        }
+        dismissWatchers.install(
+            for: panel,
+            isStillCurrent: { activePanel === panel },
+            dismiss: dismissFromOutsideInteraction
+        )
     }
 
     private static func removeDismissWatchers() {
-        dismissMonitors.forEach(NSEvent.removeMonitor)
-        dismissMonitors.removeAll()
-        dismissObservers.forEach(NotificationCenter.default.removeObserver)
-        dismissObservers.removeAll()
+        dismissWatchers.removeAll()
     }
 
     private static func dismissFromOutsideInteraction() {
@@ -224,7 +193,7 @@ private final class FillInFormController: NSViewController {
         stack.setAccessibilityRole(NSAccessibility.Role.group)
         stack.setAccessibilityLabel(loc.s("ax.fillin.form"))
 
-        let document = FillInFlippedDocumentView()
+        let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(stack)
 

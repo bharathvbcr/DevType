@@ -310,17 +310,6 @@ public final class VoiceDictationController: @unchecked Sendable {
         }
     }
 
-    /// Ends capture and lets recognition, correction and delivery run.
-    public func stopDictation() {
-        let decision = lock.withLock { lifecycle.requestStop() }
-        switch decision {
-        case .stop(let attempt):
-            finishCoordinatorSession(attempt: attempt, cancel: false)
-        case .none, .cancelPreparation, .alreadyFinishing:
-            break
-        }
-    }
-
     /// Abandons the session and erases anything progressive typing already inserted.
     public func cancelDictation() {
         let decision = lock.withLock { lifecycle.requestCancel() }

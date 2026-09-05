@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(AppKit)
-import AppKit
-#endif
 
 /// String-keyed usage sidecar for palette commands (`"ai.proofread"`, …).
 ///
@@ -49,21 +46,19 @@ public final class CommandUsageStatsStore {
     /// stranded for a whole debounce window.
     public static let defaultFlushRetryDelay: TimeInterval = 5.0
 
-    private let fileURL: URL
-    private let flushInterval: TimeInterval
-    private let flushRetryDelay: TimeInterval
     private let lock = NSLock()
-    private let ioQueue = DispatchQueue(label: "devtype.commandusagestats", qos: .utility)
+    private let writer: DebouncedSidecarWriter
 
     private var stats: [String: Stat] = [:]
     private var dirty = false
-    private var flushGeneration: UInt64 = 0
-    private var terminateObserver: NSObjectProtocol?
     private var _revision: UInt64 = 0
 
     /// Test seam: when set, replaces the atomic disk write so failure paths are
     /// reachable without a full disk. `nil` (the default) means production I/O.
-    var writeInterceptor: ((Data) throws -> Void)?
+    var writeInterceptor: ((Data) throws -> Void)? {
+        get { writer.writeInterceptor }
+        set { writer.writeInterceptor = newValue }
+    }
 
     public var revision: UInt64 {
         lock.lock()
@@ -76,28 +71,21 @@ public final class CommandUsageStatsStore {
         flushInterval: TimeInterval = CommandUsageStatsStore.defaultFlushInterval,
         flushRetryDelay: TimeInterval = CommandUsageStatsStore.defaultFlushRetryDelay
     ) {
-        if let fileURL {
-            self.fileURL = fileURL
-        } else if let env = ProcessInfo.processInfo.environment[SnippetStore.storeDirEnvKey], !env.isEmpty {
-            self.fileURL = URL(fileURLWithPath: env, isDirectory: true)
-                .appendingPathComponent(Self.fileName)
-        } else {
-            self.fileURL = SnippetStore.defaultLocalSupportDirectory
-                .appendingPathComponent(Self.fileName)
-        }
-        self.flushInterval = max(0, flushInterval)
-        self.flushRetryDelay = max(0, flushRetryDelay)
-        stats = Self.loadFromDisk(fileURL: self.fileURL)
-        installTerminateHook()
+        writer = DebouncedSidecarWriter(
+            fileURL: DebouncedSidecarWriter.resolveFileURL(
+                override: fileURL, fileName: Self.fileName
+            ),
+            flushInterval: flushInterval,
+            flushRetryDelay: flushRetryDelay,
+            queueLabel: "devtype.commandusagestats",
+            failureMessage: "[Store] Failed to write command usage stats"
+        )
+        stats = Self.loadFromDisk(fileURL: writer.fileURL)
+        writer.source = self
+        writer.installTerminateHook()
     }
 
-    deinit {
-        if let terminateObserver {
-            NotificationCenter.default.removeObserver(terminateObserver)
-        }
-    }
-
-    public var storeFileURL: URL { fileURL }
+    public var storeFileURL: URL { writer.fileURL }
 
     public func recordUsage(for commandID: String, at date: Date = Date()) {
         let key = commandID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -218,87 +206,9 @@ public final class CommandUsageStatsStore {
         return ordered.prefix(limit).map(\.key)
     }
 
-    public func flush() {
-        lock.lock()
-        flushGeneration &+= 1
-        lock.unlock()
-        ioQueue.sync { self.writeIfDirty() }
-    }
+    public func flush() { writer.flush() }
 
-    private func scheduleFlush() {
-        lock.lock()
-        flushGeneration &+= 1
-        let generation = flushGeneration
-        lock.unlock()
-
-        if flushInterval == 0 {
-            ioQueue.async { [weak self] in self?.writeIfDirty() }
-            return
-        }
-
-        ioQueue.asyncAfter(deadline: .now() + flushInterval) { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            let isCurrent = generation == self.flushGeneration
-            self.lock.unlock()
-            guard isCurrent else { return }
-            self.writeIfDirty()
-        }
-    }
-
-    private func writeIfDirty() {
-        lock.lock()
-        guard dirty else {
-            lock.unlock()
-            return
-        }
-        let snapshot = stats
-        dirty = false
-        lock.unlock()
-
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(Document(stats: snapshot))
-            try persist(data)
-        } catch {
-            // Re-arm and schedule exactly one bounded retry. Re-arming alone used
-            // to be the whole story: with no flush pending, the counters sat
-            // unwritten until some *later* mutation happened to schedule a tick —
-            // an indefinite data-loss window after a transient failure. The
-            // generation guard collapses overlapping retries the same way it
-            // dedupes debounced flushes: any newer mutation or explicit `flush()`
-            // supersedes this retry, because that newer work owns the write.
-            lock.lock()
-            dirty = true
-            let generation = flushGeneration
-            lock.unlock()
-            DevTypeLog.store.error(
-                "[Store] Failed to write command usage stats \(DevTypeLog.errorMetadata(error), privacy: .public)"
-            )
-            ioQueue.asyncAfter(deadline: .now() + flushRetryDelay) { [weak self] in
-                guard let self else { return }
-                self.lock.lock()
-                let isCurrent = generation == self.flushGeneration
-                self.lock.unlock()
-                guard isCurrent else { return }
-                self.writeIfDirty()
-            }
-        }
-    }
-
-    /// The atomic disk write, split out so tests can inject failures. Production
-    /// path (`writeInterceptor == nil`) is unchanged.
-    private func persist(_ data: Data) throws {
-        if let writeInterceptor {
-            try writeInterceptor(data)
-            return
-        }
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try data.write(to: fileURL, options: .atomic)
-    }
+    private func scheduleFlush() { writer.schedule() }
 
     private static func loadFromDisk(fileURL: URL) -> [String: Stat] {
         guard FileManager.default.fileExists(atPath: fileURL.path),
@@ -308,16 +218,27 @@ public final class CommandUsageStatsStore {
         }
         return document.stats
     }
+}
 
-    private func installTerminateHook() {
-        #if canImport(AppKit)
-        terminateObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            self?.flush()
+extension CommandUsageStatsStore: SidecarPayloadSource {
+    func takePendingSidecarPayload() throws -> Data? {
+        lock.lock()
+        guard dirty else {
+            lock.unlock()
+            return nil
         }
-        #endif
+        let snapshot = stats
+        dirty = false
+        lock.unlock()
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(Document(stats: snapshot))
+    }
+
+    func reArmPendingSidecarPayload() {
+        lock.lock()
+        dirty = true
+        lock.unlock()
     }
 }

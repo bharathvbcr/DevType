@@ -11,9 +11,7 @@ public final class VoiceSessionStore: @unchecked Sendable {
         if let base = baseDirectory {
             self.baseDirectory = base
         } else {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-                ?? FileManager.default.temporaryDirectory
-            self.baseDirectory = appSupport.appendingPathComponent("DevType/VoiceSessions", isDirectory: true)
+            self.baseDirectory = SupportDirectory.voiceSessions
         }
         do {
             try fileManager.createDirectory(

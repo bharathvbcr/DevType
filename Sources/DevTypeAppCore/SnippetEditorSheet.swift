@@ -383,13 +383,7 @@ private final class ComposerPillButton: NSButton {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
-            owner: self,
-            userInfo: nil
-        ))
+        replaceTrackingAreaOverBounds()
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
@@ -531,13 +525,7 @@ private final class ToggleChip: NSButton {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
-            owner: self,
-            userInfo: nil
-        ))
+        replaceTrackingAreaOverBounds()
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
@@ -1216,11 +1204,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
     // MARK: Building blocks
 
-    private func caption(_ text: String) -> NSTextField {
-        let label = DevTypeTheme.makeLabel(text, font: DevTypeTheme.font(11, .semibold), color: DevTypeTheme.textSecondary)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }
+    private func caption(_ text: String) -> NSTextField { DevTypeTheme.makeFieldCaption(text) }
 
     private func placeholder(_ text: String) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [

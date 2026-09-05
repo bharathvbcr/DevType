@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(AppKit)
-import AppKit
-#endif
 
 /// §1.5: Coalesced usage-statistics sidecar.
 ///
@@ -189,22 +186,19 @@ public final class UsageStatsStore {
     /// stranded for a whole debounce window.
     public static let defaultFlushRetryDelay: TimeInterval = 5.0
 
-    private let fileURL: URL
-    private let flushInterval: TimeInterval
-    private let flushRetryDelay: TimeInterval
     private let lock = NSLock()
-    private let ioQueue = DispatchQueue(label: "devtype.usagestats", qos: .utility)
+    private let writer: DebouncedSidecarWriter
 
     private var stats: [UUID: Stat] = [:]
     private var dirty = false
-    /// Monotonic token: only the newest scheduled flush is allowed to run.
-    private var flushGeneration: UInt64 = 0
-    private var terminateObserver: NSObjectProtocol?
     private var _revision: UInt64 = 0
 
     /// Test seam: when set, replaces the atomic disk write so failure paths are
     /// reachable without a full disk. `nil` (the default) means production I/O.
-    var writeInterceptor: ((Data) throws -> Void)?
+    var writeInterceptor: ((Data) throws -> Void)? {
+        get { writer.writeInterceptor }
+        set { writer.writeInterceptor = newValue }
+    }
 
     public var revision: UInt64 {
         lock.lock()
@@ -222,31 +216,24 @@ public final class UsageStatsStore {
         flushInterval: TimeInterval = UsageStatsStore.defaultFlushInterval,
         flushRetryDelay: TimeInterval = UsageStatsStore.defaultFlushRetryDelay
     ) {
-        if let fileURL {
-            self.fileURL = fileURL
-        } else if let env = ProcessInfo.processInfo.environment[SnippetStore.storeDirEnvKey], !env.isEmpty {
-            self.fileURL = URL(fileURLWithPath: env, isDirectory: true)
-                .appendingPathComponent(Self.fileName)
-        } else {
-            self.fileURL = SnippetStore.defaultLocalSupportDirectory
-                .appendingPathComponent(Self.fileName)
-        }
-        self.flushInterval = max(0, flushInterval)
-        self.flushRetryDelay = max(0, flushRetryDelay)
-        let loaded = Self.loadFromDisk(fileURL: self.fileURL)
+        writer = DebouncedSidecarWriter(
+            fileURL: DebouncedSidecarWriter.resolveFileURL(
+                override: fileURL, fileName: Self.fileName
+            ),
+            flushInterval: flushInterval,
+            flushRetryDelay: flushRetryDelay,
+            queueLabel: "devtype.usagestats",
+            failureMessage: "[Store] Failed to write usage stats"
+        )
+        let loaded = Self.loadFromDisk(fileURL: writer.fileURL)
         stats = loaded.stats
         dirty = loaded.needsRewrite
-        installTerminateHook()
+        writer.source = self
+        writer.installTerminateHook()
         if dirty { scheduleFlush() }
     }
 
-    deinit {
-        if let terminateObserver {
-            NotificationCenter.default.removeObserver(terminateObserver)
-        }
-    }
-
-    public var storeFileURL: URL { fileURL }
+    public var storeFileURL: URL { writer.fileURL }
 
     // MARK: - Recording
 
@@ -259,7 +246,7 @@ public final class UsageStatsStore {
         let bucketStart = calendar.dateInterval(of: .hour, for: date)?.start ?? date
         lock.lock()
         var stat = stats[snippetID] ?? Stat()
-        stat.usageCount = Self.addingClamped(stat.usageCount, 1)
+        stat.usageCount = Saturating.adding(stat.usageCount, 1)
         if let previous = stat.lastUsedAt {
             stat.lastUsedAt = max(previous, date)
         } else {
@@ -267,7 +254,7 @@ public final class UsageStatsStore {
         }
 
         if let index = stat.buckets.lastIndex(where: { $0.startedAt == bucketStart }) {
-            stat.buckets[index].usageCount = Self.addingClamped(
+            stat.buckets[index].usageCount = Saturating.adding(
                 stat.buckets[index].usageCount,
                 1
             )
@@ -377,16 +364,16 @@ public final class UsageStatsStore {
 
         for (id, stat) in selected {
             let retainedCount = stat.buckets.reduce(0) {
-                Self.addingClamped($0, max(0, $1.usageCount))
+                Saturating.adding($0, max(0, $1.usageCount))
             }
 
             if period == .all {
                 let count = max(0, stat.usageCount)
                 if count > 0 {
                     entries[id] = PeriodStat(usageCount: count, lastUsedAt: stat.lastUsedAt)
-                    totalUsage = Self.addingClamped(totalUsage, count)
+                    totalUsage = Saturating.adding(totalUsage, count)
                 }
-                unbucketedUsage = Self.addingClamped(
+                unbucketedUsage = Saturating.adding(
                     unbucketedUsage,
                     max(0, count - retainedCount)
                 )
@@ -399,12 +386,12 @@ public final class UsageStatsStore {
                 return bucket.lastUsedAt >= start && bucket.lastUsedAt <= now
             }
             let count = buckets.reduce(0) {
-                Self.addingClamped($0, max(0, $1.usageCount))
+                Saturating.adding($0, max(0, $1.usageCount))
             }
             guard count > 0 else { continue }
             let lastUsedAt = buckets.map(\.lastUsedAt).max()
             entries[id] = PeriodStat(usageCount: count, lastUsedAt: lastUsedAt)
-            totalUsage = Self.addingClamped(totalUsage, count)
+            totalUsage = Saturating.adding(totalUsage, count)
             selectedBuckets.append(contentsOf: buckets)
         }
 
@@ -477,92 +464,9 @@ public final class UsageStatsStore {
     // MARK: - Persistence
 
     /// Writes any pending changes synchronously. Call from `applicationWillTerminate`.
-    public func flush() {
-        lock.lock()
-        // Invalidate any in-flight debounced write so it cannot re-run after us.
-        flushGeneration &+= 1
-        lock.unlock()
-        ioQueue.sync { self.writeIfDirty() }
-    }
+    public func flush() { writer.flush() }
 
-    private func scheduleFlush() {
-        lock.lock()
-        flushGeneration &+= 1
-        let generation = flushGeneration
-        lock.unlock()
-
-        if flushInterval == 0 {
-            ioQueue.async { [weak self] in self?.writeIfDirty() }
-            return
-        }
-
-        ioQueue.asyncAfter(deadline: .now() + flushInterval) { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            let isCurrent = generation == self.flushGeneration
-            self.lock.unlock()
-            guard isCurrent else { return }
-            self.writeIfDirty()
-        }
-    }
-
-    private func writeIfDirty() {
-        lock.lock()
-        guard dirty else {
-            lock.unlock()
-            return
-        }
-        let snapshot = stats
-        dirty = false
-        lock.unlock()
-
-        var keyed: [String: Stat] = [:]
-        keyed.reserveCapacity(snapshot.count)
-        for (id, stat) in snapshot { keyed[id.uuidString] = stat }
-
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(Document(stats: keyed))
-            try persist(data)
-        } catch {
-            // Re-arm and schedule exactly one bounded retry. Re-arming alone used
-            // to be the whole story: with no flush pending, the counters sat
-            // unwritten until some *later* mutation happened to schedule a tick —
-            // an indefinite data-loss window after a transient failure. The
-            // generation guard collapses overlapping retries the same way it
-            // dedupes debounced flushes: any newer mutation or explicit `flush()`
-            // supersedes this retry, because that newer work owns the write.
-            lock.lock()
-            dirty = true
-            let generation = flushGeneration
-            lock.unlock()
-            DevTypeLog.store.error(
-                "[Store] Failed to write usage stats \(DevTypeLog.errorMetadata(error), privacy: .public)"
-            )
-            ioQueue.asyncAfter(deadline: .now() + flushRetryDelay) { [weak self] in
-                guard let self else { return }
-                self.lock.lock()
-                let isCurrent = generation == self.flushGeneration
-                self.lock.unlock()
-                guard isCurrent else { return }
-                self.writeIfDirty()
-            }
-        }
-    }
-
-    /// The atomic disk write, split out so tests can inject failures. Production
-    /// path (`writeInterceptor == nil`) is unchanged.
-    private func persist(_ data: Data) throws {
-        if let writeInterceptor {
-            try writeInterceptor(data)
-            return
-        }
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try data.write(to: fileURL, options: .atomic)
-    }
+    private func scheduleFlush() { writer.schedule() }
 
     private static func loadFromDisk(fileURL: URL) -> LoadResult {
         guard FileManager.default.fileExists(atPath: fileURL.path),
@@ -599,7 +503,7 @@ public final class UsageStatsStore {
                 lastUsedAt: max(bucket.startedAt, bucket.lastUsedAt)
             )
             if var existing = merged[bucket.startedAt] {
-                existing.usageCount = addingClamped(existing.usageCount, sanitized.usageCount)
+                existing.usageCount = Saturating.adding(existing.usageCount, sanitized.usageCount)
                 existing.lastUsedAt = max(existing.lastUsedAt, sanitized.lastUsedAt)
                 merged[bucket.startedAt] = existing
             } else {
@@ -612,7 +516,7 @@ public final class UsageStatsStore {
             buckets.removeFirst(buckets.count - maximumBucketsPerSnippet)
         }
         let retainedCount = buckets.reduce(0) {
-            addingClamped($0, max(0, $1.usageCount))
+            Saturating.adding($0, max(0, $1.usageCount))
         }
         let latestBucketDate = buckets.map(\.lastUsedAt).max()
         let lastUsedAt: Date?
@@ -663,7 +567,7 @@ public final class UsageStatsStore {
             } else {
                 start = calendar.startOfDay(for: bucket.lastUsedAt)
             }
-            counts[start] = addingClamped(counts[start] ?? 0, bucket.usageCount)
+            counts[start] = Saturating.adding(counts[start] ?? 0, bucket.usageCount)
         }
 
         if period == .all {
@@ -695,20 +599,32 @@ public final class UsageStatsStore {
         return points
     }
 
-    private static func addingClamped(_ lhs: Int, _ rhs: Int) -> Int {
-        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
-        return overflow ? Int.max : sum
+}
+
+extension UsageStatsStore: SidecarPayloadSource {
+    func takePendingSidecarPayload() throws -> Data? {
+        lock.lock()
+        guard dirty else {
+            lock.unlock()
+            return nil
+        }
+        let snapshot = stats
+        dirty = false
+        lock.unlock()
+
+        // JSON object keys must be strings; the in-memory map is keyed by UUID.
+        var keyed: [String: Stat] = [:]
+        keyed.reserveCapacity(snapshot.count)
+        for (id, stat) in snapshot { keyed[id.uuidString] = stat }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(Document(stats: keyed))
     }
 
-    private func installTerminateHook() {
-        #if canImport(AppKit)
-        terminateObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            self?.flush()
-        }
-        #endif
+    func reArmPendingSidecarPayload() {
+        lock.lock()
+        dirty = true
+        lock.unlock()
     }
 }

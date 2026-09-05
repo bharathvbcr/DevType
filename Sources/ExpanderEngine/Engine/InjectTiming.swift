@@ -190,14 +190,9 @@ public final class InjectTimingStore {
         }
     }
 
-    /// `~/Library/Application Support/DevType/inject-timing.json` (AppMuteStore's pattern).
+    /// `~/Library/Application Support/DevType/inject-timing.json`.
     public static func defaultFileURL() -> URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        let dir = base.appendingPathComponent("DevType", isDirectory: true)
-        return dir.appendingPathComponent(persistenceFileName)
+        SupportDirectory.file(persistenceFileName)
     }
 
     // MARK: - Recording

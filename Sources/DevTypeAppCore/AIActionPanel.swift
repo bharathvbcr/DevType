@@ -77,18 +77,12 @@ struct AIActionPaletteProjection: Equatable {
 /// Modeled on `InlineSearchPanel`: suspend matching on open, resume on close,
 /// capture `sourceApp` for reactivation after a pick.
 enum AIActionPanel {
-    private final class KeyablePanel: NSPanel {
-        override var canBecomeKey: Bool { true }
-        override var canBecomeMain: Bool { true }
-    }
-
     private static var panel: NSPanel?
     private static var controller: AIActionController?
     /// This panel's claim on matching being suspended. Owned, so double-open and double-close are
     /// both harmless — see `EventTapEngine.MatchingSuspension`.
     private static var suspension: EventTapEngine.MatchingSuspension?
-    private static var dismissMonitors: [Any] = []
-    private static var dismissObservers: [NSObjectProtocol] = []
+    private static let dismissWatchers = PanelDismissWatchers()
 
     static var isOpen: Bool { panel?.isVisible == true }
 
@@ -174,13 +168,13 @@ enum AIActionPanel {
             }
         )
         panel.contentView = controller.view
-        positionNearTop(panel)
+        FloatingPanelChrome.positionNearTop(panel)
 
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         controller.focusSearch()
-        animateIn(panel)
+        FloatingPanelChrome.animateIn(panel)
 
         self.panel = panel
         self.controller = controller
@@ -188,70 +182,20 @@ enum AIActionPanel {
     }
 
     private static func installDismissWatchers(for panel: NSPanel) {
-        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-
-        let local = NSEvent.addLocalMonitorForEvents(matching: clicks) { event in
-            if event.window !== panel { dismissFromOutsideInteraction() }
-            return event
-        }
-        if let local { dismissMonitors.append(local) }
-
-        let global = NSEvent.addGlobalMonitorForEvents(matching: clicks) { _ in
-            dismissFromOutsideInteraction()
-        }
-        if let global { dismissMonitors.append(global) }
-
-        DispatchQueue.main.async {
-            guard self.panel === panel else { return }
-            dismissObservers.append(
-                NotificationCenter.default.addObserver(
-                    forName: NSWindow.didResignKeyNotification,
-                    object: panel,
-                    queue: .main
-                ) { _ in dismissFromOutsideInteraction() }
-            )
-        }
+        dismissWatchers.install(
+            for: panel,
+            isStillCurrent: { self.panel === panel },
+            dismiss: dismissFromOutsideInteraction
+        )
     }
 
     private static func removeDismissWatchers() {
-        dismissMonitors.forEach(NSEvent.removeMonitor)
-        dismissMonitors.removeAll()
-        dismissObservers.forEach(NotificationCenter.default.removeObserver)
-        dismissObservers.removeAll()
+        dismissWatchers.removeAll()
     }
 
     private static func dismissFromOutsideInteraction() {
         guard panel != nil else { return }
         close()
-    }
-
-    private static func animateIn(_ panel: NSPanel) {
-        let finalFrame = panel.frame
-        guard !DevTypeAccessibility.reduceMotion else {
-            panel.alphaValue = 1
-            panel.setFrame(finalFrame, display: true)
-            return
-        }
-        let startFrame = finalFrame.insetBy(dx: 12, dy: 8).offsetBy(dx: 0, dy: -10)
-        panel.setFrame(startFrame, display: false)
-        panel.alphaValue = 0
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.16
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().alphaValue = 1
-            panel.animator().setFrame(finalFrame, display: true)
-        }
-    }
-
-    private static func positionNearTop(_ panel: NSPanel) {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        guard let frame = screen?.visibleFrame else { panel.center(); return }
-        let size = panel.frame.size
-        panel.setFrameOrigin(NSPoint(
-            x: frame.midX - size.width / 2,
-            y: frame.maxY - frame.height / 3 - size.height / 2
-        ))
     }
 }
 

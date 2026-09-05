@@ -489,12 +489,9 @@ public final class SnippetStore {
         loadSnippets()
     }
 
-    public static var defaultLocalSupportDirectory: URL {
-        (FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("DevType", isDirectory: true)
-    }
+    /// Kept as the name most of the engine already reaches for; `SupportDirectory` owns
+    /// the resolution.
+    public static var defaultLocalSupportDirectory: URL { SupportDirectory.devType }
 
     public static func resolveLocation(
         environment: [String: String] = ProcessInfo.processInfo.environment,

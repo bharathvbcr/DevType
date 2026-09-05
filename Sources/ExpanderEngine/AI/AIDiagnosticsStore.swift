@@ -140,7 +140,7 @@ public final class AIDiagnosticsStore {
         let safeError = Self.allowedErrors.contains(error) ? error : "unknown"
         let safeDetail = Self.contentFreeDetailSummary(detail)
         lock.lock()
-        failureObservedCount = Self.saturatingAdd(failureObservedCount, 1)
+        failureObservedCount = Saturating.adding(failureObservedCount, 1)
         failures.append(Failure(at: date, kind: safeKind, error: safeError, detail: safeDetail))
         if failures.count > Self.capacity {
             failures.removeFirst(failures.count - Self.capacity)
@@ -198,7 +198,7 @@ public final class AIDiagnosticsStore {
             domain: "ai-selection-via"
         )
         lock.lock()
-        selectionReadObservedCount = Self.saturatingAdd(selectionReadObservedCount, 1)
+        selectionReadObservedCount = Saturating.adding(selectionReadObservedCount, 1)
         selectionReads.append(
             SelectionRead(
                 at: date,
@@ -382,10 +382,5 @@ public final class AIDiagnosticsStore {
             lines.append("Selection read attributes: \(viaSummary)")
         }
         return lines
-    }
-
-    private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
-        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
-        return overflow ? Int.max : sum
     }
 }

@@ -55,14 +55,14 @@ struct BoundedUTF8Tail<Element> {
     }
 
     mutating func append(_ value: Element, utf8ByteCount: Int) -> AppendResult {
-        observedCount = Self.saturatingIncrement(observedCount)
+        observedCount = Saturating.incrementing(observedCount)
         let resolvedByteCount = max(0, utf8ByteCount)
         guard resolvedByteCount <= byteLimit else {
-            oversizedCount = Self.saturatingIncrement(oversizedCount)
+            oversizedCount = Saturating.incrementing(oversizedCount)
             return AppendResult(accepted: false, evicted: [])
         }
         guard countLimit > 0 else {
-            evictedCount = Self.saturatingIncrement(evictedCount)
+            evictedCount = Saturating.incrementing(evictedCount)
             return AppendResult(accepted: false, evicted: [])
         }
 
@@ -76,7 +76,7 @@ struct BoundedUTF8Tail<Element> {
             storage[head] = nil
             head += 1
             retainedUTF8Bytes -= oldest.utf8ByteCount
-            evictedCount = Self.saturatingIncrement(evictedCount)
+            evictedCount = Saturating.incrementing(evictedCount)
             evicted.append(oldest.value)
         }
 
@@ -90,9 +90,5 @@ struct BoundedUTF8Tail<Element> {
         guard head > 0, head >= countLimit || head * 2 >= storage.count else { return }
         storage.removeFirst(head)
         head = 0
-    }
-
-    private static func saturatingIncrement(_ value: Int) -> Int {
-        value == Int.max ? Int.max : value + 1
     }
 }

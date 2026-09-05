@@ -26,30 +26,13 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
     }
 
     public func probe() async -> ProviderReadiness {
-        let endpoint = endpointURL
-        guard LocalEndpointSecurity.isValid(endpoint) else {
-            return .requiresConfiguration(.invalidEndpointFormat)
-        }
-        do {
-            let req = try Self.probeRequest(endpoint: endpoint)
-            let (_, response) = try await LocalEndpointSecurity.data(
-                for: req,
-                maximumResponseBytes: LocalEndpointSecurity.maximumReadinessResponseBytes
-            )
-            if let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
-                let evidence = ProviderEvidence(
-                    providerID: descriptor.id,
-                    modelVersion: modelName,
-                    probeTimestamp: Date(),
-                    capabilities: ["chatCompletions", "openAICompatible"]
-                )
-                return .ready(evidence)
-            } else {
-                return .temporarilyUnavailable(retryAfterSeconds: 5.0, reason: .endpointUnreachable)
-            }
-        } catch {
-            return .temporarilyUnavailable(retryAfterSeconds: 5.0, reason: .endpointUnreachable)
-        }
+        await LocalCorrectorProbe.readiness(
+            endpoint: endpointURL,
+            providerID: descriptor.id,
+            modelVersion: modelName,
+            capabilities: ["chatCompletions", "openAICompatible"],
+            makeRequest: Self.probeRequest(endpoint:)
+        )
     }
 
     public func correct(_ request: CorrectionRequest) async throws -> CorrectionCandidate {
@@ -110,10 +93,7 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
         guard route.api == .openAIChatCompletions else {
             throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath
         }
-        var request = URLRequest(url: route.readinessURL)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 2.0
-        return request
+        return LocalCorrectorProbe.request(for: route)
     }
 
     static func correctionRequest(

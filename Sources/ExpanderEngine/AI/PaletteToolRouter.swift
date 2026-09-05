@@ -60,17 +60,9 @@ public enum PaletteToolRouter {
     }
 
     /// Serializes routing so a fast typist cannot stack model calls, and so routing never
-    /// competes with an AI transform the user explicitly asked for.
-    actor Latch {
-        static let shared = Latch()
-        private var busy = false
-        func acquire() -> Bool {
-            if busy { return false }
-            busy = true
-            return true
-        }
-        func release() { busy = false }
-    }
+    /// competes with an AI transform the user explicitly asked for. Its own instance: tag
+    /// suggestion has a separate one and the two must not block each other.
+    static let latch = SingleFlightLatch()
 
     /// Runs `work`, returning `nil` when it has not finished within `seconds`.
     ///
@@ -118,7 +110,7 @@ public enum PaletteToolRouter {
     ) async -> Routed? {
         guard let engine, shouldAttemptRouting(query: query) else { return nil }
         let trimmed = CommandPaletteCatalog.boundedQuery(query)
-        guard await Latch.shared.acquire() else { return nil }
+        guard await latch.acquire() else { return nil }
 
         // Released explicitly on both paths rather than in a `defer`: a deferred release is
         // ordered after the caller resumes, so the next keystroke's call would find the latch
@@ -137,7 +129,7 @@ public enum PaletteToolRouter {
             )
             routed = nil
         }
-        await Latch.shared.release()
+        await latch.release()
         return routed
     }
 

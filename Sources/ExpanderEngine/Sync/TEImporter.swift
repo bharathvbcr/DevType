@@ -190,7 +190,7 @@ public enum TEImporter {
         for url in groupFiles.sorted(by: { $0.path < $1.path }) {
             // Import files are untrusted input: refuse to read absurdly large
             // sources rather than ballooning memory in the plist parser.
-            guard let data = try boundedSourceData(at: url) else {
+            guard let data = try SnippetImporter.SnippetImportLimits.boundedSourceData(at: url) else {
                 skippedOversized += 1
                 continue
             }
@@ -311,18 +311,6 @@ public enum TEImporter {
 
     /// Reads at most one byte beyond the per-file ceiling. A stat check alone is
     /// insufficient because an untrusted source can grow between stat and read.
-    private static func boundedSourceData(at url: URL) throws -> Data? {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        guard attributes?[.type] as? FileAttributeType == .typeRegular else { return nil }
-        let byteCount = (attributes?[.size] as? Int64) ?? 0
-        guard byteCount <= SnippetImporter.SnippetImportLimits.maxSourceFileBytes else { return nil }
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        let data = try handle.read(
-            upToCount: SnippetImporter.SnippetImportLimits.maxSourceFileBytes + 1
-        ) ?? Data()
-        return data.count > SnippetImporter.SnippetImportLimits.maxSourceFileBytes ? nil : data
-    }
 
     // MARK: - Plist helpers
 

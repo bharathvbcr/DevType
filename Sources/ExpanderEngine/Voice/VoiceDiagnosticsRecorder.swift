@@ -59,7 +59,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         beforeAppendForTesting = nil
         afterAppendForTesting = nil
         afterTerminalManifestSizeCheckForTesting = nil
-        permissionSetter = Self.setPOSIXPermissions
+        permissionSetter = FilePermissions.setPOSIX
     }
 
     /// Isolated file seam for deterministic queue, retention, and I/O-failure tests.
@@ -77,7 +77,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         self.beforeAppendForTesting = beforeAppendForTesting
         self.afterAppendForTesting = afterAppendForTesting
         self.afterTerminalManifestSizeCheckForTesting = afterTerminalManifestSizeCheckForTesting
-        self.permissionSetter = permissionSetter ?? Self.setPOSIXPermissions
+        self.permissionSetter = permissionSetter ?? FilePermissions.setPOSIX
     }
 
     // MARK: - Location
@@ -90,12 +90,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         supportDirectory.appendingPathComponent("voice-terminal-manifest.json")
     }
 
-    private static var supportDirectory: URL {
-        (FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("DevType", isDirectory: true)
-    }
+    private static var supportDirectory: URL { SupportDirectory.devType }
 
     /// Whether tracing is on. Off by default — this records what the user dictated.
     public var isEnabled: Bool {
@@ -376,7 +371,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             // append at or below the cap even when the old file is exactly at the boundary.
             if projected.overflow || projected.partialValue > UInt64(Self.maxBytes) {
                 let previouslyDropped = persistedTraceDroppedByteCount()
-                let cumulativeDropped = Self.saturatingAdd(previouslyDropped, currentBytes)
+                let cumulativeDropped = Saturating.adding(previouslyDropped, currentBytes)
                 do {
                     data = try encoder.encode(
                         event.markingRollover(droppedBytes: cumulativeDropped)
@@ -454,11 +449,6 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         return event.droppedBytes ?? 0
     }
 
-    private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
-        let sum = lhs.addingReportingOverflow(rhs)
-        return sum.overflow ? UInt64.max : sum.partialValue
-    }
-
     private func recordWriteFailure(_ failure: IOFailure) {
         writeStatus = .failed(failure)
         DevTypeLog.voice.error(
@@ -480,13 +470,6 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             return .directoryCreation
         }
         return enforcePermissions(at: directory, mode: 0o700) ? nil : .directoryPermissions
-    }
-
-    private static func setPOSIXPermissions(_ url: URL, _ mode: Int) throws {
-        try FileManager.default.setAttributes(
-            [.posixPermissions: mode],
-            ofItemAtPath: url.path
-        )
     }
 
     /// Applies and verifies the requested owner-only mode. A setter that returns without changing
@@ -535,7 +518,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             volatileTerminalEntryIDs.insert(diagnostic.id)
             volatileTerminalEntryIDs.formIntersection(Set(candidate.map(\.id)))
             if isNewObservation {
-                terminalObservedCount = Self.saturatingAdd(terminalObservedCount, 1)
+                terminalObservedCount = Saturating.adding(terminalObservedCount, 1)
             }
             return recordTerminalWriteFailure(loadFailure)
         }
@@ -749,7 +732,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             }
             let duplicatedVolatileCount = volatileEntries.reduce(into: UInt64(0)) { count, entry in
                 if persistedIDs.contains(entry.id) {
-                    count = Self.saturatingAdd(count, 1)
+                    count = Saturating.adding(count, 1)
                 }
             }
             var combined = persistedEntries
@@ -766,7 +749,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
             let novelVolatileObserved = terminalObservedCount >= duplicatedVolatileCount
                 ? terminalObservedCount - duplicatedVolatileCount
                 : 0
-            terminalObservedCount = Self.saturatingAdd(
+            terminalObservedCount = Saturating.adding(
                 persistedObserved,
                 novelVolatileObserved
             )
@@ -919,7 +902,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
 
             let droppedByteCount = Self.persistedDroppedByteCount(in: data)
             traceReadCoverage = TraceReadCoverage(
-                observedByteCount: Self.saturatingAdd(
+                observedByteCount: Saturating.adding(
                     droppedByteCount,
                     UInt64(data.count)
                 ),

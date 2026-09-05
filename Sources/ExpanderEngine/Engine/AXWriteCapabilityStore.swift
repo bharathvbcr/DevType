@@ -95,14 +95,9 @@ public final class AXWriteCapabilityStore {
         }
     }
 
-    /// `~/Library/Application Support/DevType/ax-write-capability.json` (AppMuteStore's pattern).
+    /// `~/Library/Application Support/DevType/ax-write-capability.json`.
     public static func defaultFileURL() -> URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        let dir = base.appendingPathComponent("DevType", isDirectory: true)
-        return dir.appendingPathComponent(persistenceFileName)
+        SupportDirectory.file(persistenceFileName)
     }
 
     // MARK: - Keys
@@ -533,19 +528,10 @@ public final class AXWriteCapabilityStore {
         scheduleSave()
     }
 
-    /// Diagnostic dump: `key -> verdict`, sorted.
-    public func learnedVerdicts() -> [(key: String, verdict: Verdict)] {
-        lock.lock()
-        let snapshot = learned
-        lock.unlock()
-        return snapshot
-            .map { (key: $0.key, verdict: $0.value) }
-            .sorted { $0.key < $1.key }
-    }
-
     /// Bounded diagnostic view selected while the dictionary is locked. It counts every
-    /// non-unknown verdict but keeps only the lexicographically earliest `limit`, avoiding the
-    /// unbounded dictionary copy + full sort used by the unrestricted debugging API above.
+    /// non-unknown verdict but keeps only the lexicographically earliest `limit`, so a machine
+    /// with thousands of learned apps cannot turn a diagnostic report into an unbounded
+    /// dictionary copy plus a full sort.
     func learnedVerdictProjection(
         limit: Int
     ) -> (entries: [(key: String, verdict: Verdict)], observedCount: Int) {

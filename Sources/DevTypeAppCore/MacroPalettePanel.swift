@@ -22,11 +22,6 @@ import ExpanderEngine
 
 enum MacroPalettePanel {
 
-    private final class KeyablePanel: NSPanel {
-        override var canBecomeKey: Bool { true }
-        override var canBecomeMain: Bool { false }
-    }
-
     private static var activePanel: NSPanel?
     private static var activeController: MacroPaletteController?
     private static var activeHost: NSWindow?
@@ -50,6 +45,9 @@ enum MacroPalettePanel {
             backing: .buffered,
             defer: false
         )
+        // Presented with `beginSheet`, so the host window stays main; taking main-window
+        // status here is what the private subclass declined, and this preserves it.
+        panel.takesMainWindowStatus = false
         DevTypeTheme.styleFloatingPanel(panel)
         // `styleFloatingPanel` raises the level for free-floating palettes; a
         // sheet must sit at normal level or it detaches from its host.
@@ -508,28 +506,25 @@ private final class MacroPaletteController: NSViewController,
     // MARK: Selection
 
     private func firstSelectableIndex(from start: Int, step: Int) -> Int? {
-        guard !rows.isEmpty else { return nil }
-        var index = start
-        while index >= 0 && index < rows.count {
-            if rows[index].isSelectable { return index }
-            index += step
-        }
-        return nil
+        PaletteSelection.firstSelectableIndex(
+            from: start,
+            step: step,
+            count: rows.count,
+            isSelectable: { rows[$0].isSelectable }
+        )
     }
 
     private func applySelection(scroll: Bool) {
-        guard rows.indices.contains(selection) else {
-            tableView.deselectAll(nil)
-            return
-        }
-        tableView.selectRowIndexes(IndexSet(integer: selection), byExtendingSelection: false)
-        if scroll { tableView.scrollRowToVisible(selection) }
+        PaletteSelection.apply(selection, to: tableView, count: rows.count, scroll: scroll)
     }
 
     private func moveSelection(_ delta: Int) {
-        guard !rows.isEmpty else { return }
-        let start = selection < 0 ? (delta > 0 ? 0 : rows.count - 1) : selection + delta
-        guard let next = firstSelectableIndex(from: start, step: delta > 0 ? 1 : -1) else { return }
+        guard let next = PaletteSelection.next(
+            from: selection,
+            delta: delta,
+            count: rows.count,
+            isSelectable: { rows[$0].isSelectable }
+        ) else { return }
         selection = next
         applySelection(scroll: true)
     }

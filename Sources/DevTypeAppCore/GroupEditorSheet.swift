@@ -476,11 +476,7 @@ private final class GroupEditorController: NSViewController {
         view = glass
     }
 
-    private func caption(_ text: String) -> NSTextField {
-        let label = DevTypeTheme.makeLabel(text, font: DevTypeTheme.font(11, .semibold), color: DevTypeTheme.textSecondary)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }
+    private func caption(_ text: String) -> NSTextField { DevTypeTheme.makeFieldCaption(text) }
 
     private func refreshPickers() {
         let tint = DevTypeTheme.tint(forGroupColorHex: selectedColorHex)

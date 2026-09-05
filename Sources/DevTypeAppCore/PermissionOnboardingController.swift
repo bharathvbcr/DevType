@@ -1,11 +1,6 @@
 import AppKit
 import ExpanderEngine
 
-/// Flipped document so the step card lays out top-to-bottom inside the scroll view.
-private final class FlippedDocumentView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 /// First-run guided wizard: Welcome → Input Monitoring → Accessibility+Post → Verify → Done.
 final class PermissionOnboardingController: NSViewController {
     enum Step: Int, CaseIterable {
@@ -141,7 +136,7 @@ final class PermissionOnboardingController: NSViewController {
         scrollView.drawsBackground = false
         mainView.addSubview(scrollView)
 
-        let document = FlippedDocumentView()
+        let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
         scrollView.documentView = document
 

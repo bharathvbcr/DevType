@@ -302,11 +302,11 @@ public final class DevLogMirror {
             retainedUTF8Bytes: retention.retainedUTF8Bytes,
             entryCapacity: capacity,
             byteCapacity: byteCapacity,
-            oversizedEntryCount: saturatingAdd(
+            oversizedEntryCount: Saturating.adding(
                 fetchOversizedEntryCount,
                 retention.oversizedCount
             ),
-            evictedEntryCount: saturatingAdd(fetchEvictedEntryCount, retention.evictedCount)
+            evictedEntryCount: Saturating.adding(fetchEvictedEntryCount, retention.evictedCount)
         )
     }
 
@@ -353,12 +353,12 @@ public final class DevLogMirror {
         prefetchedOversizedCount: Int = 0,
         prefetchedEvictedCount: Int = 0
     ) -> Int {
-        observedEntryCount = saturatingAdd(observedEntryCount, observedCount ?? batch.count)
-        fetchOversizedEntryCount = saturatingAdd(
+        observedEntryCount = Saturating.adding(observedEntryCount, observedCount ?? batch.count)
+        fetchOversizedEntryCount = Saturating.adding(
             fetchOversizedEntryCount,
             prefetchedOversizedCount
         )
-        fetchEvictedEntryCount = saturatingAdd(fetchEvictedEntryCount, prefetchedEvictedCount)
+        fetchEvictedEntryCount = Saturating.adding(fetchEvictedEntryCount, prefetchedEvictedCount)
         var added = 0
         for line in batch {
             let identity = line.deduplicationIdentity
@@ -407,11 +407,6 @@ public final class DevLogMirror {
             oversizedEntryCount: statistics.oversizedCount,
             evictedEntryCount: statistics.evictedCount
         )
-    }
-
-    private func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
-        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
-        return overflow ? Int.max : sum
     }
 
     static func levelLabel(_ level: OSLogEntryLog.Level) -> String {

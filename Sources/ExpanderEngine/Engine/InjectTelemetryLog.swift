@@ -201,26 +201,26 @@ public final class InjectTelemetryLog {
 
     public func recordPasteRetry(bundleID: String?) {
         mutateDuplicateRisk(bundleID: bundleID) {
-            $0.pasteRetries = Self.incrementClamped($0.pasteRetries)
+            $0.pasteRetries = Saturating.incrementing($0.pasteRetries)
         }
     }
 
     public func recordTriggerRestore(bundleID: String?) {
         mutateDuplicateRisk(bundleID: bundleID) {
-            $0.triggerRestores = Self.incrementClamped($0.triggerRestores)
+            $0.triggerRestores = Saturating.incrementing($0.triggerRestores)
         }
     }
 
     public func recordSuppressedMissVerdict(bundleID: String?) {
         mutateDuplicateRisk(bundleID: bundleID) {
-            $0.suppressedMissVerdicts = Self.incrementClamped($0.suppressedMissVerdicts)
+            $0.suppressedMissVerdicts = Saturating.incrementing($0.suppressedMissVerdicts)
         }
     }
 
     public func recordTypeAheadReplay(bundleID: String?, characters: Int) {
         mutateDuplicateRisk(bundleID: bundleID) {
-            $0.typeAheadReplays = Self.incrementClamped($0.typeAheadReplays)
-            $0.typeAheadCharacters = Self.addingClamped(
+            $0.typeAheadReplays = Saturating.incrementing($0.typeAheadReplays)
+            $0.typeAheadCharacters = Saturating.adding(
                 $0.typeAheadCharacters,
                 max(0, characters)
             )
@@ -238,14 +238,14 @@ public final class InjectTelemetryLog {
     public func recordUnverifiedClipboardHold(bundleID: String?, heldFor seconds: TimeInterval) {
         let millis = Self.boundedMilliseconds(seconds)
         mutateClipboardHold(bundleID: bundleID) {
-            $0.unverifiedHolds = Self.incrementClamped($0.unverifiedHolds)
+            $0.unverifiedHolds = Saturating.incrementing($0.unverifiedHolds)
             $0.maxHeldMillis = max($0.maxHeldMillis, millis)
         }
     }
 
     public func recordClipboardHoldExtension(bundleID: String?) {
         mutateClipboardHold(bundleID: bundleID) {
-            $0.stallExtensions = Self.incrementClamped($0.stallExtensions)
+            $0.stallExtensions = Saturating.incrementing($0.stallExtensions)
         }
     }
 
@@ -293,23 +293,14 @@ public final class InjectTelemetryLog {
             return
         }
 
-        aggregateObservedCount = Self.incrementClamped(aggregateObservedCount)
+        aggregateObservedCount = Saturating.incrementing(aggregateObservedCount)
         if aggregateRecency.count >= capacity {
             let evicted = aggregateRecency.removeFirst()
             duplicateRisk.removeValue(forKey: evicted)
             clipboardHolds.removeValue(forKey: evicted)
-            aggregateDroppedCount = Self.incrementClamped(aggregateDroppedCount)
+            aggregateDroppedCount = Saturating.incrementing(aggregateDroppedCount)
         }
         aggregateRecency.append(key)
-    }
-
-    private static func incrementClamped(_ value: Int) -> Int {
-        value == Int.max ? Int.max : value + 1
-    }
-
-    private static func addingClamped(_ value: Int, _ nonnegativeDelta: Int) -> Int {
-        guard nonnegativeDelta > 0 else { return value }
-        return value > Int.max - nonnegativeDelta ? Int.max : value + nonnegativeDelta
     }
 
     /// A diagnostic duration can arrive from a stalled clock or injected test seam. Converting
@@ -320,23 +311,6 @@ public final class InjectTelemetryLog {
         let scaled = seconds * 1_000
         guard scaled.isFinite, scaled < Double(Int.max) else { return Int.max }
         return Int(scaled.rounded())
-    }
-
-    public func refuseReasonHistogram() -> [String: Int] {
-        var result: [String: Int] = [:]
-        for entry in recentEntries() {
-            guard case .refused(let reason) = entry.outcome else { continue }
-            result[reason, default: 0] += 1
-        }
-        return result
-    }
-
-    public func outcomeHistogram() -> [String: Int] {
-        var result: [String: Int] = [:]
-        for entry in recentEntries() {
-            result[Self.label(for: entry.outcome), default: 0] += 1
-        }
-        return result
     }
 
     /// Stable short label for an outcome (no associated value).

@@ -180,17 +180,8 @@ public enum SnippetTagSuggester {
 
     /// Serializes suggestions so two editors open at once cannot contend for the model.
     /// Not availability-gated: the latch is a plain actor, and the rule it enforces is
-    /// testable without a model.
-    actor Latch {
-        static let shared = Latch()
-        private var busy = false
-        func acquire() -> Bool {
-            if busy { return false }
-            busy = true
-            return true
-        }
-        func release() { busy = false }
-    }
+    /// testable without a model. Its own instance, separate from palette routing's.
+    static let latch = SingleFlightLatch()
 
     /// Best-effort. Returns `.none` for every failure — no engine, an unsupported UI language,
     /// a refusal, a busy latch — because a snippet saving without tags is the normal case, not
@@ -208,7 +199,7 @@ public enum SnippetTagSuggester {
         guard isActive, shouldSuggest(body: body, isSecret: isSecret), let engine else {
             return .none
         }
-        guard await Latch.shared.acquire() else { return .none }
+        guard await latch.acquire() else { return .none }
 
         // Released with `await`, not from a detached `Task` in a `defer`. A deferred release is
         // ordered *after* the caller resumes, so a second call made straight away — which is
@@ -228,7 +219,7 @@ public enum SnippetTagSuggester {
             )
             suggestion = .none
         }
-        await Latch.shared.release()
+        await latch.release()
         return suggestion
     }
 
