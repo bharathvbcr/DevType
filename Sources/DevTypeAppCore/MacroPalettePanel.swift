@@ -506,28 +506,25 @@ private final class MacroPaletteController: NSViewController,
     // MARK: Selection
 
     private func firstSelectableIndex(from start: Int, step: Int) -> Int? {
-        guard !rows.isEmpty else { return nil }
-        var index = start
-        while index >= 0 && index < rows.count {
-            if rows[index].isSelectable { return index }
-            index += step
-        }
-        return nil
+        PaletteSelection.firstSelectableIndex(
+            from: start,
+            step: step,
+            count: rows.count,
+            isSelectable: { rows[$0].isSelectable }
+        )
     }
 
     private func applySelection(scroll: Bool) {
-        guard rows.indices.contains(selection) else {
-            tableView.deselectAll(nil)
-            return
-        }
-        tableView.selectRowIndexes(IndexSet(integer: selection), byExtendingSelection: false)
-        if scroll { tableView.scrollRowToVisible(selection) }
+        PaletteSelection.apply(selection, to: tableView, count: rows.count, scroll: scroll)
     }
 
     private func moveSelection(_ delta: Int) {
-        guard !rows.isEmpty else { return }
-        let start = selection < 0 ? (delta > 0 ? 0 : rows.count - 1) : selection + delta
-        guard let next = firstSelectableIndex(from: start, step: delta > 0 ? 1 : -1) else { return }
+        guard let next = PaletteSelection.next(
+            from: selection,
+            delta: delta,
+            count: rows.count,
+            isSelectable: { rows[$0].isSelectable }
+        ) else { return }
         selection = next
         applySelection(scroll: true)
     }

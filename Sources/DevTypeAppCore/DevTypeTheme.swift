@@ -602,6 +602,18 @@ enum DevTypeTheme {
         return label
     }
 
+    /// A glass card already sized by AutoLayout. The two permission controllers each had a
+    /// byte-identical private `makeCard()`; the other card sites vary their tint and alpha
+    /// deliberately and pass their own.
+    static func makeGlassCard(
+        tint: NSColor = DevTypeTheme.accent,
+        alpha: CGFloat = 0.05
+    ) -> GlassCardView {
+        let card = GlassCardView(tint: tint.withAlphaComponent(alpha))
+        card.translatesAutoresizingMaskIntoConstraints = false
+        return card
+    }
+
     static func makeHairline() -> NSView {
         let line = NSView()
         line.wantsLayer = true
@@ -894,13 +906,7 @@ final class CapsuleButton: NSButton {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
-            owner: self,
-            userInfo: nil
-        ))
+        replaceTrackingAreaOverBounds()
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
@@ -1060,13 +1066,7 @@ final class GlassIconButton: NSButton {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
-            owner: self,
-            userInfo: nil
-        ))
+        replaceTrackingAreaOverBounds()
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
@@ -1193,13 +1193,12 @@ final class SplitCapsuleButton: NSView {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        ))
+        // `.mouseMoved` because the disclosure half highlights independently of the
+        // primary half, so this control needs the pointer's position, not just entry
+        // and exit.
+        replaceTrackingAreaOverBounds(
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect]
+        )
     }
 
     override func mouseMoved(with event: NSEvent) {

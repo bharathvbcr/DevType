@@ -344,11 +344,7 @@ final class PermissionRecoveryController: NSViewController {
         extendedGuidanceLabel.trailingAnchor.constraint(equalTo: pane.trailingAnchor).isActive = true
     }
 
-    private func makeCard() -> GlassCardView {
-        let card = GlassCardView(tint: DevTypeTheme.accent.withAlphaComponent(0.05))
-        card.translatesAutoresizingMaskIntoConstraints = false
-        return card
-    }
+    private func makeCard() -> GlassCardView { DevTypeTheme.makeGlassCard() }
 
     override func viewDidLoad() {
         super.viewDidLoad()

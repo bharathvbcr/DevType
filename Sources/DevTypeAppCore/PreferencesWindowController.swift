@@ -1007,13 +1007,7 @@ private final class SidebarNavRow: NSButton {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
-            owner: self,
-            userInfo: nil
-        ))
+        replaceTrackingAreaOverBounds()
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
