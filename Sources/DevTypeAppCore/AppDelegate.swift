@@ -903,7 +903,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard SecretClipboard.shared.copyResult(insertText).didCopy else {
                     ToastPanel.show(
                         self.loc.s("clipboard.write.failed"),
-                        symbol: "exclamationmark.triangle.fill"
+                        symbol: "exclamationmark.triangle.fill",
+                        preempt: true
                     )
                     return
                 }
@@ -1003,7 +1004,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             guard SecretClipboard.shared.copyResult(text).didCopy else {
                 ToastPanel.show(
                     loc.s("clipboard.write.failed"),
-                    symbol: "exclamationmark.triangle.fill"
+                    symbol: "exclamationmark.triangle.fill",
+                    preempt: true
                 )
                 return
             }
@@ -1021,7 +1023,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 ToastPanel.show(loc.s("snippet.copied.toast", snippet.displayTitle))
             }
         case .failure(.macroFailed(let reason)):
-            ToastPanel.show(reason, symbol: "exclamationmark.triangle.fill")
+            ToastPanel.show(reason, symbol: "exclamationmark.triangle.fill", preempt: true)
         case .failure(.secretUnavailable):
             DevTypeAlert.present(
                 title: loc.s("secret.missing.title"),
@@ -1037,12 +1039,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let image = ImageAttachmentStore.shared.loadImage(path: path) else {
                 ToastPanel.show(
                     loc.s("snippet.copied.empty"),
-                    symbol: "exclamationmark.triangle.fill"
+                    symbol: "exclamationmark.triangle.fill",
+                    preempt: true
                 )
                 return
             }
             guard PasteboardBroker.shared.writeUserClipboardImage(image) else {
-                ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "exclamationmark.triangle.fill")
+                ToastPanel.show(
+                    loc.s("clipboard.write.failed"),
+                    symbol: "exclamationmark.triangle.fill",
+                    preempt: true
+                )
                 return
             }
             SnippetStore.shared.incrementUsage(for: snippet.id)
@@ -1053,7 +1060,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // left the user unsure whether anything had happened at all.
             ToastPanel.show(
                 loc.s("snippet.copied.empty"),
-                symbol: "exclamationmark.triangle.fill"
+                symbol: "exclamationmark.triangle.fill",
+                preempt: true
             )
 
         case .failure(.migrationRequired(let pendingCount)):
@@ -1753,7 +1761,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         snapshot: PermissionSnapshot
     ) {
         if let failure = resolved.failure {
-            ToastPanel.show(failure.message, symbol: "exclamationmark.triangle.fill")
+            ToastPanel.show(failure.message, symbol: "exclamationmark.triangle.fill", preempt: true)
             return
         }
         let needsCursor = InjectionPlanner.needsCursorHID(

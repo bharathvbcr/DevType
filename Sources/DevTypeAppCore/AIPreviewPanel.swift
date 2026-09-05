@@ -685,7 +685,7 @@ private final class AIPreviewController: NSViewController {
         let didWrite = clipboardWriter(resultText)
         onReplace(resultText, sourceApp)
         if !didWrite {
-            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill")
+            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill", preempt: true)
         }
     }
 
@@ -694,7 +694,7 @@ private final class AIPreviewController: NSViewController {
         if clipboardWriter(resultText) {
             ToastPanel.show(loc.s("ai.preview.copy"), symbol: "doc.on.doc.fill")
         } else {
-            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill")
+            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill", preempt: true)
         }
     }
 

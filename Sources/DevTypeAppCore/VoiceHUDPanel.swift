@@ -245,7 +245,7 @@ public final class VoiceHUDPanel: NSPanel {
         if clipboardWriter(canonicalTranscript) {
             ToastPanel.show(loc.s("voice.hud.copied"), symbol: "doc.on.doc.fill")
         } else {
-            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill")
+            ToastPanel.show(loc.s("clipboard.write.failed"), symbol: "xmark.circle.fill", preempt: true)
         }
     }
 

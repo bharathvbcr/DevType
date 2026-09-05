@@ -109,6 +109,28 @@ final class ClipboardCopyUXTests: XCTestCase {
         )
     }
 
+    func testAQueuedToastStaysBehindTheMinimumReplacementWindow() throws {
+        ToastPanel.dismiss()
+        ToastPanel.show("First outcome")
+        ToastPanel.show("Second outcome")
+        XCTAssertNotNil(visibleToast(message: "First outcome"))
+        XCTAssertNil(
+            visibleToast(message: "Second outcome"),
+            "A second success in the same beat must wait, not erase the first unread line."
+        )
+    }
+
+    func testAFailureToastPreemptsAnUnreadSuccessToast() throws {
+        ToastPanel.dismiss()
+        let failure = LocalizationManager.shared.s("clipboard.write.failed")
+        ToastPanel.show("AI transform applied")
+        ToastPanel.show(failure, symbol: "xmark.circle.fill", preempt: true)
+        XCTAssertNotNil(
+            visibleToast(message: failure),
+            "A terminal failure must appear immediately rather than wait behind the unread success."
+        )
+    }
+
     func testVoiceHUDCopyFailureDoesNotClaimCopied() throws {
         var attemptedText: String?
         let hud = VoiceHUDPanel(clipboardWriter: { text in

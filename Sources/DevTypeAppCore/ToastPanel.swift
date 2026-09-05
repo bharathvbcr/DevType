@@ -73,15 +73,23 @@ enum ToastPanel {
     }
 
     /// Show `message` (with an optional quieter second line) near the menu bar.
+    ///
+    /// Pass `preempt: true` for a terminal failure. A live success toast otherwise keeps the
+    /// failure queued for `minimumVisibleBeforeReplacement`, so a replace-and-copy that missed
+    /// the clipboard still showed "applied" on CI (no activation notifications to dismiss the
+    /// first toast) while the failure waited off-screen.
     static func show(
         _ message: String,
         detail: String? = nil,
         symbol: String = "checkmark.circle.fill",
-        duration: TimeInterval? = nil
+        duration: TimeInterval? = nil,
+        preempt: Bool = false
     ) {
         let resolved = duration ?? self.duration(for: message, detail: detail)
         guard Thread.isMainThread else {
-            DispatchQueue.main.async { show(message, detail: detail, symbol: symbol, duration: resolved) }
+            DispatchQueue.main.async {
+                show(message, detail: detail, symbol: symbol, duration: resolved, preempt: preempt)
+            }
             return
         }
 
@@ -92,6 +100,14 @@ enum ToastPanel {
         DevTypeAccessibility.announce([message, detail].compactMap { $0 }.joined(separator: ". "))
 
         let pending = Pending(message: message, detail: detail, symbol: symbol, duration: resolved)
+
+        if preempt {
+            queue.removeAll()
+            drainWorkItem?.cancel()
+            drainWorkItem = nil
+            present(pending)
+            return
+        }
 
         // A live toast that has not been up long enough to read yields to the next one only
         // after it has. Without this an operation reporting several outcomes showed the last.
