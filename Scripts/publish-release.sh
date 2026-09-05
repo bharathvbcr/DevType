@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Publish only a verified draft. Failed uploads remain drafts and can be retried;
 # an already-public release is immutable and must never be clobbered by a rerun.
+#
+# DEVTYPE_ALLOW_REPUBLISH=1 is the one deliberate exception, for a hot patch that has to
+# keep its version. It replaces the notes and the DMG on an already-public release and
+# runs the same download-and-compare verification. It is off by default and says loudly
+# what it is doing, because everyone who already downloaded that version ends up with
+# different bytes under the same version string — the build number is the only tell.
 # Usage: GH_REPO=owner/repo Scripts/publish-release.sh <tag> <dist-dir>
 set -euo pipefail
 
@@ -71,6 +77,7 @@ trap 'rm -rf "${VERIFY_DIR}"' EXIT
 
 # Enumerate all pages, including drafts. API/auth failures must not be interpreted
 # as an absent release; a capped list could miss an existing published version.
+REPUBLISH=0
 gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
   --jq ".[] | select(.tag_name == \"${TAG}\") | .draft" > "${VERIFY_DIR}/draft-state"
 case "$(cat "${VERIFY_DIR}/draft-state")" in
@@ -84,7 +91,19 @@ case "$(cat "${VERIFY_DIR}/draft-state")" in
     gh release edit "${TAG}" --verify-tag --title "DevType ${TAG}" \
       --notes-file "${NOTES}" --prerelease=false
     ;;
-  false) die "${TAG} is already published; refusing to overwrite public release assets or notes" ;;
+  false)
+    # Fail closed: a rerun, a retry, or a second publisher must still bounce off a public
+    # release. Only an explicit opt-in gets past, and only after the same concurrency guard.
+    [[ "${DEVTYPE_ALLOW_REPUBLISH:-0}" == "1" ]] \
+      || die "${TAG} is already published; refusing to overwrite public release assets or notes.
+       Set DEVTYPE_ALLOW_REPUBLISH=1 to replace its notes and DMG on purpose."
+    require_no_concurrent_release_run
+    REPUBLISH=1
+    echo "warning: DEVTYPE_ALLOW_REPUBLISH=1 — replacing the published ${TAG} release" >&2
+    echo "warning: anyone who already downloaded ${EXPECTED_DMG} now has different bytes under the same version" >&2
+    gh release edit "${TAG}" --verify-tag --title "DevType ${TAG}" \
+      --notes-file "${NOTES}" --prerelease=false
+    ;;
   *) die "ambiguous release state for ${TAG}" ;;
 esac
 
@@ -153,17 +172,25 @@ PY
     || die "uploaded DMG differs from the locally built artifact"
 }
 
-verify_release true
-verify_remote_tag
-undraft_ok=0
-for attempt in 1 2 3 4 5; do
-  if gh release edit "${TAG}" --draft=false --verify-tag; then
-    undraft_ok=1
-    break
-  fi
-  [[ "${attempt}" -lt 5 ]] || break
-  sleep "$((attempt * 2))"
-done
-[[ "${undraft_ok}" -eq 1 ]] || die "could not undraft release ${TAG} after bounded retries"
-verify_release false
+if [[ "${REPUBLISH}" -eq 1 ]]; then
+  # The release was public the whole way through: there is no draft state to check and
+  # nothing to undraft. The public verification is the same one the normal path ends on,
+  # so a replacement that did not land still fails here rather than reporting success.
+  verify_remote_tag
+  verify_release false
+else
+  verify_release true
+  verify_remote_tag
+  undraft_ok=0
+  for attempt in 1 2 3 4 5; do
+    if gh release edit "${TAG}" --draft=false --verify-tag; then
+      undraft_ok=1
+      break
+    fi
+    [[ "${attempt}" -lt 5 ]] || break
+    sleep "$((attempt * 2))"
+  done
+  [[ "${undraft_ok}" -eq 1 ]] || die "could not undraft release ${TAG} after bounded retries"
+  verify_release false
+fi
 echo "verified GitHub release ${TAG}: curated notes and ${EXPECTED_DMG} match"

@@ -45,7 +45,8 @@ elif a[:2] == ["release", "edit"]:
         s["body"] = pathlib.Path(option("--notes-file")).read_text()
 elif a[:2] == ["release", "upload"]:
     s["uploads"] = s.get("uploads", 0) + 1
-    if not s["draft"]: fail("attempted to overwrite a public asset")
+    if not s["draft"] and os.environ.get("DEVTYPE_ALLOW_REPUBLISH") != "1":
+        fail("attempted to overwrite a public asset")
     if mode == "upload_failure" or (mode == "transient_upload" and s["uploads"] < 3):
         fail("upload failed")
     s["assets"] = ["DevType-0.1.4.dmg"]
@@ -228,6 +229,48 @@ class PublicationTests(unittest.TestCase):
         self.state.update(exists=True, draft=False)
         self.assertIn("already published", self.publish(success=False))
         self.assertTrue(all(c[0] == "api" for c in self.state["calls"]))
+
+    def test_the_refusal_names_the_way_past_it(self):
+        """A guard that stops a legitimate hot patch without saying how is a dead end."""
+        self.state.update(exists=True, draft=False)
+        self.assertIn("DEVTYPE_ALLOW_REPUBLISH=1", self.publish(success=False))
+
+    def test_republish_replaces_notes_and_asset_and_verifies_the_public_download(self):
+        """The one deliberate exception: a hot patch that has to keep its version.
+
+        It must still prove what it published, so the public download-and-compare runs
+        exactly as it does on the normal path — a replacement that silently did not land
+        has to fail here, not report success.
+        """
+        self.state.update(exists=True, draft=False, body="stale notes")
+        output = self.publish(extra_env={"DEVTYPE_ALLOW_REPUBLISH": "1"})
+        calls = self.state["calls"]
+        self.assertTrue(any(c[:2] == ["release", "edit"] for c in calls), "notes must be replaced")
+        self.assertTrue(any(c[:2] == ["release", "upload"] for c in calls), "DMG must be replaced")
+        self.assertTrue(any(c[:2] == ["release", "download"] for c in calls),
+                        "the replacement must be downloaded back and compared")
+        self.assertEqual(self.state["body"], (self.repo / f"docs/releases/{TAG}.md").read_text())
+        self.assertEqual(self.state["assets"], [DMG])
+        # Never silently: the operator has to see what this did to a public release.
+        self.assertIn("replacing the published", output)
+        self.assertIn("different bytes under the same version", output)
+        # A public release is never re-drafted on the way through.
+        self.assertFalse(any("--draft" in " ".join(c) and "--draft=false" not in " ".join(c)
+                             for c in calls))
+
+    def test_republish_still_fails_when_the_public_download_does_not_match(self):
+        """The hatch relaxes who may write, never whether the result is verified."""
+        self.state.update(exists=True, draft=False)
+        self.publish("corrupt_download", success=False,
+                     extra_env={"DEVTYPE_ALLOW_REPUBLISH": "1"})
+
+    def test_republish_respects_the_in_flight_workflow_guard(self):
+        """Two publishers on one public release is exactly what the concurrency guard is for."""
+        self.state.update(exists=True, draft=False)
+        output = self.publish(success=False, release_runs=["in_progress"],
+                              extra_env={"DEVTYPE_ALLOW_REPUBLISH": "1"})
+        self.assertIn("already in flight", output)
+        self.assertFalse(any(c[:2] == ["release", "upload"] for c in self.state["calls"]))
 
     def test_corrupt_or_unverifiable_drafts_remain_unpublished(self):
         for mode in ("api_failure", "malformed_state", "view_failure", "malformed_metadata",
