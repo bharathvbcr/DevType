@@ -22,7 +22,24 @@ final class SecureInputPresentationTests: XCTestCase {
         wait(for: [obsoleteCallback], timeout: 0.1)
     }
 
+    /// Exhaustive over all 32 inputs. The expectation below is the *specification*, written as
+    /// rules rather than as a copy of `resolve`'s branch order — the previous version of this test
+    /// mirrored that order verbatim, so it agreed with the implementation by construction and could
+    /// never catch a precedence bug. It did not catch this one: a paused engine has no tap, and
+    /// reporting that as Tap Failed sent users into TCC recovery for a one-click state.
     func testEngineDiagnosisStillPreservesPermissionAndPauseStates() {
+        /// Rule 1: `.defaultTap` needs Listen and Accessibility; without either, nothing else matters.
+        /// Rule 2: a tap can only have *failed* if the engine asked it to run.
+        /// Rule 3: Secure Input outranks pause, as it always has.
+        /// Rule 4: a disabled engine is paused.
+        func expectation(listen: Bool, ax: Bool, running: Bool, enabled: Bool, secure: Bool) -> EngineDisplayStatus {
+            if !listen || !ax { return .needsPermissions }
+            if enabled && !running { return .tapFailed }
+            if secure { return .secure }
+            if !enabled { return .paused }
+            return .active
+        }
+
         for listen in [false, true] {
             for ax in [false, true] {
                 for running in [false, true] {
@@ -32,13 +49,24 @@ final class SecureInputPresentationTests: XCTestCase {
                                 canListenTap: listen, canUseAX: ax, isTapRunning: running,
                                 isEnabled: enabled, isSecureInputActive: secure
                             )
-                            let expected: EngineDisplayStatus = !listen || !ax ? .needsPermissions
-                                : !running ? .tapFailed : secure ? .secure : !enabled ? .paused : .active
-                            XCTAssertEqual(actual, expected)
+                            XCTAssertEqual(
+                                actual,
+                                expectation(listen: listen, ax: ax, running: running, enabled: enabled, secure: secure),
+                                "listen=\(listen) ax=\(ax) running=\(running) enabled=\(enabled) secure=\(secure)"
+                            )
                         }
                     }
                 }
             }
         }
+
+        // The combination the running app actually produces while paused, called out so it is not
+        // just one row of a loop: the coordinator never starts a tap for a disabled engine.
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: true, canUseAX: true, isTapRunning: false, isEnabled: false, isSecureInputActive: false
+            ),
+            .paused
+        )
     }
 }

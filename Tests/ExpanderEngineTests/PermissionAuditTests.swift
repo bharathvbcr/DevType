@@ -574,6 +574,42 @@ final class EngineDisplayStatusAuditTests: XCTestCase {
         XCTAssertEqual(s, .paused)
     }
 
+    /// The state the running app actually produces when the user pauses: the coordinator never
+    /// starts a tap for a disabled engine, so `isTapRunning` is false *because* of the pause.
+    /// Reporting Tap Failed here sent users into TCC recovery — reinstalling, resetting grants,
+    /// re-approving prompts — for something one click on Resume fixes. Every earlier paused test
+    /// passed `isTapRunning: true`, which the app cannot produce while paused.
+    func testPausedEngineWithNoTapReportsPausedNotTapFailed() {
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: true, canUseAX: true, isTapRunning: false, isEnabled: false, isSecureInputActive: false
+            ),
+            .paused,
+            "A tap that was never asked to start has not failed."
+        )
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: true, canUseAX: true, isTapRunning: false, isEnabled: false, isSecureInputActive: true
+            ),
+            .secure,
+            "Secure Input keeps its existing precedence over pause."
+        )
+        // The genuine failure — asked to run, did not — must still be reported.
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: true, canUseAX: true, isTapRunning: false, isEnabled: true, isSecureInputActive: false
+            ),
+            .tapFailed
+        )
+        // And a missing capability still outranks both.
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: false, canUseAX: true, isTapRunning: false, isEnabled: false, isSecureInputActive: false
+            ),
+            .needsPermissions
+        )
+    }
+
     /// Missing Post alone (Listen + AX + tap running) must NOT show needsPermissions.
     /// Missing AX blocks defaultTap install and must show needsPermissions.
     func testMissingPostDoesNotCauseNeedsPermissionsWhileAXMissingDoes() {

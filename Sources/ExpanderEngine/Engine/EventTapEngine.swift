@@ -103,6 +103,13 @@ public enum EngineDisplayStatus: Equatable {
 
     /// Active when Listen + AX allow a running tap, user has not paused, and Secure Input is off.
     /// Missing Post alone does not demote to Needs Permissions.
+    ///
+    /// A paused engine has no tap *by design*: `PermissionCoordinator.applyTapLifecycle` only calls
+    /// `EventTapEngine.start()` when `isEnabled`. Blaming the tap before asking whether it was ever
+    /// meant to run reported a one-click pause as Tap Failed, whose recovery copy sends the user
+    /// after TCC identity and duplicate processes — a permissions hunt for a state no permission
+    /// change can fix. Every prior test of the paused branch passed `isTapRunning: true` alongside
+    /// `isEnabled: false`, a combination the running app cannot produce, so none of them saw it.
     public static func resolve(
         canListenTap: Bool,
         canUseAX: Bool = true,
@@ -114,7 +121,8 @@ public enum EngineDisplayStatus: Equatable {
         if !canListenTap || !canUseAX {
             return .needsPermissions
         }
-        if !isTapRunning {
+        // Only a tap that was asked to run can have failed.
+        if isEnabled && !isTapRunning {
             return .tapFailed
         }
         if isSecureInputActive {
