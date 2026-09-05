@@ -75,8 +75,8 @@ DevType supports rich dynamic macros. You can mix and match Mustache tags or Tex
 - `{{time}}`: Current time.
 
 ### Dynamic Clipboard & Caret
-- `{{clipboard}}` / `%clipboard`: Injects the text currently on your macOS clipboard (sanitized so clipboard content can't fire further macros).
-- `{{cursor}}` or `%|`: Places your text insertion caret right at that position after expanding.
+- `{{clipboard}}` / `%clipboard`: Inserts the current clipboard text literally. Template-shaped text such as `{{cursor}}` is preserved and does not run as another macro.
+- `{{cursor}}` or `%|`: Places your caret at that position after all substitutions and case transforms. The first marker wins across both syntaxes, including snippets with emoji or length-changing Unicode text.
 - `{{snippet:other_trigger}}` / `%snippet:other_trigger%`: Re-uses content from another snippet dynamically.
 
 ### Safe Inline Calculations
@@ -236,7 +236,9 @@ Muted apps are also reachable straight from the menu bar (**Mute Frontmost App**
 ## 11. Troubleshooting & FAQs
 
 - **Text is not expanding**: Press **`⌘⇧P`** to open Permission Recovery and inspect **Last inject**. A permission failure and an erase refusal need different remedies; see [expansion troubleshooting](../SUPPORT.md#1-snippets-are-not-expanding-when-i-type-what-should-i-do).
-- **Expansion cancelled after moving the cursor**: Refocus the intended field and retype the trigger. DevType cancels when it observes input or an application change during the erase check.
+- **Expansion cancelled after moving the cursor**: Refocus the intended field and retype the trigger. DevType rechecks the target field, selection, input and live permissions before delayed paste and cursor actions. Switching between fields in the same application can cancel the pending operation.
+- **Paste reported as unverified**: DevType posted the paste but could not confirm a relevant text change. Check the target before repeating the expansion; the app does not automatically replay an ambiguous paste.
+- **Library conflict recovery**: Recovery validates the selected library and saves verified recovery copies before removing alternate versions. An adoption failure keeps recovery alternatives. If the library was adopted but cleanup is pending, the dialog shows that status and the recovery folder; retry cleanup after the underlying file-access problem is resolved.
 - **Accidental expansion in games or terminals**: Add the app to your **Muted Apps** list in Preferences → General or choose **Mute Frontmost App** from the menu bar.
 - **Shortcut conflicts**: Re-record your global hotkeys in **Preferences → Hotkeys**.
 - **Need help?**: Check our [Support Guide](../SUPPORT.md) or open an issue on GitHub.

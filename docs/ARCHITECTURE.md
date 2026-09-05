@@ -6,7 +6,7 @@ This document provides a deep technical walkthrough of the architecture, interna
 
 ## 🏛️ High-Level Architecture Overview
 
-DevType is structured into three SwiftPM targets designed for separation of concerns, testability, and crash resilience:
+DevType is structured into four SwiftPM targets designed for separation of concerns, testability, and crash resilience:
 
 ```mermaid
 graph TD
@@ -50,14 +50,17 @@ graph TD
 The headless core library containing all business logic, matching algorithms, injection pipelines, macro evaluators, voice dictation subsystem, update checkers, and storage models.
 - **Subsystems**: `Engine` (event taps, text injection, type-ahead buffers), `Matching` (prefix search, abbreviation trie), `Macros` (Mustache & TextExpander parsing, safe math, date arithmetic), `AI` (Apple Foundation Models, selection gating, offline Markdown transforms), `Voice` (smart dictation, multi-engine ASR, durable audio capture, thought-revision correction), `Models` (snippets, groups, encrypted secret store, usage stats), `Permissions` (TCC verification, AX capability learning), `Sync` (TextExpander & Espanso importers, JSON/YAML/CSV exporters), and `Updates` (distance-aware version ordering, GitHub Releases update checker).
 - **Independence**: Has zero UI/AppKit window dependencies, enabling fast, headless unit testing in CI (1,900+ tests).
-- **Thread Safety**: Concurrency is managed via `UnfairLock` and dedicated serial run loop threads to guarantee sub-millisecond response times without race conditions.
+- **Thread Safety**: Concurrency uses locks, serial queues and operation/generation checks. Measured latency and adversarial tests support individual paths; they do not establish a universal timing or race-free guarantee.
 
 ### 2. `DevTypeSafety` (Objective-C Target)
 An Objective-C trampoline layer that wraps fragile macOS Accessibility (`AXUIElement`) and Cocoa Pasteboard APIs in `@try / @catch` blocks. Swift cannot natively catch Objective-C runtime exceptions (e.g. `NSGenericException` or corrupted AX pointers); this layer ensures such crashes are contained and degraded to safe fallbacks.
 
-### 3. `DevTypeApp` (Executable Target)
+### 3. `DevTypeAppCore` (Swift Library Target)
 The AppKit application layer providing the menu bar status item, snippet editor, inline search palette (`⌘/`), AI action palette (`⌘⌥A`), live diff preview, Smart Dictation Liquid Glass HUD, 7-tab Preferences window (`⌘,`), and onboarding setup wizard.
-- **Main Thread Isolation**: All UI components strictly operate on `@MainActor`.
+- **UI ownership**: Window and controller work runs on the main thread; delayed callbacks retain explicit lifetime checks.
+
+### 4. `DevTypeApp` (Executable Target)
+The entry point in `main.swift` delegates to `DevTypeAppCore`. Keeping the executable separate lets controller tests import the application library.
 
 ---
 
@@ -297,3 +300,12 @@ DevType contains a dedicated, privacy-conscious update checking module (`Sources
 - **Strict Distance-Aware Version Parsing (`AppVersion`)**: Distinguishes `git describe` distance suffixes (e.g. `v0.1.2-3-gabc1234` is ahead of `v0.1.2`, not a pre-release).
 - **Navigation Safety**: Release URLs are strictly constructed locally for `https://github.com/bharathvbcr/DevType/releases/tag/v...` using strict alphanumeric and semantic version checks to prevent arbitrary URI scheme or host traversal.
 - **Fail-Closed Outcome Typing (`UpdateCheckOutcome`)**: Distinguishes between `.upToDate`, `.updateAvailable`, `.failed`, and `.undeterminedLocalVersion`, ensuring network outages never report a false "up to date" result.
+
+## Shared runtime and UI owners in v0.1.7
+
+- `DebouncedSidecarWriter` owns usage-sidecar scheduling, serialized atomic writes, retry scheduling and termination flush. The snippet and command usage stores implement `SidecarPayloadSource` to supply their pending bytes and re-arm failed writes.
+- `SupportDirectory` resolves the application-support location with a temporary-directory fallback; `FilePermissions` owns owner-only file mode application. Saturating arithmetic is shared by timing, capability and usage counters where those callers require the same overflow behavior.
+- `SingleFlightLatch` is shared by AI operations that refuse overlapping work. `LocalCorrectorProbe` shares the local correctors' bounded readiness request and typed unavailable/configuration outcomes, while provider adapters retain their route and capability choices.
+- `FloatingPanelChrome`, `HoverTracking` and `PaletteSelection` own the common panel chrome, tracking areas and selectable-row navigation used by application controllers. The merge retains the audit's current-result, search and operation-lifetime checks around those shared helpers.
+
+These components replace prior copies at their existing call sites. They do not introduce a second expansion coordinator or a second clipboard/recovery policy.

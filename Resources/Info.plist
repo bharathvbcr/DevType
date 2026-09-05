@@ -29,7 +29,7 @@
          both in the packaged bundle from `git describe`, so shipped builds carry a
          real version and DiagnosticReport output can be mapped back to a commit. -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1.6</string>
+    <string>0.1.7</string>
     <key>CFBundleVersion</key>
     <string>2</string>
     <!-- §7.5: update checking is DevType's own (Sources/ExpanderEngine/Updates/), not Sparkle.

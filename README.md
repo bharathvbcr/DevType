@@ -166,8 +166,8 @@ Explore our complete documentation in the [`docs/`](docs/) directory:
 - 🏛️ **[Technical Architecture](docs/ARCHITECTURE.md)**: Deep dive into event taps, text injection pipelines, threading models, and exception safety.
 - 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
-- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running 2,000 headless unit tests, debugging, and release automation.
-- 📦 **[Release notes](docs/releases/v0.1.4.md)**: v0.1.4 Merge & Rewrite, selection-aware palette, unified multi-word search, expansion recovery, secret search, and verification.
+- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running the engine and AppKit-core test suites, debugging, and release automation.
+- 📦 **[Release notes](docs/releases/v0.1.7.md)**: v0.1.7 expansion lifetime checks, checked clipboard recovery, recoverable conflict adoption, literal-safe macros, and shared runtime/UI components.
 - 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---

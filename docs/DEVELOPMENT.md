@@ -43,12 +43,15 @@ The resolver and verification scripts have dedicated self-tests (`test-signing-i
 
 ## 🧪 Testing Guidelines
 
-DevType maintains **2,000 unit, fuzz, and stress tests** across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. The standard suite runs 2,000 tests: 1,986 pass and 14 are skipped. Seven live-AI tests and seven native AppKit window tests require explicit opt-in; the latter briefly display synthetic UI.
+DevType maintains unit, fuzz, race, persistence, controller and stress tests across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. Read the actual test summary for the selected SDK and filter; skipped tests are not passing checks. The five audit performance tests require `DEVTYPE_BENCH=1`. Isolated native pasteboard/file-version tests do not replace physical cross-application focus, Secure Input or live iCloud validation.
 
 ### Running Tests
 ```bash
 # Run all tests
 ./Scripts/test.sh
+
+# Include the five audit performance checks
+DEVTYPE_BENCH=1 ./Scripts/test.sh
 
 # Run with verbose output
 ./Scripts/test.sh -v
@@ -195,3 +198,13 @@ Before submitting changes, ensure:
 1. No external network dependencies or telemetry SDKs are included.
 2. `SecureInputMonitor` and `NSSecureTextField` fail-closed protection remain fully tested.
 3. Sensitive credentials are only handled via `SecretStore` with AES-GCM encryption.
+
+## Local v0.1.7 installation and release verification
+
+Commit the complete merged source and version notes, then run `DEVTYPE_BENCH=1 DEVTYPE_SKIP_AUTO_CERT=1 ./Scripts/ci-local.sh` against that clean commit. The script validates shell/plist inputs, release/installer fixtures, all tests, debug/release builds and the packaged signature. Create the annotated `v0.1.7` tag at the verified commit, run `./Scripts/release-preflight.sh v0.1.7`, and package/install with `./Scripts/install-app.sh release`. Export `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` for these commands when the selected toolchain is Command Line Tools.
+
+The installer validates the new package, swaps the canonical application recoverably, quarantines the displaced app and duplicate package, and compares designated signing requirements before deciding whether TCC needs a reset. Verify the installed bundle is exactly `0.1.7` using `./Scripts/verify-release-version.sh v0.1.7 0.1.7`, plus the bundle plist, executable hash, strict codesign and running process path. The version checker accepts version strings; callers must read the actual installed plist value rather than assume it.
+
+Inventory old builds before packaging: the packager removes known legacy bundles. Move old build directories and installers to a dated recoverable archive with their original paths recorded. Keep the running application until the validated replacement is ready; move the installer's quarantine to the same archive afterward. Keep release logs and a Git bundle separately from active build outputs.
+
+An Apple Development signature supports local installation and stable identity; it does not establish notarized distribution. Run `spctl --assess --type execute` separately and report its result. A local tag/install does not publish a GitHub release. Pushing a `v*.*.*` tag triggers the repository's publication workflow and is a separate distribution action.
