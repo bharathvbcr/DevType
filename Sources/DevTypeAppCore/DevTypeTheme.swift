@@ -602,6 +602,14 @@ enum DevTypeTheme {
         return label
     }
 
+    /// The small semibold label above a field. Both editor sheets had a byte-identical
+    /// private `caption(_:)`; it is one styling decision, not two.
+    static func makeFieldCaption(_ text: String) -> NSTextField {
+        let label = makeLabel(text, font: font(11, .semibold), color: textSecondary)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }
+
     /// A glass card already sized by AutoLayout. The two permission controllers each had a
     /// byte-identical private `makeCard()`; the other card sites vary their tint and alpha
     /// deliberately and pass their own.

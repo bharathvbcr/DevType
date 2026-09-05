@@ -3,37 +3,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PREFLIGHT="${ROOT}/Scripts/release-preflight.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/devtype-release-preflight.XXXXXX")"
 trap 'rm -rf "${TMP_ROOT}"' EXIT
 
-PASS=0
-FAIL=0
-
-expect_fail() {
-  local label="$1"
-  shift
-  if "${PREFLIGHT}" "$@" >"${TMP_ROOT}/stdout" 2>"${TMP_ROOT}/stderr"; then
-    echo "FAIL: ${label} — expected nonzero exit" >&2
-    FAIL=$((FAIL + 1))
-  else
-    echo "ok: ${label}"
-    PASS=$((PASS + 1))
-  fi
-}
-
-expect_ok() {
-  local label="$1"
-  shift
-  if ! "${PREFLIGHT}" "$@" >"${TMP_ROOT}/stdout" 2>"${TMP_ROOT}/stderr"; then
-    echo "FAIL: ${label} — expected success" >&2
-    cat "${TMP_ROOT}/stderr" >&2
-    FAIL=$((FAIL + 1))
-  else
-    echo "ok: ${label}"
-    PASS=$((PASS + 1))
-  fi
-}
+# shellcheck source=Scripts/lib-shell-test-harness.sh
+source "${ROOT}/Scripts/lib-shell-test-harness.sh"
+harness_subject "${ROOT}/Scripts/release-preflight.sh" "${TMP_ROOT}"
 
 REPO="${TMP_ROOT}/repo"
 mkdir -p "${REPO}/docs/releases"
@@ -82,5 +57,4 @@ git -C "${REPO}" commit -q --amend --no-edit
 git -C "${REPO}" tag -f v0.2.0 >/dev/null 2>&1
 expect_ok "release allowed once voice tracing defaults off" v0.2.0 "${REPO}"
 
-echo "release preflight tests: ${PASS} passed, ${FAIL} failed"
-[[ "${FAIL}" -eq 0 ]]
+harness_summary "release preflight"

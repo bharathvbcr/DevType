@@ -152,91 +152,66 @@ final class HotkeyManager {
         var argument: String
     }
 
+    /// The four-char signature every DevType hot key is registered under.
+    private static let hotkeySignature = OSType(0x4454_5059) // DTYP
+
+    /// Allocates an id and asks Carbon for the shortcut, retaining the returned ref on
+    /// success. All four registration paths — the three built-ins and each macro —
+    /// shared this verbatim and differ only in what they do with the outcome.
+    private func claimHotkey(keyCode: UInt32, modifiers: UInt32) -> (id: UInt32, status: OSStatus) {
+        let id = nextID
+        nextID += 1
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            EventHotKeyID(signature: Self.hotkeySignature, id: id),
+            GetEventDispatcherTarget(),
+            0,
+            &ref
+        )
+        if status == noErr, let ref { refs[id] = ref }
+        return (id, status)
+    }
+
+    /// Registers one of the three built-in shortcuts. Returns the claimed id, or `nil`
+    /// when Carbon refused — §4.2: a refusal is no longer a silent log-and-forget, so
+    /// every one of these tells the user through `onRegistrationFailed`.
+    private func registerBuiltIn(
+        _ shortcut: DevTypeShortcut,
+        named name: String
+    ) -> (id: UInt32?, status: OSStatus) {
+        let claim = claimHotkey(keyCode: shortcut.keyCode, modifiers: shortcut.carbonModifiers)
+        let label = shortcut.displayString
+        guard claim.status == noErr, refs[claim.id] != nil else {
+            DevTypeLog.app.error(
+                "[Hotkey] \(name, privacy: .public) registration failed shortcut=\(label, privacy: .public) status=\(claim.status, privacy: .public)"
+            )
+            onRegistrationFailed?(label, claim.status)
+            return (nil, claim.status)
+        }
+        DevTypeLog.app.info("[Hotkey] \(name, privacy: .public) registered (\(label, privacy: .public))")
+        return (claim.id, claim.status)
+    }
+
     private func registerInlineSearch() {
         // §4.2: was `kVK_ANSI_Slash` + `cmdKey`, hardcoded. Now read from
         // `HotkeyPreferences` so the Preferences recorder can rebind it.
-        let shortcut = inlineSearchShortcut
-        let id = nextID
-        nextID += 1
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4454_5059), id: id) // DTYP
-        var ref: EventHotKeyRef?
-        let status = RegisterEventHotKey(
-            shortcut.keyCode,
-            shortcut.carbonModifiers,
-            hotKeyID,
-            GetEventDispatcherTarget(),
-            0,
-            &ref
-        )
-        lastRegistrationStatus = status
-        let label = shortcut.displayString
-        if status == noErr, let ref {
-            refs[id] = ref
-            inlineSearchHotkeyID = id
-            DevTypeLog.app.info("[Hotkey] inline search registered (\(label, privacy: .public))")
-        } else {
-            // §4.2: no longer a silent log-and-forget — the user is told.
-            DevTypeLog.app.error(
-                "[Hotkey] inline search registration failed shortcut=\(label, privacy: .public) status=\(status, privacy: .public)"
-            )
-            onRegistrationFailed?(label, status)
-        }
+        let result = registerBuiltIn(inlineSearchShortcut, named: "inline search")
+        lastRegistrationStatus = result.status
+        if let id = result.id { inlineSearchHotkeyID = id }
     }
 
     private func registerAIPalette() {
-        let shortcut = aiPaletteShortcut
-        let id = nextID
-        nextID += 1
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4454_5059), id: id)
-        var ref: EventHotKeyRef?
-        let status = RegisterEventHotKey(
-            shortcut.keyCode,
-            shortcut.carbonModifiers,
-            hotKeyID,
-            GetEventDispatcherTarget(),
-            0,
-            &ref
-        )
-        lastAIPaletteRegistrationStatus = status
-        let label = shortcut.displayString
-        if status == noErr, let ref {
-            refs[id] = ref
-            aiPaletteHotkeyID = id
-            DevTypeLog.app.info("[Hotkey] AI palette registered (\(label, privacy: .public))")
-        } else {
-            DevTypeLog.app.error(
-                "[Hotkey] AI palette registration failed shortcut=\(label, privacy: .public) status=\(status, privacy: .public)"
-            )
-            onRegistrationFailed?(label, status)
-        }
+        let result = registerBuiltIn(aiPaletteShortcut, named: "AI palette")
+        lastAIPaletteRegistrationStatus = result.status
+        if let id = result.id { aiPaletteHotkeyID = id }
     }
 
     private func registerVoiceDictation() {
-        let shortcut = voiceShortcut
-        let id = nextID
-        nextID += 1
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4454_5059), id: id)
-        var ref: EventHotKeyRef?
-        let status = RegisterEventHotKey(
-            shortcut.keyCode,
-            shortcut.carbonModifiers,
-            hotKeyID,
-            GetEventDispatcherTarget(),
-            0,
-            &ref
-        )
-        lastVoiceRegistrationStatus = status
-        let label = shortcut.displayString
-        if status == noErr, let ref {
-            refs[id] = ref
-            voiceDictationHotkeyID = id
-            DevTypeLog.app.info("[Hotkey] Voice dictation registered (\(label, privacy: .public))")
-        } else {
-            DevTypeLog.app.error(
-                "[Hotkey] Voice dictation registration failed shortcut=\(label, privacy: .public) status=\(status, privacy: .public)"
-            )
-            onRegistrationFailed?(label, status)
-        }
+        let result = registerBuiltIn(voiceShortcut, named: "Voice dictation")
+        lastVoiceRegistrationStatus = result.status
+        if let id = result.id { voiceDictationHotkeyID = id }
     }
 
     private func unregisterAll() {
@@ -297,20 +272,8 @@ final class HotkeyManager {
     }
 
     private func registerMacro(_ macro: HotkeyMacroAction) {
-        let id = nextID
-        nextID += 1
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4454_5059), id: id)
-        var ref: EventHotKeyRef?
-        let status = RegisterEventHotKey(
-            macro.keyCode,
-            macro.modifiers,
-            hotKeyID,
-            GetEventDispatcherTarget(),
-            0,
-            &ref
-        )
-        if status == noErr, let ref {
-            refs[id] = ref
+        let (id, status) = claimHotkey(keyCode: macro.keyCode, modifiers: macro.modifiers)
+        if status == noErr, refs[id] != nil {
             var stored = macro
             stored.id = id
             macroByID[id] = stored

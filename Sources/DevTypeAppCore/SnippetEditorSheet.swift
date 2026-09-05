@@ -1204,11 +1204,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
     // MARK: Building blocks
 
-    private func caption(_ text: String) -> NSTextField {
-        let label = DevTypeTheme.makeLabel(text, font: DevTypeTheme.font(11, .semibold), color: DevTypeTheme.textSecondary)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }
+    private func caption(_ text: String) -> NSTextField { DevTypeTheme.makeFieldCaption(text) }
 
     private func placeholder(_ text: String) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [
