@@ -92,4 +92,28 @@ final class AppStringKeyCoverageTests: XCTestCase {
             }
         }
     }
+
+    func testAIModelAvailabilityReasonKeysResolveAndAreDistinct() {
+        let allReasons = AIModelAvailability.Reason.allCases
+        XCTAssertTrue(
+            allReasons.contains(.buildLacksFoundationModels),
+            "The build-vs-OS split is the point of this test; it cannot be dropped silently."
+        )
+        var seenKeys = Set<String>()
+        for reason in allReasons {
+            let key = reason.localizationKey
+            XCTAssertFalse(key.isEmpty)
+            XCTAssertFalse(seenKeys.contains(key), "Duplicate localization key \(key) for \(reason)")
+            seenKeys.insert(key)
+            assertResolves(key, origin: "AIModelAvailability.Reason.\(reason)")
+        }
+        XCTAssertEqual(seenKeys.count, allReasons.count)
+    }
+
+    func testVoiceBuildLacksSpeechKeyResolves() {
+        assertResolves(
+            "prefs.voice.speechModels.status.buildLacksSpeech",
+            origin: "AppleSpeechReadinessDisplayState.buildLacksSpeechAnalyzer"
+        )
+    }
 }

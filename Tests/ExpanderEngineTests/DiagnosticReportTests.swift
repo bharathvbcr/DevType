@@ -841,4 +841,78 @@ final class DiagnosticReportTests: XCTestCase {
         XCTAssertNotNil(pasted)
         XCTAssertTrue(pasted?.hasPrefix("devtype-diagnostic-test-") == true)
     }
+
+    func testToolchainFormattingWithKeysPresentAndAbsent() {
+        XCTAssertEqual(
+            DiagnosticReport.formatToolchain(xcode: "2660", sdk: "macosx26.5"),
+            "Built with Xcode 26.6 · SDK macosx26.5"
+        )
+        XCTAssertEqual(
+            DiagnosticReport.formatToolchain(xcode: "1540", sdk: "macosx14.5"),
+            "Built with Xcode 15.4 · SDK macosx14.5"
+        )
+        XCTAssertEqual(
+            DiagnosticReport.formatToolchain(xcode: "26.6", sdk: "macosx26.5"),
+            "Built with Xcode 26.6 · SDK macosx26.5"
+        )
+        XCTAssertEqual(
+            DiagnosticReport.formatToolchain(xcode: nil as String?, sdk: nil as String?),
+            "Built with Xcode unknown · SDK unknown"
+        )
+        XCTAssertEqual(
+            DiagnosticReport.formatToolchain(xcode: "", sdk: ""),
+            "Built with Xcode unknown · SDK unknown"
+        )
+        XCTAssertEqual(
+            DiagnosticReport.formatToolchain(xcode: "2660", sdk: nil as String?),
+            "Built with Xcode 26.6 · SDK unknown"
+        )
+        XCTAssertEqual(
+            DiagnosticReport.formatToolchain(xcode: nil as String?, sdk: "macosx26.5"),
+            "Built with Xcode unknown · SDK macosx26.5"
+        )
+    }
+
+    func testHeaderRendersToolchainLine() {
+        let gate = DiagnosticReport.ExpandGateSnapshot(
+            canUseAX: true,
+            axTrusted: true,
+            focusedAvailable: false,
+            isSecureField: nil,
+            hasIMEMarkedText: nil,
+            shouldBlockExpand: false,
+            blockReason: "Allowed"
+        )
+        var context = DiagnosticReport.Context(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            bundleID: "com.devtype.app",
+            appPath: "/Applications/DevType.app",
+            executablePath: "/Applications/DevType.app/Contents/MacOS/DevType",
+            cdHash: "deadbeef",
+            designatedRequirement: "identifier \"com.devtype.app\"",
+            snapshot: PermissionSnapshot(canListenTap: true, canUseAX: true, canPostEvents: false),
+            tapRunning: true,
+            engineEnabled: true,
+            secureInputActive: false,
+            displayStatus: "Status: Active",
+            lastInjectOutcome: nil,
+            frontmostAppName: nil,
+            frontmostBundleID: nil,
+            frontmostPID: nil,
+            mutedApps: [],
+            expandGate: gate,
+            expandGateAtLastRefuse: nil,
+            siblingPaths: [],
+            macOSVersion: "Version 15.0 (Build 24A)",
+            appVersion: "1.0.0 (1)",
+            buildToolchain: "Built with Xcode 26.6 · SDK macosx26.5"
+        )
+
+        let headerWithToolchain = DiagnosticReport.formatHeader(context)
+        XCTAssertTrue(headerWithToolchain.contains("Built with Xcode 26.6 · SDK macosx26.5"))
+
+        context.buildToolchain = nil
+        let headerWithoutToolchain = DiagnosticReport.formatHeader(context)
+        XCTAssertTrue(headerWithoutToolchain.contains("Built with Xcode unknown · SDK unknown"))
+    }
 }

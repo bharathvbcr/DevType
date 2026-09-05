@@ -107,6 +107,19 @@ for ATS_KEY in NSAllowsArbitraryLoads NSAllowsArbitraryLoadsForMedia NSAllowsArb
   fi
 done
 
+for TOOLCHAIN_KEY in DTXcode DTXcodeBuild DTSDKName DTPlatformVersion; do
+  if ! /usr/libexec/PlistBuddy -c "Print :${TOOLCHAIN_KEY}" "$APP/Contents/Info.plist" >/dev/null 2>&1; then
+    echo "error: packaged Info.plist missing toolchain key ${TOOLCHAIN_KEY}" >&2
+    exit 1
+  fi
+done
+
+# Foundation Models linkage. Unset by default so a developer on an older Xcode is not
+# blocked, and the script says out loud when it skipped rather than printing nothing —
+# a check that could not run must not read like a check that passed. The macos-26
+# packaging job and every tagged release set the gate.
+"${ROOT}/Scripts/verify-release-capabilities.sh" "$APP"
+
 codesign --verify --strict --verbose=2 "$APP"
 
 echo "=========================================="

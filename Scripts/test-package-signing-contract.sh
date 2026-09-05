@@ -82,4 +82,13 @@ if devtype_effective_hardened_runtime invalid developer-id >/dev/null 2>&1; then
   exit 1
 fi
 
+# Verify toolchain metadata keys are preserved in Info.plist
+for TOOLCHAIN_KEY in DTXcode DTXcodeBuild DTSDKName DTPlatformVersion; do
+  /usr/libexec/PlistBuddy -c "Add :${TOOLCHAIN_KEY} string test-${TOOLCHAIN_KEY}" "${CONTENTS}/Info.plist" >/dev/null
+  if [[ "$(/usr/libexec/PlistBuddy -c "Print :${TOOLCHAIN_KEY}" "${CONTENTS}/Info.plist")" != "test-${TOOLCHAIN_KEY}" ]]; then
+    echo "error: toolchain key ${TOOLCHAIN_KEY} not preserved in Info.plist" >&2
+    exit 1
+  fi
+done
+
 echo "package signing contract regression passed"

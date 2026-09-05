@@ -204,6 +204,8 @@ public enum DiagnosticReport {
         /// Read live from `CFBundleShortVersionString` / `CFBundleVersion`, which
         /// `Scripts/package-app.sh` now stamps from `git describe` (§7.6).
         public var appVersion: String?
+        /// Stamped build toolchain info from DTXcode, DTSDKName, etc.
+        public var buildToolchain: String?
         /// §2.10: `EventTapEngine.TapDisableCounters.summaryLine` — `byTimeout` means our
         /// callback blew the system budget and is the most likely silent field failure.
         public var tapDisableSummary: String?
@@ -284,6 +286,7 @@ public enum DiagnosticReport {
             siblingPaths: [String],
             macOSVersion: String,
             appVersion: String?,
+            buildToolchain: String? = nil,
             tapDisableSummary: String? = nil,
             injectTelemetryLines: [String] = [],
             overlongTriggerLines: [String] = [],
@@ -321,6 +324,7 @@ public enum DiagnosticReport {
             self.siblingPaths = siblingPaths
             self.macOSVersion = macOSVersion
             self.appVersion = appVersion
+            self.buildToolchain = buildToolchain
             self.tapDisableSummary = tapDisableSummary
             self.injectTelemetryLines = injectTelemetryLines
             self.overlongTriggerLines = overlongTriggerLines
@@ -413,6 +417,9 @@ public enum DiagnosticReport {
         } else {
             appVersion = version ?? build
         }
+        let dtXcode = Bundle.main.infoDictionary?["DTXcode"] as? String
+        let dtSDKName = Bundle.main.infoDictionary?["DTSDKName"] as? String
+        let buildToolchain = formatToolchain(xcode: dtXcode, sdk: dtSDKName)
         // One Keychain read feeds both fields. Two independent reads could report a provider
         // fallback and a credential state that never coexisted if Keychain availability changed
         // between calls, and would needlessly double a security-service operation.
@@ -482,6 +489,7 @@ public enum DiagnosticReport {
             siblingPaths: siblingPathsProjection.retainedLines,
             macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             appVersion: appVersion,
+            buildToolchain: buildToolchain,
             // §2.10 / §3.2 / §3.9: three diagnostics the engine already maintains and
             // that nothing used to print. Every one of them answers a question a bug
             // report cannot otherwise answer.
@@ -733,6 +741,8 @@ public enum DiagnosticReport {
             switch reason {
             case .unsupportedOS:
                 availability = "unavailable — unsupportedOS (needs macOS 26+ with FoundationModels)"
+            case .buildLacksFoundationModels:
+                availability = "unavailable — buildLacksFoundationModels (app compiled without FoundationModels)"
             case .deviceNotEligible:
                 availability = "unavailable — deviceNotEligible"
             case .appleIntelligenceNotEnabled:
@@ -771,6 +781,28 @@ public enum DiagnosticReport {
             + "retained=\(retained)/\(ActivityHistoryStore.maxEvents)"
     }
 
+    public static func formatToolchain(xcode: String?, sdk: String?) -> String {
+        let xcodeStr: String
+        if let xcode, !xcode.isEmpty {
+            if xcode.count == 4, let num = Int(xcode) {
+                let major = num / 100
+                let minor = (num % 100) / 10
+                let patch = num % 10
+                if patch > 0 {
+                    xcodeStr = "\(major).\(minor).\(patch)"
+                } else {
+                    xcodeStr = "\(major).\(minor)"
+                }
+            } else {
+                xcodeStr = xcode
+            }
+        } else {
+            xcodeStr = "unknown"
+        }
+        let sdkStr = (sdk?.isEmpty == false) ? sdk! : "unknown"
+        return "Built with Xcode \(xcodeStr) · SDK \(sdkStr)"
+    }
+
     public static func formatHeader(_ context: Context) -> String {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -779,6 +811,7 @@ public enum DiagnosticReport {
             "Generated: \(iso.string(from: context.generatedAt))",
             "macOS: \(boundedScalar(context.macOSVersion, label: "macOS", domain: "macos-version"))",
             "App version: \(boundedOptionalScalar(context.appVersion, label: "appVersion", domain: "app-version", nilValue: "unknown"))",
+            context.buildToolchain ?? formatToolchain(xcode: nil, sdk: nil),
             "",
             "-- Identity --",
             "Bundle ID: \(boundedScalar(context.bundleID, label: "bundleID", domain: "process-bundle-id"))",

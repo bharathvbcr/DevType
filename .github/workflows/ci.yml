@@ -99,13 +99,21 @@ jobs:
 
   package:
     name: Package .app
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 30
     needs: [test, test-macos26]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          # Distinct from macos-14: SDK/ABI differ when FoundationModels is present.
+          key: spm-${{ runner.os }}-macos26-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-macos26-
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -137,7 +145,20 @@ jobs:
               echo "error: packaged Info.plist contains broad ATS exception ${ATS_KEY}"; exit 1
             fi
           done
+          for TOOLCHAIN_KEY in DTXcode DTXcodeBuild DTSDKName DTPlatformVersion; do
+            if ! /usr/libexec/PlistBuddy -c "Print :${TOOLCHAIN_KEY}" "$APP/Contents/Info.plist" >/dev/null 2>&1; then
+              echo "error: packaged Info.plist missing toolchain key ${TOOLCHAIN_KEY}"; exit 1
+            fi
+          done
           codesign --verify --verbose=2 "$APP"
+
+      - name: Verify Foundation Models linkage
+        # This job is pinned to macos-26 precisely so the packaged bundle has the
+        # Foundation Models features. Asserting it here catches a runner or SDK
+        # regression on the pull request that causes it, not at tag time.
+        env:
+          DEVTYPE_REQUIRE_FOUNDATION_MODELS: '1'
+        run: ./Scripts/verify-release-capabilities.sh .build/DevType.app
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4

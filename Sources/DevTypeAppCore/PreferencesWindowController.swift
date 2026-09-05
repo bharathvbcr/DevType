@@ -98,6 +98,7 @@ enum AppleSpeechReadinessDisplayState: Equatable {
     case denied
     case restricted
     case onDeviceUnavailable
+    case buildLacksSpeechAnalyzer
 
     static func resolve(
         authorization: SpeechAuthorization.Status,
@@ -114,6 +115,8 @@ enum AppleSpeechReadinessDisplayState: Equatable {
         switch providerReadiness {
         case .ready: return .ready
         case .requiresPermission: return .needsPermission
+        case .unsupported(reason: .buildLacksSpeechAnalyzer):
+            return .buildLacksSpeechAnalyzer
         case .downloading, .requiresConfiguration, .temporarilyUnavailable,
              .incompatible, .corrupt, .unsupported:
             return .onDeviceUnavailable
@@ -129,6 +132,8 @@ enum AppleSpeechReadinessDisplayState: Equatable {
         case .restricted: return "prefs.voice.speechModels.status.speechRestricted"
         case .onDeviceUnavailable:
             return "prefs.voice.speechModels.status.onDeviceUnavailable"
+        case .buildLacksSpeechAnalyzer:
+            return "prefs.voice.speechModels.status.buildLacksSpeech"
         }
     }
 
@@ -136,7 +141,7 @@ enum AppleSpeechReadinessDisplayState: Equatable {
         switch self {
         case .checking: return .checking
         case .ready: return .ready
-        case .needsPermission, .denied, .restricted, .onDeviceUnavailable: return .attention
+        case .needsPermission, .denied, .restricted, .onDeviceUnavailable, .buildLacksSpeechAnalyzer: return .attention
         }
     }
 }
@@ -152,6 +157,7 @@ enum LocalAIReadinessDisplayState: Equatable {
     case denied
     case restricted
     case onDeviceUnavailable
+    case buildLacksSpeechAnalyzer
 
     static func resolve(
         authorization: SpeechAuthorization.Status,
@@ -167,6 +173,7 @@ enum LocalAIReadinessDisplayState: Equatable {
         case .denied: return .denied
         case .restricted: return .restricted
         case .onDeviceUnavailable: return .onDeviceUnavailable
+        case .buildLacksSpeechAnalyzer: return .buildLacksSpeechAnalyzer
         case .ready: break
         }
 
@@ -185,6 +192,7 @@ enum LocalAIReadinessDisplayState: Equatable {
         case .denied: return "prefs.voice.speechModels.status.speechDenied"
         case .restricted: return "prefs.voice.speechModels.status.speechRestricted"
         case .onDeviceUnavailable: return "prefs.voice.speechModels.status.onDeviceUnavailable"
+        case .buildLacksSpeechAnalyzer: return "prefs.voice.speechModels.status.buildLacksSpeech"
         }
     }
 
@@ -192,7 +200,7 @@ enum LocalAIReadinessDisplayState: Equatable {
         switch self {
         case .checking: return .checking
         case .ready: return .ready
-        case .basicCleanup, .needsPermission, .denied, .restricted, .onDeviceUnavailable:
+        case .basicCleanup, .needsPermission, .denied, .restricted, .onDeviceUnavailable, .buildLacksSpeechAnalyzer:
             return .attention
         }
     }

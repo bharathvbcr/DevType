@@ -142,6 +142,32 @@ cp "${PLIST_SRC}" "${PLIST_STAGED}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION_SHORT}" "${PLIST_STAGED}" >/dev/null
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION_BUILD}" "${PLIST_STAGED}" >/dev/null
 
+# Toolchain stamping: DTXcode, DTXcodeBuild, DTSDKName, DTPlatformVersion
+XCODE_INFO="$(xcodebuild -version 2>/dev/null || true)"
+XCODE_VER_RAW="$(echo "${XCODE_INFO}" | awk '/^Xcode / { print $2 }')"
+XCODE_BUILD_RAW="$(echo "${XCODE_INFO}" | awk '/^Build version / { print $3 }')"
+SDK_VER_RAW="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || true)"
+PLATFORM_VER_RAW="$(xcrun --sdk macosx --show-sdk-platform-version 2>/dev/null || true)"
+
+DT_XCODE="${XCODE_VER_RAW:-unknown}"
+if [[ "${XCODE_VER_RAW}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+  DT_XCODE="$(printf "%02d%d0" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")"
+fi
+DT_XCODE_BUILD="${XCODE_BUILD_RAW:-unknown}"
+DT_SDK_NAME="macosx${SDK_VER_RAW:-unknown}"
+DT_PLATFORM_VER="${PLATFORM_VER_RAW:-${SDK_VER_RAW:-unknown}}"
+
+set_staged_plist_entry() {
+  local key="$1" val="$2"
+  /usr/libexec/PlistBuddy -c "Set :${key} ${val}" "${PLIST_STAGED}" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :${key} string ${val}" "${PLIST_STAGED}" >/dev/null
+}
+
+set_staged_plist_entry "DTXcode" "${DT_XCODE}"
+set_staged_plist_entry "DTXcodeBuild" "${DT_XCODE_BUILD}"
+set_staged_plist_entry "DTSDKName" "${DT_SDK_NAME}"
+set_staged_plist_entry "DTPlatformVersion" "${DT_PLATFORM_VER}"
+
 # §7.5: signing assets live in Resources/ for discoverability but must not be copied
 # into the shipped bundle.
 RESOURCE_EXCLUDES=("Info.plist" "DevType.entitlements")

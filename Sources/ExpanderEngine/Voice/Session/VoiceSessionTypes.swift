@@ -209,6 +209,7 @@ public enum FailureCode: String, Codable, Sendable {
     case secureInputActive
     case manifestWriteFailed
     case staleGeneration
+    case buildLacksSpeechAnalyzer
 }
 
 public enum RetryClass: String, Codable, Sendable {

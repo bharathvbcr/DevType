@@ -136,6 +136,7 @@ public extension AIModelAvailability.Reason {
     var localizationKey: String {
         switch self {
         case .unsupportedOS: return "ai.availability.unsupportedOS"
+        case .buildLacksFoundationModels: return "ai.availability.buildLacksFoundationModels"
         case .deviceNotEligible: return "ai.availability.deviceNotEligible"
         case .appleIntelligenceNotEnabled: return "ai.availability.notEnabled"
         case .modelNotReady: return "ai.availability.modelNotReady"

@@ -711,4 +711,63 @@ final class AIPlumbingTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - "This build" vs "this Mac"
+
+    /// v0.1.7 shipped a DMG built on a toolchain without Foundation Models, so every
+    /// macOS 26 user was told their OS was too old. Splitting the reason fixes that —
+    /// but only if the split is drawn on the right axis. A Mac below macOS 26 must keep
+    /// hearing "requires macOS 26" however the binary was built: a newer download
+    /// cannot help it, and sending someone there is the same lie in the other direction.
+    ///
+    /// `availability` itself cannot cover this, since one of the two build states is
+    /// always compiled out.
+    func testUnavailabilityBlamesTheOSBeforeTheBuild() {
+        XCTAssertEqual(
+            AITextTransformSupport.unavailableReason(hasFoundationModels: false, isCompatibleOS: false),
+            .unsupportedOS,
+            "A Mac below macOS 26 gains nothing from a newer DMG."
+        )
+        XCTAssertEqual(
+            AITextTransformSupport.unavailableReason(hasFoundationModels: true, isCompatibleOS: false),
+            .unsupportedOS
+        )
+        XCTAssertEqual(
+            AITextTransformSupport.unavailableReason(hasFoundationModels: false, isCompatibleOS: true),
+            .buildLacksFoundationModels,
+            "A Mac that could run the models, held back by its binary, is the one case the new copy is for."
+        )
+        XCTAssertEqual(
+            AITextTransformSupport.unavailableReason(hasFoundationModels: true, isCompatibleOS: true),
+            .unsupportedOS
+        )
+    }
+
+    /// The two reasons must never resolve to the same sentence, or the split bought nothing.
+    func testBuildAndOSReasonsCarryDistinctCopyInEveryLanguage() {
+        for language in AppLanguage.concreteCases {
+            let table = LocalizationManager.stringTable(for: language)
+            let os = table[AIModelAvailability.Reason.unsupportedOS.localizationKey]
+            let build = table[AIModelAvailability.Reason.buildLacksFoundationModels.localizationKey]
+            XCTAssertNotNil(os, "\(language): missing unsupportedOS copy")
+            XCTAssertNotNil(build, "\(language): missing buildLacksFoundationModels copy")
+            XCTAssertNotEqual(os, build, "\(language): the two reasons read identically")
+        }
+    }
+
+    /// The shipping DMG is built on the Foundation Models toolchain; the fallback exists
+    /// for the macOS 14 CI job that proves it still compiles.
+    func testAvailabilityNeverBlamesTheBuildOnAToolchainThatHasFoundationModels() throws {
+        #if canImport(FoundationModels)
+        if case .unavailable(let reason) = AITextTransformSupport.availability {
+            XCTAssertNotEqual(
+                reason,
+                .buildLacksFoundationModels,
+                "This binary links Foundation Models; it must never tell the user otherwise."
+            )
+        }
+        #else
+        throw XCTSkip("toolchain has no FoundationModels")
+        #endif
+    }
 }

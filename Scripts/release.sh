@@ -96,6 +96,9 @@ VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP
 echo "==> version ${VERSION}"
 if [[ -n "${RELEASE_TAG}" ]]; then
   "${ROOT}/Scripts/verify-release-version.sh" "${RELEASE_TAG}" "${VERSION}"
+  DEVTYPE_REQUIRE_FOUNDATION_MODELS=1 "${ROOT}/Scripts/verify-release-capabilities.sh" "${APP_BUNDLE}"
+else
+  "${ROOT}/Scripts/verify-release-capabilities.sh" "${APP_BUNDLE}"
 fi
 
 # Verify the hardened runtime flag actually landed. Notarization fails without it,

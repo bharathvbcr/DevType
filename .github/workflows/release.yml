@@ -29,12 +29,20 @@ jobs:
     # version assertion); a manual dispatch from a branch must skip instead of
     # publishing a garbage-named release.
     if: github.ref_type == 'tag'
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          # Distinct from macos-14: SDK/ABI differ when FoundationModels is present.
+          key: spm-${{ runner.os }}-macos26-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-macos26-
 
       - name: Check release notes exist
         # Fail before the multi-minute build, not at publish time.
@@ -70,6 +78,7 @@ jobs:
           DEVTYPE_SKIP_AUTO_CERT: '1'
           DEVTYPE_SKIP_NOTARIZE: '1'
           DEVTYPE_RELEASE_TAG: ${{ github.ref_name }}
+          DEVTYPE_REQUIRE_FOUNDATION_MODELS: '1'
         run: |
           ./Scripts/release.sh
 

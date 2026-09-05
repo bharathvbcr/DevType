@@ -285,6 +285,8 @@ enum AITransformFlow {
         switch reason {
         case .unsupportedOS:
             return loc.s("ai.availability.unsupportedOS")
+        case .buildLacksFoundationModels:
+            return loc.s("ai.availability.buildLacksFoundationModels")
         case .deviceNotEligible:
             return loc.s("ai.availability.deviceNotEligible")
         case .appleIntelligenceNotEnabled:

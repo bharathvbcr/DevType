@@ -1214,6 +1214,7 @@ public final class LocalizationManager: ObservableObject {
 
             "ai.availability.available": "Available",
             "ai.availability.unsupportedOS": "Requires macOS 26 or later",
+            "ai.availability.buildLacksFoundationModels": "This build of DevType was compiled without Apple Foundation Models. Download the current release.",
             "ai.availability.deviceNotEligible": "This Mac is not eligible for Apple Intelligence",
             "ai.availability.notEnabled": "Turn on Apple Intelligence in System Settings",
             "ai.availability.modelNotReady": "On-device model is downloading or not ready yet",
@@ -1725,6 +1726,7 @@ public final class LocalizationManager: ObservableObject {
             "prefs.voice.speechModels.status.speechDenied": "Speech access denied",
             "prefs.voice.speechModels.status.speechRestricted": "Speech access restricted",
             "prefs.voice.speechModels.status.onDeviceUnavailable": "On-device speech unavailable",
+            "prefs.voice.speechModels.status.buildLacksSpeech": "This build of DevType was compiled without Apple Foundation Models. Download the current release.",
             "prefs.voice.speechModels.status.basicCleanup": "Ready with basic cleanup",
             "prefs.voice.appleAssets.label": "Enhanced Apple Speech",
             "prefs.voice.appleAssets.install": "Download Model",
@@ -3112,6 +3114,7 @@ public final class LocalizationManager: ObservableObject {
 
             "ai.availability.available": "사용 가능",
             "ai.availability.unsupportedOS": "macOS 26 이상이 필요합니다",
+            "ai.availability.buildLacksFoundationModels": "이 DevType 빌드는 Apple Foundation Models 없이 컴파일되었습니다. 최신 릴리스를 다운로드하세요.",
             "ai.availability.deviceNotEligible": "이 Mac은 Apple Intelligence를 사용할 수 없습니다",
             "ai.availability.notEnabled": "시스템 설정에서 Apple Intelligence를 켜세요",
             "ai.availability.modelNotReady": "온디바이스 모델을 다운로드 중이거나 아직 준비되지 않았습니다",
@@ -3608,6 +3611,7 @@ public final class LocalizationManager: ObservableObject {
             "prefs.voice.speechModels.status.speechDenied": "음성 인식 권한 거부됨",
             "prefs.voice.speechModels.status.speechRestricted": "음성 인식 권한 제한됨",
             "prefs.voice.speechModels.status.onDeviceUnavailable": "기기 내 음성 인식을 사용할 수 없음",
+            "prefs.voice.speechModels.status.buildLacksSpeech": "이 DevType 빌드는 Apple Foundation Models 없이 컴파일되었습니다. 최신 릴리스를 다운로드하세요.",
             "prefs.voice.speechModels.status.basicCleanup": "기본 정리로 사용 가능",
             "prefs.voice.appleAssets.label": "향상된 Apple 음성 인식",
             "prefs.voice.appleAssets.install": "모델 다운로드",
@@ -4997,6 +5001,7 @@ public final class LocalizationManager: ObservableObject {
 
             "ai.availability.available": "利用可能",
             "ai.availability.unsupportedOS": "macOS 26 以降が必要です",
+            "ai.availability.buildLacksFoundationModels": "このDevTypeビルドはApple Foundation Modelsなしでコンパイルされています。最新のリリースをダウンロードしてください。",
             "ai.availability.deviceNotEligible": "この Mac は Apple Intelligence に対応していません",
             "ai.availability.notEnabled": "システム設定で Apple Intelligence をオンにしてください",
             "ai.availability.modelNotReady": "オンデバイスモデルをダウンロード中か、まだ準備できていません",
@@ -5500,6 +5505,7 @@ public final class LocalizationManager: ObservableObject {
             "prefs.voice.speechModels.status.speechDenied": "音声認識が拒否されています",
             "prefs.voice.speechModels.status.speechRestricted": "音声認識が制限されています",
             "prefs.voice.speechModels.status.onDeviceUnavailable": "オンデバイス音声認識を利用できません",
+            "prefs.voice.speechModels.status.buildLacksSpeech": "このDevTypeビルドはApple Foundation Modelsなしでコンパイルされています。最新のリリースをダウンロードしてください。",
             "prefs.voice.speechModels.status.basicCleanup": "基本クリーンアップで利用可能",
             "prefs.voice.appleAssets.label": "強化されたApple音声認識",
             "prefs.voice.appleAssets.install": "モデルをダウンロード",

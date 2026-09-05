@@ -11,9 +11,13 @@ public enum AIModelAvailability: Equatable, Sendable {
     case available
     case unavailable(Reason)
 
-    public enum Reason: Equatable, Sendable {
-        /// Process is running below macOS 26, or FoundationModels is not linked.
+    /// `CaseIterable` so `AppStringKeyCoverageTests` iterates the real set: a
+    /// hand-copied list is exactly how a new reason ships with no string behind it.
+    public enum Reason: Equatable, Sendable, CaseIterable {
+        /// Process is running below macOS 26.
         case unsupportedOS
+        /// This binary was compiled on a toolchain without Apple Foundation Models.
+        case buildLacksFoundationModels
         case deviceNotEligible
         case appleIntelligenceNotEnabled
         case modelNotReady
@@ -1670,14 +1674,33 @@ public enum AITextTransformSupport {
         return version.majorVersion >= 26
     }
 
+    /// Which of the two "no on-device AI" answers to give.
+    ///
+    /// The distinction only helps if it is drawn on the right axis. An old OS is the
+    /// user's blocker no matter how the app was built, so a macOS 15 user must keep
+    /// hearing "requires macOS 26" — telling them to download the current release
+    /// sends them somewhere that cannot help. Only a machine that *could* run the
+    /// models, held back by the binary it was given, gets the build message.
+    ///
+    /// Pure and separate from `availability` because the `#else` branch below is
+    /// compiled out on a Foundation Models toolchain: the truth table is otherwise
+    /// untestable on the toolchain that ships.
+    public static func unavailableReason(
+        hasFoundationModels: Bool,
+        isCompatibleOS: Bool
+    ) -> AIModelAvailability.Reason {
+        guard isCompatibleOS else { return .unsupportedOS }
+        return hasFoundationModels ? .unsupportedOS : .buildLacksFoundationModels
+    }
+
     public static var availability: AIModelAvailability {
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
             return AITextTransformer.probeAvailability()
         }
-        return .unavailable(.unsupportedOS)
+        return .unavailable(unavailableReason(hasFoundationModels: true, isCompatibleOS: isRunningOnCompatibleOS))
         #else
-        return .unavailable(.unsupportedOS)
+        return .unavailable(unavailableReason(hasFoundationModels: false, isCompatibleOS: isRunningOnCompatibleOS))
         #endif
     }
 }

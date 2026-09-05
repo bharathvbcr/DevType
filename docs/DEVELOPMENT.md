@@ -74,7 +74,7 @@ DEVTYPE_BENCH=1 ./Scripts/test.sh
   --filter SecureInputMonitorLifecycleTests
 ```
 
-Continuous integration (`.github/workflows/ci.yml`) runs `swift build` + `swift test` on macOS 14 plus a dedicated **macOS 26 job**, because `AITextTransformer` compiles against Apple Foundation Models only where `canImport(FoundationModels)` holds — the older runner guards the stub path, the newer one compiles and tests the real AI plumbing.
+Continuous integration (`.github/workflows/ci.yml`) runs `swift build` + `swift test` on macOS 14 plus a dedicated **macOS 26 job**, because `AITextTransformer` compiles against Apple Foundation Models only where `canImport(FoundationModels)` holds — the older runner guards the stub path, the newer one compiles and tests the real AI plumbing. Packaging jobs (`package` in `ci.yml` and the distribution job in `release.yml`) run **only on `macos-26` runners**, because the packaged artifact must be built by a toolchain that has the Foundation Models SDK — v0.1.7 shipped a DMG built on `macos-14`, and every guarded feature compiled to its fallback. The release job must therefore track the newest SDK the code targets, not the oldest one it supports. `Scripts/verify-release-capabilities.sh` (gated by `DEVTYPE_REQUIRE_FOUNDATION_MODELS=1`) asserts that `FoundationModels.framework` is linked *and weak* before a DMG is assembled or published: weak linkage is what lets a macOS 26 SDK build still launch on the macOS 14 deployment target.
 
 ### Headless Test Isolation Rule
 `ExpanderEngineTests` is designed to be completely **headless**:

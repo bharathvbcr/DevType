@@ -1054,6 +1054,7 @@ public final class VoiceDictationController: @unchecked Sendable {
         case .authFailed: return localization.s("voice.error.invalidAPIKey")
         case .endpointUnreachable: return localization.s("voice.error.endpointUnreachable")
         case .noReadyProvider: return localization.s("voice.error.noReadyProvider")
+        case .buildLacksSpeechAnalyzer: return localization.s("prefs.voice.speechModels.status.buildLacksSpeech")
         case .modelNotFound, .modelLoadFailed: return localization.s("voice.error.modelUnavailable")
         case .modelDigestMismatch: return localization.s("voice.error.modelIntegrity")
         case .rateLimited: return localization.s("voice.error.rateLimited")

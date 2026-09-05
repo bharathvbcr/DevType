@@ -288,10 +288,39 @@ public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Send
         )
     }
 
+    /// False only when this binary was compiled on a toolchain without `SpeechAnalyzer`;
+    /// it says nothing about the machine the binary is running on.
+    static let isBuiltWithSpeechAnalyzer: Bool = {
+        #if compiler(>=6.0)
+        return true
+        #else
+        return false
+        #endif
+    }()
+
+    /// Why the platform came back unsupported, drawn on the right axis.
+    ///
+    /// `isPlatformSupported()` is false for two unrelated reasons and the user needs
+    /// them told apart: on a Mac below macOS 26 the OS is the blocker whatever the
+    /// build, and only a Mac that could run the analyzer, running a binary compiled
+    /// without it, should be pointed at a newer download. Same rule as
+    /// `AITextTransformSupport.unavailableReason`, and pure for the same reason —
+    /// one of the two build states is always compiled out.
+    static func platformUnsupportedReason(
+        builtWithSpeechAnalyzer: Bool,
+        isCompatibleOS: Bool
+    ) -> FailureCode {
+        guard isCompatibleOS else { return .modelNotFound }
+        return builtWithSpeechAnalyzer ? .modelNotFound : .buildLacksSpeechAnalyzer
+    }
+
     /// Observes platform, TCC, locale, and asset readiness without prompting or downloading.
     public func probe() async -> ProviderReadiness {
         guard runtime.isPlatformSupported() else {
-            return .unsupported(reason: .modelNotFound)
+            return .unsupported(reason: Self.platformUnsupportedReason(
+                builtWithSpeechAnalyzer: Self.isBuiltWithSpeechAnalyzer,
+                isCompatibleOS: AITextTransformSupport.isRunningOnCompatibleOS
+            ))
         }
         guard authorizationStatus() == .authorized else {
             return .requiresPermission(.speechRecognition)

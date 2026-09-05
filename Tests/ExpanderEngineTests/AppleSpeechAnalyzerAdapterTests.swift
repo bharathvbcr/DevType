@@ -72,6 +72,44 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         XCTAssertEqual(probes.value, 0)
     }
 
+    /// `isPlatformSupported()` is false for two unrelated reasons, and the copy the user
+    /// sees has to name the right one. A Mac below macOS 26 is blocked by its OS whatever
+    /// toolchain built the binary; only a Mac that could run the analyzer, running a build
+    /// compiled without it, should be pointed at a newer download.
+    ///
+    /// Keying that off the compiler alone — as the first cut of this did — makes the macOS 14
+    /// CI job disagree with the macOS 26 one about the very same input, which is how the test
+    /// above starts failing on one runner only.
+    func testPlatformUnsupportedReasonBlamesTheOSBeforeTheBuild() {
+        XCTAssertEqual(
+            AppleSpeechAnalyzerAdapter.platformUnsupportedReason(builtWithSpeechAnalyzer: false, isCompatibleOS: false),
+            .modelNotFound,
+            "A Mac below macOS 26 gains nothing from a newer DMG."
+        )
+        XCTAssertEqual(
+            AppleSpeechAnalyzerAdapter.platformUnsupportedReason(builtWithSpeechAnalyzer: true, isCompatibleOS: false),
+            .modelNotFound
+        )
+        XCTAssertEqual(
+            AppleSpeechAnalyzerAdapter.platformUnsupportedReason(builtWithSpeechAnalyzer: false, isCompatibleOS: true),
+            .buildLacksSpeechAnalyzer
+        )
+        XCTAssertEqual(
+            AppleSpeechAnalyzerAdapter.platformUnsupportedReason(builtWithSpeechAnalyzer: true, isCompatibleOS: true),
+            .modelNotFound
+        )
+    }
+
+    /// The flag has to track the toolchain, not the host: it is the one input above that a
+    /// released binary carries with it.
+    func testBuiltWithSpeechAnalyzerTracksTheToolchain() {
+        #if compiler(>=6.0)
+        XCTAssertTrue(AppleSpeechAnalyzerAdapter.isBuiltWithSpeechAnalyzer)
+        #else
+        XCTAssertFalse(AppleSpeechAnalyzerAdapter.isBuiltWithSpeechAnalyzer)
+        #endif
+    }
+
     func testExplicitAssetInstallationIsTheOnlyDownloadPathAndReprobesInstalled() async throws {
         let assets = LockedValue(AppleSpeechAnalyzerRuntime.AssetState.downloadable)
         let installations = LockedCounter()
