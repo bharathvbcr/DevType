@@ -3,6 +3,36 @@ import XCTest
 @testable import ExpanderEngine
 
 final class SecretClipboardWriteFailureTests: XCTestCase {
+
+    func testNegativeClearDeadlineUsesTheDefault() {
+        verifyDeadline(-1, expected: SecretClipboard.defaultClearAfter)
+    }
+
+    func testNonFiniteAndExtremeClearDeadlinesStayBounded() {
+        for invalid in [Double.nan, .infinity, -.infinity] {
+            verifyDeadline(invalid, expected: SecretClipboard.defaultClearAfter)
+        }
+        verifyDeadline(.greatestFiniteMagnitude, expected: 86_400)
+        verifyDeadline(0, expected: 0)
+    }
+
+    private func verifyDeadline(_ duration: TimeInterval, expected: TimeInterval) {
+        let clipboard = SecretClipboard()
+        let writer = Writer(failure: .none)
+        var scheduled: [() -> Void] = []
+        let result = clipboard.copyResult(
+            "synthetic secret", clearAfter: duration, pasteboardWriter: writer, broker: nil,
+            schedule: { action, delay in
+                XCTAssertEqual(delay, expected)
+                scheduled.append(action)
+            }
+        )
+        guard case .copied(let date) = result else { return XCTFail("Copy failed") }
+        XCTAssertTrue(date.timeIntervalSinceNow.isFinite)
+        XCTAssertEqual(scheduled.count, 1)
+        scheduled.first?()
+        XCTAssertNil(writer.currentString)
+    }
     private final class Writer: SecretPasteboardWriting {
         enum Failure { case none, string, concealed, transient, generated }
 

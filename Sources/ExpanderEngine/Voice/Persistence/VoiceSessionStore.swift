@@ -39,7 +39,7 @@ public final class VoiceSessionStore: @unchecked Sendable {
 
         let manifestURL = dir.appendingPathComponent("manifest.json")
         let data = try JSONEncoder().encode(snapshot)
-        try atomicWrite(data: data, to: manifestURL)
+        try atomicWrite(data: data, to: manifestURL, maximumBytes: VoiceRecoveryService.ScanLimits.standard.maximumManifestBytes)
         return dir
     }
 
@@ -49,7 +49,7 @@ public final class VoiceSessionStore: @unchecked Sendable {
         let dir = sessionDirectory(for: sessionID)
         let fileURL = dir.appendingPathComponent("raw-transcript.json")
         let data = try JSONEncoder().encode(raw)
-        try atomicWrite(data: data, to: fileURL)
+        try atomicWrite(data: data, to: fileURL, maximumBytes: VoiceRecoveryService.ScanLimits.standard.maximumRawTranscriptBytes)
     }
 
     public func saveFinalTranscript(_ final: FinalTranscript, for sessionID: VoiceSessionID) throws {
@@ -58,7 +58,7 @@ public final class VoiceSessionStore: @unchecked Sendable {
         let dir = sessionDirectory(for: sessionID)
         let fileURL = dir.appendingPathComponent("final-transcript.json")
         let data = try JSONEncoder().encode(final)
-        try atomicWrite(data: data, to: fileURL)
+        try atomicWrite(data: data, to: fileURL, maximumBytes: VoiceRecoveryService.ScanLimits.standard.maximumFinalTranscriptBytes)
     }
 
     public func saveDeliveryReceipt(_ receipt: DeliveryReceipt, for sessionID: VoiceSessionID) throws {
@@ -67,7 +67,7 @@ public final class VoiceSessionStore: @unchecked Sendable {
         let dir = sessionDirectory(for: sessionID)
         let fileURL = dir.appendingPathComponent("delivery-receipt.json")
         let data = try JSONEncoder().encode(receipt)
-        try atomicWrite(data: data, to: fileURL)
+        try atomicWrite(data: data, to: fileURL, maximumBytes: VoiceRecoveryService.ScanLimits.standard.maximumDeliveryReceiptBytes)
     }
 
     /// Persists the exact artifact metadata used for recognition. The CAF itself is written by
@@ -79,15 +79,12 @@ public final class VoiceSessionStore: @unchecked Sendable {
         let dir = sessionDirectory(for: sessionID)
         let fileURL = dir.appendingPathComponent("audio-artifact.json")
         let data = try JSONEncoder().encode(artifact)
-        try atomicWrite(data: data, to: fileURL)
+        try atomicWrite(data: data, to: fileURL, maximumBytes: VoiceRecoveryService.ScanLimits.standard.maximumManifestBytes)
     }
 
-    private func atomicWrite(data: Data, to destinationURL: URL) throws {
-        let tempURL = destinationURL.deletingLastPathComponent().appendingPathComponent(".\(destinationURL.lastPathComponent).tmp")
-        try data.write(to: tempURL, options: .atomic)
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            try fileManager.removeItem(at: destinationURL)
-        }
-        try fileManager.moveItem(at: tempURL, to: destinationURL)
+    private func atomicWrite(data: Data, to destinationURL: URL, maximumBytes: Int) throws {
+        // A successful save must remain readable under the recovery service's own bounds.
+        guard data.count <= maximumBytes else { throw POSIXError(.EFBIG) }
+        try FilePermissions.atomicWrite(data, to: destinationURL)
     }
 }

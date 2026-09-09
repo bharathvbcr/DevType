@@ -202,6 +202,41 @@ final class PaletteToolRoutingTests: XCTestCase {
 
     // MARK: - Bounds
 
+    func testTimeoutReturnsWhileCancellationIgnoringEngineKeepsAdmission() async {
+        let entered = expectation(description: "engine entered")
+        let returned = expectation(description: "caller returned by deadline")
+        let release = Sendable_AsyncGate()
+        let operation = Task {
+            let result = await PaletteToolRouter.route(
+                query: "the date next friday",
+                engine: { _ in
+                    entered.fulfill()
+                    await release.wait()
+                    return "late answer"
+                }, timeout: 0.02
+            )
+            XCTAssertNil(result)
+            returned.fulfill()
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        await fulfillment(of: [returned], timeout: 0.5)
+        let extraCalls = Sendable_Counter()
+        for _ in 0..<100 {
+            let result = await PaletteToolRouter.route(query: "the date next monday") { _ in
+                extraCalls.increment()
+                return "overlap"
+            }
+            XCTAssertNil(result)
+        }
+        XCTAssertEqual(extraCalls.value, 0, "Abandoned work must still occupy admission")
+        release.signal()
+        await operation.value
+        // The uncooperative operation now finishes; give its actor cleanup a bounded turn.
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        let recovered = await PaletteToolRouter.route(query: "the date next monday") { _ in "recovered" }
+        XCTAssertEqual(recovered?.text, "recovered")
+    }
+
     /// A model that never answers used to hold the single-flight latch for the rest of the
     /// session: every later keystroke found it busy and routing was dead, with no error
     /// surfaced anywhere. The timeout is what makes that recoverable.

@@ -38,6 +38,7 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
 
     public let descriptor: CorrectionProviderDescriptor
     private let fallback = DeterministicCorrector()
+    private static let responseLatch = SingleFlightLatch()
 
     public init() {
         self.descriptor = CorrectionProviderDescriptor(
@@ -78,9 +79,11 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
     }
 
     public func correct(_ request: CorrectionRequest) async throws -> CorrectionCandidate {
+        try Task.checkCancellation()
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
             if let text = await correctWithinContextWindow(request) {
+                try Task.checkCancellation()
                 return CorrectionCandidate(
                     text: text,
                     providerID: descriptor.id,
@@ -94,6 +97,7 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
         #endif
         // Model unavailable, declined, or over deadline — deterministic rules still run so
         // the user gets punctuation and capitalisation rather than a raw transcript.
+        try Task.checkCancellation()
         return try await fallback.correct(request)
     }
 
@@ -239,6 +243,7 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
 
         var corrected: [String] = []
         for chunk in chunks {
+            guard !Task.isCancelled else { return nil }
             guard request.deadline.timeIntervalSinceNow > 0.2 else {
                 // Out of time. Anything not yet corrected is returned as spoken rather than
                 // dropped, so a slow model costs polish and never words.
@@ -272,41 +277,32 @@ public final class FoundationLanguageModelCorrector: TranscriptCorrector, @unche
     @available(macOS 26.0, *)
     private func respond(instructions: String, transcript: String, deadline: Date) async -> String? {
         let budget = deadline.timeIntervalSinceNow
-        guard budget > 0.2 else { return nil }
+        guard budget.isFinite, budget > 0.2, !Task.isCancelled else { return nil }
 
         let prompt = CorrectionPromptBuilder.userPrompt(rawTranscript: transcript)
 
         do {
-            return try await withThrowingTaskGroup(of: String?.self) { group in
-                group.addTask {
-                    let model = SystemLanguageModel(
-                        useCase: .general,
-                        guardrails: .permissiveContentTransformations
-                    )
-                    guard case .available = model.availability else { return nil }
-                    let session = LanguageModelSession(model: model, instructions: instructions)
-                    let response = try await session.respond(to: Prompt(prompt))
-                    return response.content
-                }
-                group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
-                    return nil   // deadline reached — treat as no answer, never as an error
-                }
-
-                let first = try await group.next() ?? nil
-                group.cancelAll()
-                guard let first else { return nil }
-
-                let cleaned = CorrectionOutputSanitizer.sanitize(
-                    first,
-                    original: transcript,
-                    markdown: AIPreferences.voiceMarkdownPolicy
+            let first: String? = try await Self.responseLatch.run(timeout: budget) {
+                let model = SystemLanguageModel(
+                    useCase: .general,
+                    guardrails: .permissiveContentTransformations
                 )
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return cleaned.isEmpty ? nil : cleaned
+                guard case .available = model.availability else { return nil }
+                let session = LanguageModelSession(model: model, instructions: instructions)
+                let response = try await session.respond(to: Prompt(prompt))
+                return response.content
             }
+            guard let first else { return nil }
+
+            let cleaned = CorrectionOutputSanitizer.sanitize(
+                first,
+                original: transcript,
+                markdown: AIPreferences.voiceMarkdownPolicy
+            )
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return cleaned.isEmpty ? nil : cleaned
         } catch {
-            DevTypeLog.app.info("[Voice] Apple Intelligence correction unavailable: \(error.localizedDescription)")
+            DevTypeLog.app.info("[Voice] Apple Intelligence correction unavailable: \(DevTypeLog.errorMetadata(error), privacy: .public)")
             return nil
         }
     }

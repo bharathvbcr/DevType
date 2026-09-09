@@ -33,14 +33,18 @@ final class VoiceCaptureRaceTests: XCTestCase {
         var stopError: (any Error)?
         /// Suspends finalization so watchdog-arm and terminal-cleanup ordering is deterministic.
         var duringStop: (@Sendable () async -> Void)?
+        var duringPCMSetup: (@Sendable () -> Void)?
+        private var audioLevelHandler: (@Sendable (Float) -> Void)?
 
         func setDuringStart(_ handler: (@Sendable () -> Void)?) { duringStart = handler }
         func setStartError(_ error: (any Error)?) { startError = error }
         func setStopError(_ error: (any Error)?) { stopError = error }
         func setDuringStop(_ handler: (@Sendable () async -> Void)?) { duringStop = handler }
+        func setDuringPCMSetup(_ handler: (@Sendable () -> Void)?) { duringPCMSetup = handler }
+        func emitAudioLevel(_ level: Float) { audioLevelHandler?(level) }
 
-        func setOnPCMBuffer(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {}
-        func setOnAudioLevelUpdate(_ handler: (@Sendable (Float) -> Void)?) {}
+        func setOnPCMBuffer(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) { duringPCMSetup?() }
+        func setOnAudioLevelUpdate(_ handler: (@Sendable (Float) -> Void)?) { audioLevelHandler = handler }
 
         func startCapture(sessionDirectory: URL) throws {
             startCount += 1
@@ -161,6 +165,39 @@ final class VoiceCaptureRaceTests: XCTestCase {
     }
 
     // MARK: - Start: the generation must be re-checked after setup
+
+    func testGenerationRetiredDuringHandlerSetupNeverOpensMicrophone() async {
+        let spy = CaptureSpy()
+        let coordinator = makeCoordinator(spy)
+        let snapshot = makeSnapshot()
+        let bag = SessionTaskBag(sessionID: snapshot.sessionID, generation: snapshot.generation)
+        await coordinator.installTaskBagForTesting(bag)
+        await spy.setDuringPCMSetup { _ = bag.advanceGenerationAndCancelAll() }
+        await coordinator.performStartAudioCapture(
+            sessionDir: scratchDirectory, snapshot: snapshot,
+            generation: snapshot.generation, enableLiveRecognition: false
+        )
+        let starts = await spy.startCount
+        XCTAssertEqual(starts, 0, "Setup retired before capture; do not briefly reopen the microphone")
+    }
+
+    func testRetiredAudioLevelCallbackCannotUpdateTheHUD() async {
+        let spy = CaptureSpy()
+        let coordinator = makeCoordinator(spy)
+        let snapshot = makeSnapshot()
+        let bag = SessionTaskBag(sessionID: snapshot.sessionID, generation: snapshot.generation)
+        await coordinator.installTaskBagForTesting(bag)
+        let called = LockedFlag()
+        await coordinator.setOnAudioLevel { _ in called.set() }
+        await coordinator.performStartAudioCapture(
+            sessionDir: scratchDirectory, snapshot: snapshot,
+            generation: snapshot.generation, enableLiveRecognition: false
+        )
+        _ = bag.advanceGenerationAndCancelAll()
+        await spy.emitAudioLevel(0.5)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertFalse(called.read())
+    }
 
     func testAlreadyCancelledStartNeverCreatesACaptureSession() async {
         let spy = CaptureSpy()

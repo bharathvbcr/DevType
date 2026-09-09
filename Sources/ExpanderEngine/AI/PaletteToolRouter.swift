@@ -18,10 +18,8 @@ public enum PaletteToolRouter {
 
     /// Longest a routing round trip may take before the row is abandoned.
     ///
-    /// Without a bound, a model that never answers holds the single-flight latch for the rest
-    /// of the session: every later keystroke finds the latch busy, and routing is dead with no
-    /// error surfaced anywhere. The timeout relies on the engine honouring cancellation, which
-    /// `LanguageModelSession.respond` does.
+    /// The caller returns by the deadline plus a short cancellation grace. An engine that
+    /// ignores cancellation retains admission until it exits, keeping resource use bounded.
     public static let timeoutSeconds: Double = 8
 
     /// Longest text a routed row will carry. The palette shows one line; anything longer is
@@ -64,25 +62,6 @@ public enum PaletteToolRouter {
     /// suggestion has a separate one and the two must not block each other.
     static let latch = SingleFlightLatch()
 
-    /// Runs `work`, returning `nil` when it has not finished within `seconds`.
-    ///
-    /// The loser is cancelled rather than left running, so a timed-out round trip does not go
-    /// on consuming the model behind a palette the user has already closed.
-    static func withTimeout(
-        seconds: Double,
-        _ work: @escaping @Sendable () async throws -> String
-    ) async throws -> String? {
-        try await withThrowingTaskGroup(of: String?.self) { group in
-            group.addTask { try await work() }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
-            }
-            defer { group.cancelAll() }
-            return try await group.next() ?? nil
-        }
-    }
-
     /// Nothing the model returns is trusted as a row.
     ///
     /// The tools resolve through `DateFormatLibrary` / `PaletteTextOps` / `SnippetSearch`, so
@@ -110,27 +89,16 @@ public enum PaletteToolRouter {
     ) async -> Routed? {
         guard let engine, shouldAttemptRouting(query: query) else { return nil }
         let trimmed = CommandPaletteCatalog.boundedQuery(query)
-        guard await latch.acquire() else { return nil }
-
-        // Released explicitly on both paths rather than in a `defer`: a deferred release is
-        // ordered after the caller resumes, so the next keystroke's call would find the latch
-        // still held and be dropped as if the model were busy.
-        let routed: Routed?
         do {
-            // Cancelled between acquiring the latch and starting work — the palette closed, so
-            // there is nothing left to answer. Checked inside the do/catch so the latch below
-            // is still released.
+            let raw: String? = try await latch.run(timeout: timeout) { try await engine(trimmed) }
             try Task.checkCancellation()
-            let raw = try await withTimeout(seconds: timeout) { try await engine(trimmed) }
-            routed = raw.flatMap(sanitize).map { Routed(query: trimmed, text: $0) }
+            return raw.flatMap(sanitize).map { Routed(query: trimmed, text: $0) }
         } catch {
             DevTypeLog.store.debug(
                 "[AI] palette routing declined \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
-            routed = nil
+            return nil
         }
-        await latch.release()
-        return routed
     }
 
     #if canImport(FoundationModels)

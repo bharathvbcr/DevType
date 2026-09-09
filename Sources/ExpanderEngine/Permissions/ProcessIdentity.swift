@@ -396,10 +396,11 @@ public final class ProcessIdentity {
         ) else {
             return []
         }
-        if result.timedOut {
+        guard result.succeeded else {
             DevTypeLog.identity.notice(
-                "[Identity] mdfind timed out — dual-install detection falls back to seed paths only"
+                "[Identity] mdfind failed or incomplete — dual-install detection falls back to seed paths only"
             )
+            return []
         }
         return result.output
             .split(whereSeparator: \.isNewline)
@@ -554,7 +555,7 @@ public final class ProcessIdentity {
         ) else {
             return nil
         }
-        let hash = parseCDHash(fromCodesignOutput: result.output)
+        let hash = result.succeeded ? parseCDHash(fromCodesignOutput: result.output) : nil
         if hash == nil {
             DevTypeLog.identity.notice(
                 "[Identity] CDHash unavailable \(DevTypeLog.publicPathMetadata(path), privacy: .public) exit=\(result.exitCode, privacy: .public) timedOut=\(result.timedOut, privacy: .public)"
@@ -573,6 +574,7 @@ public final class ProcessIdentity {
         ) else {
             return nil
         }
+        guard result.succeeded else { return nil }
         return parseDesignatedRequirement(fromCodesignRequirementOutput: result.output)
     }
 

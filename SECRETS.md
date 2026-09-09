@@ -70,6 +70,10 @@ account com.devtype.masterkey                          ← ONE 256-bit master ke
 - The archive is versioned JSON with sorted keys, written atomically, owner-only permissions.
   Bytes a build cannot vouch for (corruption, a *future* format version) are **quarantined
   aside, never overwritten** — forensics beat tidiness.
+  Every quarantine keeps a distinct recovery copy; at 32 copies, new quarantine attempts
+  refuse instead of deleting earlier data. Reads and writes are capped at 64 MiB. An I/O
+  failure, symbolic link, or special file is unavailable, never an empty archive. Diagnostics
+  report an unknown archive count when the file cannot be examined.
 - The **master key** is the only keychain object. It is fetched at most once per process and
   **warmed into memory at launch**, while the keychain is still unlocked from login — so
   copies keep working even if the login keychain auto-locks later (see below).
@@ -90,8 +94,9 @@ ways (details in the appendix):
    decrypt, so per-item storage resurfaces system dialogs forever, one per item, at
    unpredictable times — no migration can fix that.
 
-With the archive, the entire keychain dialog surface is **one item**, touched **once per
-launch**, at the moment it is most likely unlocked.
+With the archive, the keychain dialog surface for sealed values is **one master-key item**.
+Launch consolidation warms it into memory when readable. Failed reads, diagnostics, and
+explicit repair can probe it again; per-item fallback secrets still require their own reads.
 
 ### Fail-safe rules (covered by source-contract and behavioral tests)
 
@@ -109,6 +114,10 @@ launch**, at the moment it is most likely unlocked.
 - The master key is **never trusted without a read-back**: a keychain write can succeed
   against an item the app cannot read (open encrypt ACL, closed decrypt). No read-back → no
   key → per-item keychain fallback, which loses nothing.
+- A successful fallback read returns the secret even when optional consolidation fails.
+  Following copies defer automatic consolidation for five seconds after that failure.
+  Explicit saves, repair, and reads requiring decryption of an existing archive retry
+  immediately. The launch sweep does not repeat a failed master-key probe merely to warm it.
 - The master key is **never overwritten**. If the item exists but this identity cannot read
   it, creation refuses rather than minting a replacement over it: those bytes are the only
   way back into every sealed secret, including after the user answers "Always Allow" and the
@@ -116,6 +125,9 @@ launch**, at the moment it is most likely unlocked.
   secret, permanently. (Existence is checked with a metadata-only query — no decrypt.)
 - A save that cannot reach the master key (locked keychain) falls back to a keychain item —
   and evicts any stale sealed copy so an edited value can never silently revert.
+  If eviction fails, the save reports `errSecIO` and keeps the copies for retry. The shared
+  atomic writer establishes `0600` before writing, synchronizes the staged file, then replaces
+  the destination with one rename; a failure before publication preserves the old destination.
 - Deleting a secret removes it from both homes. Keychain items whose creating build is gone
   (deletes are owner-pinned) are destroyed in place: value overwritten, marked
   `DevType retired secret`, invisible to every API.
@@ -144,8 +156,11 @@ Biometry: available (Touch ID)
 Require authentication: on
 Reuse window: 30s
 Clipboard auto-clear: 90s
+Secret retrieval: returned a value
 Keychain last read: ok
 Secrets pending migration: 0
+Keychain accounts needing authorization (including master key): 0
+Secret cleanup pending: 0
 Keychain: unlocked
 Storage: archive: 4 sealed, keychain-resident: 0, master key: present
   trail: item A: v2 fetch → -25300
@@ -155,6 +170,14 @@ Storage: archive: 4 sealed, keychain-resident: 0, master key: present
 The `trail:` lines are a value-free step log of every fetch, heal, migration and
 consolidation with its `OSStatus`; accounts are aliased (`item A`, `item B`) in first-seen
 order. This is what turns "it prompted again" into a diagnosis.
+
+Secret retrieval and Keychain probe outcomes are independent: a fallback secret can be
+returned successfully while the master-key probe fails. Storage inspection preserves the
+preceding read result in the report. The authorization count includes the master key even
+when no snippet needs migration, and points to **Preferences → Advanced → Repair Secret
+Storage** when authorization is pending. Repair retains the existing explicit system-dialog
+flow. Unreadable keys are never replaced; malformed keys and unavailable sealed secrets are
+reported explicitly.
 
 ## Threat model & limits
 

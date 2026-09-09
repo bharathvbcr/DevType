@@ -136,6 +136,10 @@ public final class SecretClipboard {
         schedule: ((@escaping () -> Void, TimeInterval) -> Void)? = nil
     ) -> CopyOutcome {
         guard !secret.isEmpty else { return .empty }
+        // Public/test-injected durations must never reach Dispatch or Int conversion as NaN,
+        // infinity, or an unbounded number. Invalid values use the normal privacy deadline.
+        let clearAfter = clearAfter.isFinite && clearAfter >= 0
+            ? min(clearAfter, 86_400) : Self.defaultClearAfter
 
         operationLock.lock()
 

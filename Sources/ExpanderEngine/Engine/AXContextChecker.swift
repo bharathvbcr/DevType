@@ -416,8 +416,8 @@ public final class AXContextChecker {
         /// The app does not implement the attribute (any non-Chromium app). Memoized — the
         /// answer cannot change for the life of the process.
         case unsupported
-        /// A transient AX error (timeout, app still launching). **Never memoized**: one unlucky
-        /// round-trip must not disable the wake-up for that process forever.
+        /// A transient AX error or an activation already in flight. Retried after a short
+        /// cooldown; never remembered as a permanent answer.
         case failed
         /// Not a usable target.
         case invalidPID
@@ -427,8 +427,27 @@ public final class AXContextChecker {
     }
 
     private let manualAccessibilityLock = UnfairLock()
-    private var manualAccessibilityPIDs: [pid_t: ManualAccessibilityState] = [:]
+    private enum ManualAccessibilityMemo: Equatable {
+        case probing(UUID)
+        case settled(ManualAccessibilityState)
+        case failed(at: TimeInterval)
+    }
+    private static let manualAccessibilityRetrySeconds: TimeInterval = 1
+    private static let manualAccessibilityMemoCapacity = 256
+    private var manualAccessibilityPIDs: [pid_t: ManualAccessibilityMemo] = [:]
+    private var manualAccessibilityOrder: [pid_t] = []
     private var manualAccessibilityTerminationObserver: NSObjectProtocol?
+
+    /// Called only while holding manualAccessibilityLock.
+    private func rememberManualAccessibility(_ memo: ManualAccessibilityMemo, pid: pid_t) {
+        manualAccessibilityOrder.removeAll { $0 == pid }
+        if manualAccessibilityPIDs[pid] == nil,
+           manualAccessibilityOrder.count >= Self.manualAccessibilityMemoCapacity {
+            manualAccessibilityPIDs.removeValue(forKey: manualAccessibilityOrder.removeFirst())
+        }
+        manualAccessibilityPIDs[pid] = memo
+        manualAccessibilityOrder.append(pid)
+    }
 
     /// Pure policy: a pid is worth poking once per process lifetime.
     ///
@@ -496,31 +515,64 @@ public final class AXContextChecker {
     /// whether the tree is *live*, not whether this particular call is the one that switched it on.
     @discardableResult
     public func ensureManualAccessibility(pid: pid_t) -> ManualAccessibilityState {
+        ensureManualAccessibility(pid: pid, now: { ProcessInfo.processInfo.systemUptime }) { targetPID in
+            let appElement = AXUIElementCreateApplication(targetPID)
+            Self.applyMessagingTimeout(to: appElement)
+            return AXUIElementSetAttributeValue(
+                appElement,
+                Self.manualAccessibilityAttribute as CFString,
+                kCFBooleanTrue
+            )
+        }
+    }
+
+    /// Injectable AX boundary for deterministic retry and process-lifecycle checks.
+    func ensureManualAccessibility(
+        pid: pid_t,
+        now: () -> TimeInterval,
+        activate: (pid_t) -> AXError
+    ) -> ManualAccessibilityState {
         guard pid > 0 else { return .invalidPID }
 
+        let timestamp = now()
+        let attempt = UUID()
         manualAccessibilityLock.lock()
-        let remembered = manualAccessibilityPIDs[pid]
-        manualAccessibilityLock.unlock()
-        if let remembered {
-            return remembered == .activatedNow ? .alreadyActive : remembered
+        if let remembered = manualAccessibilityPIDs[pid] {
+            switch remembered {
+            case .probing:
+                manualAccessibilityLock.unlock()
+                return .failed
+            case .settled(let state):
+                manualAccessibilityLock.unlock()
+                return state == .activatedNow ? .alreadyActive : state
+            case .failed(let failedAt):
+                let elapsed = timestamp - failedAt
+                if elapsed.isFinite, elapsed >= 0, elapsed < Self.manualAccessibilityRetrySeconds {
+                    manualAccessibilityLock.unlock()
+                    return .failed
+                }
+            }
         }
+        rememberManualAccessibility(.probing(attempt), pid: pid)
+        manualAccessibilityLock.unlock()
 
         installManualAccessibilityTerminationObserverIfNeeded()
 
-        let appElement = AXUIElementCreateApplication(pid)
-        Self.applyMessagingTimeout(to: appElement)
-        let status = AXUIElementSetAttributeValue(
-            appElement,
-            Self.manualAccessibilityAttribute as CFString,
-            kCFBooleanTrue
-        )
+        let status = activate(pid)
         let state = Self.manualAccessibilityState(forSetStatus: status)
 
-        if state != .failed {
-            manualAccessibilityLock.lock()
-            manualAccessibilityPIDs[pid] = state
-            manualAccessibilityLock.unlock()
+        let completedAt = now()
+        manualAccessibilityLock.lock()
+        // A termination, eviction, or replacement attempt invalidates this completion.
+        let isCurrent = manualAccessibilityPIDs[pid] == .probing(attempt)
+        if isCurrent {
+            rememberManualAccessibility(
+                state == .failed ? .failed(at: completedAt) : .settled(state),
+                pid: pid
+            )
         }
+        manualAccessibilityLock.unlock()
+        guard isCurrent else { return .failed }
 
         DevTypeLog.selection.info(
             """
@@ -546,12 +598,12 @@ public final class AXContextChecker {
     public func forgetManualAccessibility(pid: pid_t) {
         manualAccessibilityLock.lock()
         let removed = manualAccessibilityPIDs.removeValue(forKey: pid)
+        manualAccessibilityOrder.removeAll { $0 == pid }
         manualAccessibilityLock.unlock()
-        if let removed {
+        if removed != nil {
             DevTypeLog.selection.debug(
                 """
-                [Selection] AXManualAccessibility memo evicted pid=\(pid, privacy: .public) \
-                was=\(removed.rawValue, privacy: .public)
+                [Selection] AXManualAccessibility memo evicted pid=\(pid, privacy: .public)
                 """
             )
         }
@@ -588,13 +640,19 @@ public final class AXContextChecker {
     public func resetManualAccessibilityMemoForTesting() {
         manualAccessibilityLock.lock()
         manualAccessibilityPIDs.removeAll()
+        manualAccessibilityOrder.removeAll()
         manualAccessibilityLock.unlock()
     }
 
     /// Test hook — seed a remembered state without an AX round-trip.
     public func seedManualAccessibilityForTesting(pid: pid_t, state: ManualAccessibilityState) {
         manualAccessibilityLock.lock()
-        manualAccessibilityPIDs[pid] = state
+        rememberManualAccessibility(
+            state == .failed
+                ? .failed(at: ProcessInfo.processInfo.systemUptime)
+                : .settled(state),
+            pid: pid
+        )
         manualAccessibilityLock.unlock()
     }
 

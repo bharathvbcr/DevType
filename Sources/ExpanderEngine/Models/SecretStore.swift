@@ -531,6 +531,7 @@ public final class SecretAccessDiagnostics {
 
     private let lock = UnfairLock()
     private var last: SecretReadOutcome = .none
+    private var retrievalSucceeded: Bool?
     private var steps: [String] = []
     private var aliases: [String: String] = [:]
 
@@ -544,6 +545,17 @@ public final class SecretAccessDiagnostics {
     public func lastRead() -> SecretReadOutcome {
         lock.lock(); defer { lock.unlock() }
         return last
+    }
+
+    /// The requested secret's result, independently of later infrastructure probes.
+    public func recordRetrieval(succeeded: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        retrievalSucceeded = succeeded
+    }
+
+    public func lastRetrievalSucceeded() -> Bool? {
+        lock.lock(); defer { lock.unlock() }
+        return retrievalSucceeded
     }
 
     /// Append one value-free step, e.g. `note("legacy fetch", -25293, account: account)`.
@@ -1068,12 +1080,16 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// squatting on the real account would trap the app in read-back-refusal fallback forever.
     private let masterAccount: String
     private var cachedKey: SymmetricKey?
+    private let automaticConsolidationClock: () -> TimeInterval
+    private var lastAutomaticConsolidationFailure: TimeInterval?
+    private static let automaticConsolidationRetrySeconds: TimeInterval = 5
 
     public init(
         fileURL: URL? = nil,
         tier: SecretBackingStore? = nil,
         diagnostics: SecretAccessDiagnostics = .shared,
-        masterKeyAccount: String = ConsolidatedSecretBackingStore.masterKeyAccount
+        masterKeyAccount: String = ConsolidatedSecretBackingStore.masterKeyAccount,
+        automaticConsolidationClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         self.fileURL = fileURL
             ?? SnippetStore.defaultLocalSupportDirectory
@@ -1081,6 +1097,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         self.tier = tier ?? KeychainSecretBackingStore(diagnostics: diagnostics)
         self.diagnostics = diagnostics
         self.masterAccount = masterKeyAccount
+        self.automaticConsolidationClock = automaticConsolidationClock
     }
 
     // MARK: File I/O (always under `lock`)
@@ -1090,12 +1107,48 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         case entries([String: String])
         /// Bytes exist that this build cannot vouch for. Never overwritten in place.
         case unreadable
+        /// The source could not be examined safely. This is never an empty archive.
+        case unavailable
     }
 
+    static let maximumArchiveBytes = 64 * 1024 * 1024
+    static let maximumQuarantinedArchives = 32
+
     private func loadArchive() -> Archive {
-        guard let data = try? Data(contentsOf: fileURL) else { return .missing }
-        guard let entries = EncryptedSecretArchive.decode(data) else { return .unreadable }
-        return .entries(entries)
+        let fd = open(fileURL.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            if errno == ENOENT { return .missing }
+            diagnostics.note("archive open failed", OSStatus(errno))
+            return .unavailable
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer {
+            do { try handle.close() }
+            catch { diagnostics.note("archive read close failed") }
+        }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_size >= 0, info.st_size <= Self.maximumArchiveBytes else {
+            diagnostics.note("archive is not a bounded regular file")
+            return .unavailable
+        }
+        do {
+            var data = Data()
+            while data.count <= Self.maximumArchiveBytes {
+                let count = min(65_536, Self.maximumArchiveBytes + 1 - data.count)
+                guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { break }
+                data.append(chunk)
+            }
+            guard data.count <= Self.maximumArchiveBytes else {
+                diagnostics.note("archive exceeded read limit")
+                return .unavailable
+            }
+            guard let entries = EncryptedSecretArchive.decode(data) else { return .unreadable }
+            return .entries(entries)
+        } catch {
+            diagnostics.note("archive read failed")
+            return .unavailable
+        }
     }
 
     /// One cross-process transaction covers both storage tiers: master-key discovery/creation,
@@ -1111,11 +1164,15 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let lockPath = fileURL.appendingPathExtension("lock").path
 
-        var fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        var fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        if fd < 0, errno == ELOOP {
+            diagnostics.note("archive lock file invalid — transaction refused")
+            return nil
+        }
         if fd < 0 {
             diagnostics.note("archive lock unavailable")
             Thread.sleep(forTimeInterval: 0.05)
-            fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+            fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
         }
         guard fd >= 0 else {
             diagnostics.note("archive lock still unavailable — transaction refused")
@@ -1163,16 +1220,14 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         return true
     }
 
-    /// Atomic write (temp + rename via `.atomic`), owner-only permissions.
+    /// Atomic publication with owner-only permissions established before any content is written.
     private func saveArchive(_ entries: [String: String]) -> Bool {
-        guard let data = EncryptedSecretArchive.encode(entries) else { return false }
+        guard let data = EncryptedSecretArchive.encode(entries),
+              data.count <= Self.maximumArchiveBytes else { return false }
         let directory = fileURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         do {
-            try data.write(to: fileURL, options: [.atomic])
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600], ofItemAtPath: fileURL.path
-            )
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FilePermissions.atomicWrite(data, to: fileURL)
             return true
         } catch {
             diagnostics.note("archive save failed")
@@ -1183,8 +1238,23 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// An unreadable archive is moved aside, never deleted: those bytes may be secrets sealed
     /// by a newer build, and forensics beat tidiness. Returns true when the path is clear.
     private func quarantineUnreadableArchive() -> Bool {
-        let aside = fileURL.appendingPathExtension("unreadable")
-        try? FileManager.default.removeItem(at: aside)
+        let parent = fileURL.deletingLastPathComponent()
+        let prefix = fileURL.lastPathComponent + ".unreadable"
+        var enumerationFailed = false
+        guard let enumerator = FileManager.default.enumerator(
+            at: parent, includingPropertiesForKeys: nil, options: [.skipsSubdirectoryDescendants],
+            errorHandler: { _, _ in enumerationFailed = true; return false }
+        ) else { return false }
+        var count = 0
+        for case let url as URL in enumerator where url.lastPathComponent.hasPrefix(prefix) {
+            count += 1
+            guard count < Self.maximumQuarantinedArchives else {
+                diagnostics.note("archive quarantine capacity reached — preserving all copies")
+                return false
+            }
+        }
+        guard !enumerationFailed else { return false }
+        let aside = fileURL.appendingPathExtension(count == 0 ? "unreadable" : "unreadable.\(UUID().uuidString)")
         do {
             try FileManager.default.moveItem(at: fileURL, to: aside)
             diagnostics.note("archive quarantined as unreadable")
@@ -1196,14 +1266,18 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
 
     // MARK: Master key (always under the instance and archive locks)
 
+    private static func decodeMasterKey(_ stored: String) -> SymmetricKey? {
+        guard let raw = Data(base64Encoded: stored), raw.count == 32 else { return nil }
+        return SymmetricKey(data: raw)
+    }
+
     private func masterKey(createIfNeeded: Bool) -> SymmetricKey? {
         if let cachedKey { return cachedKey }
         if let stored = tier.value(account: masterAccount) {
-            guard let raw = Data(base64Encoded: stored), raw.count == 32 else {
+            guard let key = Self.decodeMasterKey(stored) else {
                 diagnostics.note("master key malformed")
                 return nil
             }
-            let key = SymmetricKey(data: raw)
             cachedKey = key
             return key
         }
@@ -1249,8 +1323,9 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
             case .entries(let existing): entries = existing
             case .missing: entries = [:]
             case .unreadable:
-                guard quarantineUnreadableArchive() else { return tier.set(value, account: account) }
+                guard quarantineUnreadableArchive() else { return errSecIO }
                 entries = [:]
+            case .unavailable: return errSecIO
             }
 
             // Seal, verify the seal opens, persist — and only then drop any keychain copy. Any
@@ -1275,7 +1350,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// The fallback save, with the staleness hole the fuzz found closed: a stale sealed copy
     /// left in the archive would shadow the newer tier value on every read — the user's edited
     /// secret silently reverting. Tier write first (the new value must be durable before
-    /// anything is evicted), then best-effort eviction of the stale entry.
+    /// anything is evicted), then required eviction of the stale entry before reporting success.
     private func tierFallbackSet(
         _ value: String, account: String, entries: [String: String]
     ) -> OSStatus {
@@ -1285,6 +1360,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
             pruned.removeValue(forKey: account)
             if !saveArchive(pruned) {
                 diagnostics.note("stale archive entry could not be evicted", account: account)
+                return errSecIO
             }
         }
         return status
@@ -1292,8 +1368,16 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
 
     public func value(account: String) -> String? {
         lock.lock(); defer { lock.unlock() }
-        return withArchiveLock { () -> String? in
-            if case .entries(let entries) = loadArchive(), let blob = entries[account] {
+        let result: String? = withArchiveLock { () -> String? in
+            let archive = loadArchive()
+            switch archive {
+            case .unavailable:
+                diagnostics.note("secret read refused — archive unavailable", account: account)
+                diagnostics.record(.failed(errSecIO))
+                return nil
+            case .missing, .entries, .unreadable: break
+            }
+            if case .entries(let entries) = archive, let blob = entries[account] {
                 guard let key = masterKey(createIfNeeded: false) else {
                     // Sealed value present but no key: locked keychain (recoverable via the unlock
                     // flow) or a deleted master key (not). The trail + report tell them apart.
@@ -1313,9 +1397,21 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
             // Hold exclusion before reading the source: a value captured outside the transaction
             // could overwrite a newer save or resurrect a deletion while waiting to migrate.
             guard let value = tier.value(account: account) else { return nil }
-            _ = consolidateLocked(account: account, value: value)
+            let now = automaticConsolidationClock()
+            let elapsed = lastAutomaticConsolidationFailure.map { now - $0 }
+            // Migration is optional after a successful read. A failed master-key/IO probe
+            // must not delay every following copy. Explicit saves, repair, and sealed reads
+            // still attempt immediately; this bounds only opportunistic consolidation.
+            if elapsed == nil || elapsed.map({
+                !$0.isFinite || $0 < 0 || $0 >= Self.automaticConsolidationRetrySeconds
+            }) == true {
+                lastAutomaticConsolidationFailure = consolidateLocked(account: account, value: value)
+                    ? nil : automaticConsolidationClock()
+            }
             return value
         } ?? nil
+        diagnostics.recordRetrieval(succeeded: result != nil)
+        return result
     }
 
     public func contains(account: String) -> Bool {
@@ -1341,7 +1437,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
                 }
             case .missing:
                 break
-            case .unreadable:
+            case .unreadable, .unavailable:
                 // Bytes this build cannot vouch for may hold the account. Dropping the
                 // tier copy now would strand an unremovable sealed shadow behind a
                 // "gone" answer. Refuse; quarantine/recovery flows own this state.
@@ -1384,6 +1480,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         case .unreadable:
             guard quarantineUnreadableArchive() else { return false }
             entries = [:]
+        case .unavailable: return false
         }
         guard let key = masterKey(createIfNeeded: true),
               let blob = EncryptedSecretArchive.seal(value, key: key),
@@ -1412,6 +1509,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// The entire batch shares one transaction, including key creation and source enumeration.
     private func consolidateAllLocked() -> SecretConsolidationSummary {
         var summary = SecretConsolidationSummary()
+        lastAutomaticConsolidationFailure = nil
 
         let candidates = consolidationCandidates()
         // Settle the key once, before the loop. Without a usable one every candidate is
@@ -1444,15 +1542,18 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         // (launch = login). The user's keychain auto-locks — measured mid-session — and with
         // the key cached, copies keep decrypting the archive straight through a locked
         // keychain instead of surfacing the unlock flow.
-        if masterKey(createIfNeeded: false) != nil {
+        if hasUsableKey, masterKey(createIfNeeded: false) != nil {
             diagnostics.note("master key warmed")
         }
         return summary
     }
 
-    private func countLocked() -> Int {
-        if case .entries(let entries) = loadArchive() { return entries.count }
-        return 0
+    private func countLocked() -> Int? {
+        switch loadArchive() {
+        case .entries(let entries): return entries.count
+        case .missing: return 0
+        case .unreadable, .unavailable: return nil
+        }
     }
 
     // MARK: Pass-through to the keychain tier
@@ -1483,16 +1584,27 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
             $0 != masterAccount && SecretStore.snippetID(forAccount: $0) != nil
         }.count
         let keyState: String
-        if cachedKey != nil || tier.value(account: masterAccount) != nil {
+        if cachedKey != nil {
             keyState = "present"
+        } else if let stored = tier.value(account: masterAccount) {
+            keyState = Self.decodeMasterKey(stored) != nil
+                ? "present" : "MALFORMED — refusing to replace"
         } else if tier.contains(account: masterAccount) {
             // The item exists but this identity cannot read it — the write-only ACL shape the
             // read-back guard protects against. Fallback mode; nothing is lost.
-            keyState = "present but UNREADABLE — keychain fallback in use"
+            if let sealed {
+                keyState = sealed > 0
+                    ? "present but UNREADABLE — sealed secrets unavailable"
+                    : "present but UNREADABLE — keychain fallback in use"
+            } else {
+                keyState = "present but UNREADABLE — archive unavailable"
+            }
         } else {
-            keyState = sealed > 0 ? "MISSING with sealed secrets" : "not yet created"
+            keyState = sealed.map { $0 > 0 ? "MISSING with sealed secrets" : "not yet created" }
+                ?? "unavailable — archive count unknown"
         }
-        return "archive: \(sealed) sealed, keychain-resident: \(keychainResident), master key: \(keyState)"
+        let archiveState = sealed.map { "\($0) sealed" } ?? "unavailable (count unknown)"
+        return "archive: \(archiveState), keychain-resident: \(keychainResident), master key: \(keyState)"
     }
 }
 

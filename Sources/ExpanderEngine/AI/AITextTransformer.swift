@@ -123,15 +123,25 @@ public enum AITokenBudget {
         contextSize: Int,
         tokenBudgetMultiplier: Double
     ) throws -> Int {
-        let rawMax = Int((Double(inputTokens) * tokenBudgetMultiplier).rounded(.up))
+        let invalidBudget = AITransformError.inputTooLarge(
+            estimatedTokens: Int.max, contextSize: max(0, contextSize)
+        )
+        guard inputTokens >= 0, instructionTokens >= 0, framingTokens >= 0, contextSize > 0,
+              tokenBudgetMultiplier.isFinite, tokenBudgetMultiplier > 0 else { throw invalidBudget }
+        let scaled = (Double(inputTokens) * tokenBudgetMultiplier).rounded(.up)
+        // Double(Int.max) rounds up to an unrepresentable Int, so the upper bound is strict.
+        guard scaled.isFinite, scaled >= 0, scaled < Double(Int.max) else { throw invalidBudget }
+        let rawMax = Int(scaled)
         let maxResponse = max(minimumResponseTokens, rawMax)
 
-        let estimated =
-            instructionTokens
-            + inputTokens
-            + framingTokens
-            + schemaReserveTokens
-            + maxResponse
+        var fixed = 0
+        for component in [instructionTokens, inputTokens, framingTokens, schemaReserveTokens] {
+            let (sum, overflow) = fixed.addingReportingOverflow(component)
+            guard !overflow else { throw invalidBudget }
+            fixed = sum
+        }
+        let (estimated, overflow) = fixed.addingReportingOverflow(maxResponse)
+        guard !overflow else { throw invalidBudget }
 
         if estimated > contextSize {
             throw AITransformError.inputTooLarge(
@@ -140,8 +150,6 @@ public enum AITokenBudget {
             )
         }
 
-        let fixed =
-            instructionTokens + inputTokens + framingTokens + schemaReserveTokens
         let room = max(minimumResponseTokens, contextSize - fixed)
         return min(maxResponse, room)
     }

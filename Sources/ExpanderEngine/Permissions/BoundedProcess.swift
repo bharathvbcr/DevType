@@ -1,138 +1,156 @@
 import Foundation
+import Darwin
 
-/// Deadline-bounded external tool invocation.
-///
-/// Why this exists: `ProcessIdentity` shells out to `codesign` and `mdfind` to resolve the TCC
-/// identity shown in Setup and Permission Recovery. Both call sites used the
-/// `run()` → `waitUntilExit()` → `readDataToEndOfFile()` shape, which has two failure modes that
-/// both strand the Setup wizard:
-///
-///  1. **No deadline.** `codesign` against a bundle on a stalled network mount, or `mdfind` while
-///     the Spotlight index is rebuilding, blocks forever. The wizard gates Finish on
-///     `cdHashLoadFinished`, so a hung `codesign` leaves Finish permanently disabled with no way
-///     out of the wizard except closing it — which never records completion, so it reopens on the
-///     next launch. A hang in a diagnostic subprocess must not be able to brick onboarding.
-///
-///  2. **Read-after-exit deadlocks.** Draining the pipe only *after* `waitUntilExit()` returns
-///     deadlocks whenever the child writes more than the ~64KB pipe buffer: the child blocks in
-///     `write()` waiting for a reader, the parent blocks in `waitUntilExit()` waiting for the
-///     child. `mdfind` on a machine with many DevType copies is exactly that shape.
-///
-/// This type drains the pipe concurrently and escalates SIGTERM → SIGKILL at the deadline, so the
-/// worst case is a bounded wait that returns `nil` and a caller that degrades to "unavailable".
+/// Bounded diagnostic subprocess capture. Drains nonblocking pipes on the calling thread so
+/// descendants holding an inherited pipe cannot strand a background reader after return.
 public enum BoundedProcess {
-
-    /// Default ceiling for identity tools. Generous relative to a healthy run (tens of
-    /// milliseconds) and short enough that a hung tool cannot outlive a user's patience.
-    public static let defaultTimeout: TimeInterval = 5.0
-
-    /// Grace period between SIGTERM and SIGKILL for a tool that ignores termination.
-    public static let terminationGrace: TimeInterval = 1.0
+    public static let defaultTimeout: TimeInterval = 5
+    public static let terminationGrace: TimeInterval = 1
+    public static let maximumOutputBytes = 1_048_576
 
     public struct Result: Equatable {
         public let output: String
         public let exitCode: Int32
         public let timedOut: Bool
+        public let outputTruncated: Bool
+        public let outputComplete: Bool
 
-        public init(output: String, exitCode: Int32, timedOut: Bool) {
+        /// Identity probes must not interpret failed or partial output as a verified identity.
+        public var succeeded: Bool {
+            exitCode == 0 && !timedOut && outputComplete && !outputTruncated
+        }
+
+        public init(
+            output: String, exitCode: Int32, timedOut: Bool,
+            outputTruncated: Bool = false, outputComplete: Bool = true
+        ) {
             self.output = output
             self.exitCode = exitCode
             self.timedOut = timedOut
+            self.outputTruncated = outputTruncated
+            self.outputComplete = outputComplete
         }
     }
 
-    /// Runs `executable` with `arguments`, returning captured output.
-    ///
-    /// - Parameter mergeStandardError: route stderr into the same pipe as stdout. `codesign`
-    ///   writes its `-dvvv` report to stderr and splits `-d -r-` across both depending on the
-    ///   version, so both identity probes want this; `mdfind` does not.
-    /// - Returns: `nil` when the tool could not be spawned. A timed-out run returns a `Result`
-    ///   with `timedOut == true` and whatever was drained before the deadline, so callers can tell
-    ///   "did not run" from "ran too slowly".
+    static func normalizedTimeout(_ value: TimeInterval) -> TimeInterval {
+        guard value.isFinite, value >= 0 else { return defaultTimeout }
+        return min(max(value, 0.01), 60)
+    }
+
+    /// Captures at most `outputLimit` bytes (clamped to 0...16 MiB), while continuing to drain
+    /// excess bytes to avoid blocking the child. Escalates SIGTERM to SIGKILL after a grace
+    /// period; pipe EOF and process exit each have bounded waits.
     public static func run(
         executable: String,
         arguments: [String],
         timeout: TimeInterval = defaultTimeout,
-        mergeStandardError: Bool = false
+        mergeStandardError: Bool = false,
+        outputLimit: Int = maximumOutputBytes
     ) -> Result? {
+        let timeout = normalizedTimeout(timeout)
+        let outputLimit = min(max(outputLimit, 0), 16 * maximumOutputBytes)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-
         let pipe = Pipe()
         process.standardOutput = pipe
-        // Unmerged stderr goes to the null device: a fresh undrained `Pipe()` here blocked any
-        // tool writing >64 KB to stderr until it was SIGTERM'd (output lost, full timeout burned)
-        // and leaked its file handles on every call.
         process.standardError = mergeStandardError ? pipe : FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
-
-        // Drain concurrently with the wait — see failure mode 2 above.
-        let sink = OutputSink()
-        let readFinished = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .utility).async {
-            sink.append(pipe.fileHandleForReading.readDataToEndOfFile())
-            readFinished.signal()
+        defer {
+            for handle in [pipe.fileHandleForWriting, pipe.fileHandleForReading] {
+                do { try handle.close() }
+                catch {
+                    DevTypeLog.identity.error(
+                        "[Identity] pipe close failed \(DevTypeLog.errorMetadata(error), privacy: .public)"
+                    )
+                }
+            }
         }
-
-        let exited = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in exited.signal() }
-
+        let descriptor = pipe.fileHandleForReading.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags != -1, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != -1 else {
+            DevTypeLog.identity.error("[Identity] nonblocking pipe setup failed errno=\(errno)")
+            return nil
+        }
         do {
             try process.run()
         } catch {
             DevTypeLog.identity.error(
                 "[Identity] spawn failed tool=\(executable, privacy: .public) \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
-            // The reader is parked on a pipe whose write end never opened; close it so the
-            // dispatched block can finish instead of leaking a thread for the process lifetime.
-            try? pipe.fileHandleForWriting.close()
-            _ = readFinished.wait(timeout: .now() + terminationGrace)
             return nil
         }
-
-        var timedOut = false
-        if exited.wait(timeout: .now() + timeout) == .timedOut {
-            timedOut = true
-            DevTypeLog.identity.notice(
-                "[Identity] tool exceeded \(timeout, privacy: .public)s — terminating tool=\(executable, privacy: .public)"
+        do { try pipe.fileHandleForWriting.close() }
+        catch {
+            // Continue through the bounded lifecycle even if closing the parent's copy fails.
+            DevTypeLog.identity.error(
+                "[Identity] writer close failed \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
-            process.terminate()
-            if exited.wait(timeout: .now() + terminationGrace) == .timedOut {
-                DevTypeLog.identity.error(
-                    "[Identity] tool ignored SIGTERM — killing tool=\(executable, privacy: .public)"
-                )
-                kill(process.processIdentifier, SIGKILL)
-                _ = exited.wait(timeout: .now() + terminationGrace)
+        }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 16_384)
+        var reachedEOF = false
+        var readFailed = false
+        var truncated = false
+        var timedOut = false
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        var terminatedAt: TimeInterval?
+        var killedAt: TimeInterval?
+        var exitObservedAt: TimeInterval?
+        while true {
+            if !reachedEOF && !readFailed {
+                // Limit each drain batch so a continuously writing child cannot starve deadlines.
+                for _ in 0..<16 {
+                    let count = buffer.withUnsafeMutableBytes {
+                        Darwin.read(descriptor, $0.baseAddress, $0.count)
+                    }
+                    if count > 0 {
+                        let retained = min(count, outputLimit - data.count)
+                        data.append(contentsOf: buffer.prefix(retained))
+                        truncated = truncated || retained < count
+                    } else if count == 0 {
+                        reachedEOF = true
+                        break
+                    } else {
+                        if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR {
+                            readFailed = true
+                            DevTypeLog.identity.error("[Identity] pipe read failed errno=\(errno)")
+                        }
+                        break
+                    }
+                }
             }
+
+            let now = ProcessInfo.processInfo.systemUptime
+            if !process.isRunning {
+                if reachedEOF || readFailed { break }
+                if exitObservedAt == nil { exitObservedAt = now }
+                if let exitObservedAt, now - exitObservedAt >= terminationGrace { break }
+            } else if let killedAt {
+                if now - killedAt >= terminationGrace { break }
+            } else if let terminatedAt {
+                if now - terminatedAt >= terminationGrace {
+                    if kill(process.processIdentifier, SIGKILL) != 0 && errno != ESRCH {
+                        DevTypeLog.identity.error("[Identity] SIGKILL failed errno=\(errno)")
+                    }
+                    killedAt = now
+                }
+            } else if now >= deadline {
+                timedOut = true
+                terminatedAt = now
+                process.terminate()
+            }
+            Thread.sleep(forTimeInterval: 0.005)
         }
 
-        // Bounded even here: a killed child's pipe should hit EOF immediately, but a grandchild
-        // holding the write end open would otherwise park this thread forever.
-        _ = readFinished.wait(timeout: .now() + terminationGrace)
-
+        let output = String(data: data, encoding: .utf8)
         return Result(
-            output: sink.string(),
-            exitCode: process.terminationStatus,
-            timedOut: timedOut
+            output: output ?? "",
+            exitCode: process.isRunning ? -1 : process.terminationStatus,
+            timedOut: timedOut,
+            outputTruncated: truncated,
+            outputComplete: reachedEOF && !readFailed && !truncated && output != nil
         )
-    }
-
-    /// Lock-guarded box so the draining queue and the waiting caller do not race on the buffer.
-    private final class OutputSink {
-        private let lock = NSLock()
-        private var data = Data()
-
-        func append(_ chunk: Data) {
-            lock.lock()
-            data.append(chunk)
-            lock.unlock()
-        }
-
-        func string() -> String {
-            lock.lock()
-            defer { lock.unlock() }
-            return String(data: data, encoding: .utf8) ?? ""
-        }
     }
 }

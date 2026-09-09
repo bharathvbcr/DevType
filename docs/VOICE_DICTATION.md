@@ -70,6 +70,9 @@ are kept — losing formatting is recoverable, losing the sentences is not.
 * **Audio Interruption Resilience**: Listens to `AVAudioEngineConfigurationChange` to handle headphones / AirPods switching without dropped taps or leaks.
 * **Millisecond-1 Audio Journaling**: 16kHz mono 16-bit PCM capture written continuously to `capture.caf` in a per-session directory under `~/Library/Application Support/DevType/VoiceSessions/`, so a crash mid-sentence leaves a recoverable recording rather than nothing.
 * **Single-Shot Watchdog Transcription**: Each session is armed with a watchdog sized from the snapshot it started with (the configured local-model timeout plus headroom, never under 5 seconds), so a wedged recognizer or corrector ends the session instead of stalling dictation.
+* **Session ownership**: Handler setup, microphone start/finalization, and audio-level callbacks recheck the session generation so retired work cannot reopen the microphone or update the current HUD.
+* **Recoverable records**: Manifest and transcript files are published with unique, owner-only staging files and atomic replacement. Writers reject records beyond recovery's limits: 1 MiB for manifests/raw transcripts, 4 MiB for final transcripts, and 64 KiB for delivery receipts.
+* **Bounded Apple Intelligence correction**: Deadline or cancellation abandons the response after a short cleanup grace. An engine that ignores cancellation keeps its admission slot until it exits, so later sessions use fallback instead of accumulating model operations.
 
 ### 5. Voice Dictation HUD (`VoiceHUDPanel`)
 * Floating non-activating AppKit HUD that never steals key focus from the target field:

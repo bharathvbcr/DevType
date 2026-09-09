@@ -642,9 +642,10 @@ public actor VoiceSessionCoordinator {
 
         guard enabled else {
             await capture.setOnPCMBuffer(nil)
+            guard taskBag?.isCurrentGeneration(generation) == true, !Task.isCancelled else { return }
             await capture.setOnAudioLevelUpdate { [weak self] level in
                 guard let self else { return }
-                Task { await self.emitAudioLevel(level) }
+                Task { await self.emitAudioLevel(level, generation: generation) }
             }
             DevTypeLog.voice.info("[Voice] Apple live recognition disabled for this session")
             return
@@ -675,18 +676,25 @@ public actor VoiceSessionCoordinator {
         await capture.setOnPCMBuffer { [weak stream] buffer in
             stream?.append(buffer)
         }
+        guard taskBag?.isCurrentGeneration(generation) == true, !Task.isCancelled else {
+            stream.cancel()
+            return
+        }
         await capture.setOnAudioLevelUpdate { [weak self] level in
             guard let self else { return }
-            Task { await self.emitAudioLevel(level) }
+            Task { await self.emitAudioLevel(level, generation: generation) }
         }
     }
 
-    private func finishLiveRecognition() async {
+    private func finishLiveRecognition(generation: SessionGeneration) async {
+        guard taskBag?.isCurrentGeneration(generation) == true else { return }
         await capture.setOnPCMBuffer(nil)
+        guard taskBag?.isCurrentGeneration(generation) == true else { return }
         liveStream?.finish()
     }
 
-    private func emitAudioLevel(_ level: Float) {
+    private func emitAudioLevel(_ level: Float, generation: SessionGeneration) {
+        guard taskBag?.isCurrentGeneration(generation) == true else { return }
         onAudioLevel?(level)
     }
 
@@ -723,6 +731,7 @@ public actor VoiceSessionCoordinator {
             liveStream?.cancel()
             liveStream = nil
             await capture.setOnPCMBuffer(nil)
+            guard taskBag?.isCurrentGeneration(generation) == true, !Task.isCancelled else { return false }
             diagnosticsRecorder.record(
                 "stream.unavailable",
                 note: "optionalPreviewDisabled code=\(failure.code.rawValue)"
@@ -765,6 +774,7 @@ public actor VoiceSessionCoordinator {
                 enabled: enableLiveRecognition
             )
             try Task.checkCancellation()
+            guard taskBag?.isCurrentGeneration(generation) == true else { return }
             try await capture.startCapture(sessionDirectory: sessionDir)
             // Setup finished, but this task may have lost the race while it ran.
             guard taskBag?.isCurrentGeneration(generation) == true else {
@@ -792,8 +802,10 @@ public actor VoiceSessionCoordinator {
     func performFinalizeAudioCapture(generation: SessionGeneration) async {
         do {
             try Task.checkCancellation()
-            await finishLiveRecognition()
+            guard taskBag?.isCurrentGeneration(generation) == true else { return }
+            await finishLiveRecognition(generation: generation)
             try Task.checkCancellation()
+            guard taskBag?.isCurrentGeneration(generation) == true else { return }
             let artifact = try await capture.stopCapture()
             _ = processEvent(.audioFinalized(artifact), generation: generation)
         } catch is CancellationError {

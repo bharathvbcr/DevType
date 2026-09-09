@@ -500,6 +500,7 @@ public enum DiagnosticReport {
             aiLines: captureAILines(),
             secretLines: captureSecretLines(
                 pendingMigrationCount: { SecretStore.shared.snippetIDsPendingMigration().count },
+                pendingAuthorizationCount: { SecretStore.shared.accountsNeedingAuthorizationCount() },
                 pendingCleanupCount: { SnippetStore.shared.pendingSecretCleanupCount },
                 keychainLocked: { SecretStore.shared.isKeychainLocked() },
                 storageDescription: { SecretStore.shared.storageDescription() }
@@ -599,6 +600,7 @@ public enum DiagnosticReport {
         defaults: UserDefaults = .standard,
         accessDiagnostics: SecretAccessDiagnostics = .shared,
         pendingMigrationCount: (() -> Int)? = nil,
+        pendingAuthorizationCount: (() -> Int)? = nil,
         pendingCleanupCount: (() -> Int)? = nil,
         keychainLocked: (() -> Bool)? = nil,
         storageDescription: (() -> String)? = nil
@@ -620,11 +622,18 @@ public enum DiagnosticReport {
         case .unavailable: capability = "unavailable — no login password or biometrics set"
         }
 
+        // Storage inspection itself can read the master key. Capture the preceding read's
+        // outcome first so exporting a report does not rewrite the event it describes.
+        let lastRead = accessDiagnostics.lastRead()
+        let retrieval = accessDiagnostics.lastRetrievalSucceeded().map {
+            $0 ? "returned a value" : "unavailable"
+        } ?? "not attempted"
         let safeStorageDescription = DiagnosticPrivacy.boundedIdentifier(
             (storageDescription ?? { "in-memory" })(),
             label: "secretStorage",
             domain: "secret-storage-description"
         )
+        let pendingAuthorization = (pendingAuthorizationCount ?? { 0 })()
         let trailLines = accessDiagnostics.trail().suffix(16).map {
             let safeTrail = DiagnosticPrivacy.boundedIdentifier(
                 $0,
@@ -643,10 +652,12 @@ public enum DiagnosticReport {
             // §8.10: tells "keychain asked for the login password" apart from every other
             // prompt in a report. "healed partition" here means the self-signed-cert rebuild
             // problem fired and was absorbed silently, exactly as designed.
-            "Keychain last read: \(accessDiagnostics.lastRead().label)",
+            "Secret retrieval: \(retrieval)",
+            "Keychain last read: \(lastRead.label)",
             // Hermetic by default (tests must never touch the live keychain); the production
             // capture site below injects the real closures.
             "Secrets pending migration: \((pendingMigrationCount ?? { 0 })())",
+            "Keychain accounts needing authorization (including master key): \(pendingAuthorization)",
             // A failed destructive sweep remains retryable; count only, never item identity.
             "Secret cleanup pending: \((pendingCleanupCount ?? { 0 })())",
             // A locked keychain fails every decrypt while metadata still answers — without
@@ -655,6 +666,9 @@ public enum DiagnosticReport {
             // §8.11: where the values actually live, and whether the master key is intact.
             "Storage: \(safeStorageDescription)",
         ]
+        + (pendingAuthorization > 0
+            ? ["Repair: Preferences > Advanced > Repair Secret Storage (requires user authorization)"]
+            : [])
         // The step trail: every fetch/heal/migrate with its OSStatus, accounts aliased to
         // "item A/B/…" — the exact sequence that produced whatever the user just saw.
         + trailLines

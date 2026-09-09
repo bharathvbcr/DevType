@@ -43,7 +43,7 @@ public final class InjectTelemetryLog {
             outcome == .succeeded
         }
 
-        /// Text was delivered but could not be verified (normal for Chrome / Electron).
+        /// Events were posted, but field delivery could not be verified.
         public var isUnverifiedDelivery: Bool {
             switch outcome {
             case .postedUnverified, .degradedAXOnly:
@@ -64,10 +64,10 @@ public final class InjectTelemetryLog {
 
         public init() {}
 
-        /// Fraction of attempts that put text in the field (verified or not).
+        /// Fraction of all attempts whose field delivery was verified.
         public var successRatio: Double {
             guard total > 0 else { return 0 }
-            return Double(succeeded + deliveredUnverified) / Double(total)
+            return Double(succeeded) / Double(total)
         }
     }
 
@@ -94,6 +94,8 @@ public final class InjectTelemetryLog {
         public var typeAheadCharacters: Int = 0
 
         public init() {}
+
+        public var hasDuplicateRisk: Bool { pasteRetries > 0 || triggerRestores > 0 }
 
         public var isEmpty: Bool {
             pasteRetries == 0 && triggerRestores == 0 && suppressedMissVerdicts == 0
@@ -383,19 +385,21 @@ public final class InjectTelemetryLog {
                 + "dropped=\(aggregateDroppedCount)"
         )
 
-        let riskyCount = duplicateRisk.values.lazy.filter { !$0.isEmpty }.count
-        if riskyCount > 0 {
-            builder.observe(
-                "Duplicate risk (text written twice for one expansion; apps=\(riskyCount)):"
+        let rankedRisk = duplicateRisk.lazy
+            .filter { !$0.value.isEmpty }
+            .sorted { lhs, rhs in
+                lhs.value.pasteRetries == rhs.value.pasteRetries
+                    ? lhs.key < rhs.key
+                    : lhs.value.pasteRetries > rhs.value.pasteRetries
+            }
+        for hasRisk in [true, false] {
+            let matching = rankedRisk.filter { $0.value.hasDuplicateRisk == hasRisk }
+            guard !matching.isEmpty else { continue }
+            builder.observe(hasRisk
+                ? "Duplicate risk (retry/restore actions; duplication unconfirmed; apps=\(matching.count)):"
+                : "Delivery safeguards (suppressed misses and type-ahead replays; apps=\(matching.count)):"
             )
-            let rankedRisk = duplicateRisk.lazy
-                .filter { !$0.value.isEmpty }
-                .sorted { lhs, rhs in
-                    lhs.value.pasteRetries == rhs.value.pasteRetries
-                        ? lhs.key < rhs.key
-                        : lhs.value.pasteRetries > rhs.value.pasteRetries
-                }
-            for (bundle, counters) in rankedRisk {
+            for (bundle, counters) in matching {
                 let safeBundle = DiagnosticPrivacy.boundedIdentifier(
                     bundle,
                     label: "injectBundleID",
@@ -451,7 +455,7 @@ public final class InjectTelemetryLog {
                 )
                 let percent = Int((stats.successRatio * 100).rounded())
                 builder.observe(
-                    "  \(safeBundle): \(percent)% delivered "
+                    "  \(safeBundle): \(percent)% verified "
                         + "(ok=\(stats.succeeded) unverified=\(stats.deliveredUnverified) "
                         + "refused=\(stats.refused) failed=\(stats.failed) of \(stats.total))"
                 )
