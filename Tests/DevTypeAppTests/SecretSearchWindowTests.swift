@@ -214,6 +214,36 @@ final class SecretSearchWindowTests: XCTestCase {
         }
     }
 
+    func testInvalidSearchShowsReasonClearsSelectionAndRecovers() throws {
+        let fixture = try secretFixture()
+        var selections = 0
+        InlineSearchPanel.open(store: fixture.store, mode: .copySecrets) { _, _, _ in selections += 1 }
+        let loc = LocalizationManager.shared
+        let panel = try searchPanel(placeholder: loc.s("menu.searchSecrets.placeholder"))
+        let views = descendants(of: try XCTUnwrap(panel.contentView))
+        let table = try XCTUnwrap(views.compactMap { $0 as? NSTableView }.first)
+        let search = try XCTUnwrap(views.compactMap { $0 as? NSTextField }.first { $0.isEditable })
+        for (query, issue) in [("secret -tag:", SnippetSearch.QueryIssue.incompleteFilter),
+                               (Array(repeating: "secret", count: 13).joined(separator: " "), .tooManyTerms),
+                               (String(repeating: "x", count: 513), .tooLong)] {
+            table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+            search.stringValue = query
+            search.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: search))
+            XCTAssertEqual(table.numberOfRows, 0)
+            XCTAssertEqual(table.selectedRow, -1)
+            let visibleLabels = views.compactMap { $0 as? NSTextField }.filter { !$0.isHiddenOrHasHiddenAncestor }.map(\.stringValue)
+            XCTAssertTrue(visibleLabels.contains(loc.s("search.issue.title")))
+            XCTAssertTrue(visibleLabels.contains(issue.message(loc: loc)))
+            try click(table, at: NSPoint(x: table.bounds.midX, y: table.bounds.midY))
+            XCTAssertEqual(selections, 0)
+            search.stringValue = "secret"
+            search.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: search))
+            XCTAssertEqual(table.numberOfRows, 3)
+            XCTAssertFalse(views.compactMap { $0 as? NSTextField }.filter { !$0.isHiddenOrHasHiddenAncestor }
+                .contains { $0.stringValue == loc.s("search.issue.title") })
+        }
+    }
+
     func testInsertModeSingleClickOnlySelectsAndDoubleClickCommitsClickedRow() throws {
         let fixture = try secretFixture()
         var selections = 0

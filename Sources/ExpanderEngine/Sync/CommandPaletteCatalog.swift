@@ -631,6 +631,17 @@ public enum CommandPaletteCatalog {
     /// giving up the coverage rule: nobody narrows a palette with a thirteenth word.
     public static let maximumQueryTerms = 12
 
+    /// Validate the complete input before ranking/cache normalization can drop a filter.
+    public static func queryIssue(for query: String) -> SnippetSearch.QueryIssue? {
+        if query.utf8.prefix(SnippetSearch.maximumQueryUTF8Bytes + 1).count > SnippetSearch.maximumQueryUTF8Bytes {
+            return .tooLong
+        }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.prefix(maximumQueryCharacters + 1).count > maximumQueryCharacters { return .tooLong }
+        // Explicit command mode does not interpret snippet filters.
+        return trimmed.hasPrefix(">") ? nil : SnippetSearch.queryIssue(for: query)
+    }
+
     /// Clamps a raw query to the bounds above. Applied at every ranking entry point.
     public static func boundedQuery(_ query: String) -> String {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -896,6 +907,7 @@ public enum CommandPaletteCatalog {
         routedResult: PaletteToolRouter.Routed? = nil,
         context: PaletteContext = .none
     ) -> [PaletteListRow] {
+        guard queryIssue(for: query) == nil else { return [] }
         let trimmed = boundedQuery(query)
         let commandLimit = max(0, commandLimit)
         let snippetLimit = max(0, snippetLimit)

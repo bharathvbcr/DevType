@@ -658,6 +658,8 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             color: DevTypeTheme.textTertiary
         )
         subtitle.translatesAutoresizingMaskIntoConstraints = false
+        emptyTitleLabel = title
+        emptySubtitleLabel = subtitle
 
         let stack = NSStackView(views: [icon, title, subtitle])
         stack.orientation = .vertical
@@ -740,7 +742,8 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         routingTask?.cancel()
         routingTask = nil
         let query = searchField.stringValue
-        guard mode.showsCommands, PaletteToolRouter.shouldAttemptRouting(query: query) else { return }
+        guard mode.showsCommands, CommandPaletteCatalog.queryIssue(for: query) == nil,
+              PaletteToolRouter.shouldAttemptRouting(query: query) else { return }
 
         routingTask = Task { [weak self] in
             try? await Task.sleep(
@@ -769,6 +772,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         semanticWorkItem?.cancel()
         guard mode.showsCommands else { return }
         let query = searchField.stringValue
+        guard CommandPaletteCatalog.queryIssue(for: query) == nil else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             let ids = CommandPaletteCatalog.semanticBoostIDs(for: query, loc: self.loc)
@@ -799,6 +803,9 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         groups = visibleGroups(snapshot.groups)
         groupsRevision = mode.showsOnlySecrets ? nil : snapshot.revision
     }
+
+    private var emptyTitleLabel: NSTextField?
+    private var emptySubtitleLabel: NSTextField?
 
     private func refreshHits() {
         refreshClipboardCache()
@@ -840,6 +847,9 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
         let selectableCount = rows.filter(\.isSelectable).count
         emptyState.isHidden = selectableCount > 0
+        let issue = CommandPaletteCatalog.queryIssue(for: query)
+        emptyTitleLabel?.stringValue = loc.s(issue == nil ? "search.empty.title" : "search.issue.title")
+        emptySubtitleLabel?.stringValue = issue?.message(loc: loc) ?? loc.s("search.empty.subtitle")
         // P12: `flatMap(\.snippets).count` allocated the whole flattened library — 50 µs at
         // 2,000 snippets, on every keystroke — to produce one integer.
         let totalSnippets = groups.reduce(0) { $0 + $1.snippets.count }

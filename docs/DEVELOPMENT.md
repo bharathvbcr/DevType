@@ -214,7 +214,7 @@ An Apple Development signature supports local installation and stable identity; 
 
 ## Productivity release stress checks
 
-`DEVTYPE_STRESS_ROUNDS=20 ./Scripts/stress-productivity.sh` builds once, then repeats the real search, text/macro, erasure, input and voice delivery suites. The round count must be 1–100. It exits on the first failed command; a final success line is emitted only after every round passes.
+`DEVTYPE_STRESS_ROUNDS=20 ./Scripts/stress-productivity.sh` builds once, then repeats the real search, text/macro, erasure, input and voice delivery suites. The round count must be 1–100. It exits on the first failed command and verifies that every round has a nonzero XCTest selection with no skips or failures; a final success line is emitted only after every round passes. Empty filters, missing summaries and skipped tests fail the run. `python3 Scripts/test-stress-productivity.py` verifies the runner contract and is included in release fixtures.
 
 Run sanitizer configurations sequentially because they share SwiftPM's build directory:
 

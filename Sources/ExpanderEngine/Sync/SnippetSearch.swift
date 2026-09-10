@@ -203,6 +203,26 @@ public struct SnippetSearchIndex {
 
 public enum SnippetSearch {
 
+    public enum QueryIssue: Error, Equatable {
+        case tooLong
+        case tooManyTerms
+        case incompleteFilter
+
+        public func message(loc: LocalizationManager = .shared) -> String {
+            switch self {
+            case .tooLong: return loc.s("search.issue.tooLong")
+            case .tooManyTerms: return loc.s("search.issue.tooManyTerms", SnippetSearch.maximumQueryTerms)
+            case .incompleteFilter: return loc.s("search.issue.incompleteFilter")
+            }
+        }
+    }
+
+    /// Uses the same parser as matching so presentation cannot approve a partial query.
+    public static func queryIssue(for query: String) -> QueryIssue? {
+        if case .failure(let issue) = tokenize(query) { return issue }
+        return nil
+    }
+
     // MARK: Cached index (§2.8)
 
     private static let cacheLock = UnfairLock()
@@ -467,7 +487,8 @@ public enum SnippetSearch {
         boostRevision: UInt64? = nil
     ) -> [SearchHit] {
         if let limit, limit <= 0 { return [] }
-        let trimmed = boundedQuery(query)
+        guard case .success(let terms) = tokenize(query, locale: index.stamp.localeID.map { Locale(identifier: $0) }) else { return [] }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
         if let boost {
@@ -493,7 +514,6 @@ public enum SnippetSearch {
         }
         cacheLock.unlock()
 
-        let terms = tokenize(trimmed, locale: index.stamp.localeID.map { Locale(identifier: $0) })
         guard !terms.isEmpty else { return [] }
 
         var hits: [SearchHit] = []
@@ -569,7 +589,7 @@ public enum SnippetSearch {
     /// Legacy single-snippet scorer, kept as a shim. Returns `nil` when the snippet does not
     /// match at all.
     public static func score(snippet: SnippetModel, needle: String, groupName: String = "", groupEnabled: Bool = true) -> Int? {
-        let terms = tokenize(needle)
+        guard case .success(let terms) = tokenize(needle) else { return nil }
         guard !terms.isEmpty else { return nil }
         let entry = SnippetSearchIndex.Entry(
             snippet: snippet,
@@ -797,16 +817,15 @@ public enum SnippetSearch {
 
     public static let maximumQueryUTF8Bytes = 4_096
 
-    private static func boundedQuery(_ query: String) -> String {
-        String(decoding: query.utf8.prefix(maximumQueryUTF8Bytes), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func tokenize(_ query: String, locale: Locale? = .current) -> [QueryTerm] {
-        let characters = Array(boundedQuery(query))
+    private static func tokenize(_ query: String, locale: Locale? = .current) -> Result<[QueryTerm], QueryIssue> {
+        // Reject overflow without decoding a partial scalar or dropping trailing constraints.
+        guard query.utf8.prefix(maximumQueryUTF8Bytes + 1).count <= maximumQueryUTF8Bytes else {
+            return .failure(.tooLong)
+        }
+        let characters = Array(query)
         var terms: [QueryTerm] = []
         var index = 0
-        while index < characters.count && terms.count < maximumQueryTerms {
+        while index < characters.count {
             if characters[index].isWhitespace { index += 1; continue }
             let allowsExclusion = characters[index] == "-"
             let startsQuoted = characters[index] == "\"" || (allowsExclusion && index + 1 < characters.count && characters[index + 1] == "\"")
@@ -840,12 +859,16 @@ public enum SnippetSearch {
                 else if let known = SearchField(rawValue: name) { field = known; token = value }
             }
             let folded = FoldedText.fold(token, locale: locale).characters
-            // An incomplete recognized filter narrows to nothing until a value is supplied.
-            if folded.isEmpty && state == nil && field == nil { continue }
+            // Neither a positive nor a negative incomplete filter may widen the result set.
+            if folded.isEmpty {
+                if state != nil || field != nil { return .failure(.incompleteFilter) }
+                continue
+            }
+            guard terms.count < maximumQueryTerms else { return .failure(.tooManyTerms) }
             terms.append(QueryTerm(text: folded, field: field, state: state,
                                    literal: hadQuote, excluded: excluded))
         }
-        return terms
+        return .success(terms)
     }
 
     private static func firstOccurrence(of needle: [Character], in haystack: [Character]) -> Range<Int>? {

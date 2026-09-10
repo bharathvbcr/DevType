@@ -541,6 +541,7 @@ enum SnippetManagerFilter {
     /// One indexed pass over the complete groups preserves field-filter parity with the
     /// palette. The manager then intersects these IDs with its selected group and chip.
     static func matchingIDs(in groups: [SnippetGroup], query: String) -> Set<UUID> {
+        guard SnippetSearch.queryIssue(for: query) == nil else { return [] }
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Set(groups.flatMap(\.snippets).map(\.id))
         }
@@ -1567,7 +1568,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     private func applyFilterAndReloadTable() {
-        let filter = filterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let filter = filterField.stringValue
         // Flattened once. The stats pill used to build a second copy of the whole library
         // immediately after the pool did.
         let all = groups.flatMap(\.snippets)
@@ -1626,7 +1627,12 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             let cta: String?
             let action: Selector?
 
-            if !filter.isEmpty {
+            if let issue = SnippetSearch.queryIssue(for: filter) {
+                title = loc.s("search.issue.title")
+                subtitle = issue.message(loc: loc)
+                cta = loc.s("common.clear")
+                action = #selector(clearFilter)
+            } else if !filter.isEmpty {
                 title = loc.s("snippets.empty.noMatch", filterField.stringValue)
                 subtitle = ""
                 cta = loc.s("common.clear")

@@ -125,6 +125,12 @@ final class SnippetManagerFilterTests: XCTestCase {
         )
     }
 
+    func testOverLimitExclusionCannotLeaveRowsAvailableForBulkActions() {
+        let s = snippet()
+        let query = Array(repeating: "signature", count: 12).joined(separator: " ") + " -title:signature"
+        XCTAssertFalse(matches(s, query: query))
+    }
+
     /// The two searches must answer the same question. This fails the moment either side
     /// grows a rule the other lacks, which is how the tag gap arrived in the first place.
     func testManagerAndPaletteAgreeOnTheSameLibrary() {
