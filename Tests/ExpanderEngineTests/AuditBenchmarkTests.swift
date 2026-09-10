@@ -72,12 +72,13 @@ final class AuditBenchmarkTests: XCTestCase {
         try requireBenchMode()
         for size in [1_000, 2_000] {
             let groups = library(size)
+            let libraryID = UUID()
             SnippetSearch.invalidateIndexCache()
-            _ = SnippetSearch.run(query: "trigger1", in: groups, limit: 40, revision: 7)
+            _ = SnippetSearch.run(query: "trigger1", in: groups, limit: 40, revision: 7, libraryID: libraryID)
             time("P4 cached search x1k keystrokes @ \(size)") {
                 for index in 0..<1_000 {
                     _ = SnippetSearch.run(
-                        query: "trigger\(index % 50)", in: groups, limit: 40, revision: 7
+                        query: "trigger\(index % 50)", in: groups, limit: 40, revision: 7, libraryID: libraryID
                     )
                 }
             }

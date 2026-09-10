@@ -49,6 +49,8 @@ public struct SnippetDocument: Codable, Equatable {
 }
 
 public final class SnippetStore {
+    /// Revisions are local to this instance, including when two stores read the same file.
+    public let searchCacheIdentity = UUID()
     /// The one store that owns the whole library, and therefore the only one allowed to decide a
     /// keychain secret is orphaned.
     public static let shared = SnippetStore(
@@ -2729,7 +2731,8 @@ public final class SnippetStore {
             in: snapshot.groups,
             includeDisabled: false,
             limit: limit,
-            revision: snapshot.revision
+            revision: snapshot.revision,
+            libraryID: searchCacheIdentity
         )
     }
 

@@ -447,7 +447,7 @@ public enum CommandPaletteCatalog {
 
     private struct PaletteQueryCacheKey: Hashable {
         let query: String
-        let libraryFingerprint: UInt64
+        let libraryStamp: SearchLibraryStamp
         let commandStatsRevision: UInt64
         let snippetStatsRevision: UInt64
         let language: AppLanguage
@@ -733,16 +733,16 @@ public enum CommandPaletteCatalog {
                 if case .undoAI = command.action, !AIUndoStore.hasUndo { continue }
                 var score = (id == "ai.undo" ? 100 : max(1, 40 - index))
                 if let boost = commandUsageBoost?(command.id) {
-                    score += boost
+                    score = Saturating.adding(score, max(0, boost))
                 } else {
-                    score += CommandUsageStatsStore.shared.rankBoost(for: command.id)
+                    score = Saturating.adding(score, CommandUsageStatsStore.shared.rankBoost(for: command.id))
                 }
                 // Habit still counts, but a live selection says more about the next step than
                 // a tally does: the most-used command is often a date insert, and that is not
                 // what a paragraph was selected for.
-                score += contextBoost(
+                score = Saturating.adding(score, contextBoost(
                     for: command, context: context, aiEnabled: aiDisabledReason == nil
-                )
+                ))
                 hits.append(makeHit(
                     command,
                     score: max(1, score),
@@ -802,17 +802,17 @@ public enum CommandPaletteCatalog {
             ) else { continue }
             var adjusted = score
             if let boost = boostIndex[command.id] {
-                adjusted += max(0, boost)
+                adjusted = Saturating.adding(adjusted, max(0, boost))
             }
             // Falls back to the shared store rather than silently dropping personalization.
             // The empty-query branch above has always done this; the typed branch did not, so
             // any caller that forgot the closure lost usage weighting with no symptom.
-            adjusted += commandUsageBoost?(command.id)
-                ?? CommandUsageStatsStore.shared.rankBoost(for: command.id)
-            adjusted += conversationalBoost(query: trimmed, command: command)
-            adjusted += contextBoost(
+            adjusted = Saturating.adding(adjusted, max(0, commandUsageBoost?(command.id)
+                ?? CommandUsageStatsStore.shared.rankBoost(for: command.id)))
+            adjusted = Saturating.adding(adjusted, conversationalBoost(query: trimmed, command: command))
+            adjusted = Saturating.adding(adjusted, contextBoost(
                 for: command, context: context, aiEnabled: aiDisabledReason == nil
-            )
+            ))
             admitted.insert(command.id)
             hits.append(makeHit(
                 command,
@@ -845,12 +845,12 @@ public enum CommandPaletteCatalog {
                     continue
                 }
                 var adjusted = max(1, semanticRescueBaseScore - offset * semanticRescueDecay)
-                adjusted += commandUsageBoost?(command.id)
-                    ?? CommandUsageStatsStore.shared.rankBoost(for: command.id)
-                adjusted += conversationalBoost(query: trimmed, command: command)
-                adjusted += contextBoost(
+                adjusted = Saturating.adding(adjusted, max(0, commandUsageBoost?(command.id)
+                    ?? CommandUsageStatsStore.shared.rankBoost(for: command.id)))
+                adjusted = Saturating.adding(adjusted, conversationalBoost(query: trimmed, command: command))
+                adjusted = Saturating.adding(adjusted, contextBoost(
                     for: command, context: context, aiEnabled: aiDisabledReason == nil
-                )
+                ))
                 admitted.insert(id)
                 hits.append(makeHit(
                     command,
@@ -892,23 +892,22 @@ public enum CommandPaletteCatalog {
         snippetLimit: Int = 40,
         boostRevision: UInt64? = nil,
         libraryRevision: UInt64? = nil,
+        libraryID: UUID? = nil,
         routedResult: PaletteToolRouter.Routed? = nil,
         context: PaletteContext = .none
     ) -> [PaletteListRow] {
         let trimmed = boundedQuery(query)
-        // A `SnippetStore` revision when the caller has one. The fingerprint below hashes every
-        // group and snippet — 627 µs at 2,000 snippets — and this function ran it on every
-        // keystroke in the palette, once here and once more inside `SnippetSearch`.
-        // The two numbering schemes share one cache table, so a revision is biased away from
-        // the fingerprint space rather than being used raw.
-        let libStamp = libraryRevision.map { $0 ^ 0x9E37_79B9_7F4A_7C15 }
-            ?? SnippetSearch.fingerprint(of: groups, includeDisabled: false)
+        let commandLimit = max(0, commandLimit)
+        let snippetLimit = max(0, snippetLimit)
+        let canCache = usageBoost == nil && commandUsageBoost == nil
+        let libStamp = SearchLibraryStamp.resolve(groups: groups, includeDisabled: false,
+                                                 revision: libraryRevision, libraryID: libraryID, locale: .current)
         let cmdRev = CommandUsageStatsStore.shared.revision
         let snipRev = UsageStatsStore.shared.revision
         let clipHash = clipboardPreview?.hashValue ?? 0
         let cacheKey = PaletteQueryCacheKey(
             query: trimmed,
-            libraryFingerprint: libStamp,
+            libraryStamp: libStamp,
             commandStatsRevision: cmdRev,
             snippetStatsRevision: snipRev,
             language: loc.language,
@@ -924,10 +923,21 @@ public enum CommandPaletteCatalog {
         )
 
         paletteCacheLock.lock()
-        if let cached = rowQueryCache[cacheKey] {
+        if canCache, let cached = rowQueryCache[cacheKey] {
             rowCacheHitCount &+= 1
             paletteCacheLock.unlock()
-            return cached
+            // Cache ranking, not generated values or clock readings. Every opening gets a
+            // fresh UUID/date preview, resolved through the same owner as an uncached hit.
+            return cached.map { row in
+                guard case .command(let hit) = row else { return row }
+                switch hit.command.action {
+                case .date, .generate:
+                    return .command(makeHit(hit.command, score: hit.score, loc: loc, now: Date(),
+                                            locale: .current, timeZone: .current,
+                                            clipboardPreview: clipboardPreview, aiDisabledReason: aiDisabledReason))
+                default: return row
+                }
+            }
         }
         paletteCacheLock.unlock()
 
@@ -983,7 +993,8 @@ public enum CommandPaletteCatalog {
                 limit: snippetLimit,
                 boost: usageBoost,
                 boostRevision: boostRevision,
-                revision: libraryRevision
+                revision: libraryRevision,
+                libraryID: libraryID
             )
         }
 
@@ -1024,7 +1035,12 @@ public enum CommandPaletteCatalog {
             rows.append(contentsOf: entry.rows)
         }
 
+        guard canCache else { return rows }
         paletteCacheLock.lock()
+        if rowQueryCache[cacheKey] != nil {
+            paletteCacheLock.unlock()
+            return rows
+        }
         if rowQueryCache.count >= maxRowQueryCacheEntries, !rowQueryCacheKeys.isEmpty {
             let oldest = rowQueryCacheKeys.removeFirst()
             rowQueryCache.removeValue(forKey: oldest)
@@ -1614,6 +1630,10 @@ public enum CommandPaletteCatalog {
             (.lower, "lower", "palette.tool.lower", "palette.tool.lower.detail", ["lowercase", "lower case"]),
             (.title, "titlecase", "palette.tool.title", "palette.tool.title.detail", ["title case", "capitalize"]),
             (.sentence, "sentence", "palette.tool.sentence", "palette.tool.sentence.detail", ["sentence case"]),
+            (.snake, "snake", "palette.tool.snake", "palette.tool.snake.detail", ["snake case", "snake_case", "underscores"]),
+            (.kebab, "kebab", "palette.tool.kebab", "palette.tool.kebab.detail", ["kebab case", "kebab-case", "slug", "hyphens"]),
+            (.camel, "camel", "palette.tool.camel", "palette.tool.camel.detail", ["camel case", "camelCase", "identifier"]),
+            (.pascal, "pascal", "palette.tool.pascal", "palette.tool.pascal.detail", ["pascal case", "PascalCase", "class name"]),
             (.sortLines, "sort", "palette.tool.sort", "palette.tool.sort.detail", ["sort lines", "sort lines a-z"]),
             (.dedupeLines, "dedupe", "palette.tool.dedupe", "palette.tool.dedupe.detail", ["dedupe", "unique lines", "remove duplicates"]),
             (.trimLines, "trim", "palette.tool.trim", "palette.tool.trim.detail", ["trim", "trim lines", "strip whitespace"]),

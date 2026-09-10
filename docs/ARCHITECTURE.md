@@ -320,3 +320,11 @@ DevType contains a dedicated, privacy-conscious update checking module (`Sources
 - `PasteboardBroker.verifySelectionRange` is the shared caret-identity policy: proven AX writers may refuse an expand before erase if the selection moved; after HID erase, text and image clipboard paste require the same app and focused element only. Settle-delay Cmd+V aborts log a distinct reason instead of only restoring the trigger.
 
 These components replace prior copies at their existing call sites. They do not introduce a second expansion coordinator or a second clipboard/recovery policy.
+
+## Productivity search and text operations (1.0)
+
+`SnippetSearch` owns phrase/field/type/exclusion parsing and matching for both the manager and command palette. `SnippetManagerFilter` applies one indexed pass to the complete groups and then intersects the resulting IDs with the manager's current group/chip selection. Search bodies are capped at 2,000 characters; queries at 4,096 UTF-8 bytes and 12 terms, with the palette's additional 512-character limit.
+
+`SnippetStore.searchCacheIdentity` scopes each local revision. Both identity and revision are required for a constant-time cache check; arbitrary group snapshots use a complete `Hashable` content fingerprint. Each folded index owns a UUID so caller-created indices and locales cannot share query results. Lexical results are cached separately from custom ranking closures. Palette row caches do not share custom rankings, and cached dynamic values are refreshed through the existing command-hit builder.
+
+`TextCaseTransform` owns the four identifier styles for the palette and both macro syntaxes. Whole-input cursor mapping handles acronym boundaries that cannot be inferred by transforming a prefix alone. `PaletteTextOps` owns Unicode line splitting, delegates number formatting to `SafeMathParser`, encodes URL components with the unreserved character set, and enables scalar JSON fragments on read/write. Existing insertion, permission and secret-routing owners remain authoritative.

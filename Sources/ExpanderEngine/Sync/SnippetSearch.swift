@@ -2,6 +2,23 @@
 
 import Foundation
 
+/// A revision is meaningful only inside the library that owns it. Callers without that
+/// identity use a complete content fingerprint, including the metadata returned in each hit.
+struct SearchLibraryStamp: Hashable {
+    let value: UInt64
+    let libraryID: UUID?
+    let localeID: String?
+
+    static func resolve(groups: [SnippetGroup], includeDisabled: Bool,
+                        revision: UInt64?, libraryID: UUID?, locale: Locale?) -> Self {
+        if let revision, let libraryID {
+            return Self(value: revision, libraryID: libraryID, localeID: locale?.identifier)
+        }
+        return Self(value: SnippetSearch.fingerprint(of: groups, includeDisabled: includeDisabled),
+                    libraryID: nil, localeID: locale?.identifier)
+    }
+}
+
 /// Field a search term matched in. §4.7: `group` used to be display-only.
 public enum SearchField: String, Equatable, Hashable, CaseIterable {
     case trigger
@@ -146,6 +163,7 @@ public struct SnippetSearchIndex {
         let snippet: SnippetModel
         let groupID: UUID
         let groupName: String
+        let groupEnabled: Bool
 
         let trigger: FoldedText
         /// Trigger with leading sigils (`:`, `~`, `;`) removed, so `sig` finds `:sig`.
@@ -166,6 +184,9 @@ public struct SnippetSearchIndex {
     }
 
     let entries: [Entry]
+    let stamp: SearchLibraryStamp
+    /// Separates caller-owned indices too, including differently folded locales.
+    let cacheID: UUID
     /// Cheap content fingerprint; the cached index is rebuilt when this changes.
     /// Identifies the library this index was built from. Either a `SnippetStore` revision
     /// (cheap, exact) or a content fingerprint (for callers holding groups from nowhere in
@@ -192,22 +213,8 @@ public enum SnippetSearch {
 
     private struct QueryCacheKey: Hashable {
         let query: String
-        let fingerprint: UInt64
-        /// Distinguishes a store revision from a content fingerprint, so revision 7 and
-        /// fingerprint 7 cannot collide in this table.
-        let stampIsRevision: Bool
-        /// The same library searched with and without disabled snippets gives different
-        /// answers. This used to ride along inside the content fingerprint, which hashes it —
-        /// but a store revision names the library alone, so the distinction has to be carried
-        /// explicitly or the palette would serve the manager's results.
-        let includesDisabled: Bool
+        let indexID: UUID
         let limit: Int?
-        let statsRevision: UInt64
-        /// Revision of whatever store the caller's `boost` closure actually reads. The shared
-        /// revision above cannot stand in for it: a caller boosting from its own
-        /// `UsageStatsStore` would mutate that store without moving `shared.revision`, and the
-        /// cache would keep serving rankings computed from counts that had already changed.
-        let boostRevision: UInt64
     }
 
     private static var queryCache: [QueryCacheKey: [SearchHit]] = [:]
@@ -217,10 +224,8 @@ public enum SnippetSearch {
     private static var queryCacheHead = 0
     private static let maxQueryCacheEntries = 128
 
-    /// Fingerprint over the fields the index derives from. Deliberately hashes only short
-    /// strings plus the body *length* — hashing every body byte would reintroduce the very cost
-    /// the index exists to remove, while still catching every realistic edit (`updatedAt` moves
-    /// on save, and a body edit changes its length in all but pathological cases).
+    /// Hash every returned field; equal-length edits and delivery-policy changes matter too.
+    /// Store-backed callers avoid this work by supplying both identity and revision.
     public static func fingerprint(of groups: [SnippetGroup], includeDisabled: Bool) -> UInt64 {
         #if DEBUG
         fingerprintCallLock.lock()
@@ -229,22 +234,7 @@ public enum SnippetSearch {
         #endif
         var hasher = Hasher()
         hasher.combine(includeDisabled)
-        hasher.combine(groups.count)
-        for group in groups {
-            hasher.combine(group.id)
-            hasher.combine(group.name)
-            hasher.combine(group.enabled)
-            hasher.combine(group.snippets.count)
-            for snippet in group.snippets {
-                hasher.combine(snippet.id)
-                hasher.combine(snippet.enabled)
-                hasher.combine(snippet.triggerKeyword)
-                hasher.combine(snippet.displayTitle)
-                hasher.combine(snippet.replacementText.count)
-                hasher.combine(snippet.tags)
-                hasher.combine(snippet.updatedAt)
-            }
-        }
+        hasher.combine(groups)
         return UInt64(bitPattern: Int64(hasher.finalize()))
     }
 
@@ -257,14 +247,15 @@ public enum SnippetSearch {
         for groups: [SnippetGroup],
         includeDisabled: Bool = true,
         locale: Locale? = Locale.current,
-        revision: UInt64? = nil
+        revision: UInt64? = nil,
+        libraryID: UUID? = nil
     ) -> SnippetSearchIndex {
         makeIndex(
             for: groups,
             includeDisabled: includeDisabled,
             locale: locale,
-            stamp: revision ?? fingerprint(of: groups, includeDisabled: includeDisabled),
-            stampIsRevision: revision != nil
+            stamp: SearchLibraryStamp.resolve(groups: groups, includeDisabled: includeDisabled,
+                                             revision: revision, libraryID: libraryID, locale: locale)
         )
     }
 
@@ -277,8 +268,7 @@ public enum SnippetSearch {
         for groups: [SnippetGroup],
         includeDisabled: Bool,
         locale: Locale?,
-        stamp: UInt64,
-        stampIsRevision: Bool
+        stamp: SearchLibraryStamp
     ) -> SnippetSearchIndex {
         var entries: [SnippetSearchIndex.Entry] = []
         for group in groups {
@@ -298,6 +288,7 @@ public enum SnippetSearch {
                     snippet: snippet,
                     groupID: group.id,
                     groupName: group.name,
+                    groupEnabled: group.enabled,
                     trigger: FoldedText.fold(trigger, locale: locale),
                     bareTrigger: FoldedText.fold(bare, locale: locale),
                     bareTriggerOffset: sigilCount,
@@ -312,8 +303,10 @@ public enum SnippetSearch {
         }
         return SnippetSearchIndex(
             entries: entries,
-            fingerprint: stamp,
-            stampIsRevision: stampIsRevision,
+            stamp: stamp,
+            cacheID: UUID(),
+            fingerprint: stamp.value,
+            stampIsRevision: stamp.libraryID != nil,
             includesDisabled: includeDisabled
         )
     }
@@ -321,18 +314,18 @@ public enum SnippetSearch {
     private static func index(
         for groups: [SnippetGroup],
         includeDisabled: Bool,
-        revision: UInt64?
+        revision: UInt64?,
+        libraryID: UUID?
     ) -> SnippetSearchIndex {
         // A revision comparison is O(1); the fingerprint hashes every snippet's id, trigger,
         // title, tags and timestamp — 627 µs at 2,000 snippets, paid on every keystroke to
         // discover the library had not changed.
-        let stamp = revision ?? fingerprint(of: groups, includeDisabled: includeDisabled)
-        let stampIsRevision = revision != nil
+        let stamp = SearchLibraryStamp.resolve(groups: groups, includeDisabled: includeDisabled,
+                                              revision: revision, libraryID: libraryID, locale: .current)
 
         cacheLock.lock()
         if let cached = cachedIndices[includeDisabled],
-           cached.fingerprint == stamp,
-           cached.stampIsRevision == stampIsRevision {
+           cached.stamp == stamp {
             cacheLock.unlock()
             return cached
         }
@@ -342,8 +335,7 @@ public enum SnippetSearch {
             for: groups,
             includeDisabled: includeDisabled,
             locale: Locale.current,
-            stamp: stamp,
-            stampIsRevision: stampIsRevision
+            stamp: stamp
         )
         cacheLock.lock()
         cachedIndices[includeDisabled] = fresh
@@ -358,10 +350,10 @@ public enum SnippetSearch {
 
     /// Drops query results whose stamp belongs to no live index. Caller holds `cacheLock`.
     private static func pruneQueryCacheLocked() {
-        let live = Set(cachedIndices.values.map { StampIdentity(value: $0.fingerprint, isRevision: $0.stampIsRevision) })
+        let live = Set(cachedIndices.values.map(\.cacheID))
         guard !queryCache.isEmpty else { return }
         queryCache = queryCache.filter { key, _ in
-            live.contains(StampIdentity(value: key.fingerprint, isRevision: key.stampIsRevision))
+            live.contains(key.indexID)
         }
         // Rebuild the eviction ring from the survivors, oldest first.
         var survivors: [QueryCacheKey?] = []
@@ -374,11 +366,6 @@ public enum SnippetSearch {
         }
         queryCacheKeys = survivors
         queryCacheHead = 0
-    }
-
-    private struct StampIdentity: Hashable {
-        let value: UInt64
-        let isRevision: Bool
     }
 
     #if DEBUG
@@ -432,7 +419,8 @@ public enum SnippetSearch {
         in groups: [SnippetGroup],
         includeDisabled: Bool = true,
         limit: Int? = nil,
-        revision: UInt64? = nil
+        revision: UInt64? = nil,
+        libraryID: UUID? = nil
     ) -> [SearchHit] {
         run(
             query: query,
@@ -440,7 +428,8 @@ public enum SnippetSearch {
             includeDisabled: includeDisabled,
             limit: limit,
             boost: nil,
-            revision: revision
+            revision: revision,
+            libraryID: libraryID
         )
     }
 
@@ -457,11 +446,12 @@ public enum SnippetSearch {
         limit: Int? = nil,
         boost: ((UUID) -> Int)?,
         boostRevision: UInt64? = nil,
-        revision: UInt64? = nil
+        revision: UInt64? = nil,
+        libraryID: UUID? = nil
     ) -> [SearchHit] {
         run(
             query: query,
-            index: index(for: groups, includeDisabled: includeDisabled, revision: revision),
+            index: index(for: groups, includeDisabled: includeDisabled, revision: revision, libraryID: libraryID),
             limit: limit,
             boost: boost,
             boostRevision: boostRevision
@@ -476,18 +466,24 @@ public enum SnippetSearch {
         boost: ((UUID) -> Int)? = nil,
         boostRevision: UInt64? = nil
     ) -> [SearchHit] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let limit, limit <= 0 { return [] }
+        let trimmed = boundedQuery(query)
         guard !trimmed.isEmpty else { return [] }
 
-        let statsRev = UsageStatsStore.shared.revision
+        if let boost {
+            // Cache lexical work independently of personalization. A closure's identity and
+            // state cannot be inferred from a revision supplied by an arbitrary caller.
+            let base = run(query: trimmed, index: index, limit: nil)
+            return ranked(base.map { hit in
+                SearchHit(snippet: hit.snippet, groupID: hit.groupID, groupName: hit.groupName,
+                          score: Saturating.adding(hit.score, max(0, boost(hit.id))), highlights: hit.highlights)
+            }, limit: limit)
+        }
+
         let cacheKey = QueryCacheKey(
             query: trimmed,
-            fingerprint: index.fingerprint,
-            stampIsRevision: index.stampIsRevision,
-            includesDisabled: index.includesDisabled,
-            limit: limit,
-            statsRevision: boost != nil ? statsRev : 0,
-            boostRevision: boost != nil ? (boostRevision ?? 0) : 0
+            indexID: index.cacheID,
+            limit: limit
         )
 
         cacheLock.lock()
@@ -497,15 +493,12 @@ public enum SnippetSearch {
         }
         cacheLock.unlock()
 
-        let terms = tokenize(trimmed)
+        let terms = tokenize(trimmed, locale: index.stamp.localeID.map { Locale(identifier: $0) })
         guard !terms.isEmpty else { return [] }
 
         var hits: [SearchHit] = []
         for entry in index.entries {
-            guard var evaluation = evaluate(entry: entry, terms: terms) else { continue }
-            if let boost {
-                evaluation.score += Swift.max(0, boost(entry.snippet.id))
-            }
+            guard let evaluation = evaluate(entry: entry, terms: terms) else { continue }
             hits.append(SearchHit(
                 snippet: entry.snippet,
                 groupID: entry.groupID,
@@ -515,22 +508,12 @@ public enum SnippetSearch {
             ))
         }
 
-        hits.sort { a, b in
-            if a.score != b.score { return a.score > b.score }
-            if a.snippet.triggerKeyword.count != b.snippet.triggerKeyword.count {
-                return a.snippet.triggerKeyword.count < b.snippet.triggerKeyword.count
-            }
-            return a.snippet.triggerKeyword.localizedCaseInsensitiveCompare(b.snippet.triggerKeyword) == .orderedAscending
-        }
-
-        let result: [SearchHit]
-        if let limit, hits.count > limit {
-            result = Array(hits.prefix(limit))
-        } else {
-            result = hits
-        }
-
+        let result = ranked(hits, limit: limit)
         cacheLock.lock()
+        if queryCache[cacheKey] != nil {
+            cacheLock.unlock()
+            return result
+        }
         if queryCache.count >= maxQueryCacheEntries {
             // Walk forward past keys a prune already dropped until one real eviction lands.
             while queryCacheHead < queryCacheKeys.count {
@@ -554,24 +537,45 @@ public enum SnippetSearch {
         return result
     }
 
+    private static func ranked(_ hits: [SearchHit], limit: Int?) -> [SearchHit] {
+        let hits = hits.sorted { a, b in
+            if a.score != b.score { return a.score > b.score }
+            if a.snippet.triggerKeyword.count != b.snippet.triggerKeyword.count {
+                return a.snippet.triggerKeyword.count < b.snippet.triggerKeyword.count
+            }
+            let order = a.snippet.triggerKeyword.localizedCaseInsensitiveCompare(b.snippet.triggerKeyword)
+            if order != .orderedSame { return order == .orderedAscending }
+            if a.id != b.id { return a.id.uuidString < b.id.uuidString }
+            return a.groupID.uuidString < b.groupID.uuidString
+        }
+
+        let result: [SearchHit]
+        if let limit, hits.count > limit {
+            result = Array(hits.prefix(limit))
+        } else {
+            result = hits
+        }
+
+        return result
+    }
+
     /// Body text as searched — capped at `maxIndexedBodyCharacters` exactly like
     /// `makeIndex`, so the legacy shim and the index path agree on huge snippets:
     /// same matches, same scores, and no unbounded folding work per call.
     private static func indexedBodyText(_ body: String) -> String {
-        body.count > SnippetSearchIndex.maxIndexedBodyCharacters
-            ? String(body.prefix(SnippetSearchIndex.maxIndexedBodyCharacters))
-            : body
+        String(body.prefix(SnippetSearchIndex.maxIndexedBodyCharacters))
     }
 
     /// Legacy single-snippet scorer, kept as a shim. Returns `nil` when the snippet does not
     /// match at all.
-    public static func score(snippet: SnippetModel, needle: String) -> Int? {
+    public static func score(snippet: SnippetModel, needle: String, groupName: String = "", groupEnabled: Bool = true) -> Int? {
         let terms = tokenize(needle)
         guard !terms.isEmpty else { return nil }
         let entry = SnippetSearchIndex.Entry(
             snippet: snippet,
             groupID: UUID(),
-            groupName: "",
+            groupName: groupName,
+            groupEnabled: groupEnabled,
             trigger: FoldedText.fold(snippet.triggerKeyword, locale: Locale.current),
             bareTrigger: FoldedText.fold(
                 String(snippet.triggerKeyword.dropFirst(leadingSigilCount(of: snippet.triggerKeyword))),
@@ -579,7 +583,7 @@ public enum SnippetSearch {
             ),
             bareTriggerOffset: leadingSigilCount(of: snippet.triggerKeyword),
             title: FoldedText.fold(snippet.displayTitle, locale: Locale.current),
-            group: .empty,
+            group: FoldedText.fold(groupName, locale: Locale.current),
             tags: snippet.tags.map { FoldedText.fold($0, locale: Locale.current) },
             body: FoldedText.fold(indexedBodyText(snippet.replacementText), locale: Locale.current),
             titleWordStarts: [],
@@ -611,12 +615,19 @@ public enum SnippetSearch {
 
     /// Multi-term queries are AND: every term must match somewhere. The reported score is the
     /// average per-term score, so "email work" stays comparable to "email".
-    private static func evaluate(entry: SnippetSearchIndex.Entry, terms: [[Character]]) -> Evaluation? {
+    private static func evaluate(entry: SnippetSearchIndex.Entry, terms: [QueryTerm]) -> Evaluation? {
         var total = 0
+        var positiveCount = 0
         var highlightsByField: [SearchField: [Range<Int>]] = [:]
 
         for term in terms {
-            guard let best = bestMatch(entry: entry, term: term) else { return nil }
+            let match = match(entry: entry, term: term)
+            if term.excluded {
+                if match != nil { return nil }
+                continue
+            }
+            guard let best = match else { return nil }
+            positiveCount += 1
             total += best.score
             highlightsByField[best.field, default: []].append(contentsOf: best.ranges)
         }
@@ -625,7 +636,50 @@ public enum SnippetSearch {
             guard let ranges = highlightsByField[field], !ranges.isEmpty else { return nil }
             return SearchHighlight(field: field, ranges: mergeRanges(ranges))
         }
-        return Evaluation(score: total / terms.count, highlights: highlights)
+        return Evaluation(score: positiveCount == 0 ? 0 : total / positiveCount, highlights: highlights)
+    }
+
+    private struct QueryTerm {
+        let text: [Character]
+        let field: SearchField?
+        let state: String?
+        let literal: Bool
+        let excluded: Bool
+    }
+
+    private static func match(entry: SnippetSearchIndex.Entry, term: QueryTerm) -> FieldMatch? {
+        if let state = term.state {
+            let matches: Bool
+            switch state {
+            case "enabled": matches = entry.snippet.enabled && entry.groupEnabled
+            case "disabled": matches = !entry.snippet.enabled || !entry.groupEnabled
+            case "secret": matches = entry.snippet.isSecret
+            case "image": matches = entry.snippet.isImageSnippet
+            case "ai": matches = !entry.snippet.aiTransform.isEmpty
+            case "text": matches = !entry.snippet.isSecret && !entry.snippet.isImageSnippet && entry.snippet.aiTransform.isEmpty
+            default: matches = false
+            }
+            return matches ? FieldMatch(score: 0, field: .tag, ranges: []) : nil
+        }
+        if !term.literal && term.field == nil && !term.excluded {
+            return bestMatch(entry: entry, term: term.text)
+        }
+        // Explicit filters and exclusions are literal, never fuzzy. A negative term should
+        // not unexpectedly remove a row merely because its letters form a subsequence.
+        let fields: [(SearchField, FoldedText)] = [
+            (.trigger, entry.trigger), (.title, entry.title), (.group, entry.group), (.content, entry.body)
+        ]
+        for (field, text) in fields where term.field == nil || term.field == field {
+            if let range = firstOccurrence(of: term.text, in: text.characters) {
+                return FieldMatch(score: field == .trigger ? 1_000 : 600, field: field,
+                                  ranges: text.originalRanges([range]))
+            }
+        }
+        if term.field == nil || term.field == .tag,
+           entry.tags.contains(where: { firstOccurrence(of: term.text, in: $0.characters) != nil }) {
+            return FieldMatch(score: 600, field: .tag, ranges: [])
+        }
+        return nil
     }
 
     private struct FieldMatch {
@@ -741,12 +795,57 @@ public enum SnippetSearch {
     /// library-sized amount of work on the keystroke path.
     static let maximumQueryTerms = 12
 
-    private static func tokenize(_ query: String) -> [[Character]] {
-        query.components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .prefix(maximumQueryTerms)
-            .map { Array(FoldedText.fold($0, locale: Locale.current).characters) }
-            .filter { !$0.isEmpty }
+    public static let maximumQueryUTF8Bytes = 4_096
+
+    private static func boundedQuery(_ query: String) -> String {
+        String(decoding: query.utf8.prefix(maximumQueryUTF8Bytes), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func tokenize(_ query: String, locale: Locale? = .current) -> [QueryTerm] {
+        let characters = Array(boundedQuery(query))
+        var terms: [QueryTerm] = []
+        var index = 0
+        while index < characters.count && terms.count < maximumQueryTerms {
+            if characters[index].isWhitespace { index += 1; continue }
+            let allowsExclusion = characters[index] == "-"
+            let startsQuoted = characters[index] == "\"" || (allowsExclusion && index + 1 < characters.count && characters[index + 1] == "\"")
+            var token = ""
+            var quoted = false
+            var hadQuote = false
+            while index < characters.count {
+                let character = characters[index]
+                if character.isWhitespace && !quoted { break }
+                if character == "\\", index + 1 < characters.count,
+                   characters[index + 1] == "\"" || characters[index + 1] == "\\" {
+                    index += 1
+                    token.append(characters[index])
+                } else if character == "\"" {
+                    quoted.toggle()
+                    hadQuote = true
+                } else {
+                    token.append(character)
+                }
+                index += 1
+            }
+            // A lone hyphen remains searchable; a leading hyphen on a term excludes it.
+            let excluded = allowsExclusion && token.hasPrefix("-") && token.count > 1
+            if excluded { token.removeFirst() }
+            var field: SearchField?
+            var state: String?
+            if !startsQuoted, let colon = token.firstIndex(of: ":") {
+                let name = String(token[..<colon]).lowercased()
+                let value = String(token[token.index(after: colon)...])
+                if name == "is" { state = value.lowercased(); token = value }
+                else if let known = SearchField(rawValue: name) { field = known; token = value }
+            }
+            let folded = FoldedText.fold(token, locale: locale).characters
+            // An incomplete recognized filter narrows to nothing until a value is supplied.
+            if folded.isEmpty && state == nil && field == nil { continue }
+            terms.append(QueryTerm(text: folded, field: field, state: state,
+                                   literal: hadQuote, excluded: excluded))
+        }
+        return terms
     }
 
     private static func firstOccurrence(of needle: [Character], in haystack: [Character]) -> Range<Int>? {

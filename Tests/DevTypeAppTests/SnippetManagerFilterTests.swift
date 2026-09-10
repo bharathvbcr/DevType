@@ -8,6 +8,19 @@ import ExpanderEngine
 /// same library answered the same query differently depending on which field you typed into.
 final class SnippetManagerFilterTests: XCTestCase {
 
+    private func matches(_ snippet: SnippetModel, query: String) -> Bool {
+        SnippetManagerFilter.matchingIDs(in: [SnippetGroup(name: "G", snippets: [snippet])], query: query).contains(snippet.id)
+    }
+
+    func testStructuredFiltersSeeGroupsAndDisabledSnippetsInTheManager() {
+        let enabled = snippet(title: "Client signature", tags: ["client"])
+        var disabled = snippet(title: "Draft signature", tags: ["draft"])
+        disabled.enabled = false
+        let groups = [SnippetGroup(name: "Client Work", snippets: [enabled, disabled])]
+        XCTAssertEqual(SnippetManagerFilter.matchingIDs(in: groups, query: "group:\"Client Work\" -tag:draft"), [enabled.id])
+        XCTAssertEqual(SnippetManagerFilter.matchingIDs(in: groups, query: "is:disabled"), [disabled.id])
+    }
+
     private func snippet(
         trigger: String = ":sig",
         title: String = "Signature",
@@ -20,49 +33,49 @@ final class SnippetManagerFilterTests: XCTestCase {
     }
 
     func testAnEmptyQueryMatchesEverything() {
-        XCTAssertTrue(SnippetManagerFilter.matches(snippet(), query: ""))
+        XCTAssertTrue(matches(snippet(), query: ""))
     }
 
     func testTriggerTitleAndBodyStillMatch() {
         let s = snippet()
-        XCTAssertTrue(SnippetManagerFilter.matches(s, query: "sig"))
-        XCTAssertTrue(SnippetManagerFilter.matches(s, query: "signature"))
-        XCTAssertTrue(SnippetManagerFilter.matches(s, query: "regards"))
+        XCTAssertTrue(matches(s, query: "sig"))
+        XCTAssertTrue(matches(s, query: "signature"))
+        XCTAssertTrue(matches(s, query: "regards"))
     }
 
     /// The gap this closes.
     func testATagMatches() {
         let s = snippet(tags: ["invoice"])
         XCTAssertTrue(
-            SnippetManagerFilter.matches(s, query: "invoice"),
+            matches(s, query: "invoice"),
             "typing a tag in the manager must find the snippet, as it does in the palette"
         )
     }
 
     func testAPartialTagMatches() {
-        XCTAssertTrue(SnippetManagerFilter.matches(snippet(tags: ["invoicing"]), query: "invoic"))
+        XCTAssertTrue(matches(snippet(tags: ["invoicing"]), query: "invoic"))
     }
 
     func testAnyOfSeveralTagsMatches() {
         let s = snippet(tags: ["alpha", "beta", "gamma"])
         for query in ["alpha", "beta", "gamma"] {
-            XCTAssertTrue(SnippetManagerFilter.matches(s, query: query))
+            XCTAssertTrue(matches(s, query: query))
         }
     }
 
     func testANonMatchingQueryStillMatchesNothing() {
-        XCTAssertFalse(SnippetManagerFilter.matches(snippet(tags: ["invoice"]), query: "zzz"))
+        XCTAssertFalse(matches(snippet(tags: ["invoice"]), query: "zzz"))
     }
 
     /// The field lowercases before calling, but a tag imported from Espanso keeps its own case.
     func testTagMatchingIsCaseInsensitiveOnTheStoredSide() {
-        XCTAssertTrue(SnippetManagerFilter.matches(snippet(tags: ["Invoice"]), query: "invoice"))
+        XCTAssertTrue(matches(snippet(tags: ["Invoice"]), query: "invoice"))
     }
 
     func testAnUntaggedSnippetIsUnaffected() {
         let s = snippet()
-        XCTAssertTrue(SnippetManagerFilter.matches(s, query: "sig"))
-        XCTAssertFalse(SnippetManagerFilter.matches(s, query: "invoice"))
+        XCTAssertTrue(matches(s, query: "sig"))
+        XCTAssertFalse(matches(s, query: "invoice"))
     }
 
     // MARK: - The chip
@@ -93,11 +106,11 @@ final class SnippetManagerFilterTests: XCTestCase {
     func testWordOrderAndCrossFieldQueriesMatchLikeThePalette() {
         let s = snippet(trigger: ":sig", title: "Email Signature", body: "Best regards, Bharath")
         XCTAssertTrue(
-            SnippetManagerFilter.matches(s, query: "sig email"),
+            matches(s, query: "sig email"),
             "Word order must not decide whether the manager finds a snippet."
         )
         XCTAssertTrue(
-            SnippetManagerFilter.matches(s, query: "signature best"),
+            matches(s, query: "signature best"),
             "A query spanning title and body must match, as it does in the palette."
         )
     }
@@ -107,7 +120,7 @@ final class SnippetManagerFilterTests: XCTestCase {
     func testEveryWordMustStillMatchSomething() {
         let s = snippet(trigger: ":sig", title: "Email Signature", body: "Best regards")
         XCTAssertFalse(
-            SnippetManagerFilter.matches(s, query: "signature zzzz"),
+            matches(s, query: "signature zzzz"),
             "An unmatched word must still exclude the snippet."
         )
     }
@@ -118,7 +131,7 @@ final class SnippetManagerFilterTests: XCTestCase {
         let s = snippet(trigger: ":sig", title: "Email Signature", body: "Best regards", tags: ["work"])
         let group = SnippetGroup(name: "G", snippets: [s])
         for query in ["sig", "email", "work", "sig email", "signature best", "zzz", "email zzz"] {
-            let manager = SnippetManagerFilter.matches(s, query: query)
+            let manager = matches(s, query: query)
             let palette = !SnippetSearch.run(query: query, in: [group]).isEmpty
             XCTAssertEqual(manager, palette, "manager and palette disagree on \"\(query)\"")
         }

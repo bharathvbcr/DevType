@@ -211,3 +211,17 @@ The installer validates the new package, swaps the canonical application recover
 Inventory old builds before packaging: the packager removes known legacy bundles. Move old build directories and installers to a dated recoverable archive with their original paths recorded. Keep the running application until the validated replacement is ready; move the installer's quarantine to the same archive afterward. Keep release logs and a Git bundle separately from active build outputs.
 
 An Apple Development signature supports local installation and stable identity; it does not establish notarized distribution. Run `spctl --assess --type execute` separately and report its result. A local tag/install does not publish a GitHub release. Pushing a `v*.*.*` tag triggers the repository's publication workflow and is a separate distribution action.
+
+## Productivity release stress checks
+
+`DEVTYPE_STRESS_ROUNDS=20 ./Scripts/stress-productivity.sh` builds once, then repeats the real search, text/macro, erasure, input and voice delivery suites. The round count must be 1–100. It exits on the first failed command; a final success line is emitted only after every round passes.
+
+Run sanitizer configurations sequentially because they share SwiftPM's build directory:
+
+```sh
+./Scripts/test.sh --sanitize thread --filter 'Productivity|StructuredSnippetSearch|VoiceQueuedDelivery|VoiceDeliveryIntegrity|VoiceCaptureRace|SessionWatchdog|SingleFlight'
+./Scripts/test.sh --sanitize address --filter 'Productivity|StructuredSnippetSearch|MacroStructured|EraseUndoStress|ExpansionFuzz|InputBufferBoundary'
+DEVTYPE_SKIP_AUTO_CERT=1 DEVTYPE_REQUIRE_FOUNDATION_MODELS=1 DEVTYPE_BENCH=1 ./Scripts/ci-local.sh
+```
+
+For cache clients, supply `libraryID` together with `revision` only when both identify the exact groups passed. Filtering or modifying a snapshot requires its own identity/revision or the default content fingerprint. Existing calls remain source-compatible. See the [1.0 audit](audits/2026-09-10-productivity-release.md) for observed results and platform/distribution gates.

@@ -101,10 +101,7 @@ struct MacroDocument {
 
     func transformed(_ transform: TextCaseTransform, locale: Locale) -> MacroDocument {
         var result = MacroDocument(transform.apply(to: text, locale: locale), literal: true)
-        result.cursors = cursors.map { offset in
-            let prefix = (text as NSString).substring(to: offset)
-            return transform.apply(to: prefix, locale: locale).utf16.count
-        }
+        result.cursors = transform.transformedCursorOffsets(in: text, offsets: cursors, locale: locale)
         if result.cursors.contains(where: { $0 < 0 || $0 > result.length }) { result.failure = .invalidStructure }
         return result
     }

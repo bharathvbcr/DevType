@@ -21,6 +21,10 @@ public enum TextCaseTransform: String, Equatable, CaseIterable {
     case lower
     case title
     case sentence
+    case snake
+    case kebab
+    case camel
+    case pascal
 
     /// Case-insensitive lookup used by both parsers. Also accepts a few friendly aliases.
     public static func named(_ raw: String) -> TextCaseTransform? {
@@ -29,6 +33,10 @@ public enum TextCaseTransform: String, Equatable, CaseIterable {
         case "lower", "lowercase", "lc": return .lower
         case "title", "titlecase", "capitalize": return .title
         case "sentence", "sentencecase": return .sentence
+        case "snake", "snake_case": return .snake
+        case "kebab", "kebab-case": return .kebab
+        case "camel", "camelcase": return .camel
+        case "pascal", "pascalcase": return .pascal
         default: return nil
         }
     }
@@ -40,7 +48,63 @@ public enum TextCaseTransform: String, Equatable, CaseIterable {
         case .lower: return text.lowercased(with: locale)
         case .title: return text.capitalized(with: locale)
         case .sentence: return Self.sentenceCased(text, locale: locale)
+        case .snake, .kebab, .camel, .pascal:
+            return identifierTransform(text, cursorOffsets: []).text
         }
+    }
+
+    func transformedCursorOffsets(in text: String, offsets: [Int], locale: Locale) -> [Int] {
+        switch self {
+        case .snake, .kebab, .camel, .pascal:
+            return identifierTransform(text, cursorOffsets: offsets).cursors
+        default:
+            return offsets.map { apply(to: (text as NSString).substring(to: $0), locale: locale).utf16.count }
+        }
+    }
+
+    /// Split separators, lower-to-upper transitions and acronym boundaries in one pass.
+    /// Map cursor anchors using the whole input: a prefix alone cannot know that the S in
+    /// HTTPS|erver starts a new word. Non-Latin letters and digits are retained.
+    private func identifierTransform(_ text: String, cursorOffsets: [Int]) -> (text: String, cursors: [Int]) {
+        let characters = Array(text)
+        let locale = Locale(identifier: "en_US_POSIX")
+        let anchors = cursorOffsets.enumerated().sorted { $0.element < $1.element }
+        var mapped = Array(repeating: 0, count: cursorOffsets.count)
+        var anchorIndex = 0
+        var sourceOffset = 0
+        var result = ""
+        var resultLength = 0
+        var atWordStart = true
+        for (index, character) in characters.enumerated() {
+            while anchorIndex < anchors.count && anchors[anchorIndex].element <= sourceOffset {
+                mapped[anchors[anchorIndex].offset] = resultLength
+                anchorIndex += 1
+            }
+            sourceOffset += String(character).utf16.count
+            guard character.isLetter || character.isNumber else {
+                atWordStart = true
+                continue
+            }
+            if !atWordStart && character.isUppercase {
+                let previous = characters[index - 1]
+                let nextIsLower = index + 1 < characters.count && characters[index + 1].isLowercase
+                atWordStart = previous.isLowercase || previous.isNumber || (previous.isUppercase && nextIsLower)
+            }
+            if atWordStart && !result.isEmpty && (self == .snake || self == .kebab) {
+                result.append(self == .snake ? "_" : "-")
+                resultLength += 1
+            }
+            let capitalize = atWordStart && (self == .pascal || (self == .camel && !result.isEmpty))
+            let piece = capitalize ? String(character).uppercased(with: locale) : String(character).lowercased(with: locale)
+            result += piece
+            resultLength += piece.utf16.count
+            atWordStart = false
+        }
+        while anchorIndex < anchors.count {
+            mapped[anchors[anchorIndex].offset] = resultLength
+            anchorIndex += 1
+        }
+        return (result, mapped)
     }
 
     /// Lower-cases everything, then re-capitalizes the first letter of each sentence.

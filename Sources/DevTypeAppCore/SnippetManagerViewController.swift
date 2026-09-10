@@ -538,19 +538,13 @@ private final class EmptyStateView: NSView {
 /// same library by different rules, which meant typing a tag here found nothing while typing it
 /// in the palette found the snippet.
 enum SnippetManagerFilter {
-
-    /// `query` is expected already trimmed and lowercased, as the field hands it over.
-    ///
-    /// Delegates to `SnippetSearch` rather than testing the fields again here. The previous
-    /// version matched the *whole* query as one substring of one field, so it disagreed with
-    /// the palette on any multi-word query: "sig email" and "signature best" found the
-    /// snippet in the palette and nothing in the manager, because no single field contains
-    /// either string. Tag parity had already been patched into this function once; matching
-    /// through the canonical scorer is what stops the next such divergence rather than
-    /// waiting to be told about it.
-    static func matches(_ snippet: SnippetModel, query: String) -> Bool {
-        if query.isEmpty { return true }
-        return SnippetSearch.score(snippet: snippet, needle: query) != nil
+    /// One indexed pass over the complete groups preserves field-filter parity with the
+    /// palette. The manager then intersects these IDs with its selected group and chip.
+    static func matchingIDs(in groups: [SnippetGroup], query: String) -> Set<UUID> {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return Set(groups.flatMap(\.snippets).map(\.id))
+        }
+        return Set(SnippetSearch.run(query: query, in: groups).map(\.id))
     }
 }
 
@@ -935,6 +929,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
         filterField.translatesAutoresizingMaskIntoConstraints = false
         filterField.placeholderString = loc.s("manager.filter")
+        filterField.toolTip = loc.s("search.syntax.hint")
         filterField.target = self
         filterField.action = #selector(filterChanged)
         filterField.controlSize = .regular
@@ -1611,7 +1606,8 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         }
 
         if !filter.isEmpty {
-            filtered = filtered.filter { SnippetManagerFilter.matches($0, query: filter) }
+            let matchingIDs = SnippetManagerFilter.matchingIDs(in: groups, query: filter)
+            filtered = filtered.filter { matchingIDs.contains($0.id) }
         }
         // Selection survives the reload: refining a search after selecting rows for a bulk
         // operation used to silently drop the selection, because `reloadData()` clears it.

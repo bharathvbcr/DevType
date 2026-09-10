@@ -572,6 +572,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row")))
         tableView.setAccessibilityLabel(loc.s("ax.searchResults"))
         searchField.setAccessibilityLabel(loc.s("search.placeholder"))
+        searchField.toolTip = loc.s("search.syntax.hint")
         magnifier.setAccessibilityElement(false)
         scrollView.documentView = tableView
         root.addSubview(scrollView)
@@ -820,6 +821,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             // so the cache has to key on that store's revision or it serves stale rankings.
             boostRevision: store.usageStatsStore.revision,
             libraryRevision: groupsRevision,
+            libraryID: store.searchCacheIdentity,
             routedResult: routedResult,
             context: context
         )

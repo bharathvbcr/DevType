@@ -214,14 +214,16 @@ final class SearchFingerprintAvoidanceTests: XCTestCase {
 
     func testSupplyingARevisionCostsNoContentHashAtAll() {
         let groups = library(500)
+        let libraryID = UUID()
         for index in 0..<50 {
             _ = SnippetSearch.run(
-                query: "snippet \(index)", in: groups, includeDisabled: false, limit: 20, revision: 3
+                query: "snippet \(index)", in: groups, includeDisabled: false, limit: 20,
+                revision: 3, libraryID: libraryID
             )
         }
         XCTAssertEqual(
             SnippetSearch.fingerprintCountForTesting, 0,
-            "a revision identifies the library outright — nothing should hash it"
+            "an owner and revision identify the library — nothing should hash it"
         )
     }
 

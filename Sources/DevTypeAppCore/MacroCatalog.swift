@@ -399,7 +399,11 @@ enum MacroCatalog {
             (.upper, "macro.case.upper"),
             (.lower, "macro.case.lower"),
             (.title, "macro.case.title"),
-            (.sentence, "macro.case.sentence")
+            (.sentence, "macro.case.sentence"),
+            (.snake, "palette.tool.snake"),
+            (.kebab, "palette.tool.kebab"),
+            (.camel, "palette.tool.camel"),
+            (.pascal, "palette.tool.pascal")
         ]
         for (transform, nameKey) in transforms {
             // TextExpander block form: `%case:upper%…%caseend%`.

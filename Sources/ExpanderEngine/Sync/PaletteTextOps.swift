@@ -10,6 +10,10 @@ public enum PaletteTextOp: String, Sendable, Equatable, CaseIterable {
     case lower
     case title
     case sentence
+    case snake
+    case kebab
+    case camel
+    case pascal
     case sortLines
     case dedupeLines
     case trimLines
@@ -43,26 +47,32 @@ public enum PaletteTextOps {
             return TextCaseTransform.title.apply(to: text)
         case .sentence:
             return TextCaseTransform.sentence.apply(to: text)
+        case .snake:
+            return TextCaseTransform.snake.apply(to: text)
+        case .kebab:
+            return TextCaseTransform.kebab.apply(to: text)
+        case .camel:
+            return TextCaseTransform.camel.apply(to: text)
+        case .pascal:
+            return TextCaseTransform.pascal.apply(to: text)
         case .sortLines:
-            return text.split(separator: "\n", omittingEmptySubsequences: false)
-                .map(String.init)
+            return lines(in: text)
                 .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
                 .joined(separator: "\n")
         case .dedupeLines:
             var seen = Set<String>()
             var out: [String] = []
-            for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            for line in lines(in: text) {
                 if seen.insert(line).inserted { out.append(line) }
             }
             return out.joined(separator: "\n")
         case .trimLines:
-            return text
-                .split(separator: "\n", omittingEmptySubsequences: false)
+            return lines(in: text)
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         case .numberLines:
-            let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            let lines = lines(in: text)
             return lines.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         case .base64Encode:
             return Data(text.utf8).base64EncodedString()
@@ -73,7 +83,8 @@ public enum PaletteTextOps {
             }
             return decoded
         case .urlEncode:
-            return text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+            let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+            return text.addingPercentEncoding(withAllowedCharacters: unreserved) ?? text
         case .urlDecode:
             return text.removingPercentEncoding ?? text
         case .htmlEscape:
@@ -104,6 +115,12 @@ public enum PaletteTextOps {
         }
     }
 
+    /// Swift treats CRLF as one Character. Splitting only on LF misses Windows text.
+    /// All line operations accept the same Unicode newline set and emit LF.
+    private static func lines(in text: String) -> [String] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).map(String.init)
+    }
+
     public static func generate(_ op: PaletteGenerateOp) -> String {
         switch op {
         case .uuid:
@@ -118,34 +135,26 @@ public enum PaletteTextOps {
     public static func countSummary(for text: String) -> String {
         let chars = text.count
         let words = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
-        let lines = text.isEmpty ? 0 : text.split(separator: "\n", omittingEmptySubsequences: false).count
+        let lines = text.isEmpty ? 0 : Self.lines(in: text).count
         return "\(chars) chars · \(words) words · \(lines) lines"
     }
 
     public static func formatMathResult(_ value: Double) -> String {
-        if value.rounded() == value, value >= Double(Int.min), value <= Double(Int.max) {
-            return String(Int(value))
-        }
-        var formatted = String(format: "%.8f", value)
-        while formatted.contains("."), formatted.hasSuffix("0") {
-            formatted.removeLast()
-        }
-        if formatted.hasSuffix(".") { formatted.removeLast() }
-        return formatted
+        SafeMathParser.format(value)
     }
 
     private static func prettyJSON(_ text: String) -> String? {
         guard let data = text.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data),
-              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+              let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys, .fragmentsAllowed]),
               let out = String(data: pretty, encoding: .utf8) else { return nil }
         return out
     }
 
     private static func compactJSON(_ text: String) -> String? {
         guard let data = text.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data),
-              let compact = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]),
+              let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+              let compact = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .fragmentsAllowed]),
               let out = String(data: compact, encoding: .utf8) else { return nil }
         return out
     }

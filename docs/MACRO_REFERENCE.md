@@ -200,6 +200,10 @@ Transform any literal text, fill-in value, or nested snippet output:
 | `{{lower:…}}` | `%case:lower% … %caseend%` | `hello world` |
 | `{{title:…}}` | `%case:title% … %caseend%` | `Hello World` |
 | `{{sentence:…}}` | `%case:sentence% … %caseend%` | `Hello world` |
+| `{{snake:…}}` | `%case:snake% … %caseend%` | `hello_world` |
+| `{{kebab:…}}` | `%case:kebab% … %caseend%` | `hello-world` |
+| `{{camel:…}}` | `%case:camel% … %caseend%` | `helloWorld` |
+| `{{pascal:…}}` | `%case:pascal% … %caseend%` | `HelloWorld` |
 
 Friendly aliases work in the TE form (`uppercase`/`uc`, `lowercase`/`lc`, `titlecase`/`capitalize`, `sentencecase`). Mustache transforms nest innermost-first and never fold a `{{cursor}}` marker sitting inside them; case blocks also wrap fill-ins cleanly:
 

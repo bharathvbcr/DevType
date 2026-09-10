@@ -1,6 +1,6 @@
 import Foundation
 
-public struct SnippetModel: Codable, Identifiable, Equatable {
+public struct SnippetModel: Codable, Identifiable, Hashable {
     public let id: UUID
     public var title: String
     /// Optional display label (TextExpander import). Falls back to `title` when empty.
@@ -236,7 +236,7 @@ public struct SnippetMatch: Equatable {
 
 // MARK: - SnippetGroup
 
-public struct SnippetGroup: Codable, Identifiable, Equatable {
+public struct SnippetGroup: Codable, Identifiable, Hashable {
     public var id: UUID
     public var name: String
     public var enabled: Bool
