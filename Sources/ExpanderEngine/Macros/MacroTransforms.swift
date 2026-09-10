@@ -62,7 +62,7 @@ public enum TextCaseTransform: String, Equatable, CaseIterable {
         }
     }
 
-    /// Split separators, lower-to-upper transitions and acronym boundaries in one pass.
+    /// Split separators, transitions into uppercase and acronym boundaries in one pass.
     /// Map cursor anchors using the whole input: a prefix alone cannot know that the S in
     /// HTTPS|erver starts a new word. Non-Latin letters and digits are retained.
     private func identifierTransform(_ text: String, cursorOffsets: [Int]) -> (text: String, cursors: [Int]) {
@@ -88,14 +88,24 @@ public enum TextCaseTransform: String, Equatable, CaseIterable {
             if !atWordStart && character.isUppercase {
                 let previous = characters[index - 1]
                 let nextIsLower = index + 1 < characters.count && characters[index + 1].isLowercase
-                atWordStart = previous.isLowercase || previous.isNumber || (previous.isUppercase && nextIsLower)
+                // Uncased scripts also delimit a following capital (中文User). Relying on
+                // isNumber here made 東京User vary with the platform's Unicode numeric table.
+                atWordStart = !previous.isUppercase || nextIsLower
             }
             if atWordStart && !result.isEmpty && (self == .snake || self == .kebab) {
                 result.append(self == .snake ? "_" : "-")
                 resultLength += 1
             }
             let capitalize = atWordStart && (self == .pascal || (self == .camel && !result.isEmpty))
-            let piece = capitalize ? String(character).uppercased(with: locale) : String(character).lowercased(with: locale)
+            let piece: String
+            if capitalize {
+                // One input character can uppercase into several (ß → SS, ﬃ → FFI).
+                // Keep one initial capital so a second conversion sees the same word.
+                let upper = String(character).uppercased(with: locale)
+                piece = String(upper.prefix(1)) + String(upper.dropFirst()).lowercased(with: locale)
+            } else {
+                piece = String(character).lowercased(with: locale)
+            }
             result += piece
             resultLength += piece.utf16.count
             atWordStart = false

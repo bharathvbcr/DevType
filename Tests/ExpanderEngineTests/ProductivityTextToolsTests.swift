@@ -23,6 +23,33 @@ final class ProductivityTextToolsTests: XCTestCase {
         XCTAssertEqual(PaletteTextOps.apply(.snake, to: "e\u{301}clair Value"), "e\u{301}clair_value")
     }
 
+    func testUncasedScriptBoundariesRetainCapitalizationAcrossRepeatedConversions() {
+        for prefix in ["東京", "中文", "مرحبا", "हिन्दी"] {
+            let input = "\(prefix)UserName"
+            for (operation, expected) in [(PaletteTextOp.snake, "\(prefix)_user_name"),
+                                          (.kebab, "\(prefix)-user-name"),
+                                          (.camel, input), (.pascal, input)] {
+                XCTAssertEqual(PaletteTextOps.apply(operation, to: input), expected)
+                XCTAssertEqual(PaletteTextOps.apply(operation, to: expected), expected)
+            }
+        }
+        let marked = DynamicTemplateEngine().resolve("{{snake:中文U{{cursor}}serName}}")
+        XCTAssertEqual(marked.text, "中文_user_name")
+        XCTAssertEqual(marked.cursorOffset, 4)
+    }
+
+    func testExpandingUnicodeCapitalsProduceStableWordStarts() {
+        for (input, expected) in [("ßeta", "Sseta"), ("ﬃle", "Ffile")] {
+            XCTAssertEqual(PaletteTextOps.apply(.pascal, to: input), expected)
+            XCTAssertEqual(PaletteTextOps.apply(.pascal, to: expected), expected)
+            XCTAssertEqual(PaletteTextOps.apply(.camel, to: "user \(input)"), "user\(expected)")
+            XCTAssertEqual(PaletteTextOps.apply(.camel, to: "user\(expected)"), "user\(expected)")
+        }
+        let marked = DynamicTemplateEngine().resolve("{{pascal:ß{{cursor}}eta}}")
+        XCTAssertEqual(marked.text, "Sseta")
+        XCTAssertEqual(marked.cursorOffset, 2)
+    }
+
     func testBothMacroSyntaxesUseTheSameTransformsAndKeepCursorAnchors() {
         let engine = DynamicTemplateEngine()
         for (name, expected) in [("snake", "http_server"), ("camel", "httpServer"), ("pascal", "HttpServer"), ("kebab", "http-server")] {
@@ -54,7 +81,7 @@ final class ProductivityTextToolsTests: XCTestCase {
     }
 
     func testIdentifierConversionStressDoesNotGrowOnRepeatedApplication() {
-        let fragments = ["HTTPServer", "URL", "userName", "東京", "Résumé", "v2", " ", "-", "_", "👩🏽‍💻"]
+        let fragments = ["HTTPServer", "URL", "userName", "東京", "Résumé", "v2", " ", "-", "_", "👩🏽‍💻", "中文", "مرحبا", "हिन्दी", "ßeta", "ﬃle"]
         for seed in 0..<1_000 {
             let source = (0..<(seed % 40)).map { fragments[(seed + $0 * 3) % fragments.count] }.joined(separator: " ")
             for operation in [PaletteTextOp.snake, .kebab, .camel, .pascal] {

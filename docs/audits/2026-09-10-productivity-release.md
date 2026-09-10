@@ -86,7 +86,7 @@ A second process started coverage testing in the original checkout during the fi
 - The isolated DevMap build reported 552 indexed files, 72,561 edges and generation 1. Its old-symbol candidates map to the pre-existing cleanup edits intentionally excluded from this release; they are not deletion proof.
 - All local links in changed documentation resolve. Source, test and script hashes stayed unchanged throughout these completed validation runs.
 
-The isolated release includes 28 new tests. Its full-suite count differs from the initial shared-checkout baseline because three pre-existing tests were excluded with their owner's changes. Existing test-only warnings about a fixture variable, weak references and async `NSLock` calls remain; no production Swift 6 language-mode migration is claimed.
+The initial isolated candidate includes 28 new tests; two additional Unicode regressions were added after platform CI. Its full-suite count differs from the initial shared-checkout baseline because three pre-existing tests were excluded with their owner's changes. Existing test-only warnings about a fixture variable, weak references and async `NSLock` calls remain; no production Swift 6 language-mode migration is claimed.
 
 ## Full local release gate
 
@@ -97,3 +97,12 @@ The code was validated on macOS 27 arm64 with the installed Xcode toolchain/26.5
 The search benchmark ran 1,000 cached queries over 2,000 snippets in 727.47 ms, using the explicit library identity/revision fast path. The original-code run measured 1,338.68 ms. These runs were not controlled for machine load, so the difference is an observation, not an attributed speedup. Other final measurements: 20,000 matcher calls in 6.03 ms; 200,000 localization lookups in 34.41 ms.
 
 The test/script/source hashes remained unchanged from the isolated stress run through final local CI. Documentation-only evidence updates followed validation. Remote platform CI and final tagged bundle checks are recorded separately in the release task's results; public release remains blocked by the signing gate above.
+
+
+## Platform CI follow-up
+
+The first candidate, `0814688`, passed GitHub's macOS 26 build/test job and repository hygiene, but macOS 14 failed the naming-conversion stress test with 1,550 assertions. Packaging was consequently skipped. [Run 34490217885](https://github.com/bharathvbcr/DevType/actions/runs/34490217885) is retained as failure evidence, not a passing gate.
+
+The conversion boundary incorrectly required a preceding lowercase letter or number. Uncased scripts therefore lost a following capital during repeat conversion. The local Unicode numeric classification of `京` masked the Japanese fixture; Chinese, Arabic and Hindi fixtures reproduced the same class locally with 20 failing assertions, including a shifted macro cursor (`uncased-red.log`). The shared converter now recognizes an uppercase transition after any non-uppercase identifier character.
+
+Adversarial follow-up also reproduced expanding uppercase mappings (`ß` → `SS`, `ﬃ` → `FFI`) with four failing assertions (`expanding-case-red.log`). Capitalized word starts now retain one initial capital and lowercase the remaining expansion. Both fixes keep whole-input cursor mapping, and the deterministic corpus now includes these scripts and expansions. No existing expectation was removed or weakened. The amended release has 30 new tests. Follow-up local and platform results are recorded with the final release artifacts; the earlier stress/sanitizer/full-CI counts above identify the initial candidate.
