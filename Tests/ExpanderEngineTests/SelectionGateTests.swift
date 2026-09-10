@@ -364,10 +364,9 @@ final class SelectionGateTests: XCTestCase {
             timestamp: now.addingTimeInterval(3600)
         )
         let outcome = evaluate(candidates: [], cached: future)
-        // `isFresh` uses a signed interval, so a future stamp reads as fresh. Assert the
-        // behaviour explicitly rather than leaving it undefined: it is bounded by the
-        // same-app check and single-use consumption, and never silently drops the read.
-        XCTAssertEqual(outcome.result?.text, "from the future")
+        // A negative age cannot establish freshness. Same-app attribution does not make
+        // a selection valid for the hour until the wall clock catches up.
+        XCTAssertNil(outcome.result)
     }
 
     func testMutedOrBlankCacheEntriesAreIgnored() {

@@ -1572,17 +1572,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Insert resolved palette text (date tools / clipboard) with eraseCount 0, like hotkey insertText.
     private func injectPaletteText(_ text: String, sourceApp: NSRunningApplication?) {
-        if let sourceApp {
-            sourceApp.activate()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [self] in
+        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
+            ToastPanel.show(loc.s("voice.error.targetChanged"), symbol: "exclamationmark.triangle.fill")
+        }) { [self] shouldContinue in
             TextInjectionPipeline.shared.inject(
                 snippet: SnippetModel(title: "Palette", triggerKeyword: "", replacementText: text),
                 triggerLength: 0,
-                swallowedFinalKey: false,
+                swallowed: .notSwallowed,
                 eraseCountOverride: 0,
                 preResolvedText: text,
                 secureClipboardPaste: true,
+                shouldContinue: shouldContinue,
                 completion: { [weak self] _ in
                     self?.refreshStatusItemUI()
                 }
@@ -1631,10 +1631,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             sourceApp?.activate()
             return
         }
-        if let sourceApp {
-            sourceApp.activate()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [self] in
+        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
+            ToastPanel.show(loc.s("voice.error.targetChanged"), symbol: "exclamationmark.triangle.fill")
+        }) { [self] shouldContinue in
             let snapshot = PermissionCoordinator.shared.cachedSnapshot
             let snippet = SnippetModel(
                 title: "AI Transform",
@@ -1658,11 +1657,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             TextInjectionPipeline.shared.inject(
                 snippet: snippet,
                 triggerLength: 0,
-                swallowedFinalKey: false,
+                swallowed: .notSwallowed,
                 plan: plan,
                 erasePlan: .empty,
                 preResolvedText: text,
                 secureClipboardPaste: true,
+                shouldContinue: shouldContinue,
                 completion: { _ in
                     suspension.release()
                     self.refreshStatusItemUI()
@@ -1672,131 +1672,132 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func expandFromSearch(_ snippet: SnippetModel, sourceApp: NSRunningApplication?) {
-        if let sourceApp {
-            sourceApp.activate()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [self] in
-            // Inline search: erase 0, no quiescence (palette typing would always abort).
-            let snapshot = PermissionCoordinator.shared.cachedSnapshot
-            let clipboard = NSPasteboard.general.string(forType: .string)
-            let lookup = NestedSnippetResolver(snippets: SnippetStore.shared.loadSnippets()).lookup
-            // A secret is fetched at the moment of use and injected verbatim. Never through
-            // `MacroRenderer`: a password containing `{{` or `%` is not a template, and expanding
-            // one would corrupt it silently — or resolve a nested `{{snippet:…}}` inside it.
-            if snippet.isSecret {
-                // Same gate as the copy path, and the same reason for it being in the resolver
-                // rather than here: a second surface reading secrets is a second place to forget.
-                SecretMenuFlow.resolve(snippet, loc: loc) { [weak self] result in
-                    guard let self else { return }
-                    switch result {
-                    case .success(let value):
-                        self.injectSearchExpansion(
-                            snippet: snippet,
-                            resolved: MacroExpansionResult(
-                                text: value,
-                                cursorOffset: nil,
-                                trailingKeys: [],
-                                fillFields: [],
-                                needsFillIn: false
-                            ),
-                            snapshot: snapshot
-                        )
-                    case .failure(.migrationRequired(let pendingCount)):
-                        self.offerSecretMigration(for: snippet, pendingCount: pendingCount) { [weak self] in
-                            self?.expandFromSearch(snippet, sourceApp: sourceApp)
-                        }
-                    case .failure(.keychainLocked):
-                        self.offerKeychainUnlock { [weak self] in
-                            self?.expandFromSearch(snippet, sourceApp: sourceApp)
-                        }
-                    case .failure(.authenticationCancelled):
-                        break
-                    case .failure(.authenticationFailed(let reason)):
-                        ToastPanel.show(
-                            self.loc.s("secret.auth.failed"),
-                            detail: reason,
-                            symbol: "exclamationmark.lock.fill"
-                        )
-                    case .failure:
-                        DevTypeAlert.present(
-                            title: self.loc.s("secret.missing.title"),
-                            message: self.loc.s("secret.missing.message", snippet.displayTitle),
-                            style: .warning,
-                            buttons: [self.loc.s("common.ok")],
-                            handler: nil
-                        )
-                    }
-                }
-                return
-            }
-
-            let renderContext = MacroRenderContext(clipboardText: clipboard ?? "")
-            let resolved = MacroRenderer.expand(
-                content: snippet.replacementText,
-                lookup: lookup,
-                clipboardText: clipboard,
-                context: renderContext
-            )
-            if resolved.needsFillIn {
-                FillInPanel.present(title: snippet.displayTitle, fields: resolved.fillFields) { values in
-                    guard let values else { return }
-                    let filled = MacroRenderer.expand(
-                        content: snippet.replacementText,
-                        fillValues: values,
-                        lookup: lookup,
-                        clipboardText: clipboard,
-                        context: renderContext
+        let sourceApp = sourceApp ?? NSWorkspace.shared.frontmostApplication
+        // Inline search: erase 0, no quiescence (palette typing would always abort).
+        let clipboard = NSPasteboard.general.string(forType: .string)
+        let lookup = NestedSnippetResolver(snippets: SnippetStore.shared.loadSnippets()).lookup
+        // A secret is fetched at the moment of use and injected verbatim. Never through
+        // `MacroRenderer`: a password containing `{{` or `%` is not a template, and expanding
+        // one would corrupt it silently — or resolve a nested `{{snippet:…}}` inside it.
+        if snippet.isSecret {
+            // Same gate as the copy path, and the same reason for it being in the resolver
+            // rather than here: a second surface reading secrets is a second place to forget.
+            SecretMenuFlow.resolve(snippet, loc: loc) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success(let value):
+                    self.injectSearchExpansion(
+                        snippet: snippet,
+                        resolved: MacroExpansionResult(
+                            text: value,
+                            cursorOffset: nil,
+                            trailingKeys: [],
+                            fillFields: [],
+                            needsFillIn: false
+                        ),
+                        sourceApp: sourceApp
                     )
-                    self.injectSearchExpansion(snippet: snippet, resolved: filled, snapshot: snapshot)
+                case .failure(.migrationRequired(let pendingCount)):
+                    self.offerSecretMigration(for: snippet, pendingCount: pendingCount) { [weak self] in
+                        self?.expandFromSearch(snippet, sourceApp: sourceApp)
+                    }
+                case .failure(.keychainLocked):
+                    self.offerKeychainUnlock { [weak self] in
+                        self?.expandFromSearch(snippet, sourceApp: sourceApp)
+                    }
+                case .failure(.authenticationCancelled):
+                    break
+                case .failure(.authenticationFailed(let reason)):
+                    ToastPanel.show(
+                        self.loc.s("secret.auth.failed"),
+                        detail: reason,
+                        symbol: "exclamationmark.lock.fill"
+                    )
+                case .failure:
+                    DevTypeAlert.present(
+                        title: self.loc.s("secret.missing.title"),
+                        message: self.loc.s("secret.missing.message", snippet.displayTitle),
+                        style: .warning,
+                        buttons: [self.loc.s("common.ok")],
+                        handler: nil
+                    )
                 }
-                return
             }
-            injectSearchExpansion(snippet: snippet, resolved: resolved, snapshot: snapshot)
+            return
         }
+
+        let renderContext = MacroRenderContext(clipboardText: clipboard ?? "")
+        let resolved = MacroRenderer.expand(
+            content: snippet.replacementText,
+            lookup: lookup,
+            clipboardText: clipboard,
+            context: renderContext
+        )
+        if resolved.needsFillIn {
+            FillInPanel.present(title: snippet.displayTitle, fields: resolved.fillFields) { values in
+                guard let values else { return }
+                let filled = MacroRenderer.expand(
+                    content: snippet.replacementText,
+                    fillValues: values,
+                    lookup: lookup,
+                    clipboardText: clipboard,
+                    context: renderContext
+                )
+                self.injectSearchExpansion(snippet: snippet, resolved: filled, sourceApp: sourceApp)
+            }
+            return
+        }
+        injectSearchExpansion(snippet: snippet, resolved: resolved, sourceApp: sourceApp)
     }
 
     private func injectSearchExpansion(
         snippet: SnippetModel,
         resolved: MacroExpansionResult,
-        snapshot: PermissionSnapshot
+        sourceApp: NSRunningApplication?
     ) {
         if let failure = resolved.failure {
             ToastPanel.show(failure.message, symbol: "exclamationmark.triangle.fill", preempt: true)
             return
         }
-        let needsCursor = InjectionPlanner.needsCursorHID(
-            cursorOffset: resolved.cursorOffset,
-            totalUTF16Length: resolved.text.utf16.count
-        )
-        let isTerminal = AXContextChecker.shared.isFrontmostAppTerminal()
-        let plan = InjectionPlanner().plan(
-            snapshot: snapshot,
-            isTerminal: isTerminal,
-            needsCursorHID: needsCursor,
-            isMultiLine: resolved.text.contains(where: \.isNewline)
-        )
-        if case .refuse = plan { return }
+        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
+            ToastPanel.show(loc.s("voice.error.targetChanged"), symbol: "exclamationmark.triangle.fill")
+        }) { [self] shouldContinue in
+            let snapshot = PermissionCoordinator.shared.cachedSnapshot
+            let needsCursor = InjectionPlanner.needsCursorHID(
+                cursorOffset: resolved.cursorOffset,
+                totalUTF16Length: resolved.text.utf16.count
+            )
+            let isTerminal = AXContextChecker.shared.isFrontmostAppTerminal()
+            let plan = InjectionPlanner().plan(
+                snapshot: snapshot,
+                isTerminal: isTerminal,
+                needsCursorHID: needsCursor,
+                isMultiLine: resolved.text.contains(where: \.isNewline)
+            )
+            if case .refuse = plan { return }
 
-        let suspension = EventTapEngine.shared.suspendMatching(reason: "expandFromSearch")
-        TextInjectionPipeline.shared.inject(
-            snippet: snippet,
-            triggerLength: 0,
-            swallowedFinalKey: false,
-            plan: plan,
-            eraseCountOverride: 0,
-            preResolvedText: resolved.text,
-            preResolvedCursorOffset: resolved.cursorOffset,
-            trailingKeys: resolved.trailingKeys,
-            secureClipboardPaste: true,
-            completion: { [weak self] outcome in
-                suspension.release()
-                if outcome.isConfirmedSuccess {
-                    SnippetStore.shared.incrementUsage(for: snippet.id)
-                    self?.recordRecent(snippet)
+            let suspension = EventTapEngine.shared.suspendMatching(reason: "expandFromSearch")
+            TextInjectionPipeline.shared.inject(
+                snippet: snippet,
+                triggerLength: 0,
+                swallowed: .notSwallowed,
+                plan: plan,
+                eraseCountOverride: 0,
+                preResolvedText: resolved.text,
+                preResolvedCursorOffset: resolved.cursorOffset,
+                trailingKeys: resolved.trailingKeys,
+                secureClipboardPaste: true,
+                shouldContinue: shouldContinue,
+                completion: { [weak self] outcome in
+                    suspension.release()
+                    if outcome.isConfirmedSuccess {
+                        SnippetStore.shared.incrementUsage(for: snippet.id)
+                        self?.recordRecent(snippet)
+                    }
+                    self?.refreshStatusItemUI()
                 }
-                self?.refreshStatusItemUI()
-            }
-        )
+            )
+        }
     }
 
     /// §4.8 / §1.10: unified import — one panel, format auto-detected, `.merge`

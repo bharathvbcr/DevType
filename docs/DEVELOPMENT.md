@@ -218,14 +218,18 @@ An Apple Development signature supports local installation and stable identity; 
 
 ## Productivity release stress checks
 
-`DEVTYPE_STRESS_ROUNDS=20 ./Scripts/stress-productivity.sh` builds once, then repeats the real search, text/macro, erasure, input and voice delivery suites. The round count must be 1–100. It exits on the first failed command and verifies that every round has a nonzero XCTest selection with no skips or failures; a final success line is emitted only after every round passes. Empty filters, missing summaries and skipped tests fail the run. `python3 Scripts/test-stress-productivity.py` verifies the runner contract and is included in release fixtures.
+`DEVTYPE_STRESS_ROUNDS=20 ./Scripts/stress-productivity.sh` builds once, then repeats the real search, text/macro, erasure, input, selection/cache, clipboard, command-key and voice delivery suites. Source-app restoration tests inject focus transitions without activating another application; clipboard tests use private pasteboards and injected copy events. The round count must be 1–100. It exits on the first failed command and verifies that every round has a nonzero XCTest selection with no skips or failures; a final success line is emitted only after every round passes. Empty filters, missing summaries and skipped tests fail the run. `python3 Scripts/test-stress-productivity.py` verifies the runner contract and is included in release fixtures.
 
 Run sanitizer configurations sequentially because they share SwiftPM's build directory:
 
 ```sh
 ./Scripts/test.sh --sanitize thread --filter 'Productivity|StructuredSnippetSearch|VoiceQueuedDelivery|VoiceDeliveryIntegrity|VoiceCaptureRace|SessionWatchdog|SingleFlight'
 ./Scripts/test.sh --sanitize address --filter 'Productivity|StructuredSnippetSearch|MacroStructured|EraseUndoStress|ExpansionFuzz|InputBufferBoundary'
+./Scripts/test.sh --sanitize thread --filter 'Selection|Clipboard|HID|SourceAppDelivery'
+./Scripts/test.sh --sanitize address --filter 'Selection|Clipboard|HID|SourceAppDelivery'
 DEVTYPE_SKIP_AUTO_CERT=1 DEVTYPE_REQUIRE_FOUNDATION_MODELS=1 DEVTYPE_BENCH=1 ./Scripts/ci-local.sh
 ```
 
 For cache clients, supply `libraryID` together with `revision` only when both identify the exact groups passed. Filtering or modifying a snapshot requires its own identity/revision or the default content fingerprint. Existing calls remain source-compatible. See the [1.0 audit](audits/2026-09-10-productivity-release.md) for observed results and platform/distribution gates.
+
+Selection hardening regressions include extreme UTF-16 ranges, non-finite cache ages, reentrant/concurrent consumption, incomplete multi-range reads, deadline exhaustion, permission revocation during a command chord, clipboard ownership loss and delayed source-app activation. Multi-range fallback accepts at most 64 complete pieces and 200,000 aggregate characters including separators. Source restoration polls at 20 ms intervals for at most 25 waits. These finite tests and limits do not qualify every editor, keyboard layout, OS or native IPC stall; see the [selection delivery audit](audits/2026-09-10-selection-delivery-hardening.md) for evidence and remaining gates.

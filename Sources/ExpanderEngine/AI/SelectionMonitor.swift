@@ -60,7 +60,8 @@ public final class SelectionMonitor {
         }
 
         public func isFresh(asOf now: Date = Date(), maxAge: TimeInterval = SelectionMonitor.defaultTTL) -> Bool {
-            now.timeIntervalSince(timestamp) <= maxAge
+            let age = now.timeIntervalSince(timestamp)
+            return maxAge.isFinite && maxAge >= 0 && age.isFinite && age >= 0 && age <= maxAge
         }
     }
 
@@ -189,13 +190,20 @@ public final class SelectionMonitor {
         let snapshot = cache
         lock.unlock()
 
-        guard let snapshot, snapshot.isFresh(asOf: now, maxAge: maxAge) else { return nil }
-        guard !snapshot.text.isEmpty else { return nil }
-        if environment.isMuted(snapshot.bundleID) { return nil }
-        if !environment.isTypedPathAllowed(snapshot.bundleID) { return nil }
-        if rejectWeakAX, SelectionReader.isWeakAXApp(bundleID: snapshot.bundleID) { return nil }
-        if environment.isSecureInputActive() { return nil }
+        guard let snapshot,
+              isEligible(snapshot, maxAge: maxAge, now: now, rejectWeakAX: rejectWeakAX) else { return nil }
         return snapshot
+    }
+
+    private func isEligible(
+        _ snapshot: CachedSelection, maxAge: TimeInterval, now: Date, rejectWeakAX: Bool
+    ) -> Bool {
+        guard snapshot.isFresh(asOf: now, maxAge: maxAge) else { return false }
+        guard !snapshot.text.isEmpty else { return false }
+        if environment.isMuted(snapshot.bundleID) { return false }
+        if !environment.isTypedPathAllowed(snapshot.bundleID) { return false }
+        if rejectWeakAX, SelectionReader.isWeakAXApp(bundleID: snapshot.bundleID) { return false }
+        return !environment.isSecureInputActive()
     }
 
     /// Unfiltered cache snapshot, freshness included, for the *explicit* command paths
@@ -243,24 +251,34 @@ public final class SelectionMonitor {
         rejectWeakAX: Bool = true,
         requireSameElement: Bool = true
     ) -> CachedSelection? {
-        guard let snapshot = cachedSelection(maxAge: maxAge, asOf: now, rejectWeakAX: rejectWeakAX) else {
-            return nil
-        }
+        lock.lock()
+        let snapshot = cache
+        let storedElement = cacheElement
+        lock.unlock()
+
+        guard let snapshot,
+              isEligible(snapshot, maxAge: maxAge, now: now, rejectWeakAX: rejectWeakAX) else { return nil }
 
         if requireSameElement {
-            lock.lock()
-            let storedElement = cacheElement
-            lock.unlock()
-            if let storedElement {
-                guard let focused = AXContextChecker.shared.focusedElement(),
-                      CFEqual(storedElement, focused) else {
-                    clearCache()
-                    return nil
-                }
+            guard let storedElement,
+                  let focused = AXContextChecker.shared.focusedElement(),
+                  CFEqual(storedElement, focused) else {
+                _ = takeCache(ifMatching: snapshot)
+                return nil
             }
         }
 
-        clearCache()
+        return takeCache(ifMatching: snapshot)
+    }
+
+    /// Validate outside the lock (AX and preference providers can reenter), then claim exactly
+    /// the snapshot validated. A concurrent consumer or refresh must never be cleared here.
+    private func takeCache(ifMatching snapshot: CachedSelection) -> CachedSelection? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard cache == snapshot else { return nil }
+        cache = nil
+        cacheElement = nil
         return snapshot
     }
 

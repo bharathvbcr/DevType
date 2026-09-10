@@ -1253,6 +1253,8 @@ public final class PasteboardBroker {
         case sourceAppChanged
         /// Secure Event Input became active after the reader's earlier preflight.
         case secureInputActive
+        /// A second clipboard publication superseded the observed copy before its text was read.
+        case clipboardChanged
 
         public var diagnosticLabel: String {
             switch self {
@@ -1262,6 +1264,7 @@ public final class PasteboardBroker {
             case .postFailed: return "postFailed"
             case .sourceAppChanged: return "sourceChanged"
             case .secureInputActive: return "secureInput"
+            case .clipboardChanged: return "clipboardChanged"
             }
         }
     }
@@ -1330,15 +1333,17 @@ public final class PasteboardBroker {
         let snapshot = acquireUserClipboardSnapshot(pasteboard: pasteboard)
         let baseline = pasteboard.changeCount
 
+        func boundaryFailure() -> CopyCaptureOutcome? {
+            if secureInputProvider() { return .secureInputActive }
+            if !Self.frontmostProcessMatches(
+                expectedPID: expectedFrontmostPID, actualPID: frontmostPIDProvider()
+            ) { return .sourceAppChanged }
+            return nil
+        }
+
         // Snapshotting can traverse several clipboard representations. Re-check both volatile
         // gates after that work and immediately before input posting, not merely on reader entry.
-        guard !secureInputProvider() else { return .secureInputActive }
-        guard Self.frontmostProcessMatches(
-            expectedPID: expectedFrontmostPID,
-            actualPID: frontmostPIDProvider()
-        ) else {
-            return .sourceAppChanged
-        }
+        if let failure = boundaryFailure() { return failure }
 
         let posted: Bool
         if let postCopy {
@@ -1365,9 +1370,11 @@ public final class PasteboardBroker {
 
         let deadline = now() + timeout
         for _ in 0..<maximumPolls {
+            if let failure = boundaryFailure() { return failure }
             guard pasteboard.changeCount == baseline, now() < deadline else { break }
             usleep(pollMicroseconds)
         }
+        if let failure = boundaryFailure() { return failure }
         guard pasteboard.changeCount != baseline else {
             // Nothing was written, so nothing needs restoring — the board was never touched.
             return .boardUnchanged
@@ -1378,7 +1385,16 @@ public final class PasteboardBroker {
         // One extra poll interval: apps that declare types first and provide data second bump
         // `changeCount` before the string is actually there.
         usleep(pollMicroseconds)
-        let captured = pasteboard.string(forType: .string)
+        let capture = Self.readObservedCopy(
+            expectedChangeCount: afterCopy,
+            currentChangeCount: { pasteboard.changeCount },
+            boundaryFailure: boundaryFailure,
+            readString: { pasteboard.string(forType: .string) }
+        )
+        switch capture {
+        case .captured, .noStringOnBoard: break
+        default: return capture
+        }
 
         if Self.shouldRestoreAfterCopyCapture(
             changeCountNow: pasteboard.changeCount,
@@ -1401,8 +1417,24 @@ public final class PasteboardBroker {
             )
         }
 
-        guard let captured else { return .noStringOnBoard }
-        return .captured(captured)
+        return capture
+    }
+
+    /// A lazy string read can run target-app code. Check origin and clipboard ownership on
+    /// both sides of that I/O; text from a superseding writer is never attributed to the source.
+    static func readObservedCopy(
+        expectedChangeCount: Int,
+        currentChangeCount: () -> Int,
+        boundaryFailure: () -> CopyCaptureOutcome?,
+        readString: () -> String?
+    ) -> CopyCaptureOutcome {
+        if let failure = boundaryFailure() { return failure }
+        guard currentChangeCount() == expectedChangeCount else { return .clipboardChanged }
+        let text = readString()
+        if let failure = boundaryFailure() { return failure }
+        guard currentChangeCount() == expectedChangeCount else { return .clipboardChanged }
+        guard let text else { return .noStringOnBoard }
+        return .captured(text)
     }
 
     /// §1.7: bounded pasteboard snapshot. See `snapshotMaxItems` for the tradeoff.

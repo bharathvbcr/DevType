@@ -114,7 +114,11 @@ Once a snippet match is triggered, `TextInjectionPipeline` coordinates text repl
 
 Callers can supply a session validity check to that same completion guard. Voice delivery uses it so a retired session cannot post from an earlier queued operation. Erase-plan consistency is checked before field reads and again before posting: known text must agree with both the UTF-16 range width and grapheme deletion count, while count-only plans must carry equal counts.
 
+AI replacement, palette insertion and search expansion restore their captured source process through `SourceAppDelivery`. It uses the engine's bounded focus policy (25 waits at 20 ms), refuses missing/terminated/self targets, stops when another app takes focus, and passes the original-process predicate through the existing injection completion guard. Search captures its source before fill-in/authentication work and obtains a fresh permission snapshot at final delivery. App activation alone never authorizes insertion.
+
 The broker checks operation lifetime, clipboard generation, original ownership count and target immediately before posting, including the Command-to-V modifier gap. HID key bursts check before each pair and release already-posted modifiers. Cursor positioning and trailing keys share the same lifetime. These checks reduce avoidable races; global keyboard events do not form an atomic transaction with another application.
+
+Copy and paste share one `HIDKeyPoster` command-chord owner. It allocates modifier-release and letter events before posting, rechecks permission and continuation after the modifier gap, and releases Command on refusal. Unmapped keyboard characters return no virtual key; each command chooses its own physical C/V fallback.
 
 The available write paths are:
 
@@ -187,9 +191,10 @@ graph LR
     SelectionReader --> Gate[SelectionGate Validates Safety]
     Gate --> Transformer[AITextTransformer / Local Transform Engine]
     Transformer --> Preview{Preview or Direct Replace?}
-    Preview -- Direct Replace --> Pipeline[TextInjectionPipeline]
+    Preview -- Direct Replace --> Restore[SourceAppDelivery]
     Preview -- Preview --> DiffUI[AIPreviewPanel Diff View]
-    DiffUI -- Accept --> Pipeline
+    DiffUI -- Accept --> Restore
+    Restore --> Pipeline[TextInjectionPipeline]
     DiffUI -- Reject --> Discard[Discard Transform]
 ```
 
@@ -197,6 +202,8 @@ graph LR
 - **Interactive Actions**: Proofreading, rewriting, paraphrasing, condensing, expanding, tone shifting (friendly/formal), bulletizing, prompt enhancement, code engineering (explain code, docstring generator, fix code, unit tests, regex explanation, SQL queries), conventional git commit messages, JSON conversion, and translation (English ⇄ romanized Telugu/Hindi).
 - **Offline Local Markdown Stripper (`AIMarkdownStripper`)**: A dedicated deterministic transform (`.removeMarkdown`) that strips Markdown formatting in microseconds without an AI model, functioning across all supported macOS versions (macOS 14+).
 - **Delivery Modes**: Each kind declares `direct` or `preview` output. Proofread and Remove Markdown default to direct in-place replacement; the rest stream into a diff preview panel (Replace / Copy / Retry / Cancel). Users can override per kind in Preferences → AI.
+- **Selection ownership and bounds**: Cached text requires a finite nonnegative age and is consumed atomically by its validated generation. Reentrant validation cannot erase a newer publication. UTF-16 range checks avoid overflowing addition. The multi-range fallback accepts at most 64 complete pieces and 200,000 characters including separators; failed pieces or an expired read budget yield no aggregate. Native AX calls retain their per-call messaging timeout.
+- **Brokered copy reads**: Explicit fallback checks the original process and Secure Input throughout polling and on both sides of lazy clipboard reads. The observed change count must remain stable; a superseding publication is reported as `clipboardChanged`. Unchanged boards remain failures, and ordinary `⌘A` only selects text; the AI action shortcut is `⌘⌥A`. Clipboard fallback still cannot prove the publishing process or original field when the host supplies no AX evidence.
 - **Layered Output Defense & Markdown Policies**: `AIPromptLeakGuard` extracts instruction clauses corpus-wide and fails closed on injection-boundary verdicts; a per-generation echo stripper removes prompt framing the model repeats back; post-generation checks enforce script policy (e.g. romanized-only translations), line-structure preservation, and Markdown policies (`.strip`, `.stripPreservingLayout`, `.preserve` for code/JSON/SQL).
 - **Diagnostics Without Content**: `AIDiagnosticsStore` keeps a bounded ring of failure labels and selection-read evidence — bundle IDs, probe summaries, elapsed ms, character *counts* only — feeding the `-- On-device AI --` section of the diagnostic report. No selection text ever reaches logs.
 - **Undo Integration**: Transformed text can be reverted with standard `⌘Z` or DevType's AI Undo Store (**Undo last AI** in the Command Palette).

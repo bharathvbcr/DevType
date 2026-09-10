@@ -11,11 +11,13 @@ final class PaletteSelectionContextTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        AIUndoStore.clear()
         CommandUsageStatsStore.shared.resetAll()
         CommandPaletteCatalog.invalidateCache()
     }
 
     override func tearDown() {
+        AIUndoStore.clear()
         CommandUsageStatsStore.shared.resetAll()
         CommandPaletteCatalog.invalidateCache()
         super.tearDown()

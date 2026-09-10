@@ -9,7 +9,7 @@ if [[ ! "$ROUNDS" =~ ^[1-9][0-9]?$ && "$ROUNDS" != 100 ]]; then
   exit 2
 fi
 
-FILTER='Productivity|StructuredSnippetSearch|EraseUndoStress|ExpansionFuzz|LiveTypingIntegrationStress|VoiceQueuedDelivery|VoiceDeliveryIntegrity|VoiceCaptureRace|InputBufferBoundary'
+FILTER='Productivity|StructuredSnippetSearch|EraseUndoStress|ExpansionFuzz|LiveTypingIntegrationStress|VoiceQueuedDelivery|VoiceDeliveryIntegrity|VoiceCaptureRace|InputBufferBoundary|SelectionOwnershipRegression|SelectionRangeBoundaryRegression|SelectionRangeBudget|SelectionCacheStress|ClipboardFallback|ClipboardBoundaryRegression|HIDContinuation|HIDCopyBoundaryRegression|SourceAppDelivery'
 ROUND_LOG="$(mktemp "${TMPDIR:-/tmp}/devtype-stress-round.XXXXXX")"
 trap 'rm -f "$ROUND_LOG"' EXIT
 for ((round = 1; round <= ROUNDS; round++)); do

@@ -274,7 +274,7 @@ final class ClipboardFallbackTests: XCTestCase {
 
         let outcomes: [PasteboardBroker.CopyCaptureOutcome] = [
             .captured("x"), .boardUnchanged, .noStringOnBoard, .postFailed,
-            .sourceAppChanged, .secureInputActive,
+            .sourceAppChanged, .secureInputActive, .clipboardChanged,
         ]
         XCTAssertEqual(Set(outcomes.map(\.diagnosticLabel)).count, outcomes.count)
     }

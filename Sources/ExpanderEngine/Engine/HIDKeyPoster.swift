@@ -23,7 +23,25 @@ public final class HIDKeyPoster: BackspacePosting {
     private var cachedSourceID: String?
     private var cachedKeyCodes: [Character: CGKeyCode] = [:]
 
-    public init() {}
+    /// Command-chord I/O is injectable so permission changes can be reproduced without
+    /// sending keyboard input to another application.
+    struct CommandEventIO {
+        let canPost: () -> Bool
+        let post: (CGEvent) -> Void
+        let pause: () -> Void
+
+        static var live: Self {
+            Self(canPost: { CGPreflightPostEventAccess() },
+                 post: { $0.post(tap: .cghidEventTap) },
+                 pause: { usleep(useconds_t(InjectTiming.cmdVModifierGap * 1_000_000)) })
+        }
+    }
+
+    private let commandEventIO: CommandEventIO
+
+    public init() { commandEventIO = .live }
+
+    init(commandEventIO: CommandEventIO) { self.commandEventIO = commandEventIO }
 
     // MARK: - Event source
 
@@ -107,61 +125,17 @@ public final class HIDKeyPoster: BackspacePosting {
     /// user-gesture-only path that polls the pasteboard right after.
     @discardableResult
     public func postCmdCKeyEvents(shouldContinue: () -> Bool = { true }) -> Bool {
-        guard CGPreflightPostEventAccess() else {
-            DevTypeLog.inject.error(
-                "[Inject] Cmd+C refused — CGPreflightPostEventAccess false at post time"
+        // This scheduler runs inline: neither the continuation nor completion escapes this call.
+        withoutActuallyEscaping(shouldContinue) { continuation in
+            var posted = false
+            postCommandChord(
+                character: "c", fallbackKey: CGKeyCode(kVK_ANSI_C),
+                shouldContinue: continuation,
+                schedule: { action in self.commandEventIO.pause(); action() },
+                completion: { posted = $0 }
             )
-            return false
+            return posted
         }
-        guard shouldContinue() else {
-            DevTypeLog.inject.error(
-                "[Inject] Cmd+C refused — source focus or Secure Input changed before post"
-            )
-            return false
-        }
-
-        let source = makeTaggedEventSource()
-        let command = CGKeyCode(kVK_Command)
-        let cKeyCode = virtualKeyCode(for: "c") ?? CGKeyCode(kVK_ANSI_C)
-
-        var commandIsDown = false
-        if let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: true) {
-            cmdDown.flags = .maskCommand
-            cmdDown.post(tap: .cghidEventTap)
-            commandIsDown = true
-        }
-        usleep(useconds_t(InjectTiming.cmdVModifierGap * 1_000_000))
-
-        // The modifier gap is deliberately non-zero for IME compatibility. Focus and Secure
-        // Input can change inside it; abort before the C event and always release Command.
-        guard shouldContinue() else {
-            if commandIsDown {
-                releaseCommand(source: source, command: command)
-            }
-            DevTypeLog.inject.error(
-                "[Inject] Cmd+C aborted — source focus or Secure Input changed during chord"
-            )
-            return false
-        }
-
-        guard let cDown = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: true),
-              let cUp = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: false) else {
-            DevTypeLog.inject.error(
-                "[Inject] Cmd+C CGEvent create failed — Post Events may be revoked or CG HID unavailable"
-            )
-            if commandIsDown {
-                releaseCommand(source: source, command: command)
-            }
-            return false
-        }
-        cDown.flags = .maskCommand
-        cUp.flags = .maskCommand
-        cDown.post(tap: .cghidEventTap)
-        cUp.post(tap: .cghidEventTap)
-        usleep(useconds_t(InjectTiming.cmdVModifierGap * 1_000_000))
-
-        releaseCommand(source: source, command: command)
-        return true
     }
 
     /// A continuation check belongs at both the initial post and the modifier gap.
@@ -170,34 +144,49 @@ public final class HIDKeyPoster: BackspacePosting {
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (Bool) -> Void
     ) {
-        guard let source = makeTaggedEventSource() else {
+        postCommandChord(
+            character: "v", fallbackKey: CGKeyCode(kVK_ANSI_V), shouldContinue: shouldContinue,
+            schedule: { action in
+                DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.cmdVModifierGap, execute: action)
+            },
+            completion: completion
+        )
+    }
+
+    /// One owner for copy and paste construction, permission checks, and modifier cleanup.
+    /// All events, including Command-up, exist before any key is posted.
+    private func postCommandChord(
+        character: Character,
+        fallbackKey: CGKeyCode,
+        shouldContinue: @escaping () -> Bool,
+        schedule: @escaping (@escaping () -> Void) -> Void,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard commandEventIO.canPost(), shouldContinue(), let source = makeTaggedEventSource() else {
             completion(false)
             return
         }
         let command = CGKeyCode(kVK_Command)
-        let v = virtualKeyCode(for: "v") ?? CGKeyCode(kVK_ANSI_V)
-        // Prepare Command-up before Command-down, so cancellation never depends on
-        // allocating another event to release a modifier that is already pressed.
+        let letter = virtualKeyCode(for: character) ?? fallbackKey
         guard let commandDown = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: true),
               let commandUp = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: false),
-              let vDown = CGEvent(keyboardEventSource: source, virtualKey: v, keyDown: true),
-              let vUp = CGEvent(keyboardEventSource: source, virtualKey: v, keyDown: false) else {
+              let letterDown = CGEvent(keyboardEventSource: source, virtualKey: letter, keyDown: true),
+              let letterUp = CGEvent(keyboardEventSource: source, virtualKey: letter, keyDown: false) else {
             completion(false)
             return
         }
         commandDown.flags = .maskCommand
         commandUp.flags = []
-        vDown.flags = .maskCommand
-        vUp.flags = .maskCommand
+        letterDown.flags = .maskCommand
+        letterUp.flags = .maskCommand
+        let io = commandEventIO
         Self.performCommandChord(
             shouldContinue: shouldContinue,
-            canPost: { CGPreflightPostEventAccess() },
-            postCommandDown: { commandDown.post(tap: .cghidEventTap); return true },
-            postLetter: { vDown.post(tap: .cghidEventTap); vUp.post(tap: .cghidEventTap); return true },
-            releaseCommand: { commandUp.post(tap: .cghidEventTap) },
-            schedule: { action in
-                DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.cmdVModifierGap, execute: action)
-            },
+            canPost: io.canPost,
+            postCommandDown: { io.post(commandDown); return true },
+            postLetter: { io.post(letterDown); io.post(letterUp); return true },
+            releaseCommand: { io.post(commandUp) },
+            schedule: schedule,
             completion: completion
         )
     }
@@ -234,17 +223,10 @@ public final class HIDKeyPoster: BackspacePosting {
         }
     }
 
-    private func releaseCommand(source: CGEventSource?, command: CGKeyCode) {
-        if let cmdUp = CGEvent(keyboardEventSource: source, virtualKey: command, keyDown: false) {
-            cmdUp.flags = []
-            cmdUp.post(tap: .cghidEventTap)
-        }
-    }
-
     // MARK: - Virtual key lookup
 
     /// Virtual key code producing `targetChar` on the current layout, cached per input source.
-    /// Falls back to `9` (ANSI "v") exactly as the pre-cache implementation did.
+    /// Missing layout data or an unmapped character returns nil; each command owns its fallback.
     public func virtualKeyCode(for targetChar: Character) -> CGKeyCode? {
         let sourceID = Self.currentInputSourceID()
 
@@ -277,16 +259,16 @@ public final class HIDKeyPoster: BackspacePosting {
     }
 
     /// The uncached brute-force scan. 128 `UCKeyTranslate` calls — never call this per paste.
-    public static func resolveVirtualKeyCodeForChar(_ targetChar: Character) -> CGKeyCode {
+    public static func resolveVirtualKeyCodeForChar(_ targetChar: Character) -> CGKeyCode? {
         guard let inputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
               let layoutData = TISGetInputSourceProperty(inputSource, kTISPropertyUnicodeKeyLayoutData) else {
-            return 9
+            return nil
         }
 
         let data = unsafeBitCast(layoutData, to: CFData.self)
-        guard let bytes = CFDataGetBytePtr(data) else { return 9 }
+        guard let bytes = CFDataGetBytePtr(data) else { return nil }
 
-        return bytes.withMemoryRebound(to: UCKeyboardLayout.self, capacity: 1) { keyboardLayout -> CGKeyCode in
+        return bytes.withMemoryRebound(to: UCKeyboardLayout.self, capacity: 1) { keyboardLayout -> CGKeyCode? in
             var chars = [UniChar](repeating: 0, count: 4)
             var realLength = 0
 
@@ -311,7 +293,7 @@ public final class HIDKeyPoster: BackspacePosting {
                     }
                 }
             }
-            return 9
+            return nil
         }
     }
 

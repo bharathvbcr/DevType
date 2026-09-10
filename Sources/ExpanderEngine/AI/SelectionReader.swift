@@ -565,7 +565,7 @@ public enum SelectionReader {
             return ElementRead(text: nil, timedOut: timedOut, via: .unknown)
         }
 
-        if let plural = copySelectedTextByRanges(element), !isBlankSelection(plural) {
+        if let plural = copySelectedTextByRanges(element, deadline: deadline), !isBlankSelection(plural) {
             return ElementRead(text: plural, timedOut: false, via: .selectedTextRanges)
         }
 
@@ -696,7 +696,7 @@ public enum SelectionReader {
         guard range.location >= 0,
               range.length > 0,
               range.location <= ns.length,
-              range.location + range.length <= ns.length else {
+              range.length <= ns.length - range.location else {
             return nil
         }
         return ns.substring(with: NSRange(location: range.location, length: range.length))
@@ -707,7 +707,7 @@ public enum SelectionReader {
     /// Apple documents it alongside the singular attribute, and multi-cursor editors answer it
     /// when the singular range reports only the last caret. Pieces are joined with newlines,
     /// which is what a multi-cursor copy produces in every editor that supports one.
-    private static func copySelectedTextByRanges(_ element: AXUIElement) -> String? {
+    private static func copySelectedTextByRanges(_ element: AXUIElement, deadline: Date?) -> String? {
         var rangesRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             element,
@@ -718,20 +718,40 @@ public enum SelectionReader {
             return nil
         }
 
+        return gatherSelectionPieces(values, deadline: deadline) { value in
+            guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+            let axValue = unsafeBitCast(value, to: AXValue.self)
+            guard isUsableSelectedRange(axValue) else { return nil }
+            return copyStringForRange(element, axValue, attributed: false)
+                ?? copyStringForRange(element, axValue, attributed: true)
+                ?? copyValueSubstring(element, axValue)
+        }
+    }
+
+    /// Owns aggregation separately from AX I/O so partial reads and stalled hosts can be tested.
+    static let maxDiscontinuousSelectionRanges = 64
+
+    static func gatherSelectionPieces<Element>(
+        _ values: [Element], deadline: Date?, now: () -> Date = { Date() },
+        readPiece: (Element) -> String?
+    ) -> String? {
+        guard !values.isEmpty, values.count <= maxDiscontinuousSelectionRanges else { return nil }
+        // Notification-driven cache refreshes have no enclosing explicit-action deadline.
+        // They still need a time bound, independent of the range-count ceiling.
+        let effectiveDeadline = deadline ?? now().addingTimeInterval(readBudgetSeconds)
+        func withinBudget() -> Bool {
+            let remaining = effectiveDeadline.timeIntervalSince(now())
+            return remaining.isFinite && remaining > 0
+        }
         var pieces: [String] = []
         var total = 0
         for value in values {
-            guard CFGetTypeID(value) == AXValueGetTypeID() else { continue }
-            let axValue = unsafeBitCast(value, to: AXValue.self)
-            guard isUsableSelectedRange(axValue) else { continue }
-            guard let piece = copyStringForRange(element, axValue, attributed: false)
-                ?? copyStringForRange(element, axValue, attributed: true)
-                ?? copyValueSubstring(element, axValue) else {
-                continue
-            }
-            total += piece.count
-            // The per-range guard bounds each piece; this bounds their sum.
-            guard total <= maxSelectionCharacters else { return nil }
+            guard withinBudget(), let piece = readPiece(value), !piece.isEmpty, withinBudget() else { return nil }
+            let separator = pieces.isEmpty ? 0 : 1
+            let count = piece.count
+            guard separator <= maxSelectionCharacters - total,
+                  count <= maxSelectionCharacters - total - separator else { return nil }
+            total += count + separator
             pieces.append(piece)
         }
         return pieces.isEmpty ? nil : pieces.joined(separator: "\n")
