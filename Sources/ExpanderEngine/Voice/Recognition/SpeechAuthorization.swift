@@ -31,8 +31,20 @@ public enum SpeechAuthorization {
         }
     }
 
+    #if DEBUG
+    public static var statusOverride: Status?
+    public static var requestOverride: ((@escaping (SFSpeechRecognizerAuthorizationStatus) -> Void) -> Void)?
+    #endif
+
     public static func status() -> Status {
-        switch SFSpeechRecognizer.authorizationStatus() {
+        #if DEBUG
+        if let statusOverride { return statusOverride }
+        #endif
+        return status(from: SFSpeechRecognizer.authorizationStatus())
+    }
+
+    public static func status(from raw: SFSpeechRecognizerAuthorizationStatus) -> Status {
+        switch raw {
         case .authorized: return .authorized
         case .notDetermined: return .notDetermined
         case .denied: return .denied
@@ -45,6 +57,16 @@ public enum SpeechAuthorization {
     /// Already-decided states return immediately without prompting again.
     public static func request() async -> Status {
         guard status() == .notDetermined else { return status() }
+
+        #if DEBUG
+        if let requestOverride {
+            return await withCheckedContinuation { continuation in
+                requestOverride { raw in
+                    continuation.resume(returning: status(from: raw))
+                }
+            }
+        }
+        #endif
 
         return await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { _ in

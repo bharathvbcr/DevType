@@ -57,7 +57,7 @@ enum UpdateFlow {
 
     // MARK: - Presentation
 
-    private static func present(
+    static func present(
         _ outcome: UpdateCheckOutcome,
         window: NSWindow?,
         silentWhenNothingToReport: Bool

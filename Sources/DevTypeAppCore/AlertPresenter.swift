@@ -242,6 +242,11 @@ enum DevTypeAlert {
     ///
     /// Keep `buttons` to four or fewer; anything list-shaped belongs in a real
     /// list UI (see the Muted Apps table in Preferences).
+    #if DEBUG
+    static var presenterOverride: ((_ title: String, _ message: String, _ style: NSAlert.Style, _ buttons: [String], _ window: NSWindow?, _ handler: ((Int) -> Void)?) -> Void)?
+    static var scrollablePresenterOverride: ((_ title: String, _ message: String, _ scrollTitle: String, _ scrollableText: String, _ style: NSAlert.Style, _ buttons: [String], _ window: NSWindow?, _ handler: ((Int) -> Void)?) -> Void)?
+    #endif
+
     static func present(
         title: String,
         message: String,
@@ -251,6 +256,12 @@ enum DevTypeAlert {
         window: NSWindow? = nil,
         handler: ((Int) -> Void)? = nil
     ) {
+        #if DEBUG
+        if let presenterOverride {
+            presenterOverride(title, message, style, buttons, window, handler)
+            return
+        }
+        #endif
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
@@ -291,6 +302,12 @@ enum DevTypeAlert {
         window: NSWindow? = nil,
         handler: ((Int) -> Void)? = nil
     ) {
+        #if DEBUG
+        if let scrollablePresenterOverride {
+            scrollablePresenterOverride(title, message, scrollTitle, scrollableText, style, buttons, window, handler)
+            return
+        }
+        #endif
         let presentation = DevTypeScrollableAlert(
             title: title,
             message: message,

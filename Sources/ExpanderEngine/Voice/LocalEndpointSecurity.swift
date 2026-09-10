@@ -62,13 +62,26 @@ public enum LocalEndpointSecurity {
         (try? validated(endpoint)) != nil
     }
 
+    #if DEBUG
+    public static var sessionOverride: URLSession?
+    #endif
+
     /// The only URLSession entry point local-only providers should use. The body is streamed and
     /// abandoned as soon as it crosses the caller's operation-specific response budget.
     public static func data(
         for request: URLRequest,
         maximumResponseBytes: Int
     ) async throws -> (Data, URLResponse) {
-        try await data(
+        #if DEBUG
+        if let sessionOverride {
+            return try await data(
+                for: request,
+                maximumResponseBytes: maximumResponseBytes,
+                using: sessionOverride
+            )
+        }
+        #endif
+        return try await data(
             for: request,
             maximumResponseBytes: maximumResponseBytes,
             using: session

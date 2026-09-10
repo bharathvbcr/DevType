@@ -18,7 +18,7 @@ public enum SupportDirectory {
     /// production paths there lets synthetic failures and learned AX verdicts leak into the
     /// installed app. Detect the loaded test bundle, including release-mode test runs, and
     /// give every default store the same process-local scratch root.
-    private static let testDirectory: URL? = {
+    static var testDirectory: URL? = {
         guard Bundle.allBundles.contains(where: { $0.bundleURL.pathExtension == "xctest" }) else {
             return nil
         }

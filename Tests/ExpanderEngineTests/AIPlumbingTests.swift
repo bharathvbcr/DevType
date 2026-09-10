@@ -37,6 +37,37 @@ final class AIPlumbingTests: XCTestCase {
         XCTAssertLessThanOrEqual(maxResponse, 8192)
     }
 
+    func testTokenBudgetAcceptsBoundaryContextAndReturnsMinimumResponse() throws {
+        let maxResponse = try AITokenBudget.evaluate(
+            inputTokens: 1,
+            instructionTokens: 0,
+            framingTokens: 0,
+            contextSize: 193,
+            tokenBudgetMultiplier: 0.1
+        )
+        XCTAssertEqual(maxResponse, AITokenBudget.minimumResponseTokens)
+    }
+
+    func testTokenBudgetRejectsZeroContextSize() {
+        XCTAssertThrowsError(
+            try AITokenBudget.evaluate(
+                inputTokens: 1,
+                instructionTokens: 1,
+                framingTokens: 1,
+                contextSize: 0,
+                tokenBudgetMultiplier: 1.0
+            )
+        )
+    }
+
+    func testHeuristicTokenEstimatorUsesExpectedFormula() {
+        XCTAssertEqual(AITokenBudget.estimateTokensHeuristic(""), 1)
+        XCTAssertEqual(AITokenBudget.estimateTokensHeuristic("abc"), 1)
+        XCTAssertEqual(AITokenBudget.estimateTokensHeuristic("abcd"), 1)
+        XCTAssertEqual(AITokenBudget.estimateTokensHeuristic("abcde"), 2)
+        XCTAssertEqual(AITokenBudget.estimateTokensHeuristic("The quick brown fox"), 5)
+    }
+
     func testChunkSafetyFlagsMatchCatalog() {
         XCTAssertTrue(AITransformKind.proofread.isChunkSafe)
         XCTAssertTrue(AITransformKind.formal.isChunkSafe)
@@ -322,10 +353,26 @@ final class AIPlumbingTests: XCTestCase {
         XCTAssertEqual(AITransformText.joined(segments, bodies: segments.map(\.body)), text)
     }
 
+    func testChunkingWithExplicitLineGranularityPreservesLineBreaks() {
+        let text = "first\n\nsecond\nthird"
+        let segments = AITransformText.segments(text, granularity: .line)
+        XCTAssertEqual(segments.count, 3)
+        XCTAssertEqual(
+            segments.map(\.separator),
+            ["\n\n", "\n", ""]
+        )
+        XCTAssertEqual(AITransformText.joined(segments, bodies: segments.map(\.body)), text)
+    }
+
     func testChunkingLeavesUnsplittableTextAlone() {
         let segments = AITransformText.segments("a single sentence with no breaks")
         XCTAssertEqual(segments.map(\.body), ["a single sentence with no breaks"])
         XCTAssertEqual(segments.map(\.separator), [""])
+    }
+
+    func testChunkSplitReturnsNilForSingleCharacterSegments() {
+        let original = AITransformText.Segment(body: "x", separator: "\n")
+        XCTAssertNil(AITransformText.splitForChunking(original))
     }
 
     func testOversizedChunkSplitPreservesWhitespaceAndSeparators() {

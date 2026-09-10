@@ -9,7 +9,8 @@ public enum CorrectionPipeline {
         deadline: Date,
         privacyRoute: PrivacyRoute,
         sessionID: VoiceSessionID,
-        generation: SessionGeneration
+        generation: SessionGeneration,
+        validator: ((CorrectionCandidate, RawTranscript, CorrectionPolicy, [ProtectedSpan]) -> ValidationOutcome)? = nil
     ) async -> FinalTranscript {
         let spans = ProtectedSpanExtractor.extract(from: rawTranscript.text, dictionaryTerms: vocabulary.terms)
 
@@ -26,7 +27,8 @@ public enum CorrectionPipeline {
 
         do {
             let candidate = try await corrector.correct(request)
-            let outcome = CorrectionValidator.validate(candidate: candidate, raw: rawTranscript, policy: policy, protectedSpans: spans)
+            let outcome = validator?(candidate, rawTranscript, policy, spans)
+                ?? CorrectionValidator.validate(candidate: candidate, raw: rawTranscript, policy: policy, protectedSpans: spans)
 
             switch outcome {
             case .accepted:

@@ -20,6 +20,8 @@ final class SupportDirectoryTests: XCTestCase {
         XCTAssertEqual(VoiceDiagnosticsRecorder.terminalManifestURL.deletingLastPathComponent(), root)
         XCTAssertEqual(VoiceDiagnosticsRecorder.traceURL.deletingLastPathComponent(), root)
         XCTAssertEqual(SupportDirectory.voiceSessions.deletingLastPathComponent(), root)
+        XCTAssertEqual(SupportDirectory.file("custom.db").deletingLastPathComponent(), root)
+        XCTAssertEqual(SupportDirectory.file("custom.db").lastPathComponent, "custom.db")
         XCTAssertEqual(SnippetStore.defaultLocalSupportDirectory, root)
         XCTAssertEqual(InjectTimingStore.defaultFileURL().deletingLastPathComponent(), root)
     }
@@ -39,5 +41,15 @@ final class SupportDirectoryTests: XCTestCase {
         let bytes = try Data(contentsOf: VoiceDiagnosticsRecorder.terminalManifestURL)
         XCTAssertFalse(bytes.isEmpty)
         XCTAssertEqual(VoiceDiagnosticsRecorder.terminalManifestURL.deletingLastPathComponent().standardizedFileURL, root)
+    }
+
+    func testDevTypeProductionFallbackWhenTestDirectoryIsNil() {
+        let original = SupportDirectory.testDirectory
+        defer { SupportDirectory.testDirectory = original }
+
+        SupportDirectory.testDirectory = nil
+        let fallback = SupportDirectory.devType
+        XCTAssertEqual(fallback.lastPathComponent, "DevType")
+        XCTAssertTrue(fallback.path.contains("Application Support") || fallback.path.contains(FileManager.default.temporaryDirectory.path))
     }
 }

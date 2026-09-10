@@ -90,15 +90,26 @@ public enum DebugTrace {
         return Writer(fileURL: URL(fileURLWithPath: resolvedPath), maxBytes: maxBytes)
     }()
 
-    public static var isEnabled: Bool { writer != nil }
+    #if DEBUG
+    static var writerOverride: Writer?
+    #endif
+
+    private static var activeWriter: Writer? {
+        #if DEBUG
+        if let writerOverride { return writerOverride }
+        #endif
+        return writer
+    }
+
+    public static var isEnabled: Bool { activeWriter != nil }
 
     /// Waits for every accepted write ahead of this read. An enabled-but-unattempted trace is
     /// deliberately distinguishable from a successful trace.
     public static var health: Health {
-        guard let writer else {
+        guard let activeWriter else {
             return Health(enabled: false, write: .notAttempted)
         }
-        return Health(enabled: true, write: writer.writeStatus)
+        return Health(enabled: true, write: activeWriter.writeStatus)
     }
 
     @discardableResult
@@ -108,7 +119,7 @@ public enum DebugTrace {
         message: String,
         data: [String: Any]
     ) -> Submission {
-        guard let writer else { return .disabled }
+        guard let activeWriter else { return .disabled }
         let payload: [String: Any] = [
             "location": location,
             "hypothesisId": hypothesisId,
@@ -120,15 +131,15 @@ public enum DebugTrace {
         // representable as ordinary Swift errors. An invalid diagnostic payload must be a typed
         // rejection, never a crash or a silent no-op.
         guard JSONSerialization.isValidJSONObject(payload) else {
-            writer.recordFailure(.encoding)
+            activeWriter.recordFailure(.encoding)
             return .rejected(.encoding)
         }
         do {
             let json = try JSONSerialization.data(withJSONObject: payload)
-            writer.enqueue(recordData: json)
+            activeWriter.enqueue(recordData: json)
             return .accepted
         } catch {
-            writer.recordFailure(.encoding)
+            activeWriter.recordFailure(.encoding)
             return .rejected(.encoding)
         }
     }

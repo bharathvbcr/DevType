@@ -139,6 +139,76 @@ final class DebugTraceTests: XCTestCase {
         XCTAssertFalse(health.diagnosticLine.contains("/Users/"))
     }
 
+    func testHealthLineWhenDisabledAndNotAttemptedOrSucceeded() {
+        let disabledHealth = DebugTrace.Health(enabled: false, write: .notAttempted)
+        XCTAssertEqual(
+            disabledHealth.diagnosticLine,
+            "Debug trace: disabled; write=not-attempted"
+        )
+        let succeededHealth = DebugTrace.Health(enabled: true, write: .succeeded)
+        XCTAssertEqual(
+            succeededHealth.diagnosticLine,
+            "Debug trace: enabled; write=succeeded"
+        )
+    }
+
+    func testDebugTraceStaticWriteAndHealthDefaults() {
+        // Since DebugTrace is disabled by default in tests:
+        XCTAssertFalse(DebugTrace.isEnabled)
+        XCTAssertEqual(DebugTrace.health, DebugTrace.Health(enabled: false, write: .notAttempted))
+        let submission = DebugTrace.write(
+            location: "testLoc",
+            hypothesisId: "h1",
+            message: "msg",
+            data: ["key": "val"]
+        )
+        XCTAssertEqual(submission, .disabled)
+    }
+
+    func testWriterDirectRecordFailure() throws {
+        let url = try makeTraceURL()
+        let writer = DebugTrace.Writer(fileURL: url, maxBytes: 256)
+        XCTAssertEqual(writer.writeStatus, .notAttempted)
+        writer.recordFailure(.open)
+        XCTAssertEqual(writer.writeStatus, .failed(.open))
+        writer.recordFailure(.close)
+        XCTAssertEqual(writer.writeStatus, .failed(.close))
+        writer.recordFailure(.seek)
+        XCTAssertEqual(writer.writeStatus, .failed(.seek))
+        writer.recordFailure(.truncate)
+        XCTAssertEqual(writer.writeStatus, .failed(.truncate))
+        writer.recordFailure(.write)
+        XCTAssertEqual(writer.writeStatus, .failed(.write))
+        writer.recordFailure(.postconditionExceeded)
+        XCTAssertEqual(writer.writeStatus, .failed(.postconditionExceeded))
+    }
+
+    func testDebugTraceActiveWriterExecution() throws {
+        let url = try makeTraceURL()
+        let customWriter = DebugTrace.Writer(fileURL: url, maxBytes: 1024)
+        DebugTrace.writerOverride = customWriter
+        defer { DebugTrace.writerOverride = nil }
+
+        XCTAssertTrue(DebugTrace.isEnabled)
+        XCTAssertEqual(DebugTrace.health.enabled, true)
+
+        let accepted = DebugTrace.write(
+            location: "TestClass.swift:10",
+            hypothesisId: "H1",
+            message: "Running trace test",
+            data: ["count": 42, "flag": true]
+        )
+        XCTAssertEqual(accepted, .accepted)
+
+        let rejected = DebugTrace.write(
+            location: "TestClass.swift:20",
+            hypothesisId: "H2",
+            message: "Invalid payload test",
+            data: ["bad": Double.nan]
+        )
+        XCTAssertEqual(rejected, .rejected(.encoding))
+    }
+
     private func makeTraceURL() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("devtype-debug-trace-tests-\(UUID().uuidString)", isDirectory: true)
