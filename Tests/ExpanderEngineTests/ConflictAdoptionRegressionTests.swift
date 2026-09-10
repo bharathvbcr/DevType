@@ -45,4 +45,31 @@ final class ConflictAdoptionRegressionTests: XCTestCase {
         XCTAssertEqual(SnippetStore(location: .init(fileURL: file, expectsExistingLibrary: true), localSupportDirectory: root).loadGroups(), [])
     }
 
+    /// Registration snapshots immediately; resolve then notifies again on main after the
+    /// mutation lock is released. That is the live conflict-observer path — not a leftover
+    /// synchronous setter.
+    func testResolveConflictsNotifiesConflictListenersOnMain() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("snippets.json")
+        let store = SnippetStore(
+            location: .init(fileURL: file, expectsExistingLibrary: false),
+            localSupportDirectory: root
+        )
+        let notified = expectation(description: "conflict listener after resolve")
+        var snapshots = 0
+        _ = store.addConflictListener { _ in
+            snapshots += 1
+            if snapshots == 2 {
+                XCTAssertTrue(Thread.isMainThread)
+                notified.fulfill()
+            }
+        }
+        XCTAssertEqual(snapshots, 1, "addConflictListener must snapshot the current conflicts immediately")
+        _ = store.resolveConflicts(keeping: .local)
+        wait(for: [notified], timeout: 2)
+        XCTAssertEqual(snapshots, 2)
+    }
+
 }

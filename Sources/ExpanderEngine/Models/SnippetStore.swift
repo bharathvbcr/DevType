@@ -1748,15 +1748,6 @@ public final class SnippetStore {
         return changed
     }
 
-    /// Must NOT be called while `lock` is held — it reads the listener table.
-    private func setPendingConflicts(_ conflicts: [ConflictVersion]) {
-        guard storePendingConflicts(conflicts) else { return }
-        lock.lock()
-        let observers = conflictListeners
-        lock.unlock()
-        for observer in observers.values { observer(conflicts) }
-    }
-
     private static func unresolvedConflicts(at url: URL) -> [ConflictVersion] {
         guard FileManager.default.fileExists(atPath: url.path),
               let versions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url),

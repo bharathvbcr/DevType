@@ -1276,6 +1276,40 @@ final class SourceContractTests: XCTestCase {
         XCTAssertFalse(hud.contains("NSScreen.screens[0]"))
     }
 
+    /// `setPendingConflicts` stored then notified on the calling thread. That cannot be
+    /// wired: `loadGroupsUnlocked` already holds `lock`, and `reloadFromDisk` notifies from
+    /// `coalesceQueue`. Conflict mutations persist through `storePendingConflicts` and fire
+    /// `notifyConflictListeners` on the main queue.
+    func testSnippetStoreHasNoSynchronousSetPendingConflictsDuplicate() throws {
+        let store = try source("Sources/ExpanderEngine/Models/SnippetStore.swift")
+        XCTAssertFalse(
+            store.contains("private func setPendingConflicts("),
+            "A leftover setter that notifies off-main cannot be the conflict listener path"
+        )
+        XCTAssertTrue(
+            store.contains("private func storePendingConflicts("),
+            "Conflict snapshots still persist through storePendingConflicts"
+        )
+        XCTAssertTrue(
+            store.contains("private func notifyConflictListeners()"),
+            "Conflict observers still fire through notifyConflictListeners"
+        )
+        XCTAssertTrue(
+            store.contains("self.notifyConflictListeners()"),
+            "resolveConflicts must hop to main and notify after releasing the mutation lock"
+        )
+    }
+
+    /// Map `unwired_candidates` listed this one-shot. It is not imported, not invoked, and
+    /// hardcodes a personal Gemini brain path. Icon assets live under `docs/assets/`.
+    func testOneShotOpenCVBackgroundRemovalScriptIsNotShipped() {
+        let url = Self.repoRoot.appendingPathComponent("Scripts/remove_bg_opencv.py")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: url.path),
+            "Scripts/remove_bg_opencv.py was an unwired GrabCut one-shot, not a product tool"
+        )
+    }
+
     func testPublicOSLogNeverInterpolatesFreeFormErrorDescriptions() throws {
         let sourcesRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Sources", isDirectory: true)

@@ -130,17 +130,17 @@ public final class ActivityHistoryStore {
             self.category = category
             self.action = action
             self.deduplicationKey = deduplicationKey.map {
-                Self.bounded($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
+                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
             }
             self.referenceID = referenceID.map {
-                Self.bounded($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
+                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
             }
             self.typedSignal = nil
-            self.legacyTitle = Self.bounded(
+            self.legacyTitle = Self.clampedToMaximum(
                 title,
                 maximum: ActivityHistoryStore.maximumLegacyTitleCharacters
             )
-            self.legacyDetails = Self.bounded(
+            self.legacyDetails = Self.clampedToMaximum(
                 details,
                 maximum: ActivityHistoryStore.maximumLegacyDetailsCharacters
             )
@@ -205,17 +205,17 @@ public final class ActivityHistoryStore {
             self.category = category
             self.action = action
             self.deduplicationKey = deduplicationKey.map {
-                Self.bounded($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
+                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
             }
             self.referenceID = referenceID.map {
-                Self.bounded($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
+                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
             }
             self.typedSignal = typedSignal
             self.legacyTitle = legacyTitle.map {
-                Self.bounded($0, maximum: ActivityHistoryStore.maximumLegacyTitleCharacters)
+                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumLegacyTitleCharacters)
             }
             self.legacyDetails = legacyDetails.map {
-                Self.bounded($0, maximum: ActivityHistoryStore.maximumLegacyDetailsCharacters)
+                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumLegacyDetailsCharacters)
             }
         }
 
@@ -311,7 +311,7 @@ public final class ActivityHistoryStore {
             }
         }
 
-        private static func bounded(_ value: String, maximum: Int) -> String {
+        private static func clampedToMaximum(_ value: String, maximum: Int) -> String {
             guard value.count > maximum else { return value }
             return String(value.prefix(maximum))
         }
