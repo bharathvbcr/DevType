@@ -691,10 +691,10 @@ private final class AppleSpeechAnalyzerAccumulator: @unchecked Sendable {
         var storageBytes: Int
     }
 
-    private static let maximumSegments = 4_096
-    private static let maximumTranscriptBytes = 1_048_576
-    private static let maximumResultBytes = 131_072
-    private static let maximumAlternatives = 32
+    private static let maximumSegments = SpeechSegment.maximumSegments
+    private static let maximumTranscriptBytes = SpeechSegment.maximumTranscriptBytes
+    private static let maximumResultBytes = SpeechSegment.maximumResultBytes
+    private static let maximumAlternatives = SpeechSegment.maximumAlternatives
     /// `SpeechTranscriber` defines an empty result as revoking earlier volatile output for the
     /// same audio range. Preserve range identity narrowly here: overlap is useful for recognizing
     /// a growing revision, but is not authority to erase a neighboring phrase.

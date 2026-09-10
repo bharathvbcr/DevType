@@ -37,6 +37,7 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
     /// Ingests one segment. Returns `true` when it changed the transcript.
     @discardableResult
     public mutating func ingest(_ segment: SpeechSegment) -> Bool {
+        guard segment.validatedStorageBytes != nil else { return false }
         let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let index = entries.firstIndex(where: { $0.id == segment.segmentID }) {
@@ -44,14 +45,18 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
 
             // A finalized segment is settled; only a later revision of that same
             // finalization may touch it, never a stray volatile update arriving afterwards.
-            if existing.isFinal && segment.finality == .volatile { return false }
-            if segment.revision < existing.revision { return false }
+            guard segment.canReplace(revision: existing.revision, finality: existing.isFinal ? .final : .volatile),
+                  fitsTextBudget(text, replacing: index) else { return false }
 
             let updated = Entry(text: text, revision: segment.revision, isFinal: segment.finality == .final)
             guard updated != existing else { return false }
             entries[index].entry = updated
             return true
         }
+
+        let emptyFinal = text.isEmpty && segment.finality == .final
+        guard emptyFinal || entries.count < Self.maxSegments,
+              fitsTextBudget(text, replacing: nil) else { return false }
 
         // A new segment id means the recognizer moved on, so everything before it is
         // settled — whether or not it ever reported `isFinal`.
@@ -61,21 +66,31 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
         // generally reports `isFinal` only after `endAudio()`; a mid-stream pause just ends
         // the task. Waiting for a flag that never arrives left every utterance volatile and
         // erasable, which is exactly how a pause came to wipe earlier text.
+        var sealed = false
         for index in entries.indices where !entries[index].entry.isFinal {
             entries[index].entry.isFinal = true
+            sealed = true
         }
-
-        guard entries.count < Self.maxSegments else { return false }
 
         // An utterance that finalizes with no speech carries no text; recording it would
         // add an empty slot that shows up as a doubled separator.
-        if text.isEmpty && segment.finality == .final { return false }
+        if emptyFinal { return sealed }
 
         entries.append((
             id: segment.segmentID,
             entry: Entry(text: text, revision: segment.revision, isFinal: segment.finality == .final)
         ))
         return true
+    }
+
+    private func fitsTextBudget(_ text: String, replacing index: Int?) -> Bool {
+        var remaining = SpeechSegment.maximumTranscriptBytes - text.utf8.count
+        for position in entries.indices where position != index {
+            let bytes = entries[position].entry.text.utf8.count
+            guard bytes <= remaining else { return false }
+            remaining -= bytes
+        }
+        return remaining >= 0
     }
 
     /// Everything the recognizer has settled: all segments except a trailing one that is

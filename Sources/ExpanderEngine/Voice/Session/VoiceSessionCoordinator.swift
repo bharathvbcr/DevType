@@ -261,7 +261,8 @@ public actor VoiceSessionCoordinator {
         self.taskBag = bag
 
         await MainActor.run {
-            VoiceInsertionService.shared.beginSession(targetLease: snapshot.targetLease)
+            guard bag.isCurrentGeneration(generation) else { return }
+            VoiceInsertionService.shared.beginSession(targetLease: snapshot.targetLease, bag: bag, generation: generation)
         }
         try await requireStartOwnership(admissionID, bag: bag, insertionLeaseStarted: true)
         await startStatePreparation?(generation)
@@ -702,6 +703,24 @@ public actor VoiceSessionCoordinator {
         processEvent(.liveSegmentReceived(segment), generation: generation)
     }
 
+    /// FIFO dispatch boundary, separated so cancellation while main is busy is reproducible.
+    @discardableResult
+    nonisolated static func enqueueLiveSegment(
+        _ segment: SpeechSegment,
+        generation: SessionGeneration,
+        bag: SessionTaskBag,
+        apply: @escaping @MainActor @Sendable (SpeechSegment) -> Void
+    ) -> Bool {
+        guard let bytes = segment.validatedStorageBytes,
+              bag.reserveLiveDelivery(bytes: bytes, generation: generation) else { return false }
+        DispatchQueue.main.async {
+            defer { bag.releaseLiveDelivery(bytes: bytes) }
+            guard bag.isCurrentGeneration(generation) else { return }
+            apply(segment)
+        }
+        return true
+    }
+
     static func liveRecognitionFailureDisposition(
         finalSpeechProviderID: String
     ) -> LiveRecognitionFailureDisposition {
@@ -1049,8 +1068,17 @@ public actor VoiceSessionCoordinator {
                 // assembled in the wrong sequence — which the reconciler then corrects by
                 // erasing. The main queue is FIFO, so segments arrive in the order the
                 // recognizer produced them.
-                DispatchQueue.main.async {
-                    VoiceInsertionService.shared.applyLiveSegment(segment)
+                if let bag = taskBag {
+                    let queued = Self.enqueueLiveSegment(segment, generation: generation, bag: bag) {
+                        VoiceInsertionService.shared.applyLiveSegment($0)
+                    }
+                    if !queued {
+                        _ = processEvent(.failureOccurred(VoiceFailure(
+                            stage: .delivery, code: .speechProtocolViolation,
+                            redactedDetail: "Live delivery backlog exceeded the session budget"
+                        )), generation: generation)
+                        return
+                    }
                 }
                 onLiveSegment?(segment)
 
@@ -1074,8 +1102,10 @@ public actor VoiceSessionCoordinator {
                 }
 
             case .deliverTranscript(let finalTranscript, let lease):
+                guard let deliveryBag = taskBag else { return }
                 let task = Task { [weak self] in
-                    guard let self = self else { return }
+                    guard let self = self, !Task.isCancelled,
+                          deliveryBag.isCurrentGeneration(generation) else { return }
 
                     if let intercept = await self.onDeliveryIntercept,
                        await intercept(finalTranscript.text) {
@@ -1085,6 +1115,8 @@ public actor VoiceSessionCoordinator {
                         )
                         return
                     }
+
+                    guard !Task.isCancelled, deliveryBag.isCurrentGeneration(generation) else { return }
 
                     let receipt = await VoiceInsertionService.shared.deliver(
                         text: finalTranscript.text,

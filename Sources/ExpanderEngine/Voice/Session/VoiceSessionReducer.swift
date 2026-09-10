@@ -128,18 +128,17 @@ public enum VoiceSessionReducer {
             commands.append(.notifyHUD(phase: state.phase))
             commands.append(.persistManifest(phase: state.phase))
 
-        // Live recognition during capture — progressive typing.
-        case (.capturing, .liveSegmentReceived(let segment)):
-            if let idx = state.segments.firstIndex(where: { $0.segmentID == segment.segmentID }) {
-                // Ignore out-of-order revisions; the recognizer may retract and resend.
-                guard segment.revision >= state.segments[idx].revision else {
-                    return .success(commands)
-                }
-                state.segments[idx] = segment
-            } else {
-                state.segments.append(segment)
+        // Live and batch providers share admission rules before retaining or delivering text.
+        case (.capturing, .liveSegmentReceived(let segment)),
+             (.recognizing, .speechSegmentReceived(let segment)):
+            let live: Bool
+            if case .capturing = state.phase { live = true } else { live = false }
+            switch Self.acceptSegment(segment, state: &state, live: live) {
+            case .success(let changed):
+                if live && changed { commands.append(.applyLiveSegment(segment)) }
+            case .failure(let failure):
+                return reduce(state: &state, event: .failureOccurred(failure), eventGeneration: eventGeneration)
             }
-            commands.append(.applyLiveSegment(segment))
 
         // Late live segments can arrive after the stop event; absorb them without
         // faulting the session, but do not type them — capture has already ended.
@@ -173,17 +172,14 @@ public enum VoiceSessionReducer {
             commands.append(.notifyHUD(phase: .recognizing))
             commands.append(.persistManifest(phase: .recognizing))
 
-        // Recognizing -> Segments / Completion
-        case (.recognizing, .speechSegmentReceived(let segment)):
-            if let idx = state.segments.firstIndex(where: { $0.segmentID == segment.segmentID }) {
-                state.segments[idx] = segment
-            } else {
-                state.segments.append(segment)
-            }
-            // No phase change: a segment is not a transition, and announcing one per revision
-            // is what filled the trace with eighty identical `recognizing` lines.
-
+        // Recognizing -> Completion
         case (.recognizing, .speechCompleted(let completion)):
+            guard completion.rawTranscript.text.utf8.count <= SpeechSegment.maximumTranscriptBytes else {
+                return reduce(state: &state, event: .failureOccurred(VoiceFailure(
+                    stage: .recognition, code: .speechProtocolViolation,
+                    redactedDetail: "Speech completion exceeds the session storage budget"
+                )), eventGeneration: eventGeneration)
+            }
             // A provider's completion is a claim, and its own segment stream is the evidence
             // against it. `LegacyAppleSpeechAdapter` used to report the last utterance as the
             // whole transcript, and nothing downstream could tell — the session persisted and
@@ -273,8 +269,23 @@ public enum VoiceSessionReducer {
 
         // Delivery
         case (.readyForDelivery, .deliveryCompleted(let receipt)):
+            guard receipt.sessionID == state.snapshot.sessionID,
+                  receipt.generation == state.snapshot.generation,
+                  receipt.targetLease == state.snapshot.targetLease else {
+                return reduce(state: &state, event: .failureOccurred(VoiceFailure(
+                    stage: .delivery, code: .staleGeneration,
+                    redactedDetail: "Delivery receipt does not belong to the active session target"
+                )), eventGeneration: eventGeneration)
+            }
             state.deliveryReceipt = receipt
-            let outcome: SessionOutcome = .inserted(receipt)
+            let outcome: SessionOutcome
+            switch receipt.evidenceQuality {
+            case .verifiedDirectAX, .settledUnverifiedPaste:
+                outcome = .inserted(receipt)
+            case .clipboardOnly, .targetMismatch, .secureInputRefused, .permissionDenied,
+                 .timedOut, .cancelled, .failed:
+                outcome = .savedButNotInserted(reason: "Delivery did not insert text (\(receipt.evidenceQuality.rawValue))")
+            }
             state.phase = .completed(outcome)
             commands.append(.persistReceipt(receipt))
             commands.append(.notifyHUD(phase: state.phase))
@@ -305,6 +316,34 @@ public enum VoiceSessionReducer {
 
 extension VoiceSessionReducer {
 
+    private static func acceptSegment(
+        _ segment: SpeechSegment, state: inout VoiceSessionState, live: Bool
+    ) -> Result<Bool, VoiceFailure> {
+        func rejected(_ detail: String) -> Result<Bool, VoiceFailure> {
+            .failure(VoiceFailure(stage: .recognition, code: .speechProtocolViolation, redactedDetail: detail))
+        }
+        guard let incomingBytes = segment.validatedStorageBytes else {
+            return rejected("Speech segment contains invalid metadata or exceeds the result budget")
+        }
+        let index = state.segments.firstIndex { $0.segmentID == segment.segmentID }
+        if let index, !segment.canReplace(
+            revision: state.segments[index].revision, finality: state.segments[index].finality
+        ) { return .success(false) }
+        let limit = live ? LiveTranscriptAssembler.maxSegments : SpeechSegment.maximumSegments
+        guard state.segments.count <= limit, index != nil || state.segments.count < limit else {
+            return rejected("Speech segment count exceeds the session budget")
+        }
+        var remaining = SpeechSegment.maximumTranscriptBytes - incomingBytes
+        for position in state.segments.indices where position != index {
+            guard let bytes = state.segments[position].validatedStorageBytes, bytes <= remaining else {
+                return rejected("Speech segments exceed the session storage budget")
+            }
+            remaining -= bytes
+        }
+        if let index { state.segments[index] = segment } else { state.segments.append(segment) }
+        return .success(true)
+    }
+
     /// How much shorter a provider's own completion may be than the segments it emitted
     /// before that counts as under-reporting rather than tidying.
     ///
@@ -331,11 +370,12 @@ extension VoiceSessionReducer {
         let claimed = completion.rawTranscript
         guard !segments.isEmpty else { return claimed }
 
-        var assembler = LiveTranscriptAssembler()
-        for segment in segments {
-            assembler.ingest(segment)
-        }
-        let recognized = assembler.cumulativeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The reducer already retains the latest revision per ID in arrival order. Batch
+        // evidence can exceed the live preview's 512-segment budget; using that assembler
+        // here silently truncated the evidence used to repair an incomplete completion.
+        let recognized = VoiceTranscriptReconciler.combineUtterances(
+            committed: segments.map(\.text), activePartial: ""
+        )
         guard !recognized.isEmpty else { return claimed }
 
         let recognizedContent = contentCharacterCount(recognized)

@@ -373,9 +373,10 @@ public final class TextInjectionPipeline {
         snippetLookup: ((String) -> String?)? = nil,
         secureClipboardPaste: Bool = false,
         eraseCaretVouched: Bool = true,
+        shouldContinue: @escaping @Sendable () -> Bool = { true },
         completion: InjectionCompletion? = nil
     ) {
-        let operation = InjectCompletionGuard()
+        let operation = InjectCompletionGuard(shouldContinue: shouldContinue)
         let revision = lastExpansionLock.withLock { () -> UInt64 in
             activeOperation?.cancel()
             activeOperation = operation
@@ -2247,6 +2248,11 @@ final class InjectCompletionGuard {
     private var timedOut = false
     private var cancelled = false
     private var outcome: PermissionCoordinator.InjectOutcome?
+    private let shouldContinue: @Sendable () -> Bool
+
+    init(shouldContinue: @escaping @Sendable () -> Bool = { true }) {
+        self.shouldContinue = shouldContinue
+    }
 
     /// Returns the 1-based invocation index. Only `1` may leave the group.
     func markCompleted(_ outcome: PermissionCoordinator.InjectOutcome) -> Int {
@@ -2273,6 +2279,7 @@ final class InjectCompletionGuard {
 
     func allowsContinuation(observationOnly: Bool = false) -> Bool {
         lock.withLock { !cancelled && !timedOut && (observationOnly || invocations == 0) }
+            && shouldContinue()
     }
 
     var didTimeOut: Bool {

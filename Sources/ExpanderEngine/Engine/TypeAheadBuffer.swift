@@ -49,6 +49,9 @@ public struct TypeAheadBuffer: Equatable {
     /// needing more than this means the injection is not behaving and the queue is not the place
     /// to find out.
     public static let defaultCapacity = 24
+    /// Grapheme count alone does not bound storage: repeated combining marks remain one
+    /// Character. This also bounds the payload eventually handed to the HID replay path.
+    public static let maximumBufferedUTF16 = 4_096
 
     public private(set) var queued: String = ""
     /// When the current hold must end regardless of what the injection is doing. `nil` when no
@@ -66,7 +69,7 @@ public struct TypeAheadBuffer: Equatable {
         holdWindow: TimeInterval = TypeAheadBuffer.defaultDeadline
     ) {
         self.capacity = max(1, capacity)
-        self.holdWindow = max(0, holdWindow)
+        self.holdWindow = holdWindow.isFinite ? max(0, holdWindow) : Self.defaultDeadline
     }
 
     public var isHolding: Bool { deadline != nil }
@@ -148,7 +151,8 @@ public struct TypeAheadBuffer: Equatable {
             return .flushThenPassThrough(replay: flush())
         }
 
-        guard queued.count + unicode.count <= capacity else {
+        guard unicode.utf16.count <= Self.maximumBufferedUTF16 - queued.utf16.count,
+              unicode.count <= capacity - queued.count else {
             return .flushThenPassThrough(replay: flush())
         }
 

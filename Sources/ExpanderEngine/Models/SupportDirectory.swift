@@ -14,12 +14,26 @@ import Foundation
 /// Nothing here creates directories: callers that need the directory to exist already
 /// create it themselves, at the moment they are about to write.
 public enum SupportDirectory {
+    /// SwiftPM/Xcode tests exercise shared stores as well as isolated fixtures. Resolving
+    /// production paths there lets synthetic failures and learned AX verdicts leak into the
+    /// installed app. Detect the loaded test bundle, including release-mode test runs, and
+    /// give every default store the same process-local scratch root.
+    private static let testDirectory: URL? = {
+        guard Bundle.allBundles.contains(where: { $0.bundleURL.pathExtension == "xctest" }) else {
+            return nil
+        }
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent("DevType-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("DevType", isDirectory: true)
+    }()
+
     /// `~/Library/Application Support/DevType`, or a temporary directory when the system
     /// cannot name an Application Support directory at all — which is a sandbox or
     /// migration edge case, not a normal one. Falling back keeps a diagnostic sidecar
     /// writable instead of failing the feature that wanted to record something.
     public static var devType: URL {
-        (FileManager.default
+        if let testDirectory { return testDirectory }
+        return (FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? FileManager.default.temporaryDirectory)
             .appendingPathComponent("DevType", isDirectory: true)

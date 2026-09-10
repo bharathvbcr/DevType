@@ -620,7 +620,7 @@ public enum SelectionReader {
     ///
     /// Standard `NSTextView`-backed elements and several IDE text areas implement one of these
     /// while leaving `kAXSelectedText` unimplemented.
-    private static func copyStringForRange(
+    static func copyStringForRange(
         _ element: AXUIElement,
         _ range: AXValue,
         attributed: Bool

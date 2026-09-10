@@ -262,6 +262,15 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
         }
     }
 
+    /// The serial delivery owner restores a failed proposal before admitting another edit.
+    /// This changes bookkeeping only; it never posts a compensating erase into the document.
+    func restore(committed: String, volatile: String) {
+        lock.withLock {
+            _committed = committed
+            _volatile = volatile
+        }
+    }
+
     // MARK: - Transcript assembly
 
     /// Joins finalized utterances and the in-flight partial into one cumulative transcript,

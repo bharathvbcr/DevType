@@ -22,7 +22,7 @@ public struct LayoutBuffer {
 
     public init(maxCount: Int = LayoutBuffer.defaultMaxCount) {
         self.keystrokes = []
-        self.maxCount = maxCount
+        self.maxCount = max(0, maxCount)
     }
 
     public var physical: String { String(keystrokes.map(\.physical)) }

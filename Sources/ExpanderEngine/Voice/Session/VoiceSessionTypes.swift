@@ -359,6 +359,13 @@ public struct SpeechAlternative: Codable, Sendable, Equatable {
 }
 
 public struct SpeechSegment: Codable, Sendable, Equatable {
+    // Provider-neutral storage budgets, shared with the native analyzer accumulator.
+    static let maximumSegments = 4_096
+    static let maximumTranscriptBytes = 1_048_576
+    static let maximumResultBytes = 131_072
+    static let maximumAlternatives = 32
+    static let maximumIDBytes = 256
+
     public let segmentID: String
     public let revision: UInt64
     public let startSeconds: Double
@@ -386,6 +393,38 @@ public struct SpeechSegment: Codable, Sendable, Equatable {
         self.alternatives = alternatives
         self.confidence = confidence
         self.finality = finality
+    }
+
+    /// Replays are idempotent. A final promotion at the same revision is supported for
+    /// providers that finalize their last partial without incrementing its sequence number.
+    func canReplace(revision previousRevision: UInt64, finality previousFinality: Finality) -> Bool {
+        guard previousFinality != .final || finality == .final else { return false }
+        return revision > previousRevision
+            || (revision == previousRevision && previousFinality == .volatile && finality == .final)
+    }
+
+    /// Includes alternatives and identity, which also consume retained memory. Nil is an
+    /// invalid provider result, never a zero-cost result that passed validation.
+    var validatedStorageBytes: Int? {
+        let idBytes = segmentID.utf8.count
+        guard idBytes > 0, idBytes <= Self.maximumIDBytes,
+              startSeconds.isFinite, startSeconds >= 0,
+              durationSeconds.isFinite, durationSeconds >= 0,
+              Self.validConfidence(confidence), alternatives.count <= Self.maximumAlternatives else { return nil }
+        var bytes = text.utf8.count
+        guard bytes <= Self.maximumResultBytes else { return nil }
+        for alternative in alternatives {
+            let additional = alternative.text.utf8.count
+            guard Self.validConfidence(alternative.confidence),
+                  additional <= Self.maximumResultBytes - bytes else { return nil }
+            bytes += additional
+        }
+        return bytes + idBytes
+    }
+
+    private static func validConfidence(_ confidence: Double?) -> Bool {
+        guard let confidence else { return true }
+        return confidence.isFinite && (0...1).contains(confidence)
     }
 }
 

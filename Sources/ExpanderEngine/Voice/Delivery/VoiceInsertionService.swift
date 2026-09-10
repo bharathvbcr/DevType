@@ -24,13 +24,35 @@ public final class VoiceInsertionService {
     /// injection so it can be tested without touching the user's document.
     private var assembler = LiveTranscriptAssembler()
 
-    private init() {}
+    typealias InjectionSubmit = (VoiceReconciledEdit, @escaping TextInjectionPipeline.InjectionCompletion) -> Void
+    private let submitOverride: InjectionSubmit?
+    private let liveModeOverride: VoicePreferences.LiveDeliveryMode?
+
+    private init() {
+        submitOverride = nil
+        liveModeOverride = nil
+    }
+
+    /// Exercises actual delivery bookkeeping without a live document or user preferences.
+    init(submit: @escaping InjectionSubmit, liveMode: VoicePreferences.LiveDeliveryMode = .insertAtEnd) {
+        submitOverride = submit
+        liveModeOverride = liveMode
+    }
 
     // MARK: - Session lifecycle
 
     /// The app+field this session is dictating into. Live typing refuses to write anywhere
     /// else, exactly as `deliver` already does — see `applyLiveSegment`.
     private var targetLease: TargetLease?
+    private var session = SessionTaskBag(sessionID: VoiceSessionID())
+    private var boundSession: (id: VoiceSessionID, generation: SessionGeneration)?
+    private var sessionIsCurrent: @Sendable () -> Bool = { true }
+    private var liveWriteInFlight = false
+    private var liveRevision: UInt64 = 0
+    private var liveIdleWaiter: CheckedContinuation<Void, Never>?
+    private enum DeliveryPhase { case live, finalizing, finished }
+    private var deliveryPhase: DeliveryPhase = .live
+    private var deliveryFailed = false
 
     /// Pure policy: may this live segment be written?
     ///
@@ -95,6 +117,16 @@ public final class VoiceInsertionService {
     /// Clears all ownership. Called when a dictation starts, so a new session never
     /// believes it owns text left over from the last one.
     public func beginSession(targetLease: TargetLease? = nil) {
+        _ = session.advanceGenerationAndCancelAll()
+        session = SessionTaskBag(sessionID: VoiceSessionID())
+        boundSession = nil
+        sessionIsCurrent = { true }
+        liveWriteInFlight = false
+        liveRevision = 0
+        deliveryPhase = .live
+        deliveryFailed = false
+        liveIdleWaiter?.resume()
+        liveIdleWaiter = nil
         reconciler.reset()
         assembler.reset()
         self.targetLease = targetLease
@@ -103,6 +135,12 @@ public final class VoiceInsertionService {
             engine: VoicePreferences.effectiveEngine.rawValue,
             liveDeliveryMode: VoicePreferences.liveDeliveryMode.rawValue
         )
+    }
+
+    func beginSession(targetLease: TargetLease, bag: SessionTaskBag, generation: SessionGeneration) {
+        beginSession(targetLease: targetLease)
+        boundSession = (bag.sessionID, generation)
+        sessionIsCurrent = { bag.isCurrentGeneration(generation) }
     }
 
     /// Text dictation currently believes it has typed into the document.
@@ -125,6 +163,7 @@ public final class VoiceInsertionService {
     /// is reconciled and then sealed behind the commit barrier, after which no later
     /// revision can erase it — this is what stops a pause from replacing earlier text.
     public func applyLiveSegment(_ segment: SpeechSegment) {
+        guard deliveryPhase == .live, sessionIsCurrent() else { return }
         let changed = assembler.ingest(segment)
 
         VoiceDiagnosticsRecorder.shared.record(
@@ -138,8 +177,17 @@ public final class VoiceInsertionService {
         // Outside `typeAsYouSpeak` nothing goes on screen yet. The assembler still ingested
         // the segment above, so the HUD has a transcript to show and final delivery knows it
         // owns nothing — the whole proofread text then lands in one insertion.
-        guard VoicePreferences.liveDeliveryMode.typesWhileSpeaking else { return }
+        guard (liveModeOverride ?? VoicePreferences.liveDeliveryMode).typesWhileSpeaking else { return }
         guard changed else { return }
+        guard !deliveryFailed else { return }
+        liveRevision &+= 1
+        processLiveTranscript()
+    }
+
+    /// Only one edit may enter the injection pipeline at a time. New recognizer revisions
+    /// update the bounded assembler while it settles, then one diff catches up to the latest.
+    private func processLiveTranscript() {
+        guard !liveWriteInFlight, !deliveryFailed, sessionIsCurrent() else { return }
 
         // Same gate `deliver` has always had, which live typing was missing entirely: an
         // erase is posted at whatever now has focus, so a segment that arrives after the user
@@ -153,11 +201,14 @@ public final class VoiceInsertionService {
             DevTypeLog.voice.notice(
                 "[Voice] live segment withheld — target pid \(self.targetLease?.processIdentifier ?? 0, privacy: .public) is no longer frontmost"
             )
-            VoiceDiagnosticsRecorder.shared.record("segment.withheldTargetMismatch", segment: segment)
+            VoiceDiagnosticsRecorder.shared.record("segment.withheldTargetMismatch")
             return
         }
 
         let target = assembler.cumulativeText
+        let settled = assembler.settledText
+        let currentSession = session
+        let revision = liveRevision
         let tailBefore = reconciler.volatileText
         let edit = reconciler.reconcile(target: target)
         let tailAfter = reconciler.volatileText
@@ -169,7 +220,7 @@ public final class VoiceInsertionService {
                 """
                 [Voice] live edit erase=\(edit.eraseCount) inject=\(edit.textToInject.count) \
                 committed=\(self.reconciler.committedText.count) volatile=\(self.reconciler.volatileText.count) \
-                target=\(target.count) segment=\(segment.segmentID) rev=\(segment.revision) \
+                target=\(target.count) rev=\(revision) \
                 suppressed=\(edit.suppressedCommittedRevision)
                 """
             )
@@ -177,7 +228,6 @@ public final class VoiceInsertionService {
 
         VoiceDiagnosticsRecorder.shared.record(
             "reconcile",
-            segment: segment,
             cumulative: target,
             committedLength: reconciler.committedText.count,
             volatileLength: reconciler.volatileText.count,
@@ -186,28 +236,41 @@ public final class VoiceInsertionService {
             suppressed: edit.suppressedCommittedRevision
         )
 
-        inject(edit) { [reconciler] in
-            // The whole repair is one call — see `recoverFromRefusedEdit`.
-            reconciler.recoverFromRefusedEdit(expected: tailAfter, previous: tailBefore)
-            DevTypeLog.voice.notice(
-                "[Voice] tail unreachable — sealed it and resuming at the current caret"
-            )
+        guard !edit.isNoop else {
+            reconciler.sealPrefix(settled)
+            return
         }
+        liveWriteInFlight = true
+        inject(edit) { [weak self] outcome in
+            Task { @MainActor in
+                guard let self, self.session === currentSession else { return }
+                self.liveWriteInFlight = false
+                switch outcome {
+                case .succeeded, .degradedAXOnly, .postedUnverified:
+                    self.reconciler.sealPrefix(settled)
+                    VoiceDiagnosticsRecorder.shared.record("barrier.sealed", settled: settled,
+                        committedLength: self.reconciler.committedText.count,
+                        volatileLength: self.reconciler.volatileText.count)
+                case .refused:
+                    self.reconciler.recoverFromRefusedEdit(expected: tailAfter, previous: tailBefore)
+                case .failedSilent:
+                    _ = self.reconciler.revertVolatile(from: tailAfter, to: tailBefore)
+                    // A partial post has unknown geometry. Preserve the transcript for recovery
+                    // and stop this session's writes instead of guessing at another erase.
+                    self.deliveryFailed = true
+                }
+                if self.liveRevision != revision { self.processLiveTranscript() }
+                if !self.liveWriteInFlight {
+                    self.liveIdleWaiter?.resume()
+                    self.liveIdleWaiter = nil
+                }
+            }
+        }
+    }
 
-        // Seal exactly what the recognizer has moved past. Driven by the assembler rather
-        // than by this segment's `finality` flag, because a superseded utterance is settled
-        // whether or not the recognizer ever labelled it final.
-        let settled = assembler.settledText
-        let before = reconciler.committedText.count
-        reconciler.sealPrefix(settled)
-        if reconciler.committedText.count != before {
-            VoiceDiagnosticsRecorder.shared.record(
-                "barrier.sealed",
-                settled: settled,
-                committedLength: reconciler.committedText.count,
-                volatileLength: reconciler.volatileText.count
-            )
-        }
+    private func waitForLiveDelivery() async {
+        guard liveWriteInFlight else { return }
+        await withCheckedContinuation { liveIdleWaiter = $0 }
     }
 
     // MARK: - Final delivery
@@ -228,132 +291,102 @@ public final class VoiceInsertionService {
         maxDeletionRatio: Double = CorrectionPolicy.defaultMaxDeletionRatio
     ) async -> DeliveryReceipt {
         let startTime = Date()
-
-        // Target lease: refuse to type into an app that is no longer the one the user
-        // was dictating into.
-        if targetLease.processIdentifier != 0,
-           let frontmost = NSWorkspace.shared.frontmostApplication,
-           frontmost.processIdentifier != targetLease.processIdentifier {
-            return receipt(
-                sessionID: sessionID,
-                generation: generation,
-                lease: targetLease,
-                length: 0,
-                quality: .targetMismatch,
-                startTime: startTime
-            )
+        let currentSession = session
+        func result(_ quality: DeliveryEvidenceQuality, length: Int = 0) -> DeliveryReceipt {
+            receipt(sessionID: sessionID, generation: generation, lease: targetLease,
+                    length: length, quality: quality, startTime: startTime)
         }
+        if Self.shouldWithholdLiveSegment(
+            leasePID: targetLease.processIdentifier,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier
+        ) { return result(.targetMismatch) }
+        if let boundSession,
+           boundSession.id != sessionID || boundSession.generation != generation || self.targetLease != targetLease {
+            return result(.cancelled)
+        }
+        guard deliveryPhase != .finalizing else { return result(.failed) }
+        guard !Task.isCancelled, sessionIsCurrent() else { return result(.cancelled) }
+        deliveryPhase = .finalizing
+        defer { if session === currentSession { deliveryPhase = .finished } }
+        await waitForLiveDelivery()
+        guard session === currentSession, !Task.isCancelled, sessionIsCurrent() else { return result(.cancelled) }
+        guard !deliveryFailed else { return result(.failed) }
+        if Self.shouldWithholdLiveSegment(
+            leasePID: targetLease.processIdentifier,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier
+        ) { return result(.targetMismatch) }
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
+        guard trimmed.utf8.count <= SpeechSegment.maximumTranscriptBytes else { return result(.failed) }
+        let before = (committed: reconciler.committedText, volatile: reconciler.volatileText)
         let mayReplace = replacingOwnedText && Self.replacementPreservesDictatedText(
-            owned: reconciler.ownedText,
-            replacement: trimmed,
-            maxDeletionRatio: maxDeletionRatio
+            owned: reconciler.ownedText, replacement: trimmed, maxDeletionRatio: maxDeletionRatio
         )
-
         if replacingOwnedText && !mayReplace {
-            // Fail closed, and loudly. Something upstream lost most of the session; the one
-            // thing dictation must not do about that is delete the rest from the user's
-            // document. Fall through to the reconciling path, which cannot erase behind the
-            // commit barrier, so the user keeps every word they can see.
-            DevTypeLog.voice.error(
-                """
-                [Voice] refusing destructive replacement: transcript retains too little of \
-                the dictated text owned=\(self.reconciler.ownedText.count) replacement=\(trimmed.count)
-                """
-            )
-            VoiceDiagnosticsRecorder.shared.record(
-                "deliver.replaceRefused",
-                cumulative: trimmed,
-                erase: self.reconciler.ownedText.count,
-                suppressed: true
-            )
+            DevTypeLog.voice.error("[Voice] refusing destructive replacement — insufficient retained dictation")
+            VoiceDiagnosticsRecorder.shared.record("deliver.replaceRefused", cumulative: trimmed, suppressed: true)
         }
 
+        let edit: VoiceReconciledEdit
         if mayReplace, !trimmed.isEmpty, trimmed != reconciler.ownedText {
-            // One deliberate replacement of everything dictation owns. Bounded by
-            // `rollbackAll`, so the erase can only ever cover text this session typed.
             let removed = reconciler.rollbackAll()
-            DevTypeLog.voice.info(
-                "[Voice] final transcript supersedes live text: replacing \(removed.eraseCount) chars"
-            )
-            VoiceDiagnosticsRecorder.shared.record(
-                "deliver.replace", cumulative: trimmed, erase: removed.eraseCount
-            )
-            inject(VoiceReconciledEdit(
-                eraseCount: removed.eraseCount,
-                textToInject: trimmed,
-                resultingText: trimmed,
-                erasedText: removed.erasedText
-            ))
+            edit = VoiceReconciledEdit(eraseCount: removed.eraseCount, textToInject: trimmed,
+                                       resultingText: trimmed, erasedText: removed.erasedText)
             _ = reconciler.reconcile(target: trimmed)
+        } else {
+            edit = reconciler.reconcile(target: trimmed)
+        }
+        guard !edit.isNoop else {
             reconciler.commitBoundary()
-
-            return receipt(
-                sessionID: sessionID,
-                generation: generation,
-                lease: targetLease,
-                length: trimmed.count,
-                quality: .settledUnverifiedPaste,
-                startTime: startTime
-            )
+            guard trimmed == reconciler.ownedText else {
+                VoiceDiagnosticsRecorder.shared.record("deliver.suppressed", cumulative: trimmed, suppressed: true)
+                return result(.failed)
+            }
+            return result(.settledUnverifiedPaste, length: reconciler.ownedText.count)
         }
-
-        let edit = reconciler.reconcile(target: trimmed)
-        reconciler.commitBoundary()
-
-        if edit.suppressedCommittedRevision {
-            DevTypeLog.app.info(
-                "[Voice] final transcript revised committed text; kept on-screen text chars=\(self.reconciler.ownedText.count)"
-            )
+        VoiceDiagnosticsRecorder.shared.record("deliver.final", cumulative: trimmed,
+                                               erase: edit.eraseCount, inject: edit.textToInject)
+        let outcome = await withCheckedContinuation { continuation in
+            inject(edit) { continuation.resume(returning: $0) }
         }
-
-        if edit.isNoop {
-            // Live typing already produced exactly this text — nothing to do.
-            return receipt(
-                sessionID: sessionID,
-                generation: generation,
-                lease: targetLease,
-                length: trimmed.count,
-                quality: .settledUnverifiedPaste,
-                startTime: startTime
-            )
+        guard session === currentSession, !Task.isCancelled, sessionIsCurrent() else { return result(.cancelled) }
+        switch outcome {
+        case .succeeded, .degradedAXOnly, .postedUnverified:
+            reconciler.commitBoundary()
+            let quality: DeliveryEvidenceQuality = outcome == .postedUnverified ? .settledUnverifiedPaste : .verifiedDirectAX
+            return result(quality, length: reconciler.ownedText.count)
+        case .refused, .failedSilent:
+            reconciler.restore(committed: before.committed, volatile: before.volatile)
+            deliveryFailed = true
+            return result(.failed)
         }
-
-        DevTypeLog.voice.info(
-            "[Voice] final delivery erase=\(edit.eraseCount) inject=\(edit.textToInject.count) owned=\(self.reconciler.ownedText.count)"
-        )
-        VoiceDiagnosticsRecorder.shared.record(
-            "deliver.final",
-            cumulative: trimmed,
-            erase: edit.eraseCount,
-            inject: edit.textToInject,
-            suppressed: edit.suppressedCommittedRevision
-        )
-        inject(edit)
-
-        return receipt(
-            sessionID: sessionID,
-            generation: generation,
-            lease: targetLease,
-            length: trimmed.count,
-            quality: .settledUnverifiedPaste,
-            startTime: startTime
-        )
     }
 
     /// Erases everything dictation owns — cancellation, or handing the text to another
     /// flow such as a voice AI command.
     @discardableResult
     public func rollback() -> Int {
+        // Retire pending proposals first. Their physical extent is unknown until completion,
+        // so cancellation preserves that text instead of issuing a speculative compensating erase.
+        let mayErase = !liveWriteInFlight && deliveryPhase != .finalizing && !deliveryFailed
+            && !Self.shouldWithholdLiveSegment(leasePID: targetLease?.processIdentifier,
+                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        _ = session.advanceGenerationAndCancelAll()
+        session = SessionTaskBag(sessionID: VoiceSessionID())
+        sessionIsCurrent = { true }
+        liveWriteInFlight = false
+        deliveryPhase = .finished
+        deliveryFailed = true
+        liveIdleWaiter?.resume()
+        liveIdleWaiter = nil
         let edit = reconciler.rollbackAll()
-        if edit.eraseCount > 0 {
-            DevTypeLog.voice.info("[Voice] rollback erase=\(edit.eraseCount)")
-            VoiceDiagnosticsRecorder.shared.record("rollback", erase: edit.eraseCount)
-        }
         assembler.reset()
-        inject(edit)
+        guard mayErase else {
+            DevTypeLog.voice.notice("[Voice] cancellation preserved text — pending or unverifiable delivery")
+            return 0
+        }
+        VoiceDiagnosticsRecorder.shared.record("rollback", erase: edit.eraseCount)
+        inject(edit) { _ in }
         return edit.eraseCount
     }
 
@@ -368,14 +401,27 @@ public final class VoiceInsertionService {
     /// the host moved, those backspaces land on the user's own content. A verified plan lets
     /// the precondition refuse instead, and `ErasePlan(text:)` also derives the UTF-16 width
     /// from the text rather than reusing a grapheme count for both units.
-    private func inject(_ edit: VoiceReconciledEdit, onRefused: (() -> Void)? = nil) {
-        guard !edit.isNoop else { return }
-
-        let snippet = SnippetModel(
-            title: "Voice Dictation",
-            triggerKeyword: "",
-            replacementText: edit.textToInject
-        )
+    private func inject(_ edit: VoiceReconciledEdit, completion: @escaping TextInjectionPipeline.InjectionCompletion) {
+        guard !edit.isNoop else { completion(.succeeded); return }
+        let currentSession = session
+        let generation = currentSession.generation
+        let externalValidity = sessionIsCurrent
+        let shouldContinue: @Sendable () -> Bool = {
+            currentSession.isCurrentGeneration(generation) && externalValidity()
+        }
+        guard shouldContinue() else { completion(.refused("Voice session retired")); return }
+        // The real pipeline completes exactly once after its bounded watchdog. Keep the
+        // injected boundary equally defensive against a duplicate callback.
+        let completionGuard = InjectCompletionGuard()
+        let finished: TextInjectionPipeline.InjectionCompletion = { outcome in
+            guard completionGuard.markCompleted(outcome) == 1 else { return }
+            if case .refused = outcome {
+                VoiceDiagnosticsRecorder.shared.record("edit.refused", erase: edit.eraseCount)
+            }
+            completion(outcome)
+        }
+        if let submitOverride { submitOverride(edit, finished); return }
+        let snippet = SnippetModel(title: "Voice Dictation", triggerKeyword: "", replacementText: edit.textToInject)
         let plan = edit.erasedText.map { ErasePlan(text: $0) }
         TextInjectionPipeline.shared.inject(
             snippet: snippet,
@@ -385,15 +431,10 @@ public final class VoiceInsertionService {
             erasePlan: plan,
             preResolvedText: edit.textToInject,
             secureClipboardPaste: false,
-            eraseCaretVouched: false
-        ) { outcome in
-            guard case .refused(let reason) = outcome else { return }
-            DevTypeLog.voice.notice(
-                "[Voice] edit refused (\(reason, privacy: .public)) — restoring the tracked tail so later diffs stay aligned"
-            )
-            VoiceDiagnosticsRecorder.shared.record("edit.refused", erase: edit.eraseCount)
-            Task { @MainActor in onRefused?() }
-        }
+            eraseCaretVouched: false,
+            shouldContinue: shouldContinue,
+            completion: finished
+        )
     }
 
     private func receipt(

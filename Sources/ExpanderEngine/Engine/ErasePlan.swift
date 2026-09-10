@@ -54,6 +54,20 @@ public struct ErasePlan: Equatable {
 
     public var isEmpty: Bool { utf16Count == 0 && backspaceCount == 0 }
 
+    /// Invalid unit pairs must never reach either an AX write or a best-effort HID erase.
+    /// Field evidence cannot make a contradictory deletion request safe.
+    var validationFailure: String? {
+        if let expectedText {
+            guard utf16Count == expectedText.utf16.count,
+                  backspaceCount == expectedText.count else {
+                return "erase plan counts disagree with expected text"
+            }
+        } else if utf16Count != backspaceCount {
+            return "count-only erase plan has inconsistent counts"
+        }
+        return nil
+    }
+
     /// Builds the plan from the text the user actually typed.
     ///
     /// DevType swallows the final trigger key, so that key never reaches the field:
@@ -146,6 +160,7 @@ public enum ErasePreconditionChecker {
         selectionLength: Int?,
         insertionPointFollowsExpectedText: Bool = true
     ) -> ErasePreconditionResult {
+        if let failure = plan.validationFailure { return .mismatch(failure) }
         if plan.utf16Count == 0 {
             return .ok
         }

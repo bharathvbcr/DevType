@@ -30,13 +30,48 @@ public final class EraseExecutor {
 
     private let hid: any BackspacePosting
     private let ax: AXTextWriter
+    private let textAccess: TextAccess
 
-    public init(
+    /// Read-only AX boundary, injectable so stale values and mid-read caret changes can
+    /// be reproduced without posting keys into another application.
+    struct TextAccess {
+        var value: (AXUIElement) -> String?
+        var selectedRange: (AXUIElement) -> NSRange?
+        var stringForRange: (AXUIElement, NSRange) -> String?
+
+        static let live = TextAccess(
+            value: { element in
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &ref) == .success else {
+                    return nil
+                }
+                return ref as? String
+            },
+            selectedRange: DeliveryVerifier.selectedRange,
+            stringForRange: { element, range in
+                var cfRange = CFRange(location: range.location, length: range.length)
+                guard let parameter = AXValueCreate(.cfRange, &cfRange) else { return nil }
+                return SelectionReader.copyStringForRange(element, parameter, attributed: false)
+                    ?? SelectionReader.copyStringForRange(element, parameter, attributed: true)
+            }
+        )
+    }
+
+    public convenience init(
         hid: any BackspacePosting = HIDKeyPoster.shared,
         ax: AXTextWriter = AXTextWriter.shared
     ) {
+        self.init(hid: hid, ax: ax, textAccess: .live)
+    }
+
+    init(
+        hid: any BackspacePosting = HIDKeyPoster.shared,
+        ax: AXTextWriter = AXTextWriter.shared,
+        textAccess: TextAccess
+    ) {
         self.hid = hid
         self.ax = ax
+        self.textAccess = textAccess
     }
 
     // MARK: - Counting
@@ -164,6 +199,7 @@ public final class EraseExecutor {
         element: AXUIElement?,
         insertionPointFollowsExpectedText: Bool = true
     ) -> ErasePreconditionResult {
+        if let failure = plan.validationFailure { return .mismatch(failure) }
         if plan.utf16Count == 0 { return .ok }
         guard ErasePreconditionChecker.isEnabled else {
             return .unavailable("erase precondition disabled by user default")
@@ -172,32 +208,55 @@ public final class EraseExecutor {
             return .unavailable("no focused element")
         }
 
-        var value: String?
-        var valueRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success {
-            value = valueRef as? String
-        }
+        let value = textAccess.value(axElement)
+        let range = textAccess.selectedRange(axElement)
 
-        var caretLocation: Int?
-        var selectionLength: Int?
-        var rangeRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-           let rangeValue = rangeRef,
-           CFGetTypeID(rangeValue) == AXValueGetTypeID() {
-            var range = CFRange(location: 0, length: 0)
-            if AXValueGetValue(unsafeBitCast(rangeValue, to: AXValue.self), .cfRange, &range) {
-                caretLocation = range.location
-                selectionLength = range.length
-            }
-        }
-
-        return ErasePreconditionChecker.evaluate(
+        let result = ErasePreconditionChecker.evaluate(
             plan: plan,
             value: value,
-            caretLocation: caretLocation,
-            selectionLength: selectionLength,
+            caretLocation: range?.location,
+            selectionLength: range?.length,
             insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
         )
+        guard case .mismatch(let reason) = result else { return result }
+
+        // Some editors expose a stale/flattened AXValue while their range API still
+        // describes the live text. Ask only for the exact erase window, and only while
+        // the tap can vouch for the caret. Undo, voice, selections and malformed plans
+        // cannot borrow this recovery. Never turn an absent answer into permission.
+        guard insertionPointFollowsExpectedText,
+              let range, range.length == 0,
+              range.location >= plan.utf16Count,
+              range.location <= AXTextWriter.maxPlausibleAXUTF16Units,
+              plan.utf16Count <= DeliveryVerifier.maxVerificationScanUTF16,
+              let expected = plan.expectedText,
+              expected.utf16.count == plan.utf16Count,
+              expected.count == plan.backspaceCount else {
+            return .mismatch("\(reason); rangeProbe=ineligible")
+        }
+        let eraseRange = NSRange(location: range.location - plan.utf16Count, length: plan.utf16Count)
+        guard let rangedText = textAccess.stringForRange(axElement, eraseRange) else {
+            return .mismatch("\(reason); rangeProbe=unavailable")
+        }
+        guard textAccess.selectedRange(axElement) == range else {
+            return .mismatch("\(reason); rangeProbe=selectionChanged")
+        }
+        // A host ignoring the requested range (or returning a truncated/oversized answer)
+        // has supplied no evidence for the destructive window. Check width before folding.
+        guard rangedText.utf16.count == plan.utf16Count else {
+            return .mismatch("\(reason); rangeProbe=invalidLength")
+        }
+        let rangeResult = ErasePreconditionChecker.evaluate(
+            plan: plan, value: rangedText, caretLocation: plan.utf16Count, selectionLength: 0,
+            insertionPointFollowsExpectedText: false
+        )
+        guard rangeResult == .ok else {
+            return .mismatch("\(reason); rangeProbe=mismatch")
+        }
+        DevTypeLog.inject.info("[Inject] AXValue disagrees but the stable caret range holds the trigger — using HID erase")
+        // Conflicting views must skip AX writes. `.unavailable` also preserves the existing
+        // refusal after a possible write, so this evidence cannot cause duplicate delivery.
+        return .unavailable("AXValue disagrees with the stable caret range — HID only; rangeProbe=matched")
     }
 
     // MARK: - Guarded erase
@@ -232,6 +291,11 @@ public final class EraseExecutor {
         onUnverifiableAfterWrite: ((String) -> Void)? = nil,
         completion: @escaping (Bool) -> Void
     ) {
+        if let failure = plan.validationFailure {
+            DevTypeLog.inject.error("[Inject] invalid erase plan — \(failure, privacy: .public)")
+            completion(false)
+            return
+        }
         guard plan.backspaceCount > 0 else {
             completion(true)
             return
@@ -296,6 +360,11 @@ public final class EraseExecutor {
         onUnverifiableAfterWrite: ((String) -> Void)?,
         completion: @escaping (Bool) -> Void
     ) {
+        if let failure = plan.validationFailure {
+            DevTypeLog.inject.error("[Inject] invalid erase plan — \(failure, privacy: .public)")
+            completion(false)
+            return
+        }
         guard canProceed() else {
             DevTypeLog.inject.error("[Inject] erase aborted — input or target application changed")
             completion(false)
