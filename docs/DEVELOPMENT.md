@@ -22,6 +22,7 @@ All common workflows are automated via shell scripts in the `Scripts/` directory
 | **Signing Identity** | `./Scripts/signing-identity.sh` | Prints the identity builds will use: Developer ID → Apple Development → self-signed → ad-hoc. Read-only. |
 | **Local Signing Certificate** | `./Scripts/make-signing-cert.sh` | Generates the `DevType Local Signing` self-signed cert so TCC permissions survive rebuilds. Only needed when you have no Apple Development certificate. |
 | **Run Unit Tests** | `./Scripts/test.sh [-v]` | Runs the SwiftPM engine and AppKit-core tests (`ExpanderEngineTests`, `DevTypeAppTests`). Pins `DEVELOPER_DIR` to full Xcode — Command Line Tools-only toolchains break `swift test`. |
+| **Coverage (GitPulse LCOV)** | `./Scripts/test.sh --coverage` | Same suite, with Swift and `DevTypeSafety.m` instrumented, then writes `coverage/lcov.info` (per-file, per-line hit counts). `--enable-code-coverage` does the same. |
 | **Package Application** | `./Scripts/package-app.sh [release\|debug]` | Compiles binaries, bundles resources, stamps version from Git, and signs `.build/DevType.app`. Skips wipe+resign when nothing changed to preserve the CDHash. |
 | **Build Application** | `./Scripts/build_app.sh [release\|debug]` | Thin wrapper delegating to `package-app.sh`. |
 | **Install Application** | `./Scripts/install-app.sh [release\|debug]` | Packages if needed, validates and recoverably swaps the canonical copy into `/Applications` (falls back to `~/Applications`), then quarantines stale build artifacts and a same-bundle copy at the other canonical path. |
@@ -38,7 +39,7 @@ All common workflows are automated via shell scripts in the `Scripts/` directory
 | **Publish Verified Draft** | `GH_REPO=owner/repo ./Scripts/publish-release.sh <tag> <dist-dir>` | Requires the remote tag to match HEAD, uploads to a draft, verifies exact notes and downloaded bytes, then publishes and rechecks. Refuses to overwrite a public release. |
 | **Seed Issues** | `./Scripts/seed-good-first-issues.sh` | Seeds curated, self-contained `good first issue` candidates for open-source contributors. |
 
-The resolver and verification scripts have dedicated self-tests (`test-signing-identity.sh`, `test-release-dmg-select.sh`, `test-release-signing-preflight.sh`, `test-release-preflight.sh`, `test-release-asset-list.sh`, `test-release-guard.sh`, `test-release-version.sh`) that run inside local CI with stubbed environments.
+The resolver and verification scripts have dedicated self-tests (`test-signing-identity.sh`, `test-release-dmg-select.sh`, `test-release-signing-preflight.sh`, `test-release-preflight.sh`, `test-release-asset-list.sh`, `test-release-guard.sh`, `test-release-version.sh`, `test-export-lcov.sh`) that run inside local CI with stubbed environments.
 
 ---
 
@@ -50,6 +51,9 @@ DevType maintains unit, fuzz, race, persistence, controller and stress tests acr
 ```bash
 # Run all tests
 ./Scripts/test.sh
+
+# Instrument the suite and write coverage/lcov.info for GitPulse
+./Scripts/test.sh --coverage
 
 # Include the five audit performance checks
 DEVTYPE_BENCH=1 ./Scripts/test.sh

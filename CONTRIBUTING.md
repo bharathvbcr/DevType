@@ -53,6 +53,9 @@ This creates a certificate named `DevType Local Signing` in your login keychain.
 # Run headless unit test suite
 ./Scripts/test.sh
 
+# Same suite plus coverage/lcov.info for GitPulse
+./Scripts/test.sh --coverage
+
 # Run full local CI pipeline (checks syntax, plists, tests, and builds release bundle)
 ./Scripts/ci-local.sh
 ```
@@ -133,6 +136,9 @@ Every fix and feature must be accompanied by comprehensive unit tests.
 ```bash
 # Run all unit tests
 ./Scripts/test.sh
+
+# Same suite plus coverage/lcov.info for GitPulse
+./Scripts/test.sh --coverage
 
 # Run specific test suite
 swift test --filter SecretSnippetTests
