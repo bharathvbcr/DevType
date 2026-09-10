@@ -135,3 +135,20 @@ The continuation's full source suite executed 2,946 tests with one skip and zero
 The first direct computer-use attempt to read `/Applications/DevType.app` returned `Computer Use server error -10005: timeoutReached`. Automated AppKit fixture execution is verified independently; this failed connection is not installed-app interaction evidence. Before installation, the previous app and packaged candidate had identical designated signing requirements, preserving the installer's TCC continuity path.
 
 The hardened runner then completed another 20 real rounds, explicitly verifying 96 tests and zero skips/failures in every round (1,920 executions; `/tmp/devtype-followup-verified-stress.log`). All release/installer/publication/runner fixtures passed afterward (`-final-fixtures.log`). The application source and Swift tests remained byte-identical to the sanitizer/full-suite runs; only the independently tested runner and documentation changed afterward. Local CI also completed packaging, strict signature, version-stamping and mandatory weak Foundation Models linkage successfully.
+
+## Final release inputs and local installation
+
+The immutable release input is `ef2bd025cb6ed010af08aec9fc87c0ad84fc2deb`, tagged `v1.0.0` (annotated tag object `d02f2345c3b14c0b416dcd739e4d0eced5d01150`). The former unpublished local candidate is retained at `refs/devtype/candidates/v1.0.0-052b75c`; no previously public tag was replaced. The final release adds 1,207 lines and removes 198 across 29 files, including 38 new Swift tests and seven stress-runner fixture tests.
+
+[Main CI 34516468374](https://github.com/bharathvbcr/DevType/actions/runs/34516468374) and [CodeQL](https://github.com/bharathvbcr/DevType/actions/runs/34516467122) passed. Main CI includes debug/release builds, packaging and mandatory weak Foundation Models linkage. Actual platform test counts:
+
+| Platform | Toolchain / architecture | Tests | Skipped | Failures |
+| --- | --- | --- | --- | --- |
+| macOS 14 | Swift 5.10 / Xcode 15.4 / arm64 | 2,939 | 12 | 0 |
+| macOS 26 | Swift 6.3.3 / Xcode 26.6 / arm64 | 2,946 | 13 | 0 |
+
+Hosted skips identify unavailable Foundation Models/Apple Intelligence, opt-in benchmarks and missing local Whisper. The local full suite ran the benchmarks and available model tests, with only the missing-Whisper skip. These platform results do not establish Intel runtime qualification. [Release workflow 34518098540](https://github.com/bharathvbcr/DevType/actions/runs/34518098540) records the separate tag CI, artifact construction, exact asset inventory and byte-identical download/publication checks.
+
+The local v1.0.0 build 179 was installed at `/Applications/DevType.app` with the existing Apple Development identity and Hardened Runtime enabled. Strict/deep codesign passed; the installed executable SHA-256 matched the preserved package (`1821fea0f47788d47dcae5a8a246a181ac585d0230caa84e3af2ce33443e0d81`). Startup logs confirmed `identityChanged=false`, listen/AX/post grants preserved, `tapRunning=true` and `Status: Active`. Gatekeeper returned exit 3 (`rejected`), as expected for this intentional unnotarized distribution path. Direct computer-use reads still timed out; no cross-editor insertion or microphone interaction is claimed.
+
+Persistent artifacts live under `dist/DevType-1.0.0-local-ef2bd02` and `dist/v1.0.0-release-evidence` in the canonical checkout, including logs, checksums, the old application, a complete pre-release Git bundle, and the integration stash reference. The canonical `main` branch was fast-forwarded while preserving 12 unrelated paths outside the release. Ten remain byte-identical to their original snapshot; two shared fixture/documentation files retain both the release and prior changes. This documentation follow-up changes no application source, tests, scripts, or release artifact.

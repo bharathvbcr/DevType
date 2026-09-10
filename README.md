@@ -169,7 +169,7 @@ Explore our complete documentation in the [`docs/`](docs/) directory:
 - 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
 - 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running the engine and AppKit-core test suites, debugging, and release automation.
-- 📦 **[Release notes](docs/releases/v1.0.0.md)**: v1.0.0 adds structured snippet search, four offline naming conversions, portable text tools, and cache/calculator hardening. Local candidate; see the [audit and distribution gates](docs/audits/2026-09-10-productivity-release.md). (See also [v0.1.9](docs/releases/v0.1.9.md)).
+- 📦 **[Release notes](docs/releases/v1.0.0.md)**: v1.0.0 adds structured snippet search, four offline naming conversions, portable text tools, and cache/calculator hardening. See the [audit and distribution gates](docs/audits/2026-09-10-productivity-release.md). (See also [v0.1.9](docs/releases/v0.1.9.md)).
 - 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
 
 ---
