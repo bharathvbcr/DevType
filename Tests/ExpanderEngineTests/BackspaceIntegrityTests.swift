@@ -175,6 +175,34 @@ final class BackspaceIntegrityTests: XCTestCase {
         }
         wait(for: [done], timeout: 5)
     }
+
+    /// GitPulse 2026-09-11: all four backspaces were handed to the tap, then the combo box
+    /// retargeted its focused node during the settle window. Treating that as an incomplete
+    /// post refused the expand after the trigger was already gone.
+    func testFullyPostedEraseIsNotRewrittenByALaterContinueGuard() {
+        let poster = FakeBackspacePoster()
+        poster.postedToReport = 3
+        let executor = EraseExecutor(hid: poster)
+        var proceed = true
+        let result = ErasePreconditionChecker.evaluate(
+            plan: makePlan(), value: "abc", caretLocation: 3, selectionLength: 0
+        )
+        XCTAssertEqual(result, .ok)
+        let done = expectation(description: "completed post survives continue-guard")
+        executor.finishGuardedErase(
+            plan: makePlan(), afterPossibleWrite: false, result: result,
+            canProceed: { proceed }, onUnverifiableAfterWrite: nil
+        ) { erased in
+            XCTAssertTrue(
+                erased,
+                "Every requested backspace was posted — a later focus flicker is not an incomplete erase"
+            )
+            done.fulfill()
+        }
+        proceed = false
+        wait(for: [done], timeout: 2)
+        XCTAssertEqual(poster.requestedCounts, [3])
+    }
 }
 
 /// Pins the held-expansion cursor geometry against a plausible-looking wrong "fix": when the

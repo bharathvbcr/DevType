@@ -642,7 +642,8 @@ public final class TextInjectionPipeline {
 
     private func operationIsCurrent(
         _ operation: InjectCompletionGuard, revision: UInt64, target: PasteboardBroker.PasteTarget,
-        allowSecureInput: Bool = false, observationOnly: Bool = false
+        allowSecureInput: Bool = false, observationOnly: Bool = false,
+        checkElement: Bool = true
     ) -> Bool {
         let current = lastExpansionLock.withLock {
             activeOperation === operation && inputRevision == revision
@@ -650,12 +651,19 @@ public final class TextInjectionPipeline {
         return current && operation.allowsContinuation(observationOnly: observationOnly)
             && (allowSecureInput || (AXContextChecker.shared.isProcessTrusted()
                 && !AXContextChecker.isSecureEventInputEnabledLive()))
-            && target.isCurrent(checkRange: false)
+            && target.isCurrent(checkRange: false, checkElement: checkElement)
     }
 
-    private func canContinue(_ context: InjectContext, observationOnly: Bool = false) -> Bool {
-        operationIsCurrent(context.operation, revision: context.inputRevision, target: context.target,
-                           observationOnly: observationOnly)
+    private func canContinue(
+        _ context: InjectContext,
+        observationOnly: Bool = false,
+        phase: PasteboardBroker.SelectionRangeGate = .beforeMutation
+    ) -> Bool {
+        operationIsCurrent(
+            context.operation, revision: context.inputRevision, target: context.target,
+            observationOnly: observationOnly,
+            checkElement: PasteboardBroker.verifyFocusedElement(role: context.focusedRole, phase: phase)
+        )
     }
 
     /// Internal test reader for the delivery-window counter. Not public API.
@@ -1021,6 +1029,8 @@ public final class TextInjectionPipeline {
         /// False when the caller cannot promise the caret still sits immediately after
         /// `erasePlan.expectedText` — see `injectOnMain`.
         let eraseCaretVouched: Bool
+        let focusedRole: String?
+        let gateDecision: AXContextChecker.ExpandGateDecision
 
         var frontBundle: String { frontBundleID ?? "nil" }
     }
@@ -1157,7 +1167,9 @@ public final class TextInjectionPipeline {
             frontPID: frontApp?.processIdentifier,
             deliveryInputUnits: deliveryInputUnits,
             operation: operation, inputRevision: inputRevision, target: target,
-            eraseCaretVouched: eraseCaretVouched
+            eraseCaretVouched: eraseCaretVouched,
+            focusedRole: AXContextChecker.shared.focusedElementRole(),
+            gateDecision: decision
         )
 
         // Backstop before anything destructive: if AX can read the field, the trigger must actually
@@ -1230,6 +1242,9 @@ public final class TextInjectionPipeline {
         let canProceed = {
             self.canContinue(context)
         }
+        let canProceedAfterMutation = {
+            self.canContinue(context, phase: .afterMutation)
+        }
 
         // Image snippets bypass all text/AX paths: erase the trigger with HID
         // backspaces, then paste the image through the clipboard.
@@ -1252,13 +1267,35 @@ public final class TextInjectionPipeline {
                 )
                 return
             }
-            eraser.performGuardedErase(plan: erasePlan, canProceed: canProceed) { erased in
+            eraser.performGuardedErase(
+                plan: erasePlan,
+                canProceed: canProceed,
+                postingContinue: canProceedAfterMutation
+            ) { erased in
                 guard erased else {
                     self.refuseInject(
-                        "Erase precondition failed before image paste — field no longer holds the trigger",
-                        path: "imagePaste",
+                        "Trigger erase did not complete — field may hold a partial trigger",
+                        path: "eraseIncomplete",
                         swallowed: swallowed,
-                        allowKeyReplay: canProceed(),
+                        allowKeyReplay: canProceedAfterMutation(),
+                        refuseContext: .capture(
+                            reason: "Trigger erase did not complete",
+                            decision: context.gateDecision
+                        ),
+                        completion: completion
+                    )
+                    return
+                }
+                guard canProceedAfterMutation() else {
+                    self.refuseInject(
+                        "Expansion cancelled — input or target application changed before insertion",
+                        path: "eraseContextChanged",
+                        swallowed: swallowed,
+                        allowKeyReplay: false,
+                        refuseContext: .capture(
+                            reason: "Input or target application changed before insertion",
+                            decision: context.gateDecision
+                        ),
                         completion: completion
                     )
                     return
@@ -1266,9 +1303,9 @@ public final class TextInjectionPipeline {
                 self.clipboard.pasteImageViaClipboard(
                     image: image,
                     bundleID: context.frontBundleID,
-                    shouldContinue: canProceed
+                    shouldContinue: canProceedAfterMutation
                 ) { result in
-                    guard canProceed() else { completion(result == .notPosted ? .failedSilent : .postedUnverified); return }
+                    guard canProceedAfterMutation() else { completion(result == .notPosted ? .failedSilent : .postedUnverified); return }
                     // §3.4: the image path now reports what it actually observed instead of
                     // "posted, therefore succeeded".
                     let outcome: PermissionCoordinator.InjectOutcome
@@ -1374,7 +1411,7 @@ public final class TextInjectionPipeline {
 
         // An unverifiable precondition cannot license writing through those same AX coordinates.
         // Also skip apps/roles known to report successful writes without mutating.
-        let focusedRole = AXContextChecker.shared.focusedElementRole()
+        let focusedRole = context.focusedRole
         var preferHID = eraseCheck.requiresHID || TextInjectionPipeline.shouldSkipAXSelectedText(
             bundleID: frontBundle,
             role: focusedRole
@@ -1533,6 +1570,7 @@ public final class TextInjectionPipeline {
             afterPossibleWrite: attemptedAXWrite,
             insertionPointFollowsExpectedText: context.eraseCaretVouched,
             canProceed: canProceed,
+            postingContinue: canProceedAfterMutation,
             onUnverifiableAfterWrite: { why in
                 // Self-healing: an attempted AX write left the field unreadable even after the
                 // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
@@ -1562,12 +1600,30 @@ public final class TextInjectionPipeline {
                 }
             }
         ) { erased in
-            guard erased, canProceed() else {
+            guard erased else {
                 self.refuseInject(
-                    "Erase precondition failed before paste — field no longer holds the trigger",
-                    path: "guardedErase",
+                    "Trigger erase did not complete — field may hold a partial trigger",
+                    path: "eraseIncomplete",
                     swallowed: swallowed,
-                    allowKeyReplay: canProceed(),
+                    allowKeyReplay: canProceedAfterMutation(),
+                    refuseContext: .capture(
+                        reason: "Trigger erase did not complete",
+                        decision: context.gateDecision
+                    ),
+                    completion: completion
+                )
+                return
+            }
+            guard canProceedAfterMutation() else {
+                self.refuseInject(
+                    "Expansion cancelled — input or target application changed before insertion",
+                    path: "eraseContextChanged",
+                    swallowed: swallowed,
+                    allowKeyReplay: false,
+                    refuseContext: .capture(
+                        reason: "Input or target application changed before insertion",
+                        decision: context.gateDecision
+                    ),
                     completion: completion
                 )
                 return
@@ -1604,9 +1660,9 @@ public final class TextInjectionPipeline {
                     cursorOffset: cursorOffset,
                     totalUTF16Length: totalUTF16,
                     allowHID: true,
-                    shouldContinue: canProceed
+                    shouldContinue: canProceedAfterMutation
                 ) {
-                    self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceed)
+                    self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceedAfterMutation)
                     self.finishSucceeded(
                         outcome: .succeeded,
                         path: "axDirect",
@@ -1632,7 +1688,7 @@ public final class TextInjectionPipeline {
                 focusedRole: focusedRole,
                 staleProbe: erasePlan.expectedText,
                 staleProbeCaseInsensitive: erasePlan.caseInsensitive,
-                shouldContinue: canProceed
+                shouldContinue: canProceedAfterMutation
             ) { result in
                 // #region agent log
                 TextInjectionPipeline.debugLogInject(
@@ -2007,7 +2063,7 @@ public final class TextInjectionPipeline {
         undoable: Bool,
         completion: @escaping InjectionCompletion
     ) {
-        guard canContinue(context) else { completion(.postedUnverified); return }
+        guard canContinue(context, phase: .afterMutation) else { completion(.postedUnverified); return }
         PermissionCoordinator.shared.recordInjectOutcome(
             outcome,
             refuseContext: nil,

@@ -499,6 +499,8 @@ public final class PermissionCoordinator {
             return "Post Events permission is required for multi-line shell insertion"
         case "eraseContextChanged":
             return "Input or target application changed before insertion"
+        case "eraseIncomplete":
+            return "Trigger erase did not complete"
         case "erasePrecondition", "guardedErase":
             return "Erase precondition failed — the target text changed"
         case "axOnlyRange":

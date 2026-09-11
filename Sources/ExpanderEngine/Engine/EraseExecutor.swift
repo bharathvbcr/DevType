@@ -18,7 +18,7 @@ public protocol BackspacePosting: AnyObject {
 public extension BackspacePosting {
     func sendBackspacesAsync(count: Int, shouldContinue: @escaping () -> Bool, completion: @escaping (Bool) -> Void) {
         guard shouldContinue() else { completion(false); return }
-        sendBackspacesAsync(count: count) { completion($0 && shouldContinue()) }
+        sendBackspacesAsync(count: count, completion: completion)
     }
 }
 
@@ -283,14 +283,19 @@ public final class EraseExecutor {
     ///   broken app).
     /// - Parameter canProceed: live input/focus guard, re-evaluated after retries and before
     ///   posting. A caller that observed a context change must not erase from the stale snapshot.
+    /// - Parameter postingContinue: continue-guard *during* HID posting. Combo boxes retarget
+    ///   their focused AX node while deletes land; that flicker must abort further keys if the
+    ///   PID moved, but must not rewrite a completed post as failure. Defaults to `canProceed`.
     public func performGuardedErase(
         plan: ErasePlan,
         afterPossibleWrite: Bool = false,
         insertionPointFollowsExpectedText: Bool = true,
         canProceed: @escaping () -> Bool = { true },
+        postingContinue: (() -> Bool)? = nil,
         onUnverifiableAfterWrite: ((String) -> Void)? = nil,
         completion: @escaping (Bool) -> Void
     ) {
+        let duringPost = postingContinue ?? canProceed
         if let failure = plan.validationFailure {
             DevTypeLog.inject.error("[Inject] invalid erase plan — \(failure, privacy: .public)")
             completion(false)
@@ -333,6 +338,7 @@ public final class EraseExecutor {
                         afterPossibleWrite: afterPossibleWrite,
                         result: second,
                         canProceed: canProceed,
+                        postingContinue: duringPost,
                         onUnverifiableAfterWrite: onUnverifiableAfterWrite,
                         completion: completion
                     )
@@ -344,6 +350,7 @@ public final class EraseExecutor {
                 afterPossibleWrite: afterPossibleWrite,
                 result: result,
                 canProceed: canProceed,
+                postingContinue: duringPost,
                 onUnverifiableAfterWrite: onUnverifiableAfterWrite,
                 completion: completion
             )
@@ -357,9 +364,11 @@ public final class EraseExecutor {
         afterPossibleWrite: Bool,
         result: ErasePreconditionResult,
         canProceed: @escaping () -> Bool = { true },
+        postingContinue: (() -> Bool)? = nil,
         onUnverifiableAfterWrite: ((String) -> Void)?,
         completion: @escaping (Bool) -> Void
     ) {
+        let duringPost = postingContinue ?? canProceed
         if let failure = plan.validationFailure {
             DevTypeLog.inject.error("[Inject] invalid erase plan — \(failure, privacy: .public)")
             completion(false)
@@ -397,7 +406,7 @@ public final class EraseExecutor {
         // CGEvent creation failure). Reporting success here would inject the replacement on top
         // of an unerased trigger — the exact `trigger + replacement` corruption this executor
         // exists to prevent — so a short post is a refused expand, same as a mismatch.
-        hid.sendBackspacesAsync(count: plan.backspaceCount, shouldContinue: canProceed) { erased in
+        hid.sendBackspacesAsync(count: plan.backspaceCount, shouldContinue: duringPost) { erased in
             if erased {
                 completion(true)
                 return

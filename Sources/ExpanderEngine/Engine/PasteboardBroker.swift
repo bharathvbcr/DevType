@@ -498,23 +498,32 @@ public final class PasteboardBroker {
                         range: baseline?.selectedRange ?? element.flatMap { DeliveryVerifier.selectedRange(for: $0) })
         }
 
-        func matches(pid currentPID: pid_t?, element current: AXUIElement?, range currentRange: NSRange?, checkRange: Bool) -> Bool {
+        func matches(
+            pid currentPID: pid_t?,
+            element current: AXUIElement?,
+            range currentRange: NSRange?,
+            checkRange: Bool,
+            checkElement: Bool = true
+        ) -> Bool {
             guard let pid, pid > 0, pid == currentPID else { return false }
-            switch (element, current) {
-            case (let original?, let observed?):
-                guard CFEqual(original, observed) else { return false }
-            case (nil, nil): break
-            default: return false
+            if checkElement {
+                switch (element, current) {
+                case (let original?, let observed?):
+                    guard CFEqual(original, observed) else { return false }
+                case (nil, nil): break
+                default: return false
+                }
             }
             return !checkRange || range == nil || range == currentRange
         }
 
-        func isCurrent(checkRange: Bool) -> Bool {
+        func isCurrent(checkRange: Bool, checkElement: Bool = true) -> Bool {
             let current = AXContextChecker.shared.focusedElement()
             return matches(pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
                            element: current,
                            range: checkRange ? current.flatMap { DeliveryVerifier.selectedRange(for: $0) } : nil,
-                           checkRange: checkRange)
+                           checkRange: checkRange,
+                           checkElement: checkElement)
         }
     }
 
@@ -565,6 +574,22 @@ public final class PasteboardBroker {
         )
     }
 
+    /// Whether paste/erase continue-guards should require `CFEqual` of the focused AX node.
+    ///
+    /// Combo boxes and menus retarget that node (dropdown, inner text field) while HID
+    /// backspaces land. Requiring identity after mutation is the GitPulse refuse: the trigger
+    /// was already deleted, then expand aborted because the combo box opened a list.
+    /// Before mutation we still require identity so a click into a different field cannot
+    /// authorize deleting that field's contents.
+    static func verifyFocusedElement(role: String?, phase: SelectionRangeGate) -> Bool {
+        switch phase {
+        case .beforeMutation:
+            return true
+        case .afterMutation:
+            return !AXWriteCapabilityStore.isAXWriteUnstableRole(role)
+        }
+    }
+
     /// Why Cmd+V was not posted after the clipboard payload was published. Distinct from the
     /// immediate pre-paste guards so a settle-delay abort is not silent in diagnostics.
     enum CmdVAbortReason: Equatable {
@@ -610,14 +635,17 @@ public final class PasteboardBroker {
 
     private func pasteContinuation(
         ticket: ClipboardTicket, target: PasteTarget, checkRange: Bool,
+        checkElement: Bool = true,
         allowSecureInput: Bool, shouldContinue: () -> Bool
     ) -> Bool {
         cmdVAbortReason(ticket: ticket, target: target, checkRange: checkRange,
+                        checkElement: checkElement,
                         allowSecureInput: allowSecureInput, shouldContinue: shouldContinue) == nil
     }
 
     private func cmdVAbortReason(
         ticket: ClipboardTicket, target: PasteTarget, checkRange: Bool,
+        checkElement: Bool = true,
         allowSecureInput: Bool, shouldContinue: () -> Bool
     ) -> CmdVAbortReason? {
         Self.cmdVAbortReason(
@@ -626,7 +654,7 @@ public final class PasteboardBroker {
             shouldContinue: shouldContinue(),
             canPost: CGPreflightPostEventAccess(),
             secureInputBlocked: !allowSecureInput && AXContextChecker.isSecureEventInputEnabledLive(),
-            targetCurrent: target.isCurrent(checkRange: checkRange)
+            targetCurrent: target.isCurrent(checkRange: checkRange, checkElement: checkElement)
         )
     }
 
@@ -635,11 +663,13 @@ public final class PasteboardBroker {
         ticket: ClipboardTicket,
         target: PasteTarget,
         checkRange: Bool,
+        checkElement: Bool = true,
         allowSecureInput: Bool,
         shouldContinue: () -> Bool
     ) {
         let suffix = cmdVAbortReason(
             ticket: ticket, target: target, checkRange: checkRange,
+            checkElement: checkElement,
             allowSecureInput: allowSecureInput, shouldContinue: shouldContinue
         )?.logSuffix ?? "Cmd+V was not posted"
         DevTypeLog.inject.error("\(prefix, privacy: .public) — \(suffix, privacy: .public)")
@@ -698,6 +728,7 @@ public final class PasteboardBroker {
         let verifySelection = Self.verifySelectionRange(
             bundleID: bundleID, role: focusedRole, phase: .afterMutation
         )
+        let checkElement = Self.verifyFocusedElement(role: focusedRole, phase: .afterMutation)
         guard shouldContinue() else {
             DevTypeLog.inject.error("[Inject] paste refused — cancelled or superseded")
             completion(.notPosted)
@@ -713,7 +744,7 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        guard target.isCurrent(checkRange: verifySelection) else {
+        guard target.isCurrent(checkRange: verifySelection, checkElement: checkElement) else {
             DevTypeLog.inject.error("[Inject] paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
@@ -764,6 +795,7 @@ public final class PasteboardBroker {
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.prePasteSettleDelay) {
             self.hid.postCmdVKeyEventsAsync(shouldContinue: {
                 self.pasteContinuation(ticket: ticket, target: target, checkRange: verifySelection,
+                                       checkElement: checkElement,
                                        allowSecureInput: allowSecureInput, shouldContinue: shouldContinue)
             }) { posted in
                 guard posted else {
@@ -772,6 +804,7 @@ public final class PasteboardBroker {
                     self.logCmdVNotPosted(
                         prefix: "[Inject] paste refused",
                         ticket: ticket, target: target, checkRange: verifySelection,
+                        checkElement: checkElement,
                         allowSecureInput: allowSecureInput, shouldContinue: shouldContinue
                     )
                     self.releaseOwnership(
@@ -826,6 +859,7 @@ public final class PasteboardBroker {
                     residency: residency,
                     shouldContinue: {
                         self.pasteContinuation(ticket: ticket, target: target, checkRange: false,
+                                               checkElement: checkElement,
                                                allowSecureInput: allowSecureInput, shouldContinue: shouldContinue)
                     },
                     completion: completion
@@ -928,9 +962,11 @@ public final class PasteboardBroker {
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
         let target = PasteTarget.capture()
+        let imageRole = AXContextChecker.shared.focusedElementRole()
         let verifySelection = Self.verifySelectionRange(
-            bundleID: bundleID, role: nil, phase: .afterMutation
+            bundleID: bundleID, role: imageRole, phase: .afterMutation
         )
+        let checkElement = Self.verifyFocusedElement(role: imageRole, phase: .afterMutation)
         guard shouldContinue() else {
             DevTypeLog.inject.error("[Inject] image paste refused — cancelled or superseded")
             completion(.notPosted)
@@ -946,7 +982,7 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        guard target.isCurrent(checkRange: verifySelection) else {
+        guard target.isCurrent(checkRange: verifySelection, checkElement: checkElement) else {
             DevTypeLog.inject.error("[Inject] image paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
@@ -988,12 +1024,14 @@ public final class PasteboardBroker {
             let baseline = self.verifier.captureFocusedTextObservation()
             self.hid.postCmdVKeyEventsAsync(shouldContinue: {
                 self.pasteContinuation(ticket: ticket, target: target, checkRange: verifySelection,
+                                       checkElement: checkElement,
                                        allowSecureInput: false, shouldContinue: shouldContinue)
             }) { posted in
                 guard posted else {
                     self.logCmdVNotPosted(
                         prefix: "[Inject] image paste refused",
                         ticket: ticket, target: target, checkRange: verifySelection,
+                        checkElement: checkElement,
                         allowSecureInput: false, shouldContinue: shouldContinue
                     )
                     self.releaseOwnership(ticket, result: .notPosted, residency: nil)
@@ -1015,6 +1053,7 @@ public final class PasteboardBroker {
                     residency: residency,
                     shouldContinue: {
                         self.pasteContinuation(ticket: ticket, target: target, checkRange: false,
+                                               checkElement: checkElement,
                                                allowSecureInput: false, shouldContinue: shouldContinue)
                     },
                     completion: completion

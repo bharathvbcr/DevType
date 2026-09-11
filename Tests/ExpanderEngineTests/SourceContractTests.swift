@@ -60,7 +60,15 @@ final class SourceContractTests: XCTestCase {
         )
         XCTAssertEqual(inject.components(separatedBy: "canProceed: canProceed").count - 1, 2,
                        "Both image and text erases must keep the live input/focus guard")
-        XCTAssertEqual(inject.components(separatedBy: "allowKeyReplay: canProceed()").count - 1, 2)
+        XCTAssertEqual(
+            inject.components(separatedBy: "postingContinue: canProceedAfterMutation").count - 1, 2,
+            "Both image and text HID posts must use the post-mutation continue-guard so combo-box retarget is not an incomplete erase"
+        )
+        XCTAssertEqual(
+            inject.components(separatedBy: "path: \"eraseIncomplete\"").count - 1, 2,
+            "A short HID post must be a distinct refuse from a field mismatch"
+        )
+        XCTAssertEqual(inject.components(separatedBy: "allowKeyReplay: canProceedAfterMutation()").count - 1, 2)
         XCTAssertTrue(inject.contains("if allowKeyReplay, swallowed.mustReinjectOnRefuse"))
         let eraser = try source("Sources/ExpanderEngine/Engine/EraseExecutor.swift")
         let finish = try XCTUnwrap(eraser.range(of: "func finishGuardedErase("))
@@ -68,6 +76,19 @@ final class SourceContractTests: XCTestCase {
         let contextGuard = try XCTUnwrap(posting.range(of: "guard canProceed()"))
         let post = try XCTUnwrap(posting.range(of: "hid.sendBackspacesAsync("))
         XCTAssertLessThan(contextGuard.lowerBound, post.lowerBound)
+        XCTAssertTrue(
+            posting.contains("shouldContinue: duringPost"),
+            "In-flight HID posting uses the post-mutation continue-guard, not the pre-erase field identity check"
+        )
+        let hid = try source("Sources/ExpanderEngine/Engine/HIDKeyPoster.swift")
+        XCTAssertTrue(
+            hid.contains("completion(Self.erasePostCompleted(requested: count, posted: posted))"),
+            "A completed backspace post must not be rewritten by a later continue-guard"
+        )
+        XCTAssertFalse(
+            hid.contains("posted == count && shouldContinue()"),
+            "The GitPulse refuse treated combo-box retarget during settle as an incomplete erase"
+        )
     }
 
     func testPasteRefusalsLogDistinctReasonsInsteadOfACombinedPostEventsMessage() throws {
@@ -103,7 +124,11 @@ final class SourceContractTests: XCTestCase {
                 "\(label) paste runs after HID erase; AX selectedRange is not a same-caret signal"
             )
             XCTAssertTrue(
-                body.contains("target.isCurrent(checkRange: verifySelection)"),
+                body.contains("verifyFocusedElement("),
+                "\(label) paste must not treat combo-box AX retarget as a field switch after HID erase"
+            )
+            XCTAssertTrue(
+                body.contains("target.isCurrent(checkRange: verifySelection"),
                 "\(label) paste must not require a stable AX range after our own mutation"
             )
             XCTAssertFalse(

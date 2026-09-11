@@ -367,8 +367,16 @@ public final class HIDKeyPoster: BackspacePosting {
         let posted = sendBackspaces(count: count, shouldContinue: shouldContinue)
         let settle = Double(posted) * InjectTiming.backspacePerKeyDelay + InjectTiming.backspaceTrailingDelay
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
-            completion(posted == count && shouldContinue())
+            // `shouldContinue` already gated each pair. A completed post means the trigger is
+            // gone; a later combo-box retarget must not report that as an incomplete erase.
+            completion(Self.erasePostCompleted(requested: count, posted: posted))
         }
+    }
+
+    /// True when every requested backspace was handed to the HID tap. Pure for tests.
+    /// A later continue-guard failure is a paste decision, not an incomplete erase.
+    public static func erasePostCompleted(requested: Int, posted: Int) -> Bool {
+        requested <= 0 || posted >= requested
     }
 
     // MARK: - Left arrows

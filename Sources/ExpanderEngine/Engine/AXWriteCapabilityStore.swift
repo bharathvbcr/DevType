@@ -147,6 +147,25 @@ public final class AXWriteCapabilityStore {
         return String(bundleID[..<marker.lowerBound])
     }
 
+    /// AX roles whose focused node is not a stable text field. Combo boxes, menus and lists
+    /// routinely retarget (`AXComboBox` → inner field or dropdown `AXList`) while we erase, and
+    /// `AXSelectedText` writes against the container report success without mutating. A bundle-only
+    /// seed cannot name them: GitPulse is `com.gitpulse.desktop`, not an Electron prefix, and a
+    /// trusted Notes `AXTextArea` must not license writes on that app's combo box.
+    public static let axWriteUnstableRoles: Set<String> = [
+        "AXComboBox",
+        "AXPopUpButton",
+        "AXMenu",
+        "AXMenuBar",
+        "AXMenuButton",
+        "AXList"
+    ]
+
+    public static func isAXWriteUnstableRole(_ role: String?) -> Bool {
+        guard let role, !role.isEmpty else { return false }
+        return axWriteUnstableRoles.contains(role)
+    }
+
     /// Known-bad seeds. Chromium/Electron shells and Messages report success without mutating.
     /// Kept deliberately small — it only saves the *first* wasted attempt; learning covers the rest.
     ///
@@ -154,6 +173,11 @@ public final class AXWriteCapabilityStore {
     /// see the same verdict for an installed web app as for its host browser without having to
     /// know canonicalization exists.
     public static func seedVerdict(bundleID rawBundleID: String) -> Verdict {
+        seedVerdict(bundleID: rawBundleID, role: nil)
+    }
+
+    public static func seedVerdict(bundleID rawBundleID: String, role: String?) -> Verdict {
+        if isAXWriteUnstableRole(role) { return .falseSuccess }
         let bundleID = canonicalBundleID(rawBundleID)
         let lower = bundleID.lowercased()
         switch bundleID {
@@ -258,13 +282,19 @@ public final class AXWriteCapabilityStore {
             }
             return composite
         }
+        // Role prior beats a bundle-only lesson: a trusted Notes textarea must not license
+        // selected-text writes on that app's combo box, and a never-seen desktop app must not
+        // pay the first-expansion AX probe that GitPulse just refused on.
+        if Self.isAXWriteUnstableRole(role) {
+            return .falseSuccess
+        }
         if let bundleOnly {
             if bundleOnly == .falseSuccess, retireStaleCondemnation(key: canonical, bundleID: canonical) {
                 return .unknown
             }
             return bundleOnly
         }
-        return Self.seedVerdict(bundleID: canonical)
+        return Self.seedVerdict(bundleID: canonical, role: role)
     }
 
     /// True when the AX selected-text write should be skipped entirely for this app.
@@ -494,7 +524,8 @@ public final class AXWriteCapabilityStore {
         let key = Self.verdictKey(bundleID: Self.canonicalBundleID(bundleID), role: role)
         lock.lock()
         var changed = false
-        if learned[key] == .falseSuccess {
+        let seededUnstable = learned[key] == nil && Self.isAXWriteUnstableRole(role)
+        if learned[key] == .falseSuccess || seededUnstable {
             let streak = (trustedStreak[key] ?? 0) + 1
             trustedStreak[key] = streak
             if streak >= Self.trustedStreakToRehabilitate {

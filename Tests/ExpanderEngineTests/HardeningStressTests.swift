@@ -230,6 +230,21 @@ final class HardeningStressTests: XCTestCase {
                             pid: getpid(), element: different, range: currentRange, checkRange: checkRange
                         )
                     )
+                    let pidStableChurn = target.matches(
+                        pid: getpid(), element: different, range: currentRange,
+                        checkRange: checkRange, checkElement: false
+                    )
+                    if checkRange {
+                        XCTAssertEqual(
+                            pidStableChurn, currentRange == captured,
+                            "Range mismatch still aborts when the range gate is on"
+                        )
+                    } else {
+                        XCTAssertTrue(
+                            pidStableChurn,
+                            "PID-stable element churn after mutation is not a different app"
+                        )
+                    }
                     XCTAssertFalse(
                         target.matches(
                             pid: 1, element: original, range: currentRange, checkRange: checkRange
