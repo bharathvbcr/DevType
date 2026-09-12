@@ -206,10 +206,34 @@ this window previously required a mouse.
   and the duplicated hint were found — neither shows up in a passing test.
 - New localization keys are present in all three tables (`AppStringKeyCoverageTests` enforces it).
 
-### Not done
+### Follow-up — `EmptyStateView` unified
 
-`EmptyStateView` in `SnippetManagerViewController.swift` is the snippet manager's equivalent
-component and is file-private there. The secrets empty state composes the same primitives
-(`IconBadgeView`, `makeLabel`, `CapsuleButton`) rather than reusing it, because extracting it
-would have edited a file a concurrently running task is already changing. Unifying the two into
-one shared component is worth doing once that lands.
+Deferred during the UI pass because extracting it meant editing
+`SnippetManagerViewController.swift` while a concurrent task was changing that file. That task
+landed as `8ce6538`, so the unification was done afterwards.
+
+`EmptyStateView` moved from file-private in `SnippetManagerViewController.swift` to
+`DevTypeTheme.swift`, which is where this project already keeps its shared view components
+(`GlassCardView`, `CapsuleButton`, `IconBadgeView`). Two parameters were added and nothing else
+changed: `symbol`, defaulted to `text.badge.plus` so the snippet manager's construction is
+untouched, and `ctaIdentifier`.
+
+`ctaIdentifier` belongs on `init` rather than `configure` for a reason worth recording:
+`configure` only runs while the list is empty, so a caller setting the identifier there would
+find the button unidentifiable in every other state — which is exactly what the Secrets
+manager's own empty-state test looks it up by.
+
+The Secrets manager's hand-composed stack view is gone. Its `<=` width constraint was replaced
+by the shared component's leading/trailing `>=`/`<=` pairs, which is also how the snippet
+manager constrains it. The two managers lose 97 lines; the shared component adds 94 including
+its documentation, so production code is roughly flat while the second implementation is gone.
+
+One verification came out of the move rather than into it. The shared component caps its
+subtitle at two lines within 280pt, and the secrets strings are longer than the snippet
+manager's — long enough that Korean or Japanese could have silently truncated. Measured rather
+than assumed: all three tables fit, and
+`testEveryLanguageEmptyStateSubtitleFitsTheSharedTwoLineCap` now measures every shipped
+language so a lengthened string or a new locale fails loudly instead of quietly clipping.
+
+Verified: full suite **3190 tests, 6 skipped, 0 failures**; TSan and ASan clean over the UI
+suites (78 tests each); the empty state re-rendered and inspected.

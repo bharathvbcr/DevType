@@ -1879,3 +1879,98 @@ extension NSWindow {
         }
     }
 }
+
+// MARK: - Empty state
+
+/// Centered placeholder for an empty list: icon badge, title, subtitle, and an optional
+/// call-to-action capsule.
+///
+/// Shared by the snippet manager and the Secrets manager. The two differ only in the badge
+/// symbol and their strings, so the layout is one decision rather than two. The Secrets manager
+/// previously hand-composed the same primitives in a stack view: not broken, but a second
+/// arrangement to keep in step, and the constraint reasoning recorded below — which is the
+/// residue of a real bug — applied to only one of them.
+final class EmptyStateView: NSView {
+    private let badge: IconBadgeView
+    private let titleLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(13, .semibold), color: DevTypeTheme.textSecondary)
+    private let subtitleLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11), color: DevTypeTheme.textTertiary, wrapping: true)
+    private let ctaButton = CapsuleButton(title: "", symbol: "plus", style: .primary, target: nil, action: nil)
+
+    /// - Parameters:
+    ///   - symbol: the badge glyph. The only thing the two managers disagree about.
+    ///   - ctaIdentifier: set once here rather than in `configure`, because an identifier is the
+    ///     button's identity and `configure` only runs while the list is empty — a caller that
+    ///     set it there would find the button unidentifiable in every other state.
+    init(symbol: String = "text.badge.plus", ctaIdentifier: String? = nil) {
+        self.badge = IconBadgeView(symbol: symbol, tint: DevTypeTheme.accent, size: 46, pointSize: 20)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        if let ctaIdentifier { ctaButton.identifier = .init(ctaIdentifier) }
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.alignment = .center
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.alignment = .center
+        subtitleLabel.maximumNumberOfLines = 2
+
+        addSubview(badge)
+        addSubview(titleLabel)
+        addSubview(subtitleLabel)
+        addSubview(ctaButton)
+
+        // The vertical chain (badge.top … ctaButton.bottom) gives this view its height.
+        // Width comes from the `>=`/`<=` edge pairs below: centering alone leaves the
+        // width unconstrained, so the view collapsed to 0pt. Subviews still *drew*
+        // (AppKit does not clip to bounds) but `hitTest` rejects points outside the
+        // view's own bounds — so clicks on the CTA fell through to the table behind it
+        // and the button looked dead.
+        NSLayoutConstraint.activate([
+            badge.topAnchor.constraint(equalTo: topAnchor),
+            badge.centerXAnchor.constraint(equalTo: centerXAnchor),
+            badge.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            badge.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+
+            titleLabel.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 12),
+            titleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            subtitleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            subtitleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
+            subtitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+
+            ctaButton.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 16),
+            ctaButton.centerXAnchor.constraint(equalTo: centerXAnchor),
+            ctaButton.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            ctaButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            ctaButton.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// `ctaTitle == nil` hides the call to action. That is the difference between "you have
+    /// none yet", which should offer to make one, and "none matched your search", which should
+    /// not answer a question the user did not ask.
+    func configure(
+        title: String,
+        subtitle: String,
+        ctaTitle: String?,
+        target: AnyObject?,
+        action: Selector?
+    ) {
+        titleLabel.stringValue = title
+        subtitleLabel.stringValue = subtitle
+        subtitleLabel.isHidden = subtitle.isEmpty
+        if let ctaTitle {
+            ctaButton.title = ctaTitle
+            ctaButton.target = target
+            ctaButton.action = action
+            ctaButton.isHidden = false
+        } else {
+            ctaButton.isHidden = true
+        }
+    }
+}

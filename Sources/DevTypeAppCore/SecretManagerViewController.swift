@@ -94,11 +94,7 @@ final class SecretManagerViewController: NSViewController, NSTableViewDataSource
     private var listener: UUID?
     private var selectionButtons: [NSButton] = []
     private var copyButton: NSButton?
-    private let emptyBadge = IconBadgeView(symbol: "key.fill", tint: DevTypeTheme.accent, size: 46, pointSize: 20)
-    private let emptyTitle = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(13, .semibold), color: DevTypeTheme.textSecondary)
-    private let emptySubtitle = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11), color: DevTypeTheme.textTertiary, wrapping: true)
-    private let emptyCTA = CapsuleButton(title: "", symbol: "plus", style: .primary, target: nil, action: nil)
-    private let emptyState = NSStackView()
+    private let emptyState = EmptyStateView(symbol: "key.fill", ctaIdentifier: "secrets.empty.cta")
 
     init(store: SnippetStore = .shared, loc: LocalizationManager = .shared,
          onCopy: @escaping (SecretModel) -> Void, onRepair: @escaping () -> Void) {
@@ -162,21 +158,7 @@ final class SecretManagerViewController: NSViewController, NSTableViewDataSource
         card.translatesAutoresizingMaskIntoConstraints = false
         card.contentView.addSubview(scroll)
 
-        emptyTitle.alignment = .center
-        emptySubtitle.alignment = .center
-        emptyCTA.title = loc.s("secrets.add")
-        emptyCTA.identifier = .init("secrets.empty.cta")
-        emptyCTA.target = self
-        emptyCTA.action = #selector(addSecret)
-        emptyState.orientation = .vertical
-        emptyState.alignment = .centerX
-        emptyState.spacing = 8
-        emptyState.translatesAutoresizingMaskIntoConstraints = false
-        emptyState.addArrangedSubview(emptyBadge)
-        emptyState.addArrangedSubview(emptyTitle)
-        emptyState.addArrangedSubview(emptySubtitle)
-        emptyState.addArrangedSubview(emptyCTA)
-        emptyState.setCustomSpacing(12, after: emptySubtitle)
+        emptyState.isHidden = true
         card.contentView.addSubview(emptyState)
 
         status.font = DevTypeTheme.font(11)
@@ -244,7 +226,8 @@ final class SecretManagerViewController: NSViewController, NSTableViewDataSource
             scroll.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -4),
             emptyState.centerXAnchor.constraint(equalTo: card.contentView.centerXAnchor),
             emptyState.centerYAnchor.constraint(equalTo: card.contentView.centerYAnchor),
-            emptyState.widthAnchor.constraint(lessThanOrEqualTo: card.contentView.widthAnchor, constant: -48)
+            emptyState.leadingAnchor.constraint(greaterThanOrEqualTo: card.contentView.leadingAnchor, constant: 24),
+            emptyState.trailingAnchor.constraint(lessThanOrEqualTo: card.contentView.trailingAnchor, constant: -24)
         ])
     }
 
@@ -297,9 +280,13 @@ final class SecretManagerViewController: NSViewController, NSTableViewDataSource
         emptyState.isHidden = !secrets.isEmpty
         guard secrets.isEmpty else { return }
         let searching = isSearching && hasAnySecret
-        emptyTitle.stringValue = loc.s(searching ? "secrets.empty.noMatch.title" : "secrets.empty.title")
-        emptySubtitle.stringValue = loc.s(searching ? "secrets.empty.noMatch.subtitle" : "secrets.empty.subtitle")
-        emptyCTA.isHidden = searching
+        emptyState.configure(
+            title: loc.s(searching ? "secrets.empty.noMatch.title" : "secrets.empty.title"),
+            subtitle: loc.s(searching ? "secrets.empty.noMatch.subtitle" : "secrets.empty.subtitle"),
+            ctaTitle: searching ? nil : loc.s("secrets.add"),
+            target: self,
+            action: #selector(addSecret)
+        )
     }
 
     private func refreshActions() {

@@ -361,6 +361,29 @@ final class SecretManagementTests: XCTestCase {
                                        isARepeat: false, keyCode: code))
     }
 
+    /// The shared empty state caps its subtitle at two lines and 280pt. A string that needs
+    /// three is silently truncated, which would hide guidance in whichever language ran long —
+    /// so every shipped table is measured, not just English.
+    func testEveryLanguageEmptyStateSubtitleFitsTheSharedTwoLineCap() throws {
+        let font = DevTypeTheme.font(11)
+        for language in AppLanguage.concreteCases {
+            let table = LocalizationManager.stringTable(for: language)
+            for key in ["secrets.empty.subtitle", "secrets.empty.noMatch.subtitle"] {
+                let text = try XCTUnwrap(table[key])
+                let bounding = (text as NSString).boundingRect(
+                    with: NSSize(width: 280, height: CGFloat.greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: font]
+                )
+                let lines = Int((bounding.height / font.boundingRectForFont.height).rounded(.up))
+                XCTAssertLessThanOrEqual(
+                    lines, 2,
+                    "\(language.rawValue) \(key) needs \(lines) lines at 280pt and would truncate"
+                )
+            }
+        }
+    }
+
     func testSecretViewsFitTheirWindows() throws {
         try XCTSkipUnless(CGSessionCopyCurrentDictionary() != nil && !NSScreen.screens.isEmpty, "No WindowServer")
         let secret = SecretModel(title: "Synthetic work login", tags: ["work"])
