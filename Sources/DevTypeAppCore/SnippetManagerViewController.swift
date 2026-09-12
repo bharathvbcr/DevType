@@ -290,28 +290,24 @@ private final class SnippetRowView: NSView {
 
     /// §4.5: `usageCount` is passed in rather than read from `snippet.usageCount`
     /// — usage now lives in a coalesced sidecar and the model field is legacy.
+    ///
+    /// No row here is ever a secret: the manager's `groups` come from
+    /// `SnippetStore.loadSnippetGroups()`, which lifts every secret out into the independent
+    /// `secrets` collection the Secrets manager owns. There is nothing to mask.
     func configure(with snippet: SnippetModel, usageCount: Int, isCompact: Bool = false) {
         let loc = LocalizationManager.shared
         enableSwitch.state = snippet.enabled ? .on : .off
         titleLabel.stringValue = snippet.displayTitle
         titleLabel.textColor = snippet.enabled ? DevTypeTheme.textPrimary : DevTypeTheme.textTertiary
         titleLabel.font = isCompact ? DevTypeTheme.font(12, .semibold) : DevTypeTheme.font(13, .semibold)
-        // A secret has no `replacementText` to show — by construction, not by redaction here.
-        // The mask is so the row does not read as an empty snippet the user should go fix.
         configureThumbnail(for: snippet, isCompact: isCompact)
 
-        let preview: String
-        if snippet.isImageSnippet {
-            // The filename is the least informative thing about an image, and the thumbnail
-            // beside it now carries the identity. Say what the row *is*, and leave the path to
-            // the tooltip and the editor.
-            preview = loc.s("manager.preview.image")
-        } else if snippet.isSecret {
-            preview = "🔑 \(snippet.maskedReplacement)"
-        } else {
-            preview = snippet.replacementText.replacingOccurrences(of: "\n", with: " ↵ ")
-        }
-        previewLabel.stringValue = preview
+        // The filename is the least informative thing about an image, and the thumbnail beside
+        // it now carries the identity. Say what the row *is*, and leave the path to the tooltip
+        // and the editor.
+        previewLabel.stringValue = snippet.isImageSnippet
+            ? loc.s("manager.preview.image")
+            : snippet.replacementText.replacingOccurrences(of: "\n", with: " ↵ ")
         previewLabel.textColor = snippet.enabled ? DevTypeTheme.textSecondary : DevTypeTheme.textTertiary
         previewLabel.isHidden = isCompact
         // Recycled cells inherit whatever the pointer is doing to *this* row now,
@@ -321,9 +317,7 @@ private final class SnippetRowView: NSView {
         // A replacement long enough to truncate is the common case for address,
         // degree, and paragraph snippets — surface the whole thing on hover
         // instead of making the user open the editor to read it.
-        toolTip = snippet.isImageSnippet
-            ? snippet.imagePath
-            : (snippet.isSecret ? snippet.maskedReplacement : snippet.replacementText)
+        toolTip = snippet.isImageSnippet ? snippet.imagePath : snippet.replacementText
 
         // An empty trigger used to render as "·", which the pill drew as a lone
         // dot in a circle and read as a rendering glitch. An em dash in the muted
@@ -2034,16 +2028,11 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         guard selectedRow >= 0 && selectedRow < snippets.count else { return }
         let snippet = snippets[selectedRow]
 
-        // A secret's deletion is not undoable in the way the rest of this manager is: the
-        // keychain purge follows the save, and the value is not in the undo snapshot to restore
-        // (that is the point of the feature). Say so before it happens rather than after.
-        let message = snippet.isSecret
-            ? loc.s("manager.delete.confirm.secret", snippet.displayTitle)
-            : loc.s("manager.delete.confirm.message", snippet.displayTitle)
-
+        // The secret variant of this warning lives in `SecretManagerViewController`, which owns
+        // the only rows that can be secrets.
         DevTypeAlert.confirm(
             title: loc.s("manager.delete.confirm.title"),
-            message: message,
+            message: loc.s("manager.delete.confirm.message", snippet.displayTitle),
             confirmTitle: loc.s("manager.delete"),
             destructive: true,
             window: view.window
