@@ -27,6 +27,12 @@ enum SecretLibraryEdit {
 }
 
 final class SecretEditorController: NSViewController {
+    /// Fetching a stored secret so it can be shown is a read of secret material, so it takes the
+    /// same Touch ID gate as the copy flow. Injected only so tests can drive the gate's outcomes
+    /// without a prompt — the default is the one gated resolver, never `SecretStore` directly.
+    typealias GatedSecretRead =
+        (SnippetModel, @escaping (Result<String, SecretMenuFlow.ResolveFailure>) -> Void) -> Void
+
     let nameField = NSTextField()
     /// The concealed field. `revealedField` is its plain-text twin; exactly one of the two is in
     /// the view hierarchy at any moment, so the editor always presents three editable text
@@ -46,16 +52,24 @@ final class SecretEditorController: NSViewController {
     private let store: SnippetStore
     private let transaction: SnippetEditTransaction
     private let loc: LocalizationManager
+    private let revealStoredValue: GatedSecretRead
     private let onDismiss: () -> Void
+    /// Fetched at most once per editor: a second Show must not ask for Touch ID again, and
+    /// clearing the field is an edit rather than a request to re-read what is stored.
+    private var hasLoadedStoredValue = false
+    /// A prompt is already on screen; a second click must not stack another one behind it.
+    private var isAuthenticating = false
 
     init(existing: SecretModel?, store: SnippetStore = .shared,
          resources: SnippetEditResourceAccess = .live, loc: LocalizationManager = .shared,
+         revealStoredValue: @escaping GatedSecretRead = { SecretMenuFlow.resolve($0, completion: $1) },
          onDismiss: @escaping () -> Void) {
         self.existing = existing
         self.draft = existing ?? SecretModel(title: "")
         self.store = store
         self.transaction = SnippetEditTransaction(resources: resources)
         self.loc = loc
+        self.revealStoredValue = revealStoredValue
         self.onDismiss = onDismiss
         super.init(nibName: nil, bundle: nil)
     }
@@ -196,10 +210,76 @@ final class SecretEditorController: NSViewController {
         ])
     }
 
+    /// Editing an existing secret never prefills its value, so Show had nothing to swap in: it
+    /// flipped the caption over a blank field and claimed the value was on screen. Fetch it
+    /// first — through the one gated resolver, so this surface cannot become the path around
+    /// Touch ID that the next one copies.
+    @objc private func toggleReveal() {
+        if !isRevealed, needsStoredValue {
+            authenticateThenReveal()
+            return
+        }
+        swapValueTwins()
+    }
+
+    /// True only when Show would otherwise present an empty field: the secret is already stored,
+    /// its value has not been fetched yet, and the user has not typed a replacement over it.
+    private var needsStoredValue: Bool {
+        existing != nil && !hasLoadedStoredValue && secretValue.isEmpty
+    }
+
+    /// Nothing reaches the screen until the gate says so: on cancellation or failure the value
+    /// stays concealed, so a refused prompt can never be mistaken for an empty secret.
+    private func authenticateThenReveal() {
+        guard let existing, !isAuthenticating else { return }
+        isAuthenticating = true
+        revealButton.isEnabled = false
+        errorLabel.stringValue = ""
+        revealStoredValue(existing.snippetAdapter) { [weak self] result in
+            guard let self else { return }
+            self.isAuthenticating = false
+            self.revealButton.isEnabled = true
+            switch result {
+            case .success(let value):
+                self.hasLoadedStoredValue = true
+                // The concealed twin is the installed one here, so the swap carries it across.
+                self.valueField.stringValue = value
+                self.swapValueTwins()
+            case .failure(let failure):
+                // A dismissed prompt is the user's own decision, already visible to them.
+                guard !failure.isSilent else { return }
+                self.errorLabel.stringValue = self.revealFailureMessage(failure)
+            }
+        }
+    }
+
+    /// Why the value could not be shown, in the words the copy flow already uses for the same
+    /// failures — a reveal blocked by a locked keychain must not say "no secret stored", because
+    /// that sends the user to re-enter a value they have not lost.
+    private func revealFailureMessage(_ failure: SecretMenuFlow.ResolveFailure) -> String {
+        switch failure {
+        case .secretUnavailable:
+            return loc.s("secret.missing.message", draft.displayTitle)
+        case .keychainLocked:
+            return loc.s("secret.keychainLocked.message")
+        case .migrationRequired(let pendingCount):
+            return loc.s("secret.migrate.message", "\(pendingCount)")
+        case .authenticationFailed(let reason):
+            // The system's own wording for a lockout is more accurate than anything we invent.
+            return reason.isEmpty ? loc.s("secret.auth.failed") : reason
+        case .selectionChanged:
+            return loc.s("manager.action.stale.message")
+        case .authenticationCancelled, .emptySnippet, .imageSnippet, .macroFailed:
+            // A secret resolves inside the resolver's `isSecret` branch and never reaches the
+            // snippet failures; a cancellation is answered silently before this is reached.
+            return loc.s("editor.transaction.secretReadFailed")
+        }
+    }
+
     /// Swaps the concealed and plain twins in place rather than keeping both installed, so the
     /// editor never presents a fourth editable field and the hidden twin cannot be read by
     /// anything walking the view tree.
-    @objc private func toggleReveal() {
+    private func swapValueTwins() {
         let carried = activeValueField.stringValue
         let outgoing = activeValueField
         isRevealed.toggle()

@@ -726,6 +726,33 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(appDelegate.contains("SecretMenuFlow.resolve("))
     }
 
+    /// The same contract, stated over the whole tree rather than over the one file that happened
+    /// to break it first. Naming only `AppDelegate` meant a surface added anywhere else — the
+    /// secret editor's Show button was one — could read the keychain directly and still pass.
+    ///
+    /// Two files are allowed to touch the store: the resolver, which owns the gate and reads only
+    /// after it, and the edit transaction, whose read is the rollback snapshot of a value the user
+    /// is replacing. Anywhere else is a path around Touch ID.
+    func testNoSurfaceOutsideTheResolverAndTransactionReadsTheStoreDirectly() throws {
+        let permitted: Set<String> = [
+            "Sources/DevTypeAppCore/SecretMenuFlow.swift",
+            "Sources/DevTypeAppCore/SnippetEditTransaction.swift"
+        ]
+        let readers = try sourceFilesContaining(".secret(for:")
+        XCTAssertFalse(readers.isEmpty, "The contract must still be checking a token that exists.")
+        XCTAssertEqual(
+            readers.subtracting(permitted), [],
+            "Read secrets through `SecretMenuFlow.resolve`, never straight from the store."
+        )
+
+        // Revealing a stored secret in the editor is a read of secret material like any other.
+        let editor = try source("Sources/DevTypeAppCore/SecretEditorSheet.swift")
+        XCTAssertTrue(
+            editor.contains("SecretMenuFlow.resolve("),
+            "Showing a stored secret must go through the gated resolver."
+        )
+    }
+
     /// The library file is the thing this feature exists to keep a password out of. The redaction
     /// lives in `encode(to:)` precisely so no writer has to remember it — assert it is still there
     /// rather than trusting that every future exporter looks it up.

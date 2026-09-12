@@ -302,6 +302,123 @@ final class SecretManagementTests: XCTestCase {
         XCTAssertEqual(editor.valueField.stringValue, "")
     }
 
+    // MARK: - Revealing a stored value
+
+    /// The editor never prefills, so Show on an already-stored secret used to flip the caption
+    /// and the icon over a blank field while the notice claimed the value was on screen. It must
+    /// fetch the stored value and put it there.
+    func testShowingAStoredSecretAuthenticatesAndRevealsTheStoredValue() throws {
+        let secret = SecretModel(title: "Work login")
+        var gatedReads: [UUID] = []
+        let editor = SecretEditorController(
+            existing: secret, store: try store(secrets: [secret]), resources: Values().access,
+            revealStoredValue: { snippet, completion in
+                XCTAssertTrue(snippet.isSecret, "the reveal must take the gated secret path")
+                gatedReads.append(snippet.id)
+                completion(.success("synthetic-stored-value"))
+            }, onDismiss: {})
+        _ = editor.view
+        XCTAssertEqual(editor.valueField.stringValue, "", "opening one must still never prefill")
+
+        try revealButton(editor).performClick(nil)
+
+        XCTAssertEqual(gatedReads, [secret.id], "exactly one gated read, for this secret")
+        XCTAssertEqual(editor.revealedField.stringValue, "synthetic-stored-value")
+        XCTAssertEqual(editor.secretValue, "synthetic-stored-value")
+        XCTAssertTrue(descendants(editor.view).compactMap { $0 as? NSButton }
+            .contains { $0.title == LocalizationManager.shared.s("secrets.value.hide") },
+                      "the button must now offer Hide")
+    }
+
+    /// A dismissed prompt is not an empty secret. Nothing may reach the screen, and nothing may
+    /// be said back to the user about a decision they just made themselves.
+    func testACancelledPromptLeavesTheValueConcealedAndSaysNothing() throws {
+        let secret = SecretModel(title: "Work login")
+        let editor = SecretEditorController(
+            existing: secret, store: try store(secrets: [secret]), resources: Values().access,
+            revealStoredValue: { _, completion in completion(.failure(.authenticationCancelled)) },
+            onDismiss: {})
+        _ = editor.view
+
+        try revealButton(editor).performClick(nil)
+
+        XCTAssertEqual(editor.revealedField.stringValue, "", "no value may reach the screen")
+        XCTAssertEqual(editor.secretValue, "")
+        XCTAssertTrue(descendants(editor.view).compactMap { $0 as? NSTextField }
+            .filter(\.isEditable).contains { $0 is NSSecureTextField },
+                      "the concealed twin must still be the installed one")
+        XCTAssertEqual(try errorText(editor), "", "the user's own cancellation is not an error")
+        XCTAssertNoThrow(try revealButton(editor), "the button must still offer Show")
+    }
+
+    /// A locked keychain has not lost the value. Reporting it as a missing secret would send the
+    /// user to re-enter something they still have, so each failure keeps the copy flow's wording.
+    func testAFailedReadIsReportedAndKeepsTheValueConcealed() throws {
+        let secret = SecretModel(title: "Work login")
+        let cases: [(SecretMenuFlow.ResolveFailure, String)] = [
+            (.keychainLocked, LocalizationManager.shared.s("secret.keychainLocked.message")),
+            (.secretUnavailable, LocalizationManager.shared.s("secret.missing.message", "Work login")),
+            (.selectionChanged, LocalizationManager.shared.s("manager.action.stale.message")),
+            (.authenticationFailed("Biometry is locked out."), "Biometry is locked out.")
+        ]
+        for (failure, expected) in cases {
+            let editor = SecretEditorController(
+                existing: secret, store: try store(secrets: [secret]), resources: Values().access,
+                revealStoredValue: { _, completion in completion(.failure(failure)) }, onDismiss: {})
+            _ = editor.view
+
+            try revealButton(editor).performClick(nil)
+
+            XCTAssertEqual(try errorText(editor), expected, "\(failure) must explain itself")
+            XCTAssertEqual(editor.secretValue, "", "\(failure) must not put a value on screen")
+            XCTAssertTrue(descendants(editor.view).compactMap { $0 as? NSTextField }
+                .filter(\.isEditable).contains { $0 is NSSecureTextField },
+                          "\(failure) must leave the concealed twin installed")
+        }
+    }
+
+    /// Showing what the user just typed is not a read of stored material, and neither is a second
+    /// look at a value already fetched — neither may raise a prompt.
+    func testRevealingDoesNotAskAgainForATypedOrAlreadyFetchedValue() throws {
+        let secret = SecretModel(title: "Work login")
+        var reads = 0
+        let typed = SecretEditorController(
+            existing: secret, store: try store(secrets: [secret]), resources: Values().access,
+            revealStoredValue: { _, _ in reads += 1 }, onDismiss: {})
+        _ = typed.view
+        typed.valueField.stringValue = "typed-replacement"
+
+        try revealButton(typed).performClick(nil)
+
+        XCTAssertEqual(reads, 0, "a typed replacement is already on screen; nothing to fetch")
+        XCTAssertEqual(typed.revealedField.stringValue, "typed-replacement")
+
+        let fetched = SecretEditorController(
+            existing: secret, store: try store(secrets: [secret]), resources: Values().access,
+            revealStoredValue: { _, completion in reads += 1; completion(.success("synthetic-stored-value")) },
+            onDismiss: {})
+        _ = fetched.view
+        try revealButton(fetched).performClick(nil)
+        try XCTUnwrap(descendants(fetched.view).compactMap { $0 as? NSButton }
+            .first { $0.title == LocalizationManager.shared.s("secrets.value.hide") }).performClick(nil)
+        try revealButton(fetched).performClick(nil)
+
+        XCTAssertEqual(reads, 1, "the stored value is fetched once, not once per toggle")
+        XCTAssertEqual(fetched.revealedField.stringValue, "synthetic-stored-value")
+    }
+
+    /// The Show button, by the title the user reads.
+    private func revealButton(_ editor: SecretEditorController) throws -> NSButton {
+        try XCTUnwrap(descendants(editor.view).compactMap { $0 as? NSButton }
+            .first { $0.title == LocalizationManager.shared.s("secrets.value.show") })
+    }
+
+    /// The editor's error line: the non-editable label drawn in the error colour.
+    private func errorText(_ editor: SecretEditorController) throws -> String {
+        try XCTUnwrap(descendants(editor.view).compactMap { $0 as? NSTextField }
+            .first { !$0.isEditable && $0.textColor == .systemRed }).stringValue
+    }
+
     // MARK: - Manager empty states and keyboard
 
     /// An empty library invites adding one; a search that matched nothing must not, because the
