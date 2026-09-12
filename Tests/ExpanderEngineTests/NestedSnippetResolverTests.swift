@@ -28,14 +28,12 @@ final class NestedSnippetResolverTests: XCTestCase {
         return model
     }
 
-    /// The scan every call site used to run, verbatim.
-    private func referenceLookup(
-        _ snippets: [SnippetModel],
-        excludingSecrets: Bool
-    ) -> (String) -> String? {
+    /// The scan every call site used to run, verbatim — with the secret exclusion the resolver
+    /// now applies unconditionally.
+    private func referenceLookup(_ snippets: [SnippetModel]) -> (String) -> String? {
         { trigger in
             snippets.first {
-                (!excludingSecrets || !$0.isSecret)
+                !$0.isSecret
                     && ($0.triggerKeyword == trigger
                         || (!$0.isCaseSensitive
                             && $0.triggerKeyword.lowercased() == trigger.lowercased()))
@@ -46,12 +44,11 @@ final class NestedSnippetResolverTests: XCTestCase {
     private func assertAgrees(
         _ snippets: [SnippetModel],
         _ queries: [String],
-        excludingSecrets: Bool = false,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        let reference = referenceLookup(snippets, excludingSecrets: excludingSecrets)
-        let resolver = NestedSnippetResolver(snippets: snippets, excludingSecrets: excludingSecrets)
+        let reference = referenceLookup(snippets)
+        let resolver = NestedSnippetResolver(snippets: snippets)
         for query in queries {
             XCTAssertEqual(
                 resolver.replacement(for: query), reference(query),
@@ -123,16 +120,28 @@ final class NestedSnippetResolverTests: XCTestCase {
 
     /// Resolving a secret inside another snippet would paste a password into whatever document
     /// the outer snippet lands in, with no explicit gesture naming it.
-    func testSecretsAreExcludedWhenAsked() {
+    /// The plain initialiser — the one a new call site writes without thinking — must already
+    /// exclude secrets. Against the pre-fix code this failed: `excludingSecrets` defaulted to
+    /// `false`, the secret claimed the `;pw` slot first, and the nested reference resolved to the
+    /// secret's empty body instead of the ordinary snippet behind it.
+    func testTheDefaultInitialiserExcludesSecretsWithNoFlagToForget() {
         let library = [snippet(";pw", "", isSecret: true), snippet(";pw", "public fallback")]
-        assertAgrees(library, [";pw"], excludingSecrets: true)
-        let resolver = NestedSnippetResolver(snippets: library, excludingSecrets: true)
-        XCTAssertEqual(resolver.replacement(for: ";pw"), "public fallback")
+        assertAgrees(library, [";pw"])
+        XCTAssertEqual(NestedSnippetResolver(snippets: library).replacement(for: ";pw"),
+                       "public fallback")
     }
 
-    func testSecretsAreIncludedWhenNotExcluded() {
-        let library = [snippet(";pw", "", isSecret: true), snippet(";pw", "public fallback")]
-        assertAgrees(library, [";pw"], excludingSecrets: false)
+    /// A secret carries no trigger of its own, so it must not answer the empty key either.
+    func testATriggerlessSecretCannotAnswerTheEmptyReference() {
+        let library = [snippet("", "", isSecret: true)]
+        XCTAssertNil(NestedSnippetResolver(snippets: library).replacement(for: ""))
+    }
+
+    /// Even a secret that somehow still carries a trigger and a body is unreachable by nesting.
+    func testASecretRetainingATriggerAndBodyIsStillUnreachable() {
+        var leaky = snippet(";pw", "hunter2")
+        leaky.isSecret = true
+        XCTAssertNil(NestedSnippetResolver(snippets: [leaky]).replacement(for: ";pw"))
     }
 
     func testEmptyLibraryResolvesNothing() {
@@ -160,7 +169,7 @@ final class NestedSnippetResolverTests: XCTestCase {
                     isSecret: next(5) == 0
                 ))
             }
-            assertAgrees(library, spellings, excludingSecrets: next(2) == 0)
+            assertAgrees(library, spellings)
         }
     }
 

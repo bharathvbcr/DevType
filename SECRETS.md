@@ -13,9 +13,25 @@ is allowed to show a dialog, and the measured keychain behaviour the design is b
   The editor asks for a name and secure value, with optional tags and an enabled setting.
   There is no trigger, keyboard shortcut, snippet group, replacement body, image, or AI action.
   Existing values are never prefilled. Leaving the value blank while editing keeps it unchanged.
+  The value field is concealed by default; a **Show** button reveals what is being typed so a
+  typo is caught before it is stored, and says so on screen while the value is visible. See
+  the threat model below for what that does and does not change.
 - Schema 3 stores secret metadata in a top-level `secrets` collection alongside ordinary
   snippet `groups` in the same atomic library document. Values stay in `SecretStore`.
   The snippet manager and its exports contain only snippets; resetting snippets retains secrets.
+- **Sharing and backing up are different documents.** The user-facing export (`LibraryExporter`,
+  Preferences → Export Library) reads `loadSnippetGroups()`, so a shared file contains no secret
+  record at all — not even a title or a tag. The whole-library backup used for relocation and
+  read-failure recovery (`SnippetStore.exportLibraryData()`) reads `loadGroups()`, so it *does*
+  carry secret metadata: dropping it would mean a restore silently loses the user's secrets.
+  Neither carries a value, and no export path of either kind can, because encoding a secret goes
+  through `SecretModel`, which has no field to put one in.
+- The chip labelled **Secrets** in the snippet manager's filter row is a signpost, not a filter:
+  it opens the Secrets manager. `SnippetListFilter`, the type holding the manager's active
+  filter, has no `secrets` case, so "show me the secrets in this list" is not a state the snippet
+  list can be in rather than a state it has to keep answering "none" to.
+- A secret is unreachable from `{{snippet:…}}` nesting by construction: `NestedSnippetResolver`
+  drops them unconditionally, with no parameter a caller can get wrong.
 - Older grouped, flat, and bare-array libraries are decoded into the independent collection.
   UUIDs, labels, timestamps, tags, and effective enable/app restrictions are preserved; old
   trigger text is discarded (used as the name only when an old entry has no other name).
@@ -214,10 +230,18 @@ reported explicitly.
 ## Threat model & limits
 
 - **Protected against:** the library file, exports, backups of the library, and the
-  diagnostic report carrying a value; shoulder-surfing the editor; clipboard managers
-  retaining copies; another app reading the archive (ciphertext without the key) or the
-  master key (ACL'd to DevType's signing identity); a casual user at an unlocked Mac
-  (Touch ID gate).
+  diagnostic report carrying a value; clipboard managers retaining copies; another app reading
+  the archive (ciphertext without the key) or the master key (ACL'd to DevType's signing
+  identity); a casual user at an unlocked Mac (Touch ID gate).
+- **Shoulder-surfing the editor — qualified, and deliberately so.** The value field is
+  concealed by default and an existing value is *never* prefilled, so opening the editor on a
+  stored secret still shows nothing to read. But the editor now has a **Show** button that
+  reveals what is currently typed, because the previous guarantee had a cost paid silently:
+  with no way to check a typed value, a typo was only discovered later, when a paste failed in
+  a login form — and the user's fix was usually to retype the secret blind again. Revealing is
+  explicit, per-editor, never the default, announced on screen while it is in effect ("The
+  value is visible on screen."), and applies only to the value being authored in that sheet.
+  It cannot reveal a stored value, because the editor never loads one.
 - **Not protected against:** software already running as you with debugger rights, and the
   value being on the clipboard for the seconds a paste needs. These are the standard limits
   of every macOS password manager.

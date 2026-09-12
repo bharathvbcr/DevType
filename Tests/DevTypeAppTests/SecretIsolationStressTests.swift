@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import ExpanderEngine
+@testable import ExpanderEngine
 @testable import DevTypeAppCore
 
 final class SecretIsolationStressTests: XCTestCase {
@@ -44,9 +44,19 @@ final class SecretIsolationStressTests: XCTestCase {
         }
     }
 
+    /// Scales the campaign for an on-demand soak without slowing the ordinary suite.
+    /// `DEVTYPE_SECRET_STRESS=8 swift test --filter SecretIsolationStress` runs 8x the seeds.
+    private var stressMultiplier: Int {
+        max(1, Int(ProcessInfo.processInfo.environment["DEVTYPE_SECRET_STRESS"] ?? "") ?? 1)
+    }
+
+    /// Every payload carries this marker, and nothing else in the fixture does. If a value ever
+    /// reaches the library file, the marker is what survives JSON escaping to prove it.
+    private static let valueCanary = "synthetic-"
+
     func testSeededWholeLibraryOperationsPreserveEveryCommittedSecret() throws {
         let payloads = ["synthetic-{{clipboard}}", "synthetic-\u{0}-\n", "synthetic-🔑e\u{301}", "synthetic-秘密"]
-        for seed in 1...16 {
+        for seed in 1...(16 * stressMultiplier) {
             let (store, values) = try fixture()
             var random = Random(state: UInt64(seed))
             var expected: [UUID: (SecretModel, String)] = [:]
@@ -89,9 +99,23 @@ final class SecretIsolationStressTests: XCTestCase {
                 }
                 let cleanup = store.retryOrphanSecretCleanup()
                 XCTAssertEqual(cleanup.pending, 0, "seed \(seed), step \(step)")
-                let document = try SnippetStore.decodeDocument(from: Data(contentsOf: store.activeLocationURL))
+                let rawLibrary = try Data(contentsOf: store.activeLocationURL)
+                let document = try SnippetStore.decodeDocument(from: rawLibrary)
                 XCTAssertEqual(Set(document.secrets), Set(expected.values.map { $0.0 }), "seed \(seed), step \(step)")
                 XCTAssertTrue(document.groups.flatMap(\.snippets).allSatisfy { !$0.isSecret })
+
+                // No secret value may reach the library bytes, in any escaping.
+                let libraryText = String(decoding: rawLibrary, as: UTF8.self)
+                XCTAssertFalse(libraryText.contains(Self.valueCanary),
+                               "seed \(seed), step \(step): a secret value reached the library file")
+
+                // The transaction projection every mutation walks resolves groups by identity, so a
+                // duplicate ID would silently retarget a write.
+                let groupIDs = document.transactionGroups.map(\.id)
+                XCTAssertEqual(Set(groupIDs).count, groupIDs.count,
+                               "seed \(seed), step \(step): duplicate group IDs in the projection")
+                XCTAssertFalse(document.groups.contains { $0.id == SnippetDocument.secretGroupID },
+                               "seed \(seed), step \(step): a user group holds the reserved ID")
                 for (id, entry) in expected {
                     XCTAssertEqual(values.secret(for: id), entry.1, "seed \(seed), step \(step)")
                 }

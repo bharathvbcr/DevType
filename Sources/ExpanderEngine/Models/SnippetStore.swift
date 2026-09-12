@@ -28,9 +28,20 @@ public struct SnippetDocument: Codable, Equatable {
         self.schemaVersion = schemaVersion
         self.secrets = secrets + SnippetStore.expandableSnippets(in: groups)
             .filter(\.isSecret).map(SecretModel.init(migrating:))
-        self.groups = groups.filter { $0.id != Self.secretGroupID || $0.snippets.contains(where: { !$0.isSecret }) }.map { group in
+        // A reserved-ID group holding real snippets is user data that must not be dropped — but it
+        // must not keep the reserved identity either. Retaining it produced a `transactionGroups`
+        // projection with two groups sharing one ID, and every mutation that walks that projection
+        // resolves a group by `firstIndex(where: { $0.id == ... })`. `encode` already refused such a
+        // document, so this could never reach disk; the damage was to the in-memory projection
+        // handed to mutations before that refusal. Re-home the snippets under a fresh ID so the
+        // reserved ID belongs exclusively to the projection below.
+        self.groups = groups.compactMap { group in
             var copy = group
             copy.snippets.removeAll(where: \.isSecret)
+            guard group.id == Self.secretGroupID else { return copy }
+            // Nothing but secrets: this is the projection round-tripping back in, not user data.
+            guard !copy.snippets.isEmpty else { return nil }
+            copy.id = UUID()
             return copy
         }
     }
@@ -1487,6 +1498,13 @@ public final class SnippetStore {
 
     /// §0.4: pretty-printed JSON of the current document envelope. Works even
     /// while saves are blocked — it is the escape hatch for exactly that state.
+    ///
+    /// **This is a backup, not the user-facing export.** It encodes `loadGroups()`, so the
+    /// envelope carries the independent `secrets` collection: their titles, labels, tags and
+    /// timestamps — never their values, which live only in `SecretStore`. That is correct for
+    /// its purpose (restoring a library must not silently drop the user's secrets) and wrong for
+    /// sharing. The share path is `LibraryExporter`, which reads `loadSnippetGroups()` and so
+    /// contains no secret record at all. `SecretBoundaryAdversarialTests` pins both halves.
     public func exportLibraryData() throws -> Data {
         try Self.encodeLibrary(loadGroups())
     }
@@ -1498,7 +1516,12 @@ public final class SnippetStore {
         try encodeLibrary(groups)
     }
 
-    /// §0.4: writes the export to `url` (use with `NSSavePanel`).
+    /// §0.4: writes the backup envelope to `url` (use with `NSSavePanel`).
+    ///
+    /// Currently unwired: the Preferences "Export Library" item routes to `LibraryExporter`, and
+    /// the recovery advice on `clearLibraryReadFailure()` names this method without yet calling
+    /// it. It is retained because that recovery step is the one place a *full-fidelity* copy is
+    /// wanted. Anything user-facing wants `LibraryExporter` instead — see `exportLibraryData()`.
     public func exportLibrary(to url: URL) throws {
         let data = try exportLibraryData()
         let parent = url.deletingLastPathComponent()

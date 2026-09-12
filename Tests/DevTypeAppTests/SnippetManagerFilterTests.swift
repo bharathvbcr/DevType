@@ -98,6 +98,55 @@ final class SnippetManagerFilterTests: XCTestCase {
         XCTAssertEqual(SnippetFilterChip.tagged.rawValue, 8)
     }
 
+    // MARK: - Secrets is a navigation chip, not a filter
+
+    /// `.secrets` must stay in the chip row: it is the manager's signpost to the independent
+    /// Secrets collection, and dropping the button would strand users who look for it here.
+    func testTheSecretsChipIsStillOfferedAndLabelledInEveryLanguage() {
+        XCTAssertTrue(SnippetFilterChip.allCases.contains(.secrets))
+        XCTAssertEqual(SnippetFilterChip.secrets.localizationKey, "manager.filter.secrets")
+        for language in AppLanguage.concreteCases {
+            XCTAssertNotNil(
+                LocalizationManager.stringTable(for: language)["manager.filter.secrets"],
+                "\(language.rawValue) is missing the Secrets chip label"
+            )
+        }
+    }
+
+    /// The chip navigates; it does not narrow. `loadSnippetGroups()` never yields a secret, so a
+    /// secret filter could only ever render an empty table — the state is removed rather than
+    /// guarded, and `listFilter` is where that is written down.
+    func testTheSecretsChipHasNoListFilterAndEveryOtherChipDoes() {
+        XCTAssertNil(SnippetFilterChip.secrets.listFilter)
+        for chip in SnippetFilterChip.allCases where chip != .secrets {
+            XCTAssertEqual(chip.listFilter?.chip, chip, "\(chip) must round-trip through its filter")
+        }
+    }
+
+    /// Every filter the list can hold is reachable from exactly one chip, and none of them is
+    /// the secrets chip. This is the invariant that keeps the filter switch exhaustive without
+    /// an unreachable branch.
+    func testEveryListFilterMapsBackToANonSecretChip() {
+        let chips = SnippetListFilter.allCases.map(\.chip)
+        XCTAssertEqual(Set(chips).count, chips.count, "two filters share one chip")
+        XCTAssertFalse(chips.contains(.secrets))
+        XCTAssertEqual(Set(chips), Set(SnippetFilterChip.allCases).subtracting([.secrets]))
+    }
+
+    /// Reordering is only safe on the unfiltered stored order. `.all` is the sole filter that
+    /// exposes it, and that must not regress as filters are added.
+    func testOnlyTheAllFilterPermitsManualReordering() {
+        for filter in SnippetListFilter.allCases {
+            XCTAssertEqual(
+                SnippetReorderEligibility.isAllowed(
+                    sortMode: .manual, hasConcreteGroup: true, filterText: "", filter: filter
+                ),
+                filter == .all,
+                "\(filter) must not claim to expose the stored order"
+            )
+        }
+    }
+
     // MARK: - Parity with the palette
 
     /// The manager matched the whole query as one substring of one field, so a multi-word

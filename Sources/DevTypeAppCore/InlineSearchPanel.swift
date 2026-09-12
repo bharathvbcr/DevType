@@ -848,11 +848,23 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         let selectableCount = rows.filter(\.isSelectable).count
         emptyState.isHidden = selectableCount > 0
         let issue = CommandPaletteCatalog.queryIssue(for: query)
-        emptyTitleLabel?.stringValue = loc.s(issue == nil ? "search.empty.title" : "search.issue.title")
-        emptySubtitleLabel?.stringValue = issue?.message(loc: loc) ?? loc.s("search.empty.subtitle")
         // P12: `flatMap(\.snippets).count` allocated the whole flattened library — 50 µs at
         // 2,000 snippets, on every keystroke — to produce one integer.
         let totalSnippets = groups.reduce(0) { $0 + $1.snippets.count }
+        if let issue {
+            emptyTitleLabel?.stringValue = loc.s("search.issue.title")
+            emptySubtitleLabel?.stringValue = issue.message(loc: loc)
+        } else if mode.showsOnlySecrets {
+            // In this mode `groups` is already narrowed to secrets, so an empty library and an
+            // unmatched query are distinguishable — and they need different answers. The generic
+            // palette wording talked about snippets, which is not what the user came here for.
+            let hasAny = totalSnippets > 0
+            emptyTitleLabel?.stringValue = loc.s(hasAny ? "secrets.empty.noMatch.title" : "secrets.empty.title")
+            emptySubtitleLabel?.stringValue = loc.s(hasAny ? "secrets.empty.noMatch.subtitle" : "secrets.empty.subtitle")
+        } else {
+            emptyTitleLabel?.stringValue = loc.s("search.empty.title")
+            emptySubtitleLabel?.stringValue = loc.s("search.empty.subtitle")
+        }
         countLabel.stringValue = loc.s("search.count", selectableCount, totalSnippets)
     }
 

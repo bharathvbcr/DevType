@@ -13,7 +13,7 @@ enum TestExpansionLab {
         let snippet = snippets.first { $0.triggerKeyword == ":test" }
             ?? SnippetModel(title: "Test", triggerKeyword: ":test", replacementText: "DevType OK")
         let resolved = MacroRenderer.expand(content: snippet.replacementText,
-                                            lookup: NestedSnippetResolver(snippets: snippets, excludingSecrets: true).lookup)
+                                            lookup: NestedSnippetResolver(snippets: snippets).lookup)
         if let failure = resolved.failure {
             presentResult(hostWindow: hostWindow, title: loc.s("lab.refused.title"), body: failure.message, style: .warning)
             return

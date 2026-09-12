@@ -549,6 +549,13 @@ enum SnippetManagerFilter {
     }
 }
 
+/// The chips rendered in the manager's filter row.
+///
+/// `.secrets` is a **navigation** chip, not a filter: secrets are an independent collection and
+/// `loadSnippetGroups()` never yields one, so narrowing this list by `isSecret` could only ever
+/// produce an empty table. Tapping it opens the Secrets manager instead. `listFilter` is the one
+/// place that distinction is written down, and it is what keeps the impossible state out of
+/// `SnippetListFilter`.
 enum SnippetFilterChip: Int, CaseIterable {
     case all = 0
     case enabled = 1
@@ -573,6 +580,54 @@ enum SnippetFilterChip: Int, CaseIterable {
         case .tagged: return "manager.filter.tagged"
         }
     }
+
+    /// The narrowing this chip applies, or `nil` when the chip navigates somewhere else.
+    var listFilter: SnippetListFilter? {
+        switch self {
+        case .all: return .all
+        case .enabled: return .enabled
+        case .disabled: return .disabled
+        case .secrets: return nil
+        case .images: return .images
+        case .macros: return .macros
+        case .conflicts: return .conflicts
+        case .unused: return .unused
+        case .tagged: return .tagged
+        }
+    }
+}
+
+/// The narrowings the snippet list can actually be in.
+///
+/// There is deliberately no `secrets` member. A secret filter was unreachable — both chip entry
+/// points route `.secrets` to the Secrets manager — and a branch that cannot run is a branch that
+/// cannot be tested or trusted. Removing the case makes the state unrepresentable instead of
+/// guarded, so the filter switch stays exhaustive without pretending to handle it.
+enum SnippetListFilter: Equatable, CaseIterable {
+    case all
+    case enabled
+    case disabled
+    case images
+    case macros
+    case conflicts
+    case unused
+    case tagged
+
+    /// Every filter is rendered by exactly one chip: titles and highlighting come from here.
+    var chip: SnippetFilterChip {
+        switch self {
+        case .all: return .all
+        case .enabled: return .enabled
+        case .disabled: return .disabled
+        case .images: return .images
+        case .macros: return .macros
+        case .conflicts: return .conflicts
+        case .unused: return .unused
+        case .tagged: return .tagged
+        }
+    }
+
+    var localizationKey: String { chip.localizationKey }
 }
 
 /// Canonical construction for both single-item and bulk duplication.
@@ -763,12 +818,12 @@ enum SnippetReorderEligibility {
         sortMode: SnippetSortMode,
         hasConcreteGroup: Bool,
         filterText: String,
-        filterChip: SnippetFilterChip
+        filter: SnippetListFilter
     ) -> Bool {
         sortMode == .manual
             && hasConcreteGroup
             && filterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && filterChip == .all
+            && filter == .all
     }
 }
 
@@ -779,7 +834,7 @@ struct SnippetManagerLocalizationState: Equatable {
     let selectedGroupID: UUID?
     let selectedSnippetIDs: Set<UUID>
     let filterText: String
-    let filterChip: SnippetFilterChip
+    let filter: SnippetListFilter
     let isCompactDensity: Bool
     let sortMode: SnippetSortMode
     let groupScrollOrigin: NSPoint
@@ -817,7 +872,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     private let loc = LocalizationManager.shared
 
     // Density & Filter Chips
-    private var activeFilterChip: SnippetFilterChip = .all
+    private var activeFilter: SnippetListFilter = .all
     private var isCompactDensity: Bool = false
     private let densityControl = NSSegmentedControl()
     private let filterChipsStack = NSStackView()
@@ -876,7 +931,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         guard let restorationState else { return }
         selectedGroupID = restorationState.selectedGroupID
         pendingRestoredSnippetIDs = restorationState.selectedSnippetIDs
-        activeFilterChip = restorationState.filterChip
+        activeFilter = restorationState.filter
         isCompactDensity = restorationState.isCompactDensity
         sortMode = restorationState.sortMode
         filterField.stringValue = restorationState.filterText
@@ -1093,7 +1148,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         for chip in SnippetFilterChip.allCases {
             let btn = CapsuleButton(
                 title: loc.s(chip.localizationKey),
-                style: chip == activeFilterChip ? .primary : .secondary,
+                style: chip == activeFilter.chip ? .primary : .secondary,
                 target: self,
                 action: #selector(filterChipTapped(_:))
             )
@@ -1429,7 +1484,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             selectedGroupID: selectedGroupID,
             selectedSnippetIDs: selectedIDs,
             filterText: filterField.stringValue,
-            filterChip: activeFilterChip,
+            filter: activeFilter,
             isCompactDensity: isCompactDensity,
             sortMode: sortMode,
             groupScrollOrigin: groupScroll.contentView.bounds.origin,
@@ -1441,7 +1496,9 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     /// manager session. Insight actions describe the whole library, so a selected group or search
     /// query must not silently narrow their result set.
     func showAllSnippets(filteredBy filterChip: SnippetFilterChip) {
-        if filterChip == .secrets {
+        // A navigation chip has no list state to apply: route before touching anything, so a
+        // detour to the Secrets manager cannot leave this list half-reconfigured behind it.
+        guard let filter = filterChip.listFilter else {
             (NSApp.delegate as? AppDelegate)?.openSecretManager(nil)
             return
         }
@@ -1450,11 +1507,11 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         hasResolvedInitialGroupSelection = true
         pendingRestoredSnippetIDs.removeAll()
         filterField.stringValue = ""
-        activeFilterChip = filterChip
+        activeFilter = filter
         tableView.deselectAll(nil)
         groupOutline.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         for (chip, button) in filterChipButtons {
-            button.style = chip == filterChip ? .primary : .secondary
+            button.style = chip == filter.chip ? .primary : .secondary
         }
         applyFilterAndReloadTable()
         if let button = filterChipButtons[filterChip] {
@@ -1500,11 +1557,11 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
     @objc private func filterChipTapped(_ sender: NSButton) {
         guard let chip = SnippetFilterChip(rawValue: sender.tag) else { return }
-        if chip == .secrets {
+        guard let filter = chip.listFilter else {
             (NSApp.delegate as? AppDelegate)?.openSecretManager(nil)
             return
         }
-        activeFilterChip = chip
+        activeFilter = filter
         for (c, btn) in filterChipButtons {
             btn.style = (c == chip ? .primary : .secondary)
         }
@@ -1545,7 +1602,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func resetFilterChip() {
-        activeFilterChip = .all
+        activeFilter = .all
         for (c, btn) in filterChipButtons {
             btn.style = (c == .all ? .primary : .secondary)
         }
@@ -1588,15 +1645,13 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         }
 
         var filtered = pool
-        switch activeFilterChip {
+        switch activeFilter {
         case .all:
             break
         case .enabled:
             filtered = filtered.filter(\.enabled)
         case .disabled:
             filtered = filtered.filter { !$0.enabled }
-        case .secrets:
-            filtered = filtered.filter(\.isSecret)
         case .images:
             filtered = filtered.filter(\.isImageSnippet)
         case .macros:
@@ -1645,8 +1700,8 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
                 subtitle = ""
                 cta = loc.s("common.clear")
                 action = #selector(clearFilter)
-            } else if activeFilterChip != .all {
-                title = loc.s(activeFilterChip.localizationKey)
+            } else if activeFilter != .all {
+                title = loc.s(activeFilter.localizationKey)
                 subtitle = loc.s("snippets.empty.noMatch", "")
                 cta = loc.s("manager.filter.all")
                 action = #selector(resetFilterChip)
@@ -2655,7 +2710,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             sortMode: sortMode,
             hasConcreteGroup: selectedGroupID != nil,
             filterText: filterField.stringValue,
-            filterChip: activeFilterChip
+            filter: activeFilter
         )
     }
 

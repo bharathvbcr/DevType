@@ -21,17 +21,24 @@ public struct NestedSnippetResolver {
     private let foldedIndex: [String: Int]
     private let replacements: [String]
 
-    /// - Parameter excludingSecrets: drops keychain-backed snippets. Resolving one inside another
-    ///   snippet would paste a password into whatever document the outer snippet lands in, with
-    ///   no explicit gesture naming it.
-    public init(snippets: [SnippetModel], excludingSecrets: Bool = false) {
+    /// Secrets are **always** dropped, and the caller is not offered a say.
+    ///
+    /// Resolving one inside another snippet would put a secret into whatever document the outer
+    /// snippet lands in, with no explicit gesture naming it — the opposite of the deliberate
+    /// menu/palette gesture every other secret route requires. This used to be an
+    /// `excludingSecrets` flag defaulting to `false`: both production callers passed `true`, so
+    /// nothing leaked, but the default was fail-open and the next caller to write
+    /// `NestedSnippetResolver(snippets: library)` would have inherited the unsafe behaviour
+    /// silently. A secret also carries no trigger to resolve (`snippetAdapter` leaves it empty),
+    /// so indexing one could only ever shadow the `""` key. Unrepresentable beats guarded.
+    public init(snippets: [SnippetModel]) {
         var exact: [String: Int] = [:]
         var folded: [String: Int] = [:]
         var texts: [String] = []
         texts.reserveCapacity(snippets.count)
 
         for snippet in snippets {
-            if excludingSecrets && snippet.isSecret { continue }
+            if snippet.isSecret { continue }
             let position = texts.count
             texts.append(snippet.replacementText)
             if exact[snippet.triggerKeyword] == nil {

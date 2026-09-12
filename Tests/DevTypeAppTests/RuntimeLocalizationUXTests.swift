@@ -238,7 +238,7 @@ final class RuntimeLocalizationUXTests: XCTestCase {
             selectedGroupID: nil,
             selectedSnippetIDs: [],
             filterText: "",
-            filterChip: .all,
+            filter: .all,
             isCompactDensity: false,
             sortMode: .manual,
             groupScrollOrigin: .zero,

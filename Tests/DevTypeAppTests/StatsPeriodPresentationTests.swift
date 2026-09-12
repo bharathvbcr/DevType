@@ -89,7 +89,7 @@ final class StatsPeriodPresentationTests: XCTestCase {
             $0.contentViewController as? SnippetManagerViewController
         }.last)
         let state = manager.localizationState()
-        XCTAssertEqual(state.filterChip, .unused)
+        XCTAssertEqual(state.filter, .unused)
         XCTAssertNil(state.selectedGroupID, "Review Unused must search the whole library.")
         XCTAssertTrue(state.filterText.isEmpty, "A stale text query must not hide unused snippets.")
     }

@@ -413,18 +413,18 @@ final class SnippetReorderEligibilityTests: XCTestCase {
             sortMode: .manual,
             hasConcreteGroup: true,
             filterText: "",
-            filterChip: .all
+            filter: .all
         ))
 
-        for chip in SnippetFilterChip.allCases where chip != .all {
+        for filter in SnippetListFilter.allCases where filter != .all {
             XCTAssertFalse(
                 SnippetReorderEligibility.isAllowed(
                     sortMode: .manual,
                     hasConcreteGroup: true,
                     filterText: "",
-                    filterChip: chip
+                    filter: filter
                 ),
-                "\(chip) is a projection, not the full stored order"
+                "\(filter) is a projection, not the full stored order"
             )
         }
     }
@@ -435,26 +435,26 @@ final class SnippetReorderEligibilityTests: XCTestCase {
                 sortMode: sortMode,
                 hasConcreteGroup: true,
                 filterText: "",
-                filterChip: .all
+                filter: .all
             ))
         }
         XCTAssertFalse(SnippetReorderEligibility.isAllowed(
             sortMode: .manual,
             hasConcreteGroup: false,
             filterText: "",
-            filterChip: .all
+            filter: .all
         ))
         XCTAssertFalse(SnippetReorderEligibility.isAllowed(
             sortMode: .manual,
             hasConcreteGroup: true,
             filterText: "signature",
-            filterChip: .all
+            filter: .all
         ))
         XCTAssertTrue(SnippetReorderEligibility.isAllowed(
             sortMode: .manual,
             hasConcreteGroup: true,
             filterText: "   \n",
-            filterChip: .all
+            filter: .all
         ))
     }
 }

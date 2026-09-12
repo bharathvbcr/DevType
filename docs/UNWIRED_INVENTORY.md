@@ -295,3 +295,43 @@ eventually mask a real regression, and that is worth hunting down separately.
 Re-running this check: the sweep is a full-text declaration scan, not a graph query — see the
 method note at the top, and remember that `dev map`'s `unwired_candidates` will keep reporting
 zero regardless of what is actually dead until its `entry_roots` are fixed.
+
+---
+
+## Addendum — 2026-09-12, secret-boundary audit
+
+The sweep above was run on 2026-09-01 against `b9e58b2`, before the independent-secrets work
+(`a60f7fd`). One declaration that survives it was found during the secret-boundary audit, so
+the "0 genuinely dead declarations" line is accurate **as of that date and commit only**.
+
+### `SnippetStore.exportLibrary(to:)` — unwired, deliberately retained
+
+| | |
+|---|---|
+| Where | `Sources/ExpanderEngine/Models/SnippetStore.swift`, `exportLibrary(to:)` |
+| Callers | none, in `Sources/` or `Tests/` |
+| Verified by | `rg -uu 'exportLibrary\('` over the whole tree (ignore rules disabled), plus `devmap search exportLibrary` |
+
+`PreferencesWindowController.exportLibrary()` is a same-named but unrelated selector that
+routes to `LibraryExporter.present`. The only reference to *this* method is the doc comment on
+`clearLibraryReadFailure()`, which tells callers to offer it before the next save overwrites
+whatever is on disk.
+
+**Not retired**, because that recovery advice is the one place a full-fidelity copy is wanted
+and this is the only method that produces one. It is now documented as a *backup* rather than
+an export: it encodes `loadGroups()`, so it carries secret metadata (titles, tags, timestamps —
+never values), whereas the user-facing share path (`LibraryExporter`) encodes
+`loadSnippetGroups()` and carries no secret record at all. That distinction is what made the
+method a trap while it was undocumented: a future caller reaching for the obviously-named
+`store.exportLibrary(to:)` to implement "Export Library" would have shipped secret metadata
+into a file the user intended to share. Both halves are pinned by
+`SecretBoundaryAdversarialTests.testTheBackupEnvelopeKeepsSecretMetadataWhileTheShareEnvelopeKeepsNothing`.
+
+Wiring it into the read-failure recovery UI remains open work.
+
+### Also noted
+
+The narrative in the bulk-export entry above says `LibraryExporter.present` "reads
+`store.loadGroups()`". That was true when written; since `a60f7fd` it reads
+`loadSnippetGroups()`, which is what keeps secrets out of shared exports. The entry is left as
+written because it is a record of what was found then.

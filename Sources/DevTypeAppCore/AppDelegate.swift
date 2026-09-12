@@ -793,7 +793,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         manage.image = DevTypeTheme.menuIcon("key.fill")
         secretsSubmenu.addItem(manage)
         secretsSubmenu.addItem(.separator())
-        let secrets = SecretMenuFlow.secretMenuEntries(from: SnippetStore.shared.loadSecrets().map(\.snippetAdapter))
+        let allEnabled = SnippetStore.shared.loadSecrets().filter(\.enabled)
+        let secrets = SecretMenuFlow.secretMenuEntries(from: allEnabled.map(\.snippetAdapter))
 
         // Search first, always — a flat list stops being usable well before it stops being
         // buildable, and this is the entry that scales past the handful shown below it.
@@ -832,6 +833,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             item.image = DevTypeTheme.menuIcon("key.fill")
             item.representedObject = snippet
             secretsSubmenu.addItem(item)
+        }
+
+        // The submenu is capped. Showing 20 of 25 with nothing to say so invites the reading that
+        // the other five are gone — so say how many are not listed, and name the entry that finds
+        // them. A capped sample is never presented as the whole set.
+        let hidden = allEnabled.count - secrets.count
+        if hidden > 0 {
+            let more = NSMenuItem(title: loc.s("menu.copySecret.more", String(hidden)),
+                                  action: nil, keyEquivalent: "")
+            more.isEnabled = false
+            secretsSubmenu.addItem(.separator())
+            secretsSubmenu.addItem(more)
         }
         appendBiometryToggle(to: secretsSubmenu)
     }
@@ -1005,8 +1018,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // paste a password into whatever document the outer snippet lands in, with no explicit
         // gesture naming it.
         let lookup = NestedSnippetResolver(
-            snippets: SnippetStore.shared.loadSnippets(),
-            excludingSecrets: true
+            snippets: SnippetStore.shared.loadSnippets()
         ).lookup
 
         // Gated entry point: a secret asks for Touch ID here, before anything is read.
@@ -2066,6 +2078,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func openSnippetManager(filteringBy filterChip: SnippetFilterChip) {
+        // A navigation chip names a different window. Route before opening the snippet manager,
+        // or asking for secrets would raise the snippet manager *and* the Secrets manager and
+        // leave the wrong one in front.
+        guard filterChip.listFilter != nil else {
+            openSecretManager(nil)
+            return
+        }
         openSnippetManager(nil)
         (snippetWindowController?.contentViewController as? SnippetManagerViewController)?
             .showAllSnippets(filteredBy: filterChip)
