@@ -470,6 +470,7 @@ public final class EventTapEngine {
                 // hold armed moments ago still has a live debounce timer, and firing it would
                 // expand text while the user believes DevType is off.
                 heldCoordinator.cancelAll(reason: .unobservedInput)
+                TextInjectionPipeline.shared.cancelCurrentInjection()
             }
             UserDefaults.standard.set(!newValue, forKey: ProcessIdentity.userPausedDefaultsKey)
         }
@@ -1019,6 +1020,7 @@ public final class EventTapEngine {
         }
 
         guard enabled && !secureFlag && !suspended else {
+            TextInjectionPipeline.shared.clearLastExpansion()
             // These keystrokes reach the field but bypass matching entirely. A live hold's
             // erase is counted from *observed* keystrokes, so anything landing unseen breaks
             // its integrity — drop the hold rather than fire a miscounted erase later.
@@ -1034,6 +1036,7 @@ public final class EventTapEngine {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let isAutorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         if EventTapEngine.shouldIgnoreForMatching(isAutorepeat: isAutorepeat) {
+            TextInjectionPipeline.shared.clearLastExpansion()
             // Autorepeat appends characters the hold never sees (repeats are filtered from
             // matching). Same integrity rule as above: unobserved input, drop the hold.
             if heldCoordinator.cancelAll(reason: .unobservedInput) {
@@ -1096,14 +1099,8 @@ public final class EventTapEngine {
         // `undoLastExpansion()` is single-shot and does not block this callback (it hops to main
         // itself), and the erase still runs behind the erase-precondition guard — so if the user
         // typed more text after expanding, it refuses rather than destroying the field.
-        // §3.1e: the backspace travels with the attempt so every refusal exit can hand it back —
-        // a refused undo must never also cost the user the keystroke they pressed.
-        //
-        // Known residual bound (§3.1f): a second backspace landing *while* the undo's async AX
-        // work is still in flight (~10–30 ms) is treated as an ordinary delete and can shift the
-        // caret before a blind (AX-opaque) erase computes its span. Readable hosts are protected
-        // by the guarded erase's re-verification; closing the opaque-host window entirely would
-        // require blocking the user's real keystrokes, which costs more than it saves.
+        // A preflight refusal returns the key only while its source context remains current.
+        // Later input revokes queued undo through the shared injection continuation guard.
         if keyAction == .deleteLast,
            flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty,
            TextInjectionPipeline.shared.undoLastExpansion(
@@ -3070,6 +3067,7 @@ public final class EventTapEngine {
             queue: nil
         ) { [weak self] note in
             guard let self else { return }
+            TextInjectionPipeline.shared.clearLastExpansion()
             // §2.3: refresh the cache here rather than calling NSWorkspace from the tap thread.
             // The notification already carries the application that just activated.
             if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {

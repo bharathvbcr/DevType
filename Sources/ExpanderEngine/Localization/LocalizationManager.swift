@@ -1112,6 +1112,9 @@ public final class LocalizationManager: ObservableObject {
             "prefs.tab.ai.subtitle": "Control on-device transforms, output modes, and app access.",
             "prefs.tab.advanced.subtitle": "Inspect engine health and manage maintenance tools.",
             "prefs.general.startup": "Startup",
+            "prefs.general.typing": "Typing",
+            "prefs.general.undo": "Undo expansion with Backspace",
+            "prefs.general.undo.hint": "When enabled, Backspace shortly after an expansion restores its trigger when safe. Turn off to keep normal Backspace behavior. Takes effect immediately; app-native Undo is unchanged.",
             "prefs.general.appearanceNote":
                 "DevType follows the system appearance and honours Reduce Motion, Reduce Transparency, Increase Contrast, and Differentiate Without Color.",
             "prefs.general.language": "Language",
@@ -3051,6 +3054,9 @@ public final class LocalizationManager: ObservableObject {
             "prefs.tab.ai.subtitle": "온디바이스 변환, 출력 방식 및 앱 접근을 제어합니다.",
             "prefs.tab.advanced.subtitle": "엔진 상태를 확인하고 유지 관리 도구를 실행합니다.",
             "prefs.general.startup": "시작",
+            "prefs.general.typing": "입력",
+            "prefs.general.undo": "백스페이스로 확장 실행 취소",
+            "prefs.general.undo.hint": "켜면 확장 직후 백스페이스를 눌렀을 때 안전한 경우 트리거를 복원합니다. 끄면 백스페이스가 일반 삭제로 동작합니다. 즉시 적용되며 앱 자체의 실행 취소에는 영향을 주지 않습니다.",
             "prefs.general.appearanceNote":
                 "DevType는 시스템 화면 모드를 따르며 동작 줄이기, 투명도 줄이기, 대비 높이기, 색상 없이 구분하기 설정을 존중합니다.",
             "prefs.general.language": "언어",
@@ -4973,6 +4979,9 @@ public final class LocalizationManager: ObservableObject {
             "prefs.tab.ai.subtitle": "オンデバイス変換、出力方式、アプリへのアクセスを管理します。",
             "prefs.tab.advanced.subtitle": "エンジンの状態を確認し、メンテナンスツールを管理します。",
             "prefs.general.startup": "起動",
+            "prefs.general.typing": "入力",
+            "prefs.general.undo": "Backspace で展開を取り消す",
+            "prefs.general.undo.hint": "オンの場合、展開直後に Backspace を押すと、安全を確認できた場合にトリガーを復元します。オフにすると通常の削除になります。すぐに反映され、アプリ本来の取り消し操作には影響しません。",
             "prefs.general.appearanceNote":
                 "DevType はシステムの外観に従い、視差効果を減らす・透明度を下げる・コントラストを上げる・カラーなしで区別 の各設定を尊重します。",
             "prefs.general.language": "言語",

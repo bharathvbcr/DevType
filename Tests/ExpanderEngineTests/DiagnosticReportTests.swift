@@ -162,6 +162,12 @@ final class DiagnosticReportTests: XCTestCase {
         )
 
         let header = DiagnosticReport.formatHeader(context)
+        XCTAssertTrue(header.contains("Backspace expansion undo: unavailable"))
+        var undoContext = context
+        undoContext.expansionUndoEnabled = false
+        XCTAssertTrue(DiagnosticReport.formatHeader(undoContext).contains("Backspace expansion undo: disabled"))
+        undoContext.expansionUndoEnabled = true
+        XCTAssertTrue(DiagnosticReport.formatHeader(undoContext).contains("Backspace expansion undo: enabled"))
         XCTAssertTrue(header.contains("=== DevType Diagnostic Report ==="))
         XCTAssertTrue(header.contains("Bundle ID: com.devtype.app"))
         XCTAssertTrue(header.contains("CDHash: deadbeef"))

@@ -26,6 +26,27 @@ public extension BackspacePosting {
 /// delete, and then deleting it. `ErasePlan.swift` owns the pure half (unit counting + the
 /// precondition evaluator); this owns the AX reads and the posted backspaces.
 public final class EraseExecutor {
+    public enum Intent {
+        case expansion
+        case undo(inputEventsSinceExpansion: Int)
+
+        var isUndo: Bool {
+            if case .undo = self { return true }
+            return false
+        }
+
+        func refusalReason(_ result: ErasePreconditionResult) -> String? {
+            switch result {
+            case .ok: return nil
+            case .mismatch(let reason): return reason
+            case .unavailable(let reason):
+                guard case .undo(let events) = self, events > 0 else { return nil }
+                return "field unverifiable (\(reason)) and \(events) input event(s) "
+                    + "landed since the expansion — blind undo could erase the wrong text"
+            }
+        }
+    }
+
     public static let shared = EraseExecutor()
 
     private let hid: any BackspacePosting
@@ -148,12 +169,13 @@ public final class EraseExecutor {
         element: AXUIElement? = nil,
         retryOnMismatch: Bool = true,
         insertionPointFollowsExpectedText: Bool = true,
+        intent: Intent = .expansion,
         completion: @escaping (ErasePreconditionResult) -> Void
     ) {
         let first = evaluateErasePreconditionOnce(
             plan: plan,
             element: element,
-            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
         )
         guard retryOnMismatch, first.blocksErase else {
             completion(first)
@@ -163,7 +185,7 @@ public final class EraseExecutor {
             completion(self.evaluateErasePreconditionOnce(
                 plan: plan,
                 element: nil,
-                insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+                insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
             ))
         }
     }
@@ -178,30 +200,32 @@ public final class EraseExecutor {
         plan: ErasePlan,
         element: AXUIElement? = nil,
         retryOnMismatch: Bool = true,
-        insertionPointFollowsExpectedText: Bool = true
+        insertionPointFollowsExpectedText: Bool = true,
+        intent: Intent = .expansion
     ) -> ErasePreconditionResult {
         let first = evaluateErasePreconditionOnce(
             plan: plan,
             element: element,
-            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
         )
         guard retryOnMismatch, first.blocksErase, !Thread.isMainThread else { return first }
         Thread.sleep(forTimeInterval: InjectTiming.erasePreconditionRetryDelay)
         return evaluateErasePreconditionOnce(
             plan: plan,
             element: nil,
-            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
         )
     }
 
     private func evaluateErasePreconditionOnce(
         plan: ErasePlan,
         element: AXUIElement?,
-        insertionPointFollowsExpectedText: Bool = true
+        insertionPointFollowsExpectedText: Bool = true,
+        intent: Intent = .expansion
     ) -> ErasePreconditionResult {
         if let failure = plan.validationFailure { return .mismatch(failure) }
         if plan.utf16Count == 0 { return .ok }
-        guard ErasePreconditionChecker.isEnabled else {
+        guard ErasePreconditionChecker.isEnabled || intent.isUndo else {
             return .unavailable("erase precondition disabled by user default")
         }
         guard let axElement = element ?? AXContextChecker.shared.focusedElement() else {
@@ -210,13 +234,14 @@ public final class EraseExecutor {
 
         let value = textAccess.value(axElement)
         let range = textAccess.selectedRange(axElement)
+        if intent.isUndo, let range, range.length > 0 { return .mismatch("selection active") }
 
         let result = ErasePreconditionChecker.evaluate(
             plan: plan,
             value: value,
             caretLocation: range?.location,
             selectionLength: range?.length,
-            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+            insertionPointFollowsExpectedText: !intent.isUndo && insertionPointFollowsExpectedText
         )
         guard case .mismatch(let reason) = result else { return result }
 
@@ -224,7 +249,7 @@ public final class EraseExecutor {
         // describes the live text. Ask only for the exact erase window, and only while
         // the tap can vouch for the caret. Undo, voice, selections and malformed plans
         // cannot borrow this recovery. Never turn an absent answer into permission.
-        guard insertionPointFollowsExpectedText,
+        guard !intent.isUndo, insertionPointFollowsExpectedText,
               let range, range.length == 0,
               range.location >= plan.utf16Count,
               range.location <= AXTextWriter.maxPlausibleAXUTF16Units,
@@ -235,6 +260,11 @@ public final class EraseExecutor {
             return .mismatch("\(reason); rangeProbe=ineligible")
         }
         let eraseRange = NSRange(location: range.location - plan.utf16Count, length: plan.utf16Count)
+        if let value, ErasePreconditionChecker.splitsCharacter(
+            value, start: eraseRange.location, end: range.location
+        ) {
+            return .mismatch("erase window splits a Unicode character; rangeProbe=ineligible")
+        }
         guard let rangedText = textAccess.stringForRange(axElement, eraseRange) else {
             return .mismatch("\(reason); rangeProbe=unavailable")
         }
@@ -290,6 +320,7 @@ public final class EraseExecutor {
         plan: ErasePlan,
         afterPossibleWrite: Bool = false,
         insertionPointFollowsExpectedText: Bool = true,
+        intent: Intent = .expansion,
         canProceed: @escaping () -> Bool = { true },
         postingContinue: (() -> Bool)? = nil,
         onUnverifiableAfterWrite: ((String) -> Void)? = nil,
@@ -313,11 +344,11 @@ public final class EraseExecutor {
         // round trip and this sits on the keystroke path. Attribute reads through the handle stay
         // live, so the precondition still sees the post-collapse selection.
         let element = AXContextChecker.shared.focusedElement()
-        ax.collapseSelectionToCaret(element: element)
+        if !intent.isUndo { ax.collapseSelectionToCaret(element: element) }
         evaluateErasePrecondition(
             plan: plan,
             element: element,
-            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
         ) { result in
             if afterPossibleWrite, case .unavailable = result {
                 // Unverifiable after a write that reached the field is grounds to refuse — but
@@ -331,12 +362,12 @@ public final class EraseExecutor {
                         plan: plan,
                         element: nil,
                         retryOnMismatch: false,
-                        insertionPointFollowsExpectedText: insertionPointFollowsExpectedText
+                        insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
                     )
                     self.finishGuardedErase(
                         plan: plan,
                         afterPossibleWrite: afterPossibleWrite,
-                        result: second,
+                        result: second, intent: intent,
                         canProceed: canProceed,
                         postingContinue: duringPost,
                         onUnverifiableAfterWrite: onUnverifiableAfterWrite,
@@ -348,7 +379,7 @@ public final class EraseExecutor {
             self.finishGuardedErase(
                 plan: plan,
                 afterPossibleWrite: afterPossibleWrite,
-                result: result,
+                result: result, intent: intent,
                 canProceed: canProceed,
                 postingContinue: duringPost,
                 onUnverifiableAfterWrite: onUnverifiableAfterWrite,
@@ -363,6 +394,7 @@ public final class EraseExecutor {
         plan: ErasePlan,
         afterPossibleWrite: Bool,
         result: ErasePreconditionResult,
+        intent: Intent = .expansion,
         canProceed: @escaping () -> Bool = { true },
         postingContinue: (() -> Bool)? = nil,
         onUnverifiableAfterWrite: ((String) -> Void)?,
@@ -387,7 +419,7 @@ public final class EraseExecutor {
             completion(false)
             return
         }
-        if case .mismatch(let why) = result {
+        if let why = intent.refusalReason(result) {
             DevTypeLog.inject.error(
                 "[Inject] erase aborted before backspaces — \(why, privacy: .public)"
             )

@@ -224,7 +224,7 @@ failed relocation is reported without changing the active library.
 Open **DevType Preferences** from the menu bar or press **`⌘,`**. The window features 7 dedicated tabs:
 
 1. 🏠 **Home**: First-class getting started dashboard displaying engine status, quick actions (New Snippet, Templates, Import), live scratchpad test field, active shortcuts summary, and top/recent snippets.
-2. ⚙️ **General**: Startup settings (Launch at login), application language (System, English, 한국어, 日本語), opt-in update check (at most once a day, zero telemetry), and the **Muted Apps** list (apps where DevType pauses expansion).
+2. ⚙️ **General**: Startup settings (Launch at login), the Backspace expansion-undo switch, application language (System, English, 한국어, 日本語), opt-in update check (at most once a day, zero telemetry), and the **Muted Apps** list (apps where DevType pauses expansion).
 3. 📚 **Snippets**: Secret snippets security configuration (Touch ID requirement), library location controls, import/export buttons, trigger-conflict detection, and detailed usage statistics.
 4. ⌨️ **Hotkeys**: Customizable shortcut recorders for Command Palette (`⌘/`), AI Action Palette (`⌘⌥A`), Smart Dictation (`⌘⌥V`), and hotkey macro actions.
 5. 🎙️ **Voice**: Speech engine selector (Apple Speech, Local AI, Local Whisper, Gemini) with live readiness indicators, prompt tone styles, a "While you speak" mode (type as you speak, show words in the bubble and insert at the end, or show nothing and insert at the end), custom phonetic vocabulary dictionary, voice action triggers, and microphone permissions.
@@ -234,6 +234,12 @@ Open **DevType Preferences** from the menu bar or press **`⌘,`**. The window f
 Muted apps are also reachable straight from the menu bar (**Mute Frontmost App**, **Muted Apps…**).
 
 ---
+
+### Backspace expansion undo
+
+**Preferences → General → Typing → Undo expansion with Backspace** controls DevType's automatic reversal of a recently expanded snippet. It is enabled by default. Turn it off to make Backspace perform ordinary deletion. The change is immediate, persists across launches, and clears outstanding expansion-undo records. Re-enabling it applies to future expansions. Native `⌘Z`, snippet-editor Undo, and **Undo last AI** are separate features.
+
+When enabled, DevType checks that the original process and field still match before reversing an expansion. Input, focus changes, engine pause, and cancellation can revoke queued work. If the field is unreadable after intervening input, reversal is refused. “Posted, unverified” means DevType sent the paste but could not confirm receipt; it is not confirmed success or confirmed failure.
 
 ## 11. Troubleshooting & FAQs
 

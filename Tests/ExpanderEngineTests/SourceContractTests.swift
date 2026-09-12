@@ -24,10 +24,11 @@ final class SourceContractTests: XCTestCase {
         // for the caret. Voice dictation cannot, and a vouched erase downgrades a mismatch to
         // "proceed best-effort" — which is how a moved caret came to eat the user's own text.
         let check = try XCTUnwrap(pipeline.range(
-            of: "eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched) { eraseCheck in"
+            of: "eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched,"
         ))
         let next = try XCTUnwrap(pipeline.range(of: "private func performInject("))
         let gate = String(pipeline[check.lowerBound..<next.lowerBound])
+        XCTAssertTrue(gate.contains("intent: purpose.eraseIntent"), "Undo policy must survive the async precondition")
         XCTAssertTrue(gate.contains("self.canContinue(context)"), "A stale AX retry must not erase after cancellation, input, or focus changes")
         XCTAssertTrue(
             gate.contains("phase: .beforeMutation"),

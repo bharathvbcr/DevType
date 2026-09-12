@@ -1091,6 +1091,7 @@ final class PreferencesViewController: NSViewController,
     // General
     private let openAtLoginSwitch = NSSwitch()
     private let automaticUpdateSwitch = NSSwitch()
+    private let expansionUndoSwitch = NSSwitch()
     /// Only meaningful while the library lives somewhere the user chose; disabled otherwise.
     private var libraryStopSyncButton: CapsuleButton?
     private let updateStatusLabel = DevTypeTheme.makeLabel(
@@ -1794,6 +1795,18 @@ final class PreferencesViewController: NSViewController,
         appearanceNote.translatesAutoresizingMaskIntoConstraints = false
         stackInCard(startupCard, views: [loginRow, appearanceNote])
 
+        let undoCard = makeCard(title: loc.s("prefs.general.typing"), symbol: "keyboard")
+        let undoRow = makeToggleRow(
+            title: loc.s("prefs.general.undo"), toggle: expansionUndoSwitch,
+            action: #selector(expansionUndoChanged)
+        )
+        let undoHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.general.undo.hint"), font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary, wrapping: true
+        )
+        undoHint.translatesAutoresizingMaskIntoConstraints = false
+        stackInCard(undoCard, views: [undoRow, undoHint])
+
         // Language (§4.1: was a menu submenu)
         let languageCard = makeCard(title: loc.s("prefs.general.language"), symbol: "globe")
         languagePopup.translatesAutoresizingMaskIntoConstraints = false
@@ -1884,15 +1897,21 @@ final class PreferencesViewController: NSViewController,
         stackInCard(updatesCard, views: [updatesRow, updatesNote, updateStatusLabel, updatesButtons])
 
         stack.addArrangedSubview(startupCard)
+        stack.addArrangedSubview(undoCard)
         stack.addArrangedSubview(languageCard)
         stack.addArrangedSubview(updatesCard)
         stack.addArrangedSubview(mutedCard)
-        pinWidth(of: [startupCard, languageCard, updatesCard, mutedCard], to: stack)
+        pinWidth(of: [startupCard, undoCard, languageCard, updatesCard, mutedCard], to: stack)
+    }
+
+    @objc private func expansionUndoChanged() {
+        TextInjectionPipeline.shared.expansionUndoEnabled = expansionUndoSwitch.state == .on
     }
 
     private func reloadGeneral() {
         openAtLoginSwitch.state = SMAppService.mainApp.status == .enabled ? .on : .off
         automaticUpdateSwitch.state = UpdatePreferences.automaticCheckEnabled ? .on : .off
+        expansionUndoSwitch.state = TextInjectionPipeline.shared.expansionUndoEnabled ? .on : .off
         refreshUpdateStatusLabel()
         let current = loc.language.rawValue
         for (index, language) in AppLanguage.allCases.enumerated()

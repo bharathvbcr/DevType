@@ -138,6 +138,16 @@ public enum ErasePreconditionChecker {
         !UserDefaults.standard.bool(forKey: disableDefaultsKey)
     }
 
+    /// Positive evidence of a split character. Out-of-range coordinates provide no such
+    /// evidence and remain subject to the existing virtualized-field/range-read policy.
+    static func splitsCharacter(_ value: String, start: Int, end: Int) -> Bool {
+        let units = value.utf16
+        guard start >= 0, end >= start, end <= units.count else { return false }
+        let lower = units.index(units.startIndex, offsetBy: start)
+        let upper = units.index(lower, offsetBy: end - start)
+        return String.Index(lower, within: value) == nil || String.Index(upper, within: value) == nil
+    }
+
     /// Pure evaluation so the guard is unit-testable without a live AX element.
     ///
     /// - Parameters:
@@ -212,6 +222,12 @@ public enum ErasePreconditionChecker {
             // Copy only the trigger window, not the entire AXValue.
             let lower = units.index(units.startIndex, offsetBy: start)
             let upper = units.index(lower, offsetBy: plan.utf16Count)
+            // Decoding a split surrogate silently inserts U+FFFD. A suffix combining mark
+            // can also compare equal while one Backspace would delete the preceding base.
+            // Neither is evidence for the requested destructive span, even on vouched input.
+            guard !splitsCharacter(value, start: start, end: end) else {
+                return .mismatch("erase window splits a Unicode character")
+            }
             let rawActual = String(decoding: units[lower..<upper], as: UTF16.self)
             let actual = rawActual.normalizedWhitespace
             let normExpected = expected.normalizedWhitespace
