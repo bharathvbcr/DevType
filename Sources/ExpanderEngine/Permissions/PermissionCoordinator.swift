@@ -509,8 +509,16 @@ public final class PermissionCoordinator {
             return reason.contains("image")
                 ? "Secure clipboard insertion does not support images"
                 : "Secure clipboard insertion unavailable"
+        case "undoUnverifiable":
+            return "Undo refused — target could not be read after intervening input"
+        case "undoOriginalPosition":
+            return "Undo refused — original insertion position could not be verified"
+        case "undoSelection":
+            return "Undo refused — a text selection is active"
+        case "undoContextChanged":
+            return "Undo cancelled — input, target, or settings changed"
         case "undo", "undoAXRange", "undoAXDirect", "undoPaste":
-            return "Undo refused — the target text changed"
+            return "Undo refused — safe reversal could not be verified"
         default:
             break
         }

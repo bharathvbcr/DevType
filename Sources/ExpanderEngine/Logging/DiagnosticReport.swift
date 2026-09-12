@@ -253,6 +253,7 @@ public enum DiagnosticReport {
         /// Opt-in debug-trace state and its latest typed write result. The type can represent only
         /// finite status values, so a configured path or trace payload cannot enter the report.
         public var debugTraceHealth: DebugTrace.Health?
+        public var expansionUndoEnabled: Bool? = nil
 
         /// Production capture fills these at the subsystem boundary. Public/test callers keep the
         /// array initializer and are projected during formatting for source compatibility.
@@ -527,6 +528,7 @@ public enum DiagnosticReport {
             activityHistoryLine: activityHistoryLine,
             debugTraceHealth: DebugTrace.health
         )
+        context.expansionUndoEnabled = TextInjectionPipeline.shared.expansionUndoEnabled
         context.mutedAppsProjection = mutedAppsProjection
         context.siblingPathsProjection = siblingPathsProjection
         context.injectTelemetryProjection = injectTelemetryProjection
@@ -838,6 +840,7 @@ public enum DiagnosticReport {
             "LIVE: \(PermissionCopy.livePreflightSummary(snapshot: context.snapshot))",
             "Tap running: \(context.tapRunning)",
             "Engine enabled: \(context.engineEnabled)",
+            "Backspace expansion undo: \(context.expansionUndoEnabled.map { $0 ? "enabled" : "disabled" } ?? "unavailable")",
             "Secure Input active: \(context.secureInputActive)",
             "Display status: \(boundedScalar(context.displayStatus, label: "displayStatus", domain: "display-status"))",
             "Last inject: \(boundedOptionalScalar(context.lastInjectOutcome, label: "injectOutcome", domain: "inject-outcome", nilValue: "(none)"))",

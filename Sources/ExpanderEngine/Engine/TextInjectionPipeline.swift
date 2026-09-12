@@ -119,7 +119,8 @@ public final class TextInjectionPipeline {
             window: TimeInterval = InjectTiming.effectiveUndoWindow
         ) -> Bool {
             let age = now.timeIntervalSince(timestamp)
-            return age >= 0 && age <= window
+            return window.isFinite && window > 0 && age >= 0
+                && age <= min(window, InjectTiming.undoWindowCeiling)
         }
     }
 
@@ -139,6 +140,57 @@ public final class TextInjectionPipeline {
     /// §2.4: `os_unfair_lock`, taken from both the inject queue and main.
     private let lastExpansionLock = UnfairLock()
     private var _lastExpansion: LastExpansion?
+    private var lastExpansionTarget: PasteboardBroker.PasteTarget?
+    private var undoGeneration: UInt64 = 0
+    private let defaults: UserDefaults
+
+    public static let expansionUndoEnabledDefaultsKey = "DevTypeExpansionUndoEnabled"
+
+    /// Enabled by default for existing installations. Disabling consumes every outstanding
+    /// record and invalidates queued undo, including when the switch is re-enabled immediately.
+    public var expansionUndoEnabled: Bool {
+        get { lastExpansionLock.withLock { undoEnabledLocked } }
+        set {
+            lastExpansionLock.withLock {
+                defaults.set(newValue, forKey: Self.expansionUndoEnabledDefaultsKey)
+                invalidateUndoLocked()
+            }
+        }
+    }
+
+    private var undoEnabledLocked: Bool {
+        defaults.object(forKey: Self.expansionUndoEnabledDefaultsKey) == nil
+            || defaults.bool(forKey: Self.expansionUndoEnabledDefaultsKey)
+    }
+
+    struct UndoAttempt {
+        let record: LastExpansion
+        let target: PasteboardBroker.PasteTarget
+        let inputEvents: Int
+        let inputRevision: UInt64
+        let generation: UInt64
+    }
+
+    private enum InjectionPurpose {
+        case expansion
+        case undo(UndoAttempt)
+
+        func deliveryPath(_ path: String) -> String {
+            guard case .undo = self else { return path }
+            switch path {
+            case "axRange", "axOnlyRange": return "undoAXRange"
+            case "axDirect": return "undoAXDirect"
+            default: return "undoPaste"
+            }
+        }
+
+        var eraseIntent: EraseExecutor.Intent {
+            switch self {
+            case .expansion: return .expansion
+            case .undo(let attempt): return .undo(inputEventsSinceExpansion: attempt.inputEvents)
+            }
+        }
+    }
     /// §3.1: input events (real keystrokes and type-ahead replays) that landed after the recorded
     /// expansion. When the field is AX-opaque, this is the only evidence about whether the caret
     /// still sits right after `injectedText` — a blind undo is permitted only at zero. Guarded by
@@ -159,7 +211,8 @@ public final class TextInjectionPipeline {
     private var inputRevision: UInt64 = 0
     private var activeOperation: InjectCompletionGuard?
 
-    public init() {
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         hid = HIDKeyPoster.shared
         ax = AXTextWriter.shared
         verifier = DeliveryVerifier.shared
@@ -376,13 +429,49 @@ public final class TextInjectionPipeline {
         shouldContinue: @escaping @Sendable () -> Bool = { true },
         completion: InjectionCompletion? = nil
     ) {
+        enqueueInjection(
+            snippet: snippet, triggerLength: triggerLength, swallowed: swallowed,
+            clipboardOverride: clipboardOverride, lastEventCharacterCount: lastEventCharacterCount,
+            plan: plan, terminator: terminator, eraseCountOverride: eraseCountOverride,
+            erasePlan: erasePlan, preResolvedText: preResolvedText,
+            preResolvedCursorOffset: preResolvedCursorOffset, trailingKeys: trailingKeys,
+            snippetLookup: snippetLookup, secureClipboardPaste: secureClipboardPaste,
+            eraseCaretVouched: eraseCaretVouched, shouldContinue: shouldContinue, completion: completion
+        )
+    }
+
+    private func enqueueInjection(
+        snippet: SnippetModel,
+        triggerLength: Int,
+        swallowed: SwallowedKey,
+        clipboardOverride: String? = nil,
+        lastEventCharacterCount: Int = 1,
+        plan: InjectionPlan? = nil,
+        terminator: String = "",
+        eraseCountOverride: Int? = nil,
+        erasePlan: ErasePlan? = nil,
+        preResolvedText: String? = nil,
+        preResolvedCursorOffset: Int? = nil,
+        trailingKeys: [String] = [],
+        snippetLookup: ((String) -> String?)? = nil,
+        secureClipboardPaste: Bool = false,
+        eraseCaretVouched: Bool = true,
+        shouldContinue: @escaping @Sendable () -> Bool = { true },
+        purpose: InjectionPurpose = .expansion,
+        completion: InjectionCompletion? = nil
+    ) {
         let operation = InjectCompletionGuard(shouldContinue: shouldContinue)
         let revision = lastExpansionLock.withLock { () -> UInt64 in
+            if case .expansion = purpose { invalidateUndoLocked() }
             activeOperation?.cancel()
             activeOperation = operation
             return inputRevision
         }
-        let target = PasteboardBroker.PasteTarget.capture()
+        let target: PasteboardBroker.PasteTarget
+        switch purpose {
+        case .expansion: target = PasteboardBroker.PasteTarget.capture()
+        case .undo(let attempt): target = attempt.target
+        }
         injectQueue.async {
             // Prefer the fully-specified plan. Fall back to count-only planning for callers that
             // cannot supply the matched text (tests, Test Expansion Lab, physical Hangul overrides);
@@ -425,7 +514,7 @@ public final class TextInjectionPipeline {
                     snippetLookup: snippetLookup,
                     secureClipboardPaste: secureClipboardPaste,
                     eraseCaretVouched: eraseCaretVouched,
-                    operation: operation, inputRevision: revision, target: target
+                    operation: operation, inputRevision: revision, target: target, purpose: purpose
                 ) { outcome in
                     let invocation = completionGuard.markCompleted(outcome)
                     if invocation == 1 {
@@ -501,93 +590,74 @@ public final class TextInjectionPipeline {
 
     // MARK: - §3.1 Undo
 
-    /// The last delivered expansion, if any. Cleared by a successful undo.
+    /// The last delivered expansion, if any. Consumed when undo is claimed or invalidated.
     public var lastExpansion: LastExpansion? {
         lastExpansionLock.withLock { _lastExpansion }
     }
 
-    /// True when `undoLastExpansion()` would do something right now.
     public func canUndoLastExpansion(now: Date = Date()) -> Bool {
-        guard let record = lastExpansion, record.isFresh(now: now) else { return false }
-        guard let recorded = record.bundleID,
-              let current = EventTapEngine.shared.cachedFrontmostBundleID else { return true }
-        return recorded == current
+        let front = EventTapEngine.shared.frontmostContext
+        return lastExpansionLock.withLock {
+            undoEnabledLocked && _lastExpansion?.isFresh(now: now) == true
+                && lastExpansionTarget?.pid == front.processID && front.processID != nil
+        }
     }
 
-    /// §3.1: revert the last expansion — erase what was injected and put the trigger back.
-    ///
-    /// Returns `true` when an undo was accepted and started (the erase itself is asynchronous and
-    /// still runs behind the erase precondition guard, so a user who typed more text after the
-    /// expansion gets a refusal rather than a destroyed field). Returns `false` when there is
-    /// nothing to undo, the record has aged out of `InjectTiming.undoExpansionWindow`, or focus has
-    /// moved to a different app.
-    ///
-    /// Single-shot: the record is consumed whether or not the erase ultimately succeeds, so a held
-    /// backspace cannot walk backwards through the document.
-    ///
-    /// Keystroke detection is deliberately **not** wired here — `EventTapEngine` owns that decision
-    /// and this is the API it should call from its backspace handling.
-    ///
-    /// - Parameter heldBackspace: the key event the tap swallowed in order to attempt this undo.
-    ///   Every refusal exit returns it to the field as a synthetic keypress, so a refused undo
-    ///   still performs the ordinary one-character delete instead of eating input (§3.1e).
+    /// Claims one fresh record on the tap thread; no AX or AppKit calls occur here.
+    /// False leaves the original backspace untouched. Accepted work still needs live target,
+    /// input, permission and cancellation checks before each mutation on the main thread.
     @discardableResult
     public func undoLastExpansion(now: Date = Date(), heldBackspace: SwallowedKey? = nil) -> Bool {
-        lastExpansionLock.lock()
-        guard let record = _lastExpansion, record.isFresh(now: now) else {
-            lastExpansionLock.unlock()
-            return false
-        }
-        let inputEvents = _inputEventsSinceExpansion
-        _lastExpansion = nil
-        _inputEventsSinceExpansion = 0
-        lastExpansionLock.unlock()
-
-        if let recorded = record.bundleID,
-           let current = EventTapEngine.shared.cachedFrontmostBundleID,
-           recorded != current {
-            DevTypeLog.inject.notice(
-                "[Inject] §3.1 undo skipped — expansion happened in \(recorded, privacy: .public), frontmost is now \(current, privacy: .public)"
-            )
-            // §3.1e: deliberately NO backspace return on this exit. Focus has moved to another
-            // app; posting the swallowed key there would delete a character of text the key was
-            // never aimed at. The old app's field is unreachable, so the keystroke is simply lost.
-            finishRefusedUndo(
-                "expansion happened in another app",
-                path: "undo",
-                bundleID: recorded,
-                heldBackspace: nil
-            )
-            return false
-        }
-
-        if Thread.isMainThread {
-            performUndo(record, inputEventsSinceExpansion: inputEvents, heldBackspace: heldBackspace)
-        } else {
-            DispatchQueue.main.async {
-                self.performUndo(record, inputEventsSinceExpansion: inputEvents, heldBackspace: heldBackspace)
-            }
+        guard let attempt = takeUndoAttempt(
+            now: now, frontmostPID: EventTapEngine.shared.frontmostContext.processID
+        ) else { return false }
+        DispatchQueue.main.async {
+            self.performUndo(attempt, heldBackspace: heldBackspace)
         }
         return true
     }
 
-    /// Forget the last expansion (e.g. the user moved the caret, so undo would be destructive).
-    public func clearLastExpansion() {
-        lastExpansionLock.lock()
-        _lastExpansion = nil
-        _inputEventsSinceExpansion = 0
-        lastExpansionLock.unlock()
+    func takeUndoAttempt(now: Date, frontmostPID: pid_t?) -> UndoAttempt? {
+        lastExpansionLock.withLock {
+            guard undoEnabledLocked, let record = _lastExpansion, record.isFresh(now: now),
+                  let target = lastExpansionTarget, let pid = target.pid, pid > 0,
+                  pid == frontmostPID else {
+                invalidateUndoLocked()
+                return nil
+            }
+            let attempt = UndoAttempt(record: record, target: target,
+                                      inputEvents: _inputEventsSinceExpansion,
+                                      inputRevision: inputRevision, generation: undoGeneration)
+            _lastExpansion = nil
+            lastExpansionTarget = nil
+            _inputEventsSinceExpansion = 0
+            return attempt
+        }
     }
 
-    /// Forget the last expansion only if it is the one that injected `text` — used by the deferred
-    /// paste re-verification, which must not discard a newer expansion's undo point.
-    public func clearLastExpansion(ifInjectedTextIs text: String) {
-        lastExpansionLock.lock()
-        if _lastExpansion?.injectedText == text {
-            _lastExpansion = nil
-            _inputEventsSinceExpansion = 0
+    func undoAttemptIsCurrent(_ attempt: UndoAttempt) -> Bool {
+        lastExpansionLock.withLock {
+            undoEnabledLocked && undoGeneration == attempt.generation
+                && inputRevision == attempt.inputRevision
         }
-        lastExpansionLock.unlock()
+    }
+
+    private func invalidateUndoLocked() {
+        _lastExpansion = nil
+        lastExpansionTarget = nil
+        _inputEventsSinceExpansion = 0
+        undoGeneration &+= 1
+    }
+
+    /// Caret changes also revoke an undo already dispatched to main.
+    public func clearLastExpansion() {
+        lastExpansionLock.withLock { invalidateUndoLocked() }
+    }
+
+    public func clearLastExpansion(ifInjectedTextIs text: String) {
+        lastExpansionLock.withLock {
+            if _lastExpansion?.injectedText == text { invalidateUndoLocked() }
+        }
     }
 
     /// §3.1: input landed in the field after the recorded expansion — a real keystroke observed by
@@ -604,7 +674,7 @@ public final class TextInjectionPipeline {
         lastExpansionLock.lock()
         inputRevision &+= 1
         if _lastExpansion != nil {
-            _inputEventsSinceExpansion += units
+            _inputEventsSinceExpansion = Saturating.adding(_inputEventsSinceExpansion, units)
         }
         lastExpansionLock.unlock()
     }
@@ -627,7 +697,7 @@ public final class TextInjectionPipeline {
     public func noteDeliveryInput(units: Int = 1) {
         guard units > 0 else { return }
         lastExpansionLock.lock()
-        _deliveryInputUnits += units
+        _deliveryInputUnits = Saturating.adding(_deliveryInputUnits, units)
         inputRevision &+= 1
         lastExpansionLock.unlock()
     }
@@ -635,6 +705,7 @@ public final class TextInjectionPipeline {
     /// Invalidates queued work as well as callbacks already scheduled on main.
     public func cancelCurrentInjection() {
         lastExpansionLock.withLock {
+            invalidateUndoLocked()
             activeOperation?.cancel()
             activeOperation = nil
         }
@@ -704,16 +775,16 @@ public final class TextInjectionPipeline {
     /// the paste. Uncounted, they broke the record's "caret sits right after the injected text"
     /// premise invisibly — the exact mis-erase shape this window exists to prevent.
     public static func deliveryInputUnits(keyContaminates: Bool, flushReplayCount: Int) -> Int {
-        (keyContaminates ? 1 : 0) + max(0, flushReplayCount)
+        Saturating.adding(keyContaminates ? 1 : 0, max(0, flushReplayCount))
     }
 
     /// What a finished undo owes the caller's swallowed backspace. Pure for tests.
     ///
     /// The tap swallows a real backspace to attempt the undo (`return nil`). When the undo then
     /// refuses — selection active, unverifiable field, erased text gone — refusing while keeping
-    /// the keystroke turns the user's delete into a dead keypress. The backspace must go back:
-    /// posted synthetically it performs its ordinary one-character delete. A programmatic undo
-    /// (no held key) owes nothing.
+    /// the keystroke can turn the user's delete into a dead keypress. Preflight can return it
+    /// only after checking the source context is still current; after mutation or a context
+    /// change another delete would be unsafe. A programmatic undo owes no key.
     public enum UndoExit: Equatable {
         case accepted
         case refusedWithBackspaceReturned
@@ -750,17 +821,33 @@ public final class TextInjectionPipeline {
         triggerText: String,
         value: String?,
         caretLocation: Int?,
-        maxTypedAfter: Int = undoMaxTypedAfter
+        maxTypedAfter: Int = undoMaxTypedAfter,
+        originalCaretLocation: Int? = nil
     ) -> (plan: ErasePlan, restore: String)? {
-        guard let value, let caret = caretLocation, caret >= 0 else { return nil }
-        let units = Array(value.utf16)
-        guard caret <= units.count else { return nil }
-        let injected = Array(injectedText.utf16)
-        guard !injected.isEmpty else { return nil }
+        guard let value, let caret = caretLocation, caret >= 0, maxTypedAfter > 0 else { return nil }
+        let limit = min(maxTypedAfter, undoMaxTypedAfter)
+        let injected = Array(injectedText.utf16.prefix(DeliveryVerifier.maxVerificationScanUTF16 + 1))
+        guard !injected.isEmpty, injected.count <= DeliveryVerifier.maxVerificationScanUTF16 else { return nil }
+        let field = value.utf16
+        guard caret <= field.count else { return nil }
+        let lower = field.index(field.startIndex, offsetBy: max(0, caret - injected.count - limit))
+        let upper = field.index(field.startIndex, offsetBy: caret)
+        guard String.Index(upper, within: value) != nil else { return nil }
+        let units = Array(field[lower..<upper])
+        let localCaret = units.count
 
-        // k == 0 is the untouched case and is handled by the normal plan; start at 1.
-        for k in 1...max(1, maxTypedAfter) {
-            let end = caret - k
+        let distances: ClosedRange<Int>
+        if let originalCaretLocation {
+            guard originalCaretLocation >= 0, originalCaretLocation < caret,
+                  caret - originalCaretLocation <= limit else { return nil }
+            let distance = caret - originalCaretLocation
+            distances = distance...distance
+        } else {
+            distances = 1...limit
+        }
+        var match: (plan: ErasePlan, restore: String)?
+        for k in distances {
+            let end = localCaret - k
             let start = end - injected.count
             guard start >= 0, end <= units.count else { break }
             // Fold whitespace unit-by-unit: the host may have stored the injected text's spaces
@@ -770,18 +857,68 @@ public final class TextInjectionPipeline {
                 injected,
                 by: { String.foldedWhitespaceUnit($0) == String.foldedWhitespaceUnit($1) }
             ) else { continue }
+            let eraseStart = field.index(lower, offsetBy: start)
+            guard String.Index(eraseStart, within: value) != nil else { continue }
 
-            let tailSlice = Array(units[end..<caret])
+            let tailSlice = Array(units[end..<localCaret])
             let typedAfter = String(utf16CodeUnits: tailSlice, count: tailSlice.count)
             // A newline may have submitted a form or moved focus; the text after it is not
             // safely ours to re-type.
             guard !typedAfter.contains(where: \.isNewline) else { return nil }
-            return (
-                plan: ErasePlan(text: injectedText + typedAfter),
-                restore: triggerText + typedAfter
-            )
+            guard match == nil else { return nil }
+            match = (plan: ErasePlan(text: injectedText + typedAfter), restore: triggerText + typedAfter)
         }
-        return nil
+        return match
+    }
+
+    enum UndoRefusal: String {
+        case verification = "undo"
+        case unreadable = "undoUnverifiable"
+        case selection = "undoSelection"
+        case originalPosition = "undoOriginalPosition"
+    }
+
+    enum UndoPreparation: Equatable {
+        case replacement(ErasePlan, String)
+        case refused(UndoRefusal)
+    }
+
+    /// After intervening input, only the recorded insertion boundary can identify which
+    /// occurrence belongs to this expansion. Searching for the nearest equal substring can
+    /// erase newly typed text (for example expanding to "aa", then typing another "aa").
+    static func prepareUndo(
+        record: LastExpansion, originalRange: NSRange?, inputEvents: Int,
+        field: (value: String?, caret: Int?, selection: Int?)
+    ) -> UndoPreparation {
+        if let selection = field.selection, selection > 0 { return .refused(.selection) }
+        guard inputEvents >= 0 else { return .refused(.verification) }
+        var plan = ErasePlan(text: record.injectedText)
+        var restore = record.triggerText
+        if inputEvents > 0 {
+            guard let originalRange, originalRange.length == 0, originalRange.location >= 0 else {
+                return .refused(.originalPosition)
+            }
+            guard let caret = field.caret, field.value != nil, field.selection == 0 else {
+                return .refused(.unreadable)
+            }
+            if caret != originalRange.location {
+                guard let widened = widenedUndo(
+                    injectedText: record.injectedText, triggerText: record.triggerText,
+                    value: field.value, caretLocation: caret, originalCaretLocation: originalRange.location
+                ) else { return .refused(.verification) }
+                plan = widened.plan
+                restore = widened.restore
+            }
+        }
+        let result = ErasePreconditionChecker.evaluate(
+            plan: plan, value: field.value, caretLocation: field.caret, selectionLength: field.selection,
+            insertionPointFollowsExpectedText: false
+        )
+        if undoEraseRefusalReason(result: result, inputEventsSinceExpansion: inputEvents) != nil {
+            if case .unavailable = result { return .refused(.unreadable) }
+            return .refused(.verification)
+        }
+        return .replacement(plan, restore)
     }
 
     /// Reads AXValue + caret + selection length in one snapshot for the undo path. Returns all
@@ -819,188 +956,58 @@ public final class TextInjectionPipeline {
         result: ErasePreconditionResult,
         inputEventsSinceExpansion: Int
     ) -> String? {
-        switch result {
-        case .ok:
-            return nil
-        case .mismatch(let why):
-            return why
-        case .unavailable(let why):
-            guard inputEventsSinceExpansion > 0 else { return nil }
-            return "field unverifiable (\(why)) and \(inputEventsSinceExpansion) input event(s) "
-                + "landed since the expansion — blind undo would erase the wrong text"
+        EraseExecutor.Intent.undo(inputEventsSinceExpansion: inputEventsSinceExpansion).refusalReason(result)
+    }
+
+    private func finishRefusedUndo(
+        _ reason: String, path: String, attempt: UndoAttempt, heldBackspace: SwallowedKey?
+    ) {
+        let safeReason = PermissionCoordinator.sanitizedRefusalReason(reason, path: path)
+        PermissionCoordinator.shared.recordInjectOutcome(.refused(safeReason), refuseContext: nil, path: path)
+        guard Self.classifyUndoExit(accepted: false, heldBackspace: heldBackspace)
+                == .refusedWithBackspaceReturned, undoAttemptIsCurrent(attempt),
+              attempt.target.isCurrent(checkRange: false),
+              !AXContextChecker.isSecureEventInputEnabledLive(), CGPreflightPostEventAccess() else { return }
+        if !hid.postUnicodeKeyEvent(unicode: "\u{7F}", keyCode: CGKeyCode(kVK_Delete), flags: []) {
+            PermissionCoordinator.shared.recordInjectOutcome(.failedSilent, refuseContext: nil, path: "undoKeyReturn")
         }
     }
 
-    /// §3.1e: the single exit for a refused undo. Records the outcome, and — when this undo was
-    /// attempted on the user's swallowed backspace — posts that key back so it still deletes one
-    /// character. Every refusal path in `performUndo` funnels here; none may return silently.
-    private func finishRefusedUndo(
-        _ reason: String,
-        path: String,
-        bundleID: String?,
-        heldBackspace: SwallowedKey?
-    ) {
-        PermissionCoordinator.shared.recordInjectOutcome(
-            .refused("Undo refused — \(reason)"),
-            refuseContext: nil,
-            path: path
-        )
-        guard Self.classifyUndoExit(accepted: false, heldBackspace: heldBackspace)
-            == .refusedWithBackspaceReturned else { return }
-        let keyCode = heldBackspace?.keyCode ?? Int64(kVK_Delete)
-        DevTypeLog.inject.info(
-            "[Inject] §3.1 returning swallowed backspace after refusal (keycode \(keyCode, privacy: .public))"
-        )
-        _ = hid.postUnicodeKeyEvent(
-            unicode: "\u{7F}",
-            keyCode: CGKeyCode(truncatingIfNeeded: keyCode),
-            flags: []
-        )
-    }
-
-    private func performUndo(
-        _ record: LastExpansion,
-        inputEventsSinceExpansion: Int,
-        heldBackspace: SwallowedKey? = nil
-    ) {
-        var undoPlan = ErasePlan(text: record.injectedText)
-        var restoreText = record.triggerText
-
-        // One consistent AX snapshot drives the selection guard, the first precondition pass,
-        // and the widening — judging them on separate reads let an in-flight edit split them.
-        let field = readFieldForUndo()
-
-        // A non-empty selection means this backspace was "delete the selection" — a gesture with
-        // its own meaning that undo must not hijack. The AX replace below would additionally
-        // widen *over* the selection and erase its contents. Refuse; the record is already
-        // consumed. With the backspace returned, delete-selection still happens.
-        if let selection = field.selection, selection > 0 {
-            DevTypeLog.inject.notice(
-                "[Inject] §3.1 undo refused — selection of \(selection, privacy: .public) unit(s) active; backspace means delete-selection"
-            )
-            finishRefusedUndo(
-                "selection active",
-                path: "undo",
-                bundleID: record.bundleID,
-                heldBackspace: heldBackspace
-            )
+    private func performUndo(_ attempt: UndoAttempt, heldBackspace: SwallowedKey? = nil) {
+        guard attempt.record.isFresh(), undoAttemptIsCurrent(attempt), attempt.target.isCurrent(checkRange: false),
+              AXContextChecker.shared.isProcessTrusted(), !AXContextChecker.isSecureEventInputEnabledLive() else {
+            finishRefusedUndo("context changed", path: "undoContextChanged", attempt: attempt, heldBackspace: nil)
             return
         }
-
-        // If the plain plan would not verify, try widening over text typed since the expansion
-        // before giving up. Only ever widens on a positive match of the injected text.
-        //
-        // Every precondition check in this function passes `insertionPointFollowsExpectedText:
-        // false`: the expand path's §8.6 "value contains the text, caret geometry is the liar"
-        // downgrade must not apply here, because on the undo path the caret legitimately sits
-        // past whatever the user typed after the expansion. Under the downgrade, that typed
-        // tail read as best-effort-erasable — widening never ran (it keys on `.mismatch`) and
-        // the blind caret-relative erase ate the tail plus part of the injected text, then
-        // restored the trigger onto the remnant: "ScholarLM" + 3 typed units + Backspace
-        // became "Sch`slm".
-        if ErasePreconditionChecker.isEnabled,
-           case .mismatch = ErasePreconditionChecker.evaluate(
-               plan: undoPlan,
-               value: field.value,
-               caretLocation: field.caret,
-               selectionLength: field.selection,
-               insertionPointFollowsExpectedText: false
-           ) {
-            if let widened = Self.widenedUndo(
-                injectedText: record.injectedText,
-                triggerText: record.triggerText,
-                value: field.value,
-                caretLocation: field.caret
-            ) {
-                DevTypeLog.inject.info(
-                    "[Inject] §3.1 undo widened over \(widened.plan.utf16Count - undoPlan.utf16Count, privacy: .public) unit(s) typed after the expansion"
-                )
-                undoPlan = widened.plan
-                restoreText = widened.restore
-            }
+        let field = readFieldForUndo()
+        let record = attempt.record
+        let plan: ErasePlan
+        let restore: String
+        switch Self.prepareUndo(record: record, originalRange: attempt.target.range,
+                                inputEvents: attempt.inputEvents, field: field) {
+        case .replacement(let preparedPlan, let text):
+            plan = preparedPlan
+            restore = text
+        case .refused(let reason):
+            finishRefusedUndo(reason.rawValue, path: reason.rawValue, attempt: attempt, heldBackspace: heldBackspace)
+            return
         }
-        eraser.evaluateErasePrecondition(
-            plan: undoPlan,
-            insertionPointFollowsExpectedText: false
-        ) { result in
-            if let why = Self.undoEraseRefusalReason(
-                result: result,
-                inputEventsSinceExpansion: inputEventsSinceExpansion
-            ) {
-                DevTypeLog.inject.notice(
-                    "[Inject] §3.1 undo refused — \(why, privacy: .public)"
-                )
-                self.finishRefusedUndo(
-                    why,
-                    path: "undo",
-                    bundleID: record.bundleID,
-                    heldBackspace: heldBackspace
-                )
-                return
+        // All mutation, timeout, cancellation, host capability learning, clipboard residency,
+        // recovery and delivery evidence now have one owner. Undo never creates another undo.
+        let target = PasteboardBroker.PasteTarget(
+            pid: attempt.target.pid, element: attempt.target.element,
+            range: field.caret.flatMap { caret in
+                field.selection.map { NSRange(location: caret, length: $0) }
             }
-
-            // One transactional AX replace is the cleanest undo: no backspaces, no clipboard.
-            let bundle = record.bundleID ?? ""
-            var undoWriteMayHaveMutated = false
-            if !bundle.isEmpty, !TextInjectionPipeline.shouldSkipAXSelectedText(bundleID: bundle) {
-                let undoOutcome = self.ax.performAXRangeReplace(
-                    text: restoreText,
-                    eraseCount: undoPlan.utf16Count,
-                    bundleID: record.bundleID
-                )
-                if undoOutcome == .replaced {
-                    DevTypeLog.inject.info("[Inject] §3.1 undo via AX range replace")
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        .succeeded,
-                        refuseContext: nil,
-                        path: "undoAXRange"
-                    )
-                    return
-                }
-                // Same provenance rule as the expand path: only a write that actually reached
-                // the field makes unverifiable state a reason to abort the HID fallback.
-                undoWriteMayHaveMutated = undoOutcome.fieldMayHaveMutated
-            }
-
-            // HID fallback: the guarded erase re-verifies that the injected text is still sitting
-            // left of the caret before a single backspace is posted.
-            self.eraser.performGuardedErase(
-                plan: undoPlan,
-                afterPossibleWrite: undoWriteMayHaveMutated,
-                insertionPointFollowsExpectedText: false
-            ) { erased in
-                guard erased else {
-                    DevTypeLog.inject.notice(
-                        "[Inject] §3.1 undo aborted — field no longer holds the injected text"
-                    )
-                    self.finishRefusedUndo(
-                        "field no longer holds the injected text",
-                        path: "undo",
-                        bundleID: record.bundleID,
-                        heldBackspace: heldBackspace
-                    )
-                    return
-                }
-                if self.ax.attemptAXDirectInjection(
-                    text: restoreText,
-                    bundleID: record.bundleID
-                ) {
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        .succeeded,
-                        refuseContext: nil,
-                        path: "undoAXDirect"
-                    )
-                    return
-                }
-                self.clipboard.pasteViaClipboard(text: restoreText) { posted in
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        posted ? .succeeded : .failedSilent,
-                        refuseContext: nil,
-                        path: "undoPaste"
-                    )
-                }
-            }
-        }
+        )
+        let prepared = UndoAttempt(record: record, target: target, inputEvents: attempt.inputEvents,
+                                   inputRevision: attempt.inputRevision, generation: attempt.generation)
+        enqueueInjection(
+            snippet: SnippetModel(title: "Undo expansion", triggerKeyword: "", replacementText: restore),
+            triggerLength: 0, swallowed: .notSwallowed, erasePlan: plan, preResolvedText: restore,
+            eraseCaretVouched: false,
+            shouldContinue: { self.undoAttemptIsCurrent(attempt) }, purpose: .undo(prepared)
+        )
     }
 
     // MARK: - Inject (main thread)
@@ -1026,6 +1033,7 @@ public final class TextInjectionPipeline {
         let operation: InjectCompletionGuard
         let inputRevision: UInt64
         let target: PasteboardBroker.PasteTarget
+        let purpose: InjectionPurpose
         /// False when the caller cannot promise the caret still sits immediately after
         /// `erasePlan.expectedText` — see `injectOnMain`.
         let eraseCaretVouched: Bool
@@ -1052,6 +1060,7 @@ public final class TextInjectionPipeline {
         /// click elsewhere in between. See `ErasePreconditionChecker.evaluate`.
         eraseCaretVouched: Bool = true,
         operation: InjectCompletionGuard, inputRevision: UInt64, target: PasteboardBroker.PasteTarget,
+        purpose: InjectionPurpose,
         completion: @escaping InjectionCompletion
     ) {
         guard operationIsCurrent(operation, revision: inputRevision, target: target,
@@ -1166,7 +1175,7 @@ public final class TextInjectionPipeline {
             frontBundleID: frontBundleID,
             frontPID: frontApp?.processIdentifier,
             deliveryInputUnits: deliveryInputUnits,
-            operation: operation, inputRevision: inputRevision, target: target,
+            operation: operation, inputRevision: inputRevision, target: target, purpose: purpose,
             eraseCaretVouched: eraseCaretVouched,
             focusedRole: AXContextChecker.shared.focusedElementRole(),
             gateDecision: decision
@@ -1178,7 +1187,8 @@ public final class TextInjectionPipeline {
         //
         // §8.3: asynchronous, so the one-shot retry is available here (on main) without a 30 ms
         // `Thread.sleep` that would stall the event tap.
-        eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched) { eraseCheck in
+        eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched,
+                                          intent: purpose.eraseIntent) { eraseCheck in
             guard self.canContinue(context), context.target.isCurrent(
                 checkRange: PasteboardBroker.verifySelectionRange(
                     bundleID: context.frontBundleID,
@@ -1214,6 +1224,13 @@ public final class TextInjectionPipeline {
                 )
             }
             // #endregion
+            if case .undo(let attempt) = purpose,
+               let reason = Self.undoEraseRefusalReason(result: eraseCheck, inputEventsSinceExpansion: attempt.inputEvents) {
+                let path: String
+                if case .unavailable = eraseCheck { path = "undoUnverifiable" } else { path = "undo" }
+                self.refuseInject(reason, path: path, swallowed: .notSwallowed, completion: completion)
+                return
+            }
             if case .mismatch(let why) = eraseCheck {
                 DevTypeLog.inject.error(
                     "[Inject] erase precondition failed — \(why, privacy: .public)"
@@ -1569,6 +1586,7 @@ public final class TextInjectionPipeline {
             plan: erasePlan,
             afterPossibleWrite: attemptedAXWrite,
             insertionPointFollowsExpectedText: context.eraseCaretVouched,
+            intent: context.purpose.eraseIntent,
             canProceed: canProceed,
             postingContinue: canProceedAfterMutation,
             onUnverifiableAfterWrite: { why in
@@ -1928,7 +1946,7 @@ public final class TextInjectionPipeline {
                     PermissionCoordinator.shared.recordInjectOutcome(
                         .succeeded,
                         refuseContext: nil,
-                        path: path
+                        path: context.purpose.deliveryPath(path)
                     )
                 case .failed, .unavailable:
                     // Neither provable: AX cannot read this field at all (common for
@@ -2067,9 +2085,9 @@ public final class TextInjectionPipeline {
         PermissionCoordinator.shared.recordInjectOutcome(
             outcome,
             refuseContext: nil,
-            path: path
+            path: context.purpose.deliveryPath(path)
         )
-        if undoable {
+        if undoable, case .expansion = context.purpose {
             rememberExpansion(context: context, injectedText: injectedText)
         }
         completion(outcome)
@@ -2091,15 +2109,19 @@ public final class TextInjectionPipeline {
             triggerText: typed,
             bundleID: context.frontBundleID
         )
-        lastExpansionLock.lock()
-        _lastExpansion = record
-        // §3.1d: input that passed through *during this expansion's delivery* already broke the
-        // "caret sits right after the injected text" premise. Seeding it here (instead of the
-        // old unconditional reset to 0) is what keeps a mid-delivery backspace from authorising
-        // a blind mis-erase one keystroke later.
-        _inputEventsSinceExpansion = max(0, _deliveryInputUnits)
-        _deliveryInputUnits = 0
-        lastExpansionLock.unlock()
+        recordUndoExpansion(record, target: PasteboardBroker.PasteTarget.capture())
+    }
+
+    func recordUndoExpansion(_ record: LastExpansion, target: PasteboardBroker.PasteTarget) {
+        lastExpansionLock.withLock {
+            invalidateUndoLocked()
+            guard undoEnabledLocked, let pid = target.pid, pid > 0,
+                  !record.injectedText.isEmpty, !record.triggerText.isEmpty else { return }
+            _lastExpansion = record
+            lastExpansionTarget = target
+            _inputEventsSinceExpansion = max(0, _deliveryInputUnits)
+            _deliveryInputUnits = 0
+        }
     }
 
     // MARK: - Cursor placement
