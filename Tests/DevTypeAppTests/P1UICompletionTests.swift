@@ -222,10 +222,10 @@ final class P1UICompletionTests: XCTestCase {
             XCTAssertTrue(preferencesSource.contains(contract), "Missing accessibility contract: \(contract)")
         }
 
-        let editor = try source("Sources/DevTypeAppCore/SnippetEditorSheet.swift")
-        XCTAssertTrue(editor.contains(
-            "secretField.setAccessibilityLabel(loc.s(\"editor.secret.toggle\"))"
-        ))
+        let editor = try source("Sources/DevTypeAppCore/SecretEditorSheet.swift")
+        XCTAssertTrue(editor.contains("field.setAccessibilityLabel(loc.s(key))"))
+        XCTAssertTrue(editor.contains("field.setAccessibilityTitleUIElement(label)"))
+        XCTAssertTrue(editor.contains("(\"secrets.value\", valueField)"))
 
         let preview = try source("Sources/DevTypeAppCore/AIPreviewPanel.swift")
         XCTAssertTrue(preview.contains(

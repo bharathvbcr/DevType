@@ -218,7 +218,7 @@ final class AppCoreFlowCoverageTests: XCTestCase {
         }
     }
 
-    func testSecretMenuFlowResolveWithBiometrics() {
+    func testSecretMenuFlowResolveWithBiometrics() throws {
         let textSnippet = SnippetModel(
             title: "Greeting",
             triggerKeyword: ";hi",
@@ -240,9 +240,17 @@ final class AppCoreFlowCoverageTests: XCTestCase {
             replacementText: "",
             isSecret: true
         )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let libraryURL = directory.appendingPathComponent("library.json")
+        try JSONEncoder().encode(SnippetDocument(snippets: [secretSnippet])).write(to: libraryURL)
+        let library = SnippetStore(fileURL: libraryURL)
+        let values = SecretStore(backing: InMemorySecretBackingStore())
         let exp2 = expectation(description: "resolve migration required")
         SecretMenuFlow.resolve(
             secretSnippet,
+            secretStore: values, libraryStore: library,
             preferenceEnabled: false,
             pendingMigration: { [secretSnippet.id] }
         ) { result in
@@ -256,6 +264,7 @@ final class AppCoreFlowCoverageTests: XCTestCase {
         let exp3 = expectation(description: "resolve with mock authorized gate")
         SecretMenuFlow.resolve(
             secretSnippet,
+            secretStore: values, libraryStore: library,
             gate: authGate,
             preferenceEnabled: true,
             pendingMigration: { [] }
@@ -278,6 +287,7 @@ final class AppCoreFlowCoverageTests: XCTestCase {
         let exp4 = expectation(description: "resolve with mock cancelled gate")
         SecretMenuFlow.resolve(
             secretSnippet,
+            secretStore: values, libraryStore: library,
             gate: cancelGate,
             preferenceEnabled: true,
             pendingMigration: { [] }

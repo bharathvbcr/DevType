@@ -127,7 +127,7 @@ final class SecretSearchWindowTests: XCTestCase {
         InlineSearchPanel.open(store: fixture.store, mode: .copySecrets) { pick, _, _ in
             guard case .snippet(let snippet) = pick else { return XCTFail("Unexpected command") }
             picked = snippet.id
-            SecretMenuFlow.resolve(snippet, secretStore: fixture.values, gate: gate, preferenceEnabled: true) { result in
+            SecretMenuFlow.resolve(snippet, secretStore: fixture.values, libraryStore: fixture.store, gate: gate, preferenceEnabled: true) { result in
                 guard case .success(let value) = result else { return XCTFail("Expected authorized copy") }
                 copied = clipboard.copy(value, pasteboard: board, broker: nil, schedule: { _, _ in }) != nil
             }
@@ -167,7 +167,7 @@ final class SecretSearchWindowTests: XCTestCase {
             var failure: SecretMenuFlow.ResolveFailure?
             InlineSearchPanel.open(store: fixture.store, mode: .copySecrets) { pick, _, _ in
                 guard case .snippet(let snippet) = pick else { return XCTFail("Unexpected command") }
-                SecretMenuFlow.resolve(snippet, secretStore: fixture.values, gate: gate, preferenceEnabled: true) { result in
+                SecretMenuFlow.resolve(snippet, secretStore: fixture.values, libraryStore: fixture.store, gate: gate, preferenceEnabled: true) { result in
                     switch result {
                     case .success(let text):
                         clipboard.copy(text, pasteboard: board, broker: nil, schedule: { _, _ in })

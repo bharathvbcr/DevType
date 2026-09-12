@@ -194,7 +194,7 @@ public enum PaletteToolRouter {
         public func call(arguments: Arguments) async throws -> String {
             let hits = SnippetSearch.run(
                 query: arguments.query,
-                in: groupsProvider(),
+                in: SnippetDocument(groups: groupsProvider()).groups,
                 includeDisabled: false,
                 limit: 1,
                 revision: revisionProvider()

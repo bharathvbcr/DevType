@@ -228,7 +228,7 @@ enum LibraryExporter {
 
         DispatchQueue.global(qos: .userInitiated).async {
             let outcome = Result {
-                let groups = restrict(store.loadGroups(), to: selectedIDs)
+                let groups = restrict(store.loadSnippetGroups(), to: selectedIDs)
                 return try write(choice: choice, groups: groups, to: url)
             }
             DispatchQueue.main.async {

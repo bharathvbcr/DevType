@@ -34,43 +34,49 @@ struct SnippetEditResourceAccess {
     var storeSecret: (String, UUID) -> Result<Void, SnippetEditResourceError>
     var removeSecret: (UUID) -> Result<Void, SnippetEditResourceError>
     var protectSecretFromOrphanPurge: (UUID) -> SecretStore.OrphanPurgeLease?
+    var performSecretTransaction: (_ body: () -> Void) -> Bool = { body in body(); return true }
 
-    static let live = SnippetEditResourceAccess(
-        importImage: { source in
-            do {
-                return .success(try ImageAttachmentStore.shared.importImage(from: source))
-            } catch {
-                return .failure(.unavailable)
-            }
-        },
-        deleteImage: { path in
-            guard !path.isEmpty, !path.hasPrefix("/") else { return .success(()) }
-            guard let url = ImageAttachmentStore.shared.resolvedURL(forImagePath: path) else {
-                return .failure(.unavailable)
-            }
-            do {
-                if FileManager.default.fileExists(atPath: url.path) {
-                    try FileManager.default.removeItem(at: url)
+    static let live = using(secretStore: .shared)
+
+    static func using(secretStore: SecretStore) -> Self {
+        SnippetEditResourceAccess(
+            importImage: { source in
+                do {
+                    return .success(try ImageAttachmentStore.shared.importImage(from: source))
+                } catch {
+                    return .failure(.unavailable)
                 }
-                return .success(())
-            } catch {
-                return .failure(.unavailable)
-            }
-        },
-        readSecret: { id in
-            if let value = SecretStore.shared.secret(for: id) { return .value(value) }
-            return SecretStore.shared.hasSecret(for: id) ? .unavailable : .missing
-        },
-        storeSecret: { value, id in
-            SecretStore.shared.store(value, for: id).mapError { _ in .unavailable }
-        },
-        removeSecret: { id in
-            SecretStore.shared.remove(for: id).mapError { _ in .unavailable }
-        },
-        protectSecretFromOrphanPurge: { id in
-            SecretStore.shared.protectFromOrphanPurge(id)
-        }
-    )
+            },
+            deleteImage: { path in
+                guard !path.isEmpty, !path.hasPrefix("/") else { return .success(()) }
+                guard let url = ImageAttachmentStore.shared.resolvedURL(forImagePath: path) else {
+                    return .failure(.unavailable)
+                }
+                do {
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        try FileManager.default.removeItem(at: url)
+                    }
+                    return .success(())
+                } catch {
+                    return .failure(.unavailable)
+                }
+            },
+            readSecret: { id in
+                if let value = secretStore.secret(for: id) { return .value(value) }
+                return secretStore.hasSecret(for: id) ? .unavailable : .missing
+            },
+            storeSecret: { value, id in
+                secretStore.store(value, for: id).mapError { _ in .unavailable }
+            },
+            removeSecret: { id in
+                secretStore.remove(for: id).mapError { _ in .unavailable }
+            },
+            protectSecretFromOrphanPurge: { id in
+                secretStore.protectFromOrphanPurge(id)
+            },
+            performSecretTransaction: secretStore.performExclusiveTransaction
+        )
+    }
 }
 
 /// A host save is not complete until resource cleanup succeeds. Hosts therefore return a receipt:
@@ -199,7 +205,10 @@ final class SnippetEditTransaction {
     }
 
     private let resources: SnippetEditResourceAccess
+    private let executionLock = NSLock()
     private var pendingCompensations: [Compensation] = []
+    private var pendingSecretID: UUID?
+    private var secretProtection: SecretStore.OrphanPurgeLease?
 
     init(resources: SnippetEditResourceAccess = .live) {
         self.resources = resources
@@ -213,12 +222,49 @@ final class SnippetEditTransaction {
         groupID: UUID?,
         persist: (SnippetModel, UUID?) -> SnippetEditorPersistenceReceipt
     ) -> SnippetEditTransactionOutcome {
+        guard executionLock.try() else { return .failed(.secretWrite) }
+        defer { executionLock.unlock() }
+        guard pendingSecretID == nil || pendingSecretID == originalCandidate.id else { return .failed(.rollback) }
+        let needsSecretTransaction = originalCandidate.isSecret || existing?.isSecret == true || {
+            if case .set = secretIntent { return true }
+            return false
+        }()
+        if needsSecretTransaction {
+            // Acquire before the backing transaction: a same-ID orphan delete may already be
+            // waiting on the backing lock. Failed compensation keeps this lease until retry.
+            if secretProtection == nil { secretProtection = resources.protectSecretFromOrphanPurge(originalCandidate.id) }
+            pendingSecretID = originalCandidate.id
+        }
+        defer {
+            if pendingCompensations.isEmpty {
+                secretProtection = nil
+                pendingSecretID = nil
+            }
+        }
+        if needsSecretTransaction {
+            var outcome = SnippetEditTransactionOutcome.failed(.secretWrite)
+            guard resources.performSecretTransaction({
+                outcome = saveExclusively(snippet: originalCandidate, existing: existing,
+                    pickedImageURL: pickedImageURL, secretIntent: secretIntent, groupID: groupID, persist: persist)
+            }) else { return .failed(.secretWrite) }
+            return outcome
+        }
+        return saveExclusively(snippet: originalCandidate, existing: existing,
+            pickedImageURL: pickedImageURL, secretIntent: secretIntent, groupID: groupID, persist: persist)
+    }
+
+    private func saveExclusively(
+        snippet originalCandidate: SnippetModel,
+        existing: SnippetModel?,
+        pickedImageURL: URL?,
+        secretIntent: SnippetEditSecretIntent,
+        groupID: UUID?,
+        persist: (SnippetModel, UUID?) -> SnippetEditorPersistenceReceipt
+    ) -> SnippetEditTransactionOutcome {
         guard retryPendingCompensations() else { return .failed(.rollback) }
 
         var candidate = originalCandidate
         var staged: [Compensation] = []
-        var secretPurgeLease: SecretStore.OrphanPurgeLease?
-        defer { secretPurgeLease?.end() }
 
         let willBeSecret: Bool
         switch secretIntent {
@@ -229,13 +275,6 @@ final class SnippetEditTransaction {
         // The model makes image+secret unrepresentable on disk. Refuse the inconsistent request
         // before copying anything, so a future caller cannot turn that invariant into an orphan.
         if willBeSecret, pickedImageURL != nil { return .failed(.imageStaging) }
-
-        // Protect both newly written and unchanged values. An orphan sweep may have selected this
-        // ID just before an editor re-references it; the per-ID lease waits for that irreversible
-        // delete to finish, after which a staged replacement wins or an unchanged read fails closed.
-        if willBeSecret {
-            secretPurgeLease = resources.protectSecretFromOrphanPurge(candidate.id)
-        }
 
         // A newly selected attachment is the only image mutation that must precede persistence:
         // the candidate needs its stable stored name. The old attachment remains untouched.
@@ -265,6 +304,21 @@ final class SnippetEditTransaction {
             guard prior != .unavailable else {
                 return failAfterStaging(.secretRead, staged: staged)
             }
+            // Backings can make a durable partial write and still report failure. Stage the
+            // compensation before attempting the write, then inspect what actually survived.
+            staged.append(Compensation { [resources] in
+                switch resources.readSecret(candidate.id) {
+                case .unavailable: return .failure(.unavailable)
+                case .missing: return .success(())
+                case .value(let current) where current != value || prior == .value(current): return .success(())
+                case .value: break
+                }
+                switch prior {
+                case .value(let oldValue): return resources.storeSecret(oldValue, candidate.id)
+                case .missing: return resources.removeSecret(candidate.id)
+                case .unavailable: return .failure(.unavailable)
+                }
+            })
             switch resources.storeSecret(value, candidate.id) {
             case .failure:
                 return failAfterStaging(.secretWrite, staged: staged)
@@ -272,13 +326,6 @@ final class SnippetEditTransaction {
                 candidate.isSecret = true
                 candidate.replacementText = ""
                 candidate.imagePath = ""
-                staged.append(Compensation { [resources] in
-                    switch prior {
-                    case .value(let oldValue): return resources.storeSecret(oldValue, candidate.id)
-                    case .missing: return resources.removeSecret(candidate.id)
-                    case .unavailable: return .failure(.unavailable)
-                    }
-                })
             }
 
         case .remove:
@@ -327,7 +374,18 @@ final class SnippetEditTransaction {
     /// Cancel has no work before the first save attempt. After a failed rollback it is a cleanup
     /// retry, and callers must keep the editor open if that retry still fails.
     func cancel() -> SnippetEditCancellationOutcome {
-        retryPendingCompensations() ? .clean : .rollbackFailed
+        guard executionLock.try() else { return .rollbackFailed }
+        defer { executionLock.unlock() }
+        var clean = false
+        let retry = { clean = self.retryPendingCompensations() }
+        if pendingSecretID != nil {
+            guard resources.performSecretTransaction(retry) else { return .rollbackFailed }
+        } else { retry() }
+        if clean {
+            secretProtection = nil
+            pendingSecretID = nil
+        }
+        return clean ? .clean : .rollbackFailed
     }
 
     private func failAfterStaging(
@@ -359,43 +417,6 @@ final class SnippetEditTransaction {
         }
         pendingCompensations = failed
         return failed.isEmpty
-    }
-}
-
-/// Draft-only state for switching between ordinary replacement text and Keychain-backed secret
-/// entry. The ordinary text is deliberately retained in memory for the life of the sheet, never
-/// copied into the secret field or persisted while Secret is enabled.
-struct SnippetSecretModeDraft: Equatable {
-    private(set) var isSecret: Bool
-    private var preservedReplacement: String?
-
-    init(isSecret: Bool) {
-        self.isSecret = isSecret
-    }
-
-    /// Returns the text the ordinary replacement editor should display after the transition.
-    /// Entering Secret hides a blank editor; leaving restores the exact draft captured on entry.
-    mutating func transition(toSecret wantsSecret: Bool, currentReplacement: String) -> String {
-        guard wantsSecret != isSecret else { return currentReplacement }
-        isSecret = wantsSecret
-        if wantsSecret {
-            preservedReplacement = currentReplacement
-            return ""
-        }
-        return preservedReplacement ?? ""
-    }
-}
-
-/// Resolves the user gesture before any editor state changes. An attachment is mutually exclusive
-/// with Secret, but it is never removed from the draft without a separate destructive confirmation.
-enum SnippetSecretModeTransition: Equatable {
-    case enable
-    case disable
-    case confirmImageRemoval
-
-    static func resolve(isSecret: Bool, hasImage: Bool) -> Self {
-        if isSecret { return .disable }
-        return hasImage ? .confirmImageRemoval : .enable
     }
 }
 
@@ -488,7 +509,9 @@ enum SnippetLibraryEdit {
         to original: [SnippetGroup],
         conflictDetectionEnabled: Bool = SnippetStore.isConflictDetectionEnabled
     ) -> [SnippetGroup]? {
-        var groups = original
+        guard !snippet.isSecret else { return nil }
+        let document = SnippetDocument(groups: original)
+        var groups = document.groups
 
         if let existingID {
             let locations = groups.indices.flatMap { groupIndex in
@@ -520,10 +543,10 @@ enum SnippetLibraryEdit {
                 groups[source.0].snippets.remove(at: source.1)
                 groups[destinationIndex].snippets.append(snippet)
             }
-            return groups
+            return SnippetDocument(groups: groups, secrets: document.secrets).transactionGroups
         }
 
-        guard !groups.flatMap(\.snippets).contains(where: { $0.id == snippet.id }) else { return nil }
+        guard !document.snippets.contains(where: { $0.id == snippet.id }) else { return nil }
         guard SnippetTriggerAuthoringValidator.conflict(
             for: snippet,
             excludingID: nil,
@@ -547,6 +570,6 @@ enum SnippetLibraryEdit {
             destinationIndex = 0
         }
         groups[destinationIndex].snippets.append(snippet)
-        return groups
+        return SnippetDocument(groups: groups, secrets: document.secrets).transactionGroups
     }
 }

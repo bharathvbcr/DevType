@@ -977,7 +977,7 @@ public enum CommandPaletteCatalog {
                 .filter(\.enabled)
                 .flatMap { group in
                     group.snippets
-                        .filter { $0.enabled && !$0.triggerKeyword.isEmpty }
+                        .filter { $0.enabled && ($0.isSecret || !$0.triggerKeyword.isEmpty) }
                         .map { snippet in
                             let boost = usageBoost?(snippet.id) ?? UsageStatsStore.shared.rankBoost(for: snippet.id)
                             return SearchHit(

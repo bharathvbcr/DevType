@@ -420,8 +420,24 @@ public final class LocalizationManager: ObservableObject {
             "secret.copied.toast.detail": "Clipboard clears in %@ seconds.",
             "snippet.copied.toast": "Copied “%@” — press ⌘V",
             "snippet.copied.empty": "Nothing to copy — this snippet is empty",
-            "menu.copySecret.empty": "No secret snippets yet",
-            "menu.copySecret.hint": "Mark a snippet as Secret to store it in the Keychain",
+            "menu.copySecret.empty": "No secrets yet",
+            "secrets.title": "Secrets",
+            "secrets.manage": "Manage Secrets…",
+            "secrets.add": "Add Secret",
+            "secrets.edit": "Edit Secret",
+            "secrets.save": "Save Secret",
+            "secrets.delete": "Delete Secret",
+            "secrets.name": "Name",
+            "secrets.value": "Secret value",
+            "secrets.tags": "Tags (comma separated)",
+            "secrets.hint": "Store and manage secrets here. Copy from this window or the menu bar — no trigger or shortcut needed.",
+            "secrets.empty": "No matching secrets. Add a secret to get started.",
+            "secrets.name.required": "Enter a name between 1 and 256 characters.",
+            "secrets.save.failed": "The secret was not saved. Resolve the library error or reopen the latest secret and try again.",
+            "secrets.cleanup.pending": "Secret removal is pending. Open Advanced preferences to retry storage cleanup.",
+            "secrets.repair": "Advanced · Repair Secret Storage…",
+            "secrets.repair.hint": "Preferences → Advanced → Repair Secret Storage",
+            "menu.copySecret.hint": "Add and edit secrets in Manage Secrets",
             "secret.copied.title": "Copied — press ⌘V to paste",
             "secret.copied.message":
                 "%@ is on the clipboard and will be cleared in %@ seconds. "
@@ -429,8 +445,8 @@ public final class LocalizationManager: ObservableObject {
                 + "so paste it yourself.",
             "secret.missing.title": "Secret unavailable",
             "secret.missing.message":
-                "%@ is marked as a secret, but its value could not be read from the Keychain. "
-                + "Open the snippet editor and enter it again.",
+                "The stored value for %@ could not be read. Open Manage Secrets to edit it, "
+                + "or use Preferences → Advanced → Repair Secret Storage if storage needs attention.",
             "secret.saveFailed.title": "Could not save to Keychain",
             "secret.saveFailed.message":
                 "The Keychain refused to store this secret (status %@). The snippet was saved "
@@ -2380,8 +2396,24 @@ public final class LocalizationManager: ObservableObject {
             "secret.copied.toast.detail": "%@초 후 클립보드가 지워집니다.",
             "snippet.copied.toast": "“%@” 복사됨 — ⌘V를 누르세요",
             "snippet.copied.empty": "복사할 내용이 없습니다 — 빈 스니펫입니다",
-            "menu.copySecret.empty": "비밀 스니펫이 없습니다",
-            "menu.copySecret.hint": "스니펫을 비밀로 표시하면 키체인에 저장됩니다",
+            "menu.copySecret.empty": "비밀이 없습니다",
+            "secrets.title": "비밀",
+            "secrets.manage": "비밀 관리…",
+            "secrets.add": "비밀 추가",
+            "secrets.edit": "비밀 편집",
+            "secrets.save": "비밀 저장",
+            "secrets.delete": "비밀 삭제",
+            "secrets.name": "이름",
+            "secrets.value": "비밀 값",
+            "secrets.tags": "태그 (쉼표로 구분)",
+            "secrets.hint": "여기에서 비밀을 관리하고 이 창이나 메뉴 막대에서 복사하세요. 트리거나 단축키가 필요하지 않습니다.",
+            "secrets.empty": "일치하는 비밀이 없습니다. 비밀을 추가해 시작하세요.",
+            "secrets.name.required": "1~256자의 이름을 입력하세요.",
+            "secrets.save.failed": "비밀이 저장되지 않았습니다. 라이브러리 오류를 해결하거나 최신 비밀을 다시 열어 재시도하세요.",
+            "secrets.cleanup.pending": "비밀 삭제가 보류 중입니다. 고급 환경설정에서 저장소 정리를 재시도하세요.",
+            "secrets.repair": "고급 · 비밀 저장소 복구…",
+            "secrets.repair.hint": "환경설정 → 고급 → 비밀 저장소 복구",
+            "menu.copySecret.hint": "비밀 관리에서 비밀을 추가하고 편집하세요",
             "secret.copied.title": "복사됨 — ⌘V로 붙여넣으세요",
             "secret.copied.message":
                 "%@이(가) 클립보드에 있으며 %@초 후 삭제됩니다. "
@@ -4285,8 +4317,24 @@ public final class LocalizationManager: ObservableObject {
             "secret.copied.toast.detail": "%@ 秒後にクリップボードを消去します。",
             "snippet.copied.toast": "「%@」をコピーしました — ⌘V を押してください",
             "snippet.copied.empty": "コピーする内容がありません — 空のスニペットです",
-            "menu.copySecret.empty": "シークレットスニペットはありません",
-            "menu.copySecret.hint": "スニペットをシークレットにするとキーチェーンに保存されます",
+            "menu.copySecret.empty": "シークレットはありません",
+            "secrets.title": "シークレット",
+            "secrets.manage": "シークレットを管理…",
+            "secrets.add": "シークレットを追加",
+            "secrets.edit": "シークレットを編集",
+            "secrets.save": "シークレットを保存",
+            "secrets.delete": "シークレットを削除",
+            "secrets.name": "名前",
+            "secrets.value": "シークレットの値",
+            "secrets.tags": "タグ（カンマ区切り）",
+            "secrets.hint": "ここでシークレットを管理し、このウィンドウやメニューバーからコピーできます。トリガーやショートカットは不要です。",
+            "secrets.empty": "一致するシークレットがありません。追加して始めましょう。",
+            "secrets.name.required": "1〜256文字の名前を入力してください。",
+            "secrets.save.failed": "保存できませんでした。ライブラリのエラーを解決するか、最新のシークレットを開き直して再試行してください。",
+            "secrets.cleanup.pending": "シークレットの削除は保留中です。詳細設定でストレージのクリーンアップを再試行してください。",
+            "secrets.repair": "詳細 · シークレットストレージを修復…",
+            "secrets.repair.hint": "環境設定 → 詳細 → シークレットストレージを修復",
+            "menu.copySecret.hint": "シークレットを管理から追加・編集できます",
             "secret.copied.title": "コピーしました — ⌘V で貼り付け",
             "secret.copied.message":
                 "%@ はクリップボードにあり、%@ 秒後に消去されます。"
@@ -4294,8 +4342,8 @@ public final class LocalizationManager: ObservableObject {
                 + "ご自身で貼り付けてください。",
             "secret.missing.title": "シークレットを利用できません",
             "secret.missing.message":
-                "%@ はシークレットに設定されていますが、キーチェーンから値を読み取れませんでした。"
-                + "スニペットエディタで再入力してください。",
+                "%@ の保存済みの値を読み取れませんでした。シークレットを管理から編集するか、"
+                + "環境設定 → 詳細 → シークレットストレージを修復を使用してください。",
             "secret.saveFailed.title": "キーチェーンに保存できません",
             "secret.saveFailed.message":
                 "キーチェーンがこのシークレットの保存を拒否しました（状態 %@）。"

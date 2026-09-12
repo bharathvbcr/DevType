@@ -95,6 +95,10 @@ enum SnippetEditorSheet {
         // Same single-instance contract as MacroPalettePanel.present: a second
         // presentation while one is up would overwrite the statics, and finishing
         // the first would then nil them out from under the second.
+        if (existing ?? draft)?.isSecret == true {
+            (NSApp.delegate as? AppDelegate)?.openSecretManager(nil)
+            return
+        }
         if activePanel != nil { return }
         let panel = EditorKeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
@@ -104,11 +108,12 @@ enum SnippetEditorSheet {
         )
         DevTypeTheme.styleFloatingPanel(panel)
 
+        let snippetGroups = SnippetDocument(groups: groups).groups
         let controller = SnippetEditorController(
             existing: existing,
             draft: draft,
-            groups: groups,
-            currentGroupID: currentGroupID,
+            groups: snippetGroups,
+            currentGroupID: snippetGroups.contains(where: { $0.id == currentGroupID }) ? currentGroupID : nil,
             loc: loc,
             persist: completion,
             onDismiss: {
@@ -608,9 +613,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private var caseChip: ToggleChip!
     private var boundaryChip: ToggleChip!
     private var plainChip: ToggleChip!
-    private var secretChip: ToggleChip!
-    /// Secure entry shown in place of the replacement text view while `secretChip` is on.
-    private let secretField = NSSecureTextField()
     /// The replacement text view's scroller, hidden while the secure field has the slot.
     private weak var replacementScroll: NSScrollView?
     private let errorLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(11, .medium), color: DevTypeTheme.accentBright, wrapping: true)
@@ -654,7 +656,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private var pickedImageURL: URL?
     /// Ordinary replacement text survives Secret on/off cycles for this sheet only. It is never
     /// persisted while Secret is enabled and never copied into the secure field.
-    private var secretModeDraft: SnippetSecretModeDraft
 
     // MARK: - On-device tag suggestion (`SnippetTagSuggester`)
 
@@ -704,7 +705,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         self.onDismiss = onDismiss
         self.initialGroupID = currentGroupID ?? groups.first?.id
         self.attachedImagePath = (existing ?? draft)?.imagePath ?? ""
-        self.secretModeDraft = SnippetSecretModeDraft(isSecret: (existing ?? draft)?.isSecret ?? false)
         // §1: never shown when editing an existing snippet, and the dismissal is
         // remembered across launches.
         self.guideVisible = (existing == nil) && !SnippetEditorGuideView.isDismissed
@@ -881,25 +881,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             help: loc.s("editor.plainText.help"),
             target: self, action: #selector(chipTapped(_:))
         )
-        secretChip = ToggleChip(
-            title: loc.s("editor.secret.toggle"), symbol: "key.fill",
-            isOn: seed?.isSecret ?? false,
-            help: loc.s("editor.secret.help"),
-            target: self, action: #selector(chipTapped(_:))
-        )
-        // Editing an existing secret shows an empty field with a "stored" placeholder: the value
-        // is in the keychain and is deliberately never fetched to populate this view. Leaving the
-        // field untouched keeps what is stored; typing replaces it.
-        secretField.placeholderString = loc.s(
-            (seed?.isSecret ?? false) ? "editor.secret.unchanged" : "editor.secret.placeholder"
-        )
-        secretField.translatesAutoresizingMaskIntoConstraints = false
-        secretField.font = DevTypeTheme.font(13, .regular)
-        secretField.isHidden = !(seed?.isSecret ?? false)
-        secretField.setAccessibilityLabel(loc.s("editor.secret.toggle"))
-        secretField.setAccessibilityTitleUIElement(secretChip)
-
-        let chipsRow = NSStackView(views: [enabledChip, caseChip, boundaryChip, plainChip, secretChip])
+        let chipsRow = NSStackView(views: [enabledChip, caseChip, boundaryChip, plainChip])
         // Suggestion chips are appended to this same row rather than given a row of their own:
         // the panel is a fixed 690pt and this one already scrolls horizontally when it overflows.
         self.chipsRow = chipsRow
@@ -1189,8 +1171,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         enabledChip.nextKeyView = caseChip
         caseChip.nextKeyView = boundaryChip
         boundaryChip.nextKeyView = plainChip
-        plainChip.nextKeyView = secretChip
-        secretChip.nextKeyView = cancelButton
+        plainChip.nextKeyView = cancelButton
         cancelButton.nextKeyView = saveButton
         saveButton.nextKeyView = titleField
 
@@ -1202,7 +1183,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     }
 
     override func viewDidLoad() {
-        defer { applySecretVisibility() }
         super.viewDidLoad()
         triggerDidChange()
     }
@@ -1455,10 +1435,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         charCountLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         container.addSubview(scroll)
-        // The secret field occupies the replacement text view's own slot rather than a row of its
-        // own: it *is* the replacement, and the outer layout pins `chipsRow` directly to the error
-        // label with nothing between them to insert into.
-        container.addSubview(secretField)
         container.addSubview(toolbarRule)
         container.addSubview(macro)
         container.addSubview(image)
@@ -1469,11 +1445,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
             scroll.bottomAnchor.constraint(equalTo: toolbarRule.topAnchor, constant: -2),
-
-            secretField.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
-            secretField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            secretField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            secretField.heightAnchor.constraint(equalToConstant: 24),
 
             toolbarRule.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             toolbarRule.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
@@ -1532,11 +1503,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         suggestionTask?.cancel()
         suggestionTask = nil
         guard existing == nil, SnippetTagSuggester.isActive else { return }
-        // A secret's body is the secret. It never reaches the model — the suggester refuses it
-        // too, but the caller that has the plaintext is the right place to stop.
-        let isSecret = secretChip?.isOn ?? false
         let body = replacementView.string
-        guard SnippetTagSuggester.shouldSuggest(body: body, isSecret: isSecret) else {
+        guard SnippetTagSuggester.shouldSuggest(body: body, isSecret: false) else {
             clearSuggestionChips()
             acceptance = nil
             return
@@ -1551,7 +1519,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             let suggestion = await SnippetTagSuggester.suggest(
                 title: title,
                 body: body,
-                isSecret: isSecret,
+                isSecret: false,
                 groupNames: names
             )
             guard !Task.isCancelled else { return }
@@ -1771,18 +1739,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     /// saves happily and then never fires; nothing used to say so.
     private func validateTriggerLive() {
         let trigger = triggerField.stringValue.trimmingCharacters(in: .whitespaces)
-        // Secrets are gesture-only and deliberately do not participate in typed matching.
-        // Switching modes must therefore release trigger validation without destroying the
-        // ordinary trigger draft the user may return to.
-        if secretChip?.isOn == true {
-            isTriggerValid = true
-            saveButton?.isEnabled = true
-            triggerStatusLabel.stringValue = ""
-            stage.setInvalid(false)
-            setError(nil)
-            setTriggerRule(loc.s("editor.secret.help"), isError: false)
-            return
-        }
         guard !trigger.isEmpty else {
             isTriggerValid = false
             saveButton?.isEnabled = false
@@ -2161,58 +2117,11 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     // MARK: Actions
 
     @objc private func chipTapped(_ sender: ToggleChip) {
-        if sender === secretChip {
-            requestSecretModeTransition()
-            return
-        }
         sender.isOn.toggle()
         // Case sensitivity changes what counts as a conflict, and Word Boundary
         // changes the firing rule the guide explains — both re-run live.
         if sender === caseChip || sender === boundaryChip || sender === enabledChip {
             triggerDidChange()
-        }
-    }
-
-    private func requestSecretModeTransition() {
-        switch SnippetSecretModeTransition.resolve(isSecret: secretChip.isOn, hasImage: hasImage) {
-        case .enable:
-            commitSecretMode(true)
-        case .disable:
-            commitSecretMode(false)
-        case .confirmImageRemoval:
-            confirmImageRemoval(
-                titleKey: "editor.secret.removeImage.title",
-                messageKey: "editor.secret.removeImage.message",
-                confirmKey: "editor.secret.removeImage.confirm",
-                onCancel: { [weak self] in
-                    self?.secretChip.isOn = false
-                },
-                onConfirm: { [weak self] in
-                    guard let self else { return }
-                    // This mutates only the sheet draft. The transaction retains the stored
-                    // attachment until the library save commits, and Cancel leaves it intact.
-                    self.clearImageDraft()
-                    self.commitSecretMode(true)
-                }
-            )
-        }
-    }
-
-    private func commitSecretMode(_ secret: Bool) {
-        replacementView.string = secretModeDraft.transition(
-            toSecret: secret,
-            currentReplacement: replacementView.string
-        )
-        lastTextLength = (replacementView.string as NSString).length
-        secretChip.isOn = secret
-        applySecretVisibility()
-        triggerDidChange()
-        scheduleTagSuggestion()
-        if secret {
-            view.window?.makeFirstResponder(secretField)
-        } else {
-            view.window?.makeFirstResponder(replacementView)
-            replacementView.setSelectedRange(NSRange(location: lastTextLength, length: 0))
         }
     }
 
@@ -2233,32 +2142,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         }
     }
 
-    /// A secret's value is typed into a secure field, never into the plain text view.
-    ///
-    /// The text view is hidden and disabled. `SnippetSecretModeDraft` owns its reversible draft;
-    /// this method changes presentation only and never destroys text or an attachment.
-    private func applySecretVisibility() {
-        let secret = secretChip?.isOn ?? false
-        imageButton?.isEnabled = !secret
-        imageButton?.alphaValue = secret ? 0.4 : 1.0
-        secretField.isHidden = !secret
-        // Hidden rather than dimmed: two text areas in one slot, one of them live, is exactly the
-        // ambiguity that gets a password typed into the wrong one.
-        replacementScroll?.isHidden = secret
-        replacementView.isEditable = !secret
-        if secret {
-            view.window?.makeFirstResponder(secretField)
-        }
-        refreshPreview()
-    }
-
     @objc private func saveTapped() {
         let trigger = triggerField.stringValue.trimmingCharacters(in: .whitespaces)
-        // A secret is reachable only by an explicit gesture — the menu, or the copy palette — so
-        // its trigger can never fire and demanding one made the user invent a keyword for
-        // something that does nothing with it.
-        let requiresTrigger = !(secretChip?.isOn ?? false)
-        guard !trigger.isEmpty || !requiresTrigger else {
+        guard !trigger.isEmpty else {
             showError(loc.s("editor.error.emptyTrigger"))
             return
         }
@@ -2269,7 +2155,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             return
         }
         let caseSensitive = caseChip.isOn
-        if requiresTrigger, let conflict = SnippetTriggerAuthoringValidator.conflict(
+        if let conflict = SnippetTriggerAuthoringValidator.conflict(
             trigger: trigger,
             caseSensitive: caseSensitive,
             requireWordBoundary: boundaryChip.isOn,
@@ -2285,9 +2171,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         let replacement = replacementView.string
         // A cleared body used to resurrect the previous text on save — or plant a
         // "Hello World" placeholder into a brand-new snippet — silently undoing what
-        // the user just deleted. Refuse the save instead. Secrets and attached images
-        // carry no body by design, so they stay exempt.
-        if !hasImage && !(secretChip?.isOn ?? false), replacement.isEmpty {
+        // the user just deleted. Refuse the save instead. Attached images carry no body
+        // by design, so they stay exempt.
+        if !hasImage, replacement.isEmpty {
             showError(loc.s("editor.error.emptyReplacement"))
             return
         }
@@ -2334,8 +2220,6 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             snippet.replacementText = ""
         } else {
             snippet.imagePath = ""
-            // Unreachable with an empty body: the guard above refused it (or a secret
-            // is on, and `applySecret` overwrites this below).
             snippet.replacementText = replacement
         }
 
@@ -2345,43 +2229,18 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         snippet.enabled = enabledChip.isOn
         snippet.aiTransform = selectedAITransform
 
-        let secretIntent: SnippetEditSecretIntent
-        let wantsSecret = secretChip?.isOn ?? false
-        let typedSecret = secretField.stringValue
-        if wantsSecret {
-            snippet.isSecret = true
-            snippet.replacementText = ""
-            snippet.imagePath = ""
-            if typedSecret.isEmpty {
-                guard existing?.isSecret == true,
-                      SecretStore.shared.hasSecret(for: snippet.id) else {
-                    showError(loc.s("editor.secret.placeholder"))
-                    view.window?.makeFirstResponder(secretField)
-                    return
-                }
-                secretIntent = .unchanged
-            } else {
-                secretIntent = .set(typedSecret)
-            }
-        } else {
-            snippet.isSecret = false
-            secretIntent = .remove
-        }
-
         snippet.updatedAt = Date()
         switch resourceTransaction.save(
             snippet: snippet,
             existing: existing,
             pickedImageURL: pickedImageURL,
-            secretIntent: secretIntent,
+            secretIntent: .remove,
             groupID: selectedGroupID,
             persist: persist
         ) {
         case .committed:
-            secretField.stringValue = ""
             onDismiss()
         case .committedWithWarning:
-            secretField.stringValue = ""
             DevTypeAlert.present(
                 title: loc.s("editor.transaction.commitWarning.title"),
                 message: loc.s("editor.transaction.commitWarning.message"),

@@ -22,6 +22,7 @@ enum SecretMenuFlow {
     static func resolve(
         _ snippet: SnippetModel,
         secretStore: SecretStore = .shared,
+        libraryStore: SnippetStore = .shared,
         gate: BiometricGate = .shared,
         preferenceEnabled: Bool? = nil,
         clipboardText: String? = nil,
@@ -30,6 +31,28 @@ enum SecretMenuFlow {
         loc: LocalizationManager = .shared,
         completion: @escaping (Result<String, ResolveFailure>) -> Void
     ) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async {
+                resolve(snippet, secretStore: secretStore, libraryStore: libraryStore, gate: gate,
+                        preferenceEnabled: preferenceEnabled, clipboardText: clipboardText,
+                        lookup: lookup, pendingMigration: pendingMigration, loc: loc, completion: completion)
+            }
+            return
+        }
+        let selectedSecret = snippet.isSecret ? SnippetDocument(snippets: [snippet]).secrets.first : nil
+        let selectionIsCurrent = {
+            !snippet.isSecret || (snippet.enabled &&
+                libraryStore.loadCurrentSecrets()?.first(where: { $0.id == snippet.id }) == selectedSecret)
+        }
+        guard selectionIsCurrent() else { completion(.failure(.selectionChanged)); return }
+        let resolveCurrent = {
+            guard selectionIsCurrent() else { return Result<String, ResolveFailure>.failure(.selectionChanged) }
+            let result = resolveForCopy(snippet, secretStore: secretStore,
+                                        clipboardText: clipboardText, lookup: lookup)
+            // A backing read may wait for another writer. Do not publish a value if its
+            // metadata was retired while that read was in flight.
+            return selectionIsCurrent() ? result : .failure(.selectionChanged)
+        }
         // §8.10: a secret still stored the old way cannot be read without a system password
         // dialog, and an ordinary copy is never allowed to surprise the user with one. Fail
         // into the migration flow instead, which explains itself before any dialog appears.
@@ -51,14 +74,7 @@ enum SecretMenuFlow {
             preferenceEnabled: enabled,
             availability: availability
         ) else {
-            completion(
-                resolveForCopy(
-                    snippet,
-                    secretStore: secretStore,
-                    clipboardText: clipboardText,
-                    lookup: lookup
-                )
-            )
+            completion(resolveCurrent())
             return
         }
 
@@ -67,14 +83,7 @@ enum SecretMenuFlow {
         gate.authorize(reason: loc.s("secret.auth.reason", snippet.displayTitle)) { outcome in
             switch outcome {
             case .authorized:
-                completion(
-                    resolveForCopy(
-                        snippet,
-                        secretStore: secretStore,
-                        clipboardText: clipboardText,
-                        lookup: lookup
-                    )
-                )
+                completion(resolveCurrent())
             case .cancelled:
                 completion(.failure(.authenticationCancelled))
             case .failed(let reason):
@@ -124,6 +133,8 @@ enum SecretMenuFlow {
     }
 
     enum ResolveFailure: Error, Equatable {
+        /// The selected record was disabled, deleted, edited or could not be revalidated.
+        case selectionChanged
         /// Marked secret, but the keychain has nothing (or refused to answer).
         case secretUnavailable
         /// An image snippet: copyable, but as image data rather than as text.

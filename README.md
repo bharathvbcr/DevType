@@ -46,7 +46,7 @@ It expands typed triggers in place, renders Mustache and TextExpander macros, ru
 - [📚 Documentation Suite](#-documentation-suite)
 - [🤖 On-Device AI Transforms](#-on-device-ai-transforms-macos-26)
 - [🎙️ Smart Dictation](#️-smart-dictation)
-- [🔒 Secret Snippets (Touch ID)](#-secret-snippets-passwords)
+- [🔒 Secrets (Touch ID)](#-secrets-passwords)
 - [🧩 Template & Macro Engine](#-template-engine-reference)
 - [🤝 Open Source & Contributing](#-open-source--contributing)
 - [❓ Frequently Asked Questions (FAQ)](#-frequently-asked-questions-faq)
@@ -97,7 +97,7 @@ It expands typed triggers in place, renders Mustache and TextExpander macros, ru
 - 🖼️ **Rich Image Snippets**: Paste images directly from snippet triggers with full Espanso `image_path` import support.
 - 📦 **One-Click Importers**: Seamlessly import existing snippet libraries from TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML match configs — with export to Espanso YAML, an atomic Espanso `match/` folder, CSV, or DevType JSON.
 - 🛡️ **Privacy & Fail-Closed Security**: Automatic expansion pause during password entry (`NSSecureTextField`), Secure Event Input locks, IME composition, or in muted apps.
-- 🔒 **Secret Snippets**: Store passwords AES-GCM-encrypted, gated behind Touch ID, copied from the menu bar with an auto-clearing concealed clipboard — never in the library file, exports, or diagnostics. See [SECRETS.md](SECRETS.md).
+- 🔒 **Independent Secrets**: Manage passwords without triggers or shortcuts, with encrypted storage, an optional Touch ID gate, and an auto-clearing concealed clipboard. Stored values stay out of the library file, snippet exports, and diagnostics. See [SECRETS.md](SECRETS.md).
 - 🔑 **Stable Identity TCC**: Packaged `.app` bundle with dedicated code identity (`com.devtype.app`) so macOS Accessibility & Input Monitoring permissions persist cleanly across updates.
 - 🔔 **Opt-In Update Checks**: DevType can tell you when a new release ships — **off by default**, at most once a day, and it never downloads or installs anything on its own. The request carries no version, machine, or usage data; you get a notice with the release notes and a button to the release page. "Check for Updates…" in the menu bar and Preferences always works regardless of the setting.
 
@@ -170,7 +170,7 @@ Explore our complete documentation in the [`docs/`](docs/) directory:
 - 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
 - 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running the engine and AppKit-core test suites, debugging, and release automation.
 - 📦 **[Release notes](docs/releases/v1.0.0.md)**: v1.0.0 adds structured snippet search, four offline naming conversions, portable text tools, and cache/calculator hardening. See the [audit and distribution gates](docs/audits/2026-09-10-productivity-release.md). (See also [v0.1.9](docs/releases/v0.1.9.md)).
-- 🔒 **[Secret Snippets Design](SECRETS.md)**: Cryptographic threat model, AES-GCM encryption, and Touch ID biometric gating.
+- 🔒 **[Secrets Design](SECRETS.md)**: Independent metadata, encrypted storage, recovery, and Touch ID gating.
 
 ---
 
@@ -207,19 +207,21 @@ Full detail in [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
 
 ---
 
-## 🔒 Secret Snippets (Passwords)
+## 🔒 Secrets (Passwords)
 
 <p align="center">
   <img src="docs/assets/screenshots/preferences-snippets.png" alt="DevType Preferences — Snippets tab with the Touch ID requirement for secrets and expansion statistics" width="85%">
 </p>
 
-Mark any snippet **Secret** in the editor and its value moves out of the snippet library entirely — AES-GCM-sealed in an encrypted archive, with a single master key in the login keychain, gated behind **Touch ID**.
+Open **menu bar → Copy Secret → Manage Secrets…** to add, edit, copy, or delete secrets independently of snippets. Secrets need a name and value, with no trigger or keyboard shortcut. Values remain AES-GCM-sealed in the encrypted archive (or retained in Keychain fallback storage until repair). Existing secret entries migrate with their UUIDs preserved.
+
+Secret metadata lives in a separate collection in library schema 3. Snippet editing, resetting, and exports stay separate. For an unreadable master key, use **Preferences → Advanced → Repair Secret Storage**, also reachable from the Secrets manager.
 
 - **Copy, don't type**: secrets never expand from typed triggers — macOS Secure Event Input withholds keystrokes in password fields, and a typo firing a password into a chat window is avoided by design. Use **menu bar → Copy Secret ▸** or **Search Secrets…**, then paste with `⌘V`.
 - **Password-field shortcut**: when macOS Secure Input is active, the menu bar shows a key and **Copy Secret**. Click it to open **Search Secrets** directly. Right-click or Control-click the button for the full DevType menu.
-- **Touch ID first**: each copy asks for Touch ID (password fallback available, one 30-second reuse window).
-- **Auto-clearing clipboard**: copies are marked concealed (clipboard managers ignore them) and cleared after 90 seconds.
-- **Zero leaks by construction**: values are absent from `snippets.json`, every export, the editor after save, and diagnostic reports.
+- **Touch ID gate**: enabled by default where available, with password fallback and a 30-second reuse window. The existing preference controls it.
+- **Auto-clearing clipboard**: copies request exclusion from compatible clipboard managers and clear after 90 seconds if DevType still owns the write.
+- **Separate values**: stored values are absent from `snippets.json`, snippet exports, and diagnostic reports, and are never prefilled in the editor.
 
 ---
 

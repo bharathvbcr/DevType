@@ -133,15 +133,12 @@ final class SnippetStoreSaveRaceTests: XCTestCase {
             // belonging to a snippet the library still references. A snippet that
             // is deleted and later re-added may legitimately lose its secret —
             // that is eager-orphan-purge semantics, not this race.
-            let live = store.loadGroups()
-            for group in live where group.name == "Marker-\(round)" {
-                for snippet in group.snippets {
-                    XCTAssertNotNil(
-                        secrets.secret(for: snippet.id),
-                        "round \(round): marker snippet \(snippet.triggerKeyword) survived "
-                            + "on disk but its keychain secret was purged by a racing save."
-                    )
-                }
+            let live = store.loadSecrets()
+            XCTAssertEqual(live.count, round + 1, "Every committed marker must be examined")
+            XCTAssertTrue(live.contains { $0.id == markerID })
+            for secret in live {
+                XCTAssertNotNil(secrets.secret(for: secret.id),
+                    "round \(round): a committed marker lost its stored value")
             }
         }
     }

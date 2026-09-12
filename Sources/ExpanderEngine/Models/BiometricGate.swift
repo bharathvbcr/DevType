@@ -87,6 +87,7 @@ public final class BiometricGate {
     ) -> Bool {
         guard let lastSuccess else { return true }
         let elapsed = now.timeIntervalSince(lastSuccess)
+        guard elapsed.isFinite, window.isFinite, window > 0 else { return true }
         return elapsed < 0 || elapsed >= window
     }
 
@@ -124,10 +125,16 @@ public final class BiometricGate {
 
         guard Self.needsAuthentication(lastSuccess: last, now: clock()) else {
             DevTypeLog.inject.info("[Secret] auth reused (within \(Int(Self.reuseWindow), privacy: .public)s)")
-            return dispatchToMain { completion(.authorized) }
+            return Self.dispatchToMain { completion(.authorized) }
         }
 
+        let replyLock = NSLock()
+        var didReply = false
         authenticator.evaluate(reason: reason) { [weak self] outcome in
+            replyLock.lock()
+            guard !didReply else { replyLock.unlock(); return }
+            didReply = true
+            replyLock.unlock()
             if case .authorized = outcome, let self {
                 // Stamped when the answer arrived, not when it was asked: a prompt the user left
                 // sitting for a minute should not spend that minute of the window before it opens.
@@ -140,7 +147,7 @@ public final class BiometricGate {
             // Privacy: the outcome, never the snippet's value; the reason string is already the
             // snippet's title, which the user just clicked.
             DevTypeLog.inject.info("[Secret] auth → \(outcome.logLabel, privacy: .public)")
-            self?.dispatchToMain { completion(outcome) }
+            Self.dispatchToMain { completion(outcome) }
         }
     }
 
@@ -154,7 +161,7 @@ public final class BiometricGate {
         authenticator.invalidate()
     }
 
-    private func dispatchToMain(_ work: @escaping () -> Void) {
+    private static func dispatchToMain(_ work: @escaping () -> Void) {
         if Thread.isMainThread {
             work()
         } else {

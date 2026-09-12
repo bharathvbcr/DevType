@@ -14,6 +14,16 @@ final class BiometricGateTests: XCTestCase {
 
     // MARK: - When to ask
 
+    func testInvalidAuthenticationClockOrWindowNeverReusesAuthorization() {
+        for window in [Double.nan, .infinity, -.infinity, -1, 0] {
+            XCTAssertTrue(BiometricGate.needsAuthentication(lastSuccess: now, now: now, window: window))
+        }
+        for invalid in [Double.nan, .infinity, -.infinity] {
+            XCTAssertTrue(BiometricGate.needsAuthentication(lastSuccess: now,
+                now: Date(timeIntervalSince1970: invalid)))
+        }
+    }
+
     func testFirstReadAlwaysAsks() {
         XCTAssertTrue(BiometricGate.needsAuthentication(lastSuccess: nil, now: now))
     }
@@ -234,6 +244,8 @@ final class BiometricGateTests: XCTestCase {
             "SnippetManagerViewController.swift",
             "InlineSearchPanel.swift",
             "SnippetEditorSheet.swift",
+            "SecretEditorSheet.swift",
+            "SecretManagerViewController.swift",
             "ToastPanel.swift",
         ] {
             let url = root.appendingPathComponent("Sources/DevTypeAppCore/\(name)")
@@ -244,16 +256,19 @@ final class BiometricGateTests: XCTestCase {
             )
         }
 
-        // The editor may ask *whether* a secret exists — that reveals nothing — but not what it is.
+        // Secret editing delegates unchanged-value validation to the existing resource
+        // transaction; neither editor nor manager fetches a value to populate the UI.
         let editor = try String(
-            contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/SnippetEditorSheet.swift"),
+            contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/SecretEditorSheet.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(
-            editor.contains("SecretStore.shared.hasSecret(for:"),
-            "The editor still needs the existence check to decide whether an untouched field "
-                + "means 'keep what is stored'."
+        XCTAssertTrue(editor.contains("value.isEmpty ? .unchanged : .set(value)"))
+        let transaction = try String(
+            contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/SnippetEditTransaction.swift"),
+            encoding: .utf8
         )
+        XCTAssertTrue(transaction.contains("case .value = resources.readSecret(candidate.id)"),
+                      "An untouched field must verify the stored value before committing metadata.")
     }
     // MARK: - Which policy actually gets used
 

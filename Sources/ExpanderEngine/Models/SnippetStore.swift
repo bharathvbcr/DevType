@@ -3,48 +3,93 @@ import Foundation
 
 /// On-disk envelope for snippets. Versioned so future fields can migrate without wiping user data.
 public struct SnippetDocument: Codable, Equatable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
     public static let defaultGroupName = "General"
 
     public var schemaVersion: Int
     public var groups: [SnippetGroup]
+    public var secrets: [SecretModel]
+
+    // Internal projection into the established whole-library transaction owner. The reserved
+    // group is never encoded or offered as a user snippet group.
+    static let secretGroupID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
+    public var transactionGroups: [SnippetGroup] {
+        guard !secrets.isEmpty else { return groups }
+        return groups + [SnippetGroup(id: Self.secretGroupID, name: "Secrets", symbol: "key.fill",
+                                      snippets: secrets.map(\.snippetAdapter))]
+    }
 
     /// Flattened snippets for engine / legacy callers.
     public var snippets: [SnippetModel] {
-        groups.flatMap(\.snippets)
+        transactionGroups.flatMap(\.snippets)
     }
 
-    public init(schemaVersion: Int = SnippetDocument.currentSchemaVersion, groups: [SnippetGroup]) {
+    public init(schemaVersion: Int = SnippetDocument.currentSchemaVersion, groups: [SnippetGroup], secrets: [SecretModel] = []) {
         self.schemaVersion = schemaVersion
-        self.groups = groups
+        self.secrets = secrets + SnippetStore.expandableSnippets(in: groups)
+            .filter(\.isSecret).map(SecretModel.init(migrating:))
+        self.groups = groups.filter { $0.id != Self.secretGroupID || $0.snippets.contains(where: { !$0.isSecret }) }.map { group in
+            var copy = group
+            copy.snippets.removeAll(where: \.isSecret)
+            return copy
+        }
     }
 
     /// Convenience: wrap a flat snippet list in the default group (v1 migration shape).
     public init(schemaVersion: Int = SnippetDocument.currentSchemaVersion, snippets: [SnippetModel]) {
-        self.schemaVersion = schemaVersion
-        self.groups = [SnippetGroup(name: Self.defaultGroupName, snippets: snippets)]
+        self.init(schemaVersion: schemaVersion, groups: [SnippetGroup(name: Self.defaultGroupName, snippets: snippets)])
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, groups, snippets
+        case schemaVersion, groups, snippets, secrets
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
-        if let decodedGroups = try container.decodeIfPresent([SnippetGroup].self, forKey: .groups) {
-            groups = decodedGroups
-        } else if let legacySnippets = try container.decodeIfPresent([SnippetModel].self, forKey: .snippets) {
-            groups = [SnippetGroup(name: Self.defaultGroupName, snippets: legacySnippets)]
-        } else {
-            groups = []
+        let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        guard version > 0, !(container.contains(.groups) && container.contains(.snippets)) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                debugDescription: "Invalid or ambiguous library envelope."))
         }
+        let decodedGroups: [SnippetGroup]
+        if container.contains(.groups) {
+            decodedGroups = try container.decode([SnippetGroup].self, forKey: .groups)
+        } else if container.contains(.snippets), version < 3 {
+            let flat = try container.decode([SnippetModel].self, forKey: .snippets)
+            decodedGroups = [SnippetGroup(name: Self.defaultGroupName, snippets: flat)]
+        } else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                debugDescription: "The library collection is missing."))
+        }
+        guard !decodedGroups.contains(where: { $0.id == Self.secretGroupID }) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                debugDescription: "A snippet group uses the reserved secret collection identifier."))
+        }
+        let decodedSecrets = version == 3 || container.contains(.secrets)
+            ? try container.decode([SecretModel].self, forKey: .secrets) : []
+        self.init(schemaVersion: version, groups: decodedGroups, secrets: decodedSecrets)
+        guard hasUniqueSecretIDs else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                debugDescription: "Secret identifiers must be unique and distinct from snippet identifiers."))
+        }
+    }
+
+    fileprivate var hasUniqueSecretIDs: Bool {
+        let ids = Set(secrets.map(\.id))
+        return ids.count == secrets.count && ids.isDisjoint(with: groups.flatMap(\.snippets).map(\.id))
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(schemaVersion, forKey: .schemaVersion)
-        try container.encode(groups, forKey: .groups)
+        let normalized = SnippetDocument(schemaVersion: schemaVersion, groups: groups, secrets: secrets)
+        guard normalized.hasUniqueSecretIDs,
+              !normalized.groups.contains(where: { $0.id == Self.secretGroupID }) else {
+            throw EncodingError.invalidValue("secret identifiers", .init(codingPath: encoder.codingPath,
+                debugDescription: "Secret identifiers must be unique and distinct from snippet identifiers."))
+        }
+        try container.encode(max(schemaVersion, Self.currentSchemaVersion), forKey: .schemaVersion)
+        try container.encode(normalized.groups, forKey: .groups)
+        try container.encode(normalized.secrets, forKey: .secrets)
     }
 }
 
@@ -839,11 +884,15 @@ public final class SnippetStore {
 
     public static func decodeDocument(from data: Data) throws -> SnippetDocument {
         let decoder = JSONDecoder()
-        if let document = try? decoder.decode(SnippetDocument.self, from: data) {
+        if let legacySnippets = try? decoder.decode([SnippetModel].self, from: data) {
+            let document = SnippetDocument(snippets: legacySnippets)
+            guard document.hasUniqueSecretIDs else {
+                throw DecodingError.dataCorrupted(.init(codingPath: [],
+                    debugDescription: "Secret identifiers must be unique and distinct from snippet identifiers."))
+            }
             return document
         }
-        let legacySnippets = try decoder.decode([SnippetModel].self, from: data)
-        return SnippetDocument(snippets: legacySnippets)
+        return try decoder.decode(SnippetDocument.self, from: data)
     }
 
     /// `@discardableResult` because most callers genuinely cannot act on a failed save, but the
@@ -858,8 +907,9 @@ public final class SnippetStore {
         let existing = _cachedGroups ?? loadGroupsUnlocked()
         lock.unlock()
 
-        let sanitized = Self.sanitize(snippets)
-        var updated = existing
+        let replacement = SnippetDocument(snippets: Self.sanitize(snippets))
+        let sanitized = replacement.groups.flatMap(\.snippets)
+        var updated = SnippetDocument(groups: existing).groups
 
         if updated.isEmpty {
             updated = [SnippetGroup(name: SnippetDocument.defaultGroupName, snippets: sanitized)]
@@ -892,7 +942,7 @@ public final class SnippetStore {
 
         // `rmwLock` is already held for this whole read-modify-write; the public
         // `saveGroups` would try to re-acquire it and deadlock.
-        return saveGroupsSerialized(updated)
+        return saveGroupsSerialized(SnippetDocument(groups: updated, secrets: replacement.secrets).transactionGroups)
     }
 
     /// Commits `groups` as the whole library. The sanitize → write → cache-commit
@@ -1047,20 +1097,21 @@ public final class SnippetStore {
         keepingLatest latestLiveIDs: () -> Set<UUID>?
     ) -> SecretStore.PurgeSummary {
         guard secretPurgeEnabled else { return .init() }
-        let summary = secretStore.purgeOrphans(keepingLatest: latestLiveIDs)
+        let summary = secretStore.purgeOrphans(keepingLatest: latestLiveIDs,
+            confirmingLatest: { [weak self] in self?.confirmedLiveSecretIDsForCleanup() })
         saveBlockLock.lock()
-        _pendingSecretCleanupCount = summary.failed
+        _pendingSecretCleanupCount = summary.pending
         saveBlockLock.unlock()
         if summary.removed > 0 {
             DevTypeLog.store.info(
                 "[Store] purged \(summary.removed, privacy: .public) orphaned secret(s) from the keychain"
             )
         }
-        if summary.failed > 0 {
+        if summary.pending > 0 {
             // Aggregate counts only. Never log the stable keychain account UUID, snippet title,
             // trigger, or value while surfacing a failed destructive cleanup.
             DevTypeLog.store.error(
-                "[Store] orphaned secret cleanup incomplete attempted=\(summary.attempted, privacy: .public) removed=\(summary.removed, privacy: .public) failed=\(summary.failed, privacy: .public)"
+                "[Store] orphaned secret cleanup incomplete attempted=\(summary.attempted, privacy: .public) removed=\(summary.removed, privacy: .public) failed=\(summary.failed, privacy: .public) deferred=\(summary.deferred, privacy: .public)"
             )
         }
         return summary
@@ -1224,7 +1275,7 @@ public final class SnippetStore {
     }
 
     private static func importTargetIndex(named name: String, in groups: [SnippetGroup]) -> Int? {
-        groups.firstIndex { $0.name == name }
+        groups.firstIndex { $0.name == name && $0.id != SnippetDocument.secretGroupID }
     }
 
     private static func freshGroupID(excluding groups: [SnippetGroup]) -> UUID {
@@ -1506,6 +1557,25 @@ public final class SnippetStore {
         )
     }
 
+    /// Metadata authorized for value reads and cleanup. Nil means current authority could not
+    /// be established, never an empty collection. Refuse while another mutation owns the
+    /// cache/digest pair or disk no longer matches it. Nonblocking acquisition avoids lock inversion.
+    public func loadCurrentSecrets() -> [SecretModel]? {
+        guard rmwLock.try() else { return nil }
+        defer { rmwLock.unlock() }
+        guard blockedReason() == nil, hardFailure() == nil,
+              case .sha = lastKnownDigest(),
+              Self.currentDigest(at: fileURL) == lastKnownDigest() else { return nil }
+        lock.lock()
+        let groups = _cachedGroups
+        lock.unlock()
+        return groups.map { SnippetDocument(groups: $0).secrets }
+    }
+
+    private func confirmedLiveSecretIDsForCleanup() -> Set<UUID>? {
+        loadCurrentSecrets().map { Set($0.map(\.id)) }
+    }
+
     /// Coalesces launch, activation, and manual retries onto one bounded worker. While a pass is
     /// stalled in securityd, any number of new requests sets one trailing-pass bit rather than
     /// enqueueing one global job apiece. Callbacks run on the cleanup queue after the coalesced
@@ -1729,7 +1799,7 @@ public final class SnippetStore {
             _saveBlocked = pending == nil ? nil : .blockedByRemoteChange
             saveBlockLock.unlock()
             lock.lock()
-            _cachedGroups = document.groups
+            _cachedGroups = document.transactionGroups
             _lastLoadIssue = remaining.isEmpty ? nil : .conflicted(path: fileURL.path, versionCount: remaining.count)
             lock.unlock()
             if let pending { return .adoptedCleanupPending(pending, recoveryURL: recoveryURL) }
@@ -2057,7 +2127,7 @@ public final class SnippetStore {
 
         do {
             let document = try decodeDocument(from: raw)
-            out.groups = document.groups
+            out.groups = document.transactionGroups
             out.decodeSucceeded = true
             if document.schemaVersion > SnippetDocument.currentSchemaVersion {
                 out.blocked = .blockedByNewerSchema
@@ -2412,11 +2482,7 @@ public final class SnippetStore {
     }
 
     public static func sanitizeGroups(_ groups: [SnippetGroup]) -> [SnippetGroup] {
-        groups.map { group in
-            var copy = group
-            copy.snippets = sanitize(group.snippets)
-            return copy
-        }
+        SnippetDocument(groups: groups).transactionGroups
     }
 
     /// User preference: report trigger conflicts (duplicates, shadowing, empty triggers) in the
@@ -2701,16 +2767,17 @@ public final class SnippetStore {
         ]
     }
 
-    /// Replaces the complete library with a single canonical defaults group under the same
+    /// Replaces snippet groups with the defaults while retaining the independent secrets under the same
     /// read-modify-write boundary as every other logical mutation. Callers receive the exact
     /// before/after pair and must not present success unless this result is `.saved`.
     @discardableResult
     public func resetToDefaults() -> GroupMutationResult {
         mutateGroups { groups in
-            groups = [SnippetGroup(
+            let secrets = SnippetDocument(groups: groups).secrets
+            groups = SnippetDocument(groups: [SnippetGroup(
                 name: SnippetDocument.defaultGroupName,
                 snippets: defaultSnippets()
-            )]
+            )], secrets: secrets).transactionGroups
             return true
         }
     }

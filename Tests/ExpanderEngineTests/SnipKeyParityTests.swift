@@ -348,7 +348,7 @@ final class SchemaV2MigrationTests: XCTestCase {
         XCTAssertEqual(doc.groups[0].name, SnippetDocument.defaultGroupName)
     }
 
-    func testCurrentSchemaIsV2() {
-        XCTAssertEqual(SnippetDocument.currentSchemaVersion, 2)
+    func testCurrentSchemaSeparatesSecretsInV3() {
+        XCTAssertEqual(SnippetDocument.currentSchemaVersion, 3)
     }
 }

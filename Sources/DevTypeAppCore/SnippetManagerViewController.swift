@@ -1441,6 +1441,10 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     /// manager session. Insight actions describe the whole library, so a selected group or search
     /// query must not silently narrow their result set.
     func showAllSnippets(filteredBy filterChip: SnippetFilterChip) {
+        if filterChip == .secrets {
+            (NSApp.delegate as? AppDelegate)?.openSecretManager(nil)
+            return
+        }
         _ = view
         selectedGroupID = nil
         hasResolvedInitialGroupSelection = true
@@ -1496,6 +1500,10 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
     @objc private func filterChipTapped(_ sender: NSButton) {
         guard let chip = SnippetFilterChip(rawValue: sender.tag) else { return }
+        if chip == .secrets {
+            (NSApp.delegate as? AppDelegate)?.openSecretManager(nil)
+            return
+        }
         activeFilterChip = chip
         for (c, btn) in filterChipButtons {
             btn.style = (c == chip ? .primary : .secondary)
@@ -1551,7 +1559,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     private func reloadGroups() {
-        groups = SnippetStore.shared.loadGroups()
+        groups = SnippetStore.shared.loadSnippetGroups()
         if !hasResolvedInitialGroupSelection, let first = groups.first {
             selectedGroupID = first.id
             hasResolvedInitialGroupSelection = true

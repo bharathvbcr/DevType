@@ -10,6 +10,48 @@ import XCTest
 
 final class SecretArchiveLockTests: XCTestCase {
 
+    func testCleanupRechecksLivenessAfterWaitingForAnotherArchiveTransaction() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("synthetic.enc")
+        let tier = InMemorySecretBackingStore()
+        let writer = ConsolidatedSecretBackingStore(fileURL: url, tier: tier)
+        let cleaner = SecretStore(backing: ConsolidatedSecretBackingStore(fileURL: url, tier: tier))
+        let id = UUID()
+        XCTAssertEqual(writer.set("synthetic", account: id.uuidString), errSecSuccess)
+        let queried = DispatchSemaphore(value: 0)
+        let finished = expectation(description: "cleanup reconsidered the candidate")
+        let stateLock = NSLock()
+        var live = false
+        var queries = 0
+        XCTAssertTrue(writer.performExclusiveTransaction {
+            DispatchQueue.global().async {
+                let result = cleaner.purgeOrphans(keepingLatest: {
+                    stateLock.lock()
+                    let keep = live
+                    queries += 1
+                    stateLock.unlock()
+                    queried.signal()
+                    return keep ? [id] : []
+                })
+                XCTAssertEqual(result.attempted, 0)
+                XCTAssertEqual(result.removed, 0)
+                finished.fulfill()
+            }
+            XCTAssertEqual(queried.wait(timeout: .now() + 3), .success)
+            stateLock.lock()
+            live = true
+            stateLock.unlock()
+        })
+        wait(for: [finished], timeout: 8)
+        stateLock.lock()
+        let totalQueries = queries
+        stateLock.unlock()
+        XCTAssertGreaterThanOrEqual(totalQueries, 2)
+        XCTAssertEqual(writer.value(account: id.uuidString), "synthetic")
+    }
+
     func testUnavailableLockNeverChangesArchiveOrMasterKey() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("DevTypeArchiveLock-\(UUID().uuidString)", isDirectory: true)

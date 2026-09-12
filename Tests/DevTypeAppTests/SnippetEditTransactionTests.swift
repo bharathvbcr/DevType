@@ -233,7 +233,7 @@ final class SnippetEditTransactionTests: XCTestCase {
             resources.events,
             [
                 "secret.protect", "secret.read", "secret.store:replacement value", "library.persist",
-                "secret.store:prior value"
+                "secret.read", "secret.store:prior value"
             ]
         )
     }
@@ -261,7 +261,7 @@ final class SnippetEditTransactionTests: XCTestCase {
         XCTAssertNil(resources.secrets[id])
         XCTAssertEqual(
             resources.events,
-            ["library.persist", "secret.remove", "library.finalize"]
+            ["secret.protect", "library.persist", "secret.remove", "library.finalize"]
         )
     }
 
@@ -307,7 +307,7 @@ final class SnippetEditTransactionTests: XCTestCase {
 
         XCTAssertEqual(outcome, .failed(.secretWrite))
         XCTAssertTrue(resources.images.isEmpty)
-        XCTAssertEqual(resources.events, ["secret.protect", "secret.read", "secret.store:new value"])
+        XCTAssertEqual(resources.events, ["secret.protect", "secret.read", "secret.store:new value", "secret.read"])
     }
 
     func testImageImportFailureStopsBeforePersistenceWithoutCreatingAnAsset() {
@@ -356,7 +356,7 @@ final class SnippetEditTransactionTests: XCTestCase {
         XCTAssertEqual(resources.secrets[id], "prior value")
         XCTAssertEqual(
             resources.events,
-            ["library.persist", "secret.remove", "library.rollback"]
+            ["secret.protect", "library.persist", "secret.remove", "library.rollback"]
         )
     }
 
@@ -507,43 +507,38 @@ final class SnippetEditTransactionTests: XCTestCase {
         XCTAssertFalse(SnippetLibraryEdit.supportsModelOnlyUndo(existing: secret, candidate: changedSecret))
     }
 
-    func testSecretModeDraftRestoresTypedReplacementAfterRoundTrip() {
-        var draft = SnippetSecretModeDraft(isSecret: false)
-
-        XCTAssertEqual(
-            draft.transition(toSecret: true, currentReplacement: "typed before toggle"),
-            ""
-        )
-        XCTAssertTrue(draft.isSecret)
-        XCTAssertEqual(
-            draft.transition(toSecret: false, currentReplacement: ""),
-            "typed before toggle"
-        )
-        XCTAssertFalse(draft.isSecret)
+    // Secrets now have their own editor. Pin the stronger isolation invariants in place
+    // of the retired snippet/secret toggle's draft round-trip contract.
+    func testCreatingSecretPreservesOrdinaryReplacement() {
+        let original = snippet()
+        var groups = [SnippetGroup(name: "General", snippets: [original])]
+        XCTAssertTrue(SecretLibraryEdit.applying(SecretModel(title: "Login"), replacing: nil, to: &groups))
+        XCTAssertEqual(SnippetDocument(groups: groups).groups[0].snippets, [original])
     }
 
-    func testSecretModeDraftRecapturesEditsAcrossRepeatedToggleCycles() {
-        var draft = SnippetSecretModeDraft(isSecret: false)
-
-        _ = draft.transition(toSecret: true, currentReplacement: "first draft")
-        XCTAssertEqual(draft.transition(toSecret: false, currentReplacement: ""), "first draft")
-        _ = draft.transition(toSecret: true, currentReplacement: "edited draft")
-        XCTAssertEqual(draft.transition(toSecret: false, currentReplacement: ""), "edited draft")
+    func testEditingSecretPreservesOrdinaryEdits() {
+        let secret = SecretModel(title: "Login")
+        var updated = secret
+        updated.title = "Renamed"
+        var original = snippet()
+        original.replacementText = "edited draft"
+        var groups = SnippetDocument(groups: [SnippetGroup(name: "General", snippets: [original])],
+                                     secrets: [secret]).transactionGroups
+        XCTAssertTrue(SecretLibraryEdit.applying(updated, replacing: secret, to: &groups))
+        XCTAssertEqual(SnippetDocument(groups: groups).groups[0].snippets, [original])
+        XCTAssertEqual(SnippetDocument(groups: groups).secrets, [updated])
     }
 
-    func testSecretModeTransitionRequiresConfirmationBeforeRemovingImage() {
-        XCTAssertEqual(
-            SnippetSecretModeTransition.resolve(isSecret: false, hasImage: true),
-            .confirmImageRemoval
-        )
-        XCTAssertEqual(
-            SnippetSecretModeTransition.resolve(isSecret: false, hasImage: false),
-            .enable
-        )
-        XCTAssertEqual(
-            SnippetSecretModeTransition.resolve(isSecret: true, hasImage: true),
-            .disable
-        )
+    func testCreatingSecretCannotConvertOrRemoveImage() {
+        var image = snippet()
+        image.imagePath = "existing.png"
+        var groups = [SnippetGroup(name: "Images", snippets: [image])]
+        let before = groups
+        XCTAssertFalse(SecretLibraryEdit.applying(SecretModel(id: image.id, title: "Login"),
+                                                 replacing: nil, to: &groups))
+        XCTAssertEqual(groups, before)
+        XCTAssertTrue(SecretLibraryEdit.applying(SecretModel(title: "Login"), replacing: nil, to: &groups))
+        XCTAssertEqual(SnippetDocument(groups: groups).groups, before)
     }
 
     func testCanonicalTriggerValidationFindsExactCaseAndPrefixConflicts() throws {

@@ -1,20 +1,36 @@
-# Secret Snippets — Design & Security Model
+# Secrets — Design & Security Model
 
-DevType can store passwords and other sensitive strings as **secret snippets**: entries whose
-value never appears in the snippet library, the editor, any export, or the diagnostic report.
+DevType can store passwords and other sensitive strings as independent **secrets**: entries whose
+stored value is never prefilled in the editor or included in the snippet library, exports, or diagnostics.
 This document is the complete record of how they work, what protects them, exactly when macOS
 is allowed to show a dialog, and the measured keychain behaviour the design is built on.
 
 ---
 
-## What a secret snippet is
+## What a secret is
 
-- A snippet marked **Secret** in the editor. Its value is typed once into a secure field
-  (never echoed back) and handed straight to encrypted storage — the snippet model itself
-  carries an empty `replacementText`, enforced structurally in `SnippetModel.encode(to:)` and
-  re-stripped on decode, so *every* writer (library JSON, exports, conflict snapshots) redacts
-  by construction rather than by convention.
-- Secrets are **mouse-only**. They are excluded from typed-trigger matching at the engine's
+- An independent `SecretModel`, created in **menu bar → Copy Secret → Manage Secrets…**.
+  The editor asks for a name and secure value, with optional tags and an enabled setting.
+  There is no trigger, keyboard shortcut, snippet group, replacement body, image, or AI action.
+  Existing values are never prefilled. Leaving the value blank while editing keeps it unchanged.
+- Schema 3 stores secret metadata in a top-level `secrets` collection alongside ordinary
+  snippet `groups` in the same atomic library document. Values stay in `SecretStore`.
+  The snippet manager and its exports contain only snippets; resetting snippets retains secrets.
+- Older grouped, flat, and bare-array libraries are decoded into the independent collection.
+  UUIDs, labels, timestamps, tags, and effective enable/app restrictions are preserved; old
+  trigger text is discarded (used as the name only when an old entry has no other name).
+  Loading does not write or access values. The next successful library save writes schema 3.
+  Older builds that support only schema 2 refuse writes to this newer schema. Missing/null schema-3
+  collections, ambiguous grouped/flat envelopes, and duplicate secret IDs fail closed. Their raw
+  bytes remain intact; they cannot become an empty library that authorizes cleanup.
+- Search, authenticated copy, and atomic resource edits reuse their existing owners through
+  a value-free `snippetAdapter`. The internal transaction projection is never serialized as
+  snippet records. Failed metadata writes retain the existing library and compensate staged values.
+  An editor holds the archive transaction across value reads, staging, metadata publication, and
+  compensation. Partial writes that report failure are compensated too. Retried compensation
+  verifies its staged value before changing anything and keeps orphan protection until it finishes.
+  Metadata queries remain available while a value transaction owns the archive lock.
+- Secrets need **no trigger or shortcut**. They support deliberate mouse and palette actions. They are excluded from typed-trigger matching at the engine's
   setter (`isTypedTriggerExpandable == false`), for two independent reasons:
   1. Typed triggers cannot work where secrets are wanted: macOS **Secure Event Input**
      (TN2150) withholds keystrokes from every event tap *and* every registered hotkey while a
@@ -22,8 +38,8 @@ is allowed to show a dialog, and the measured keychain behaviour the design is b
   2. Typed triggers are dangerous everywhere else: a trigger that fires on typing fires in
      chat windows and shared documents too. An explicit gesture cannot misfire.
 - The paths to a secret: **status-bar menu → Copy Secret ▸**, **Search Secrets…**, or the
-  command palette. Each copies the value to the clipboard (marked
-  `org.nspasteboard.ConcealedType` so clipboard managers ignore it), shows a non-activating
+  command palette. Copy actions put the value on the clipboard (marked
+  `org.nspasteboard.ConcealedType` to request exclusion from compatible clipboard managers), show a non-activating
   toast, and schedules an auto-clear (default **90 s**) that only fires if the clipboard still
   holds our write. The final keystroke — `⌘V` in the target app — is the user's own, which is
   what makes this work inside password fields where synthetic input paths are curtailed.
@@ -32,23 +48,39 @@ When macOS Secure Input is active, the menu-bar button shows a key and **Copy Se
 Clicking it opens **Search Secrets** directly, with the search field ready for typing.
 Single-click a result, or select it with the arrow keys and press Return, to begin copying.
 The authentication gate runs before the value is read; merely highlighting or filtering
-results does not read or copy a secret.
+results does not read or copy a secret. Disabled secrets are absent from the copy menu. Before
+and after authorization/value retrieval, the resolver verifies that the selected metadata is still
+current on disk. Deleted, edited, disabled, unreadable, or externally changed selections fail closed.
 Right-click or Control-click the button for the full DevType menu, including the existing
 Copy Secret submenu, permission recovery, and engine diagnostics. Opening search does not
 read or copy a secret; choosing a result uses the same authentication and clipboard
 auto-clear flow. Typed expansion remains blocked in secure fields.
 
+If the master key cannot be read and values remain in Keychain fallback storage, metadata
+migration leaves those values alone. Use **Preferences → Advanced → Repair Secret Storage**;
+the Secrets manager links to that existing recovery page. Opening the manager does not run
+repair or prompt for Keychain access. A failed value read or write never becomes a successful save.
+
+Cleanup rechecks references after acquiring archive exclusion and verifies that the library's
+cached snapshot still matches disk. An external edit, unreadable library, or competing mutation
+defers deletion. Deferred items remain visible as pending cleanup in Advanced and the Secrets
+manager; an unexamined item is never reported as a successful removal.
+
 ## Touch ID gate
 
-Every secret read funnels through one resolver (`SecretMenuFlow.resolve`) that asks for
-authorization first — pinned by a source-contract test so no future surface can bypass it.
+User copy and insertion actions share one resolver (`SecretMenuFlow.resolve`) that applies the
+authentication preference before reading values. Source-contract tests guard these UI routes;
+internal storage operations also read values to verify writes and perform compensation.
 
 - Policy starts at `.deviceOwnerAuthenticationWithBiometrics` wherever biometrics are
   enrolled, so the prompt is **Touch ID**, not the password sheet. A named *Use Password…*
   fallback escalates exactly once (user fallback, biometry lockout, sensor unavailable) and
   never on a cancel — answering "no" is respected, not retried.
 - One successful check covers a **30 s reuse window**, so copying two secrets back-to-back
-  asks once. The window is invalidated when DevType resigns active.
+  asks once. The standing reuse window is invalidated when DevType resigns active; an already
+  requested prompt may finish, but cannot reopen that retired window. Non-finite clocks/windows
+  never authorize reuse. Duplicate authenticator callbacks finish the request only once, and
+  releasing a gate owner cannot silently strand a requested completion.
 - The gate is a switch, on by default where the machine can evaluate one: **Preferences →
   Snippets → Secrets**, mirrored as a checkable item at the bottom of the **Copy Secret**
   menu.

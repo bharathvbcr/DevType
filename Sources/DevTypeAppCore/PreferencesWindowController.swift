@@ -4677,10 +4677,10 @@ final class PreferencesViewController: NSViewController,
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.secretCleanupButton?.isEnabled = true
-                if summary.failed > 0 {
+                if summary.pending > 0 {
                     self.maintenanceStatus.stringValue = self.loc.s(
                         "prefs.advanced.secretCleanup.failed",
-                        summary.failed
+                        summary.pending
                     )
                     self.maintenanceStatus.textColor = DevTypeTheme.accentBright
                 } else if summary.removed > 0 {

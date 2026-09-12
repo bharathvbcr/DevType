@@ -11,6 +11,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemInteraction: StatusItemInteraction?
     private var menuRebuildPending = false
     private var secretsSubmenu: NSMenu?
+    private var secretWindowController: NSWindowController?
     private var snippetWindowController: NSWindowController?
     private var snippetManagerRenderedLanguage: AppLanguage?
     private var permissionWindowController: NSWindowController?
@@ -787,7 +788,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let secretsSubmenu else { return }
         secretsSubmenu.removeAllItems()
 
-        let secrets = SecretMenuFlow.secretMenuEntries(from: SnippetStore.shared.loadSnippets())
+        let manage = NSMenuItem(title: loc.s("secrets.manage"), action: #selector(openSecretManager(_:)), keyEquivalent: "")
+        manage.target = self
+        manage.image = DevTypeTheme.menuIcon("key.fill")
+        secretsSubmenu.addItem(manage)
+        secretsSubmenu.addItem(.separator())
+        let secrets = SecretMenuFlow.secretMenuEntries(from: SnippetStore.shared.loadSecrets().map(\.snippetAdapter))
 
         // Search first, always — a flat list stops being usable well before it stops being
         // buildable, and this is the entry that scales past the handful shown below it.
@@ -828,6 +834,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             secretsSubmenu.addItem(item)
         }
         appendBiometryToggle(to: secretsSubmenu)
+    }
+
+    @objc func openSecretManager(_ sender: Any?) {
+        if secretWindowController == nil {
+            let controller = SecretManagerViewController(onCopy: { [weak self] secret in
+                self?.copyToClipboard(secret.snippetAdapter)
+            }, onRepair: { [weak self] in
+                self?.openPreferences(nil, tab: .advanced)
+            })
+            let window = NSWindow(contentViewController: controller)
+            window.title = loc.s("secrets.title")
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            window.setContentSize(NSSize(width: 620, height: 470))
+            window.minSize = NSSize(width: 620, height: 470)
+            window.center()
+            secretWindowController = NSWindowController(window: window)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        secretWindowController?.showWindow(nil)
+        secretWindowController?.window?.makeKeyAndOrderFront(nil)
     }
 
     /// Copy palette narrowed to secrets, for libraries with more of them than a submenu can hold.
@@ -1024,14 +1050,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         case .failure(.macroFailed(let reason)):
             ToastPanel.show(reason, symbol: "exclamationmark.triangle.fill", preempt: true)
+        case .failure(.selectionChanged):
+            ToastPanel.show(loc.s("manager.action.stale.message"), symbol: "exclamationmark.triangle.fill", preempt: true)
         case .failure(.secretUnavailable):
             DevTypeAlert.present(
                 title: loc.s("secret.missing.title"),
                 message: loc.s("secret.missing.message", snippet.displayTitle),
                 style: .warning,
-                buttons: [loc.s("menu.manage"), loc.s("common.ok")]
+                buttons: [loc.s("secrets.manage"), loc.s("common.ok")]
             ) { index in
-                if index == 0 { self.openSnippetManager(nil) }
+                if index == 0 { self.openSecretManager(nil) }
             }
         case .failure(.imageSnippet(let path)):
             // Copy the picture itself. The clipboard is the one place an image snippet and a text
@@ -1707,6 +1735,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 case .failure(.authenticationCancelled):
                     break
+                case .failure(.selectionChanged):
+                    self.applyCopyResult(.failure(.selectionChanged), for: snippet)
                 case .failure(.authenticationFailed(let reason)):
                     ToastPanel.show(
                         self.loc.s("secret.auth.failed"),
@@ -2366,4 +2396,3 @@ extension AppDelegate {
     func rebuildMenuForTesting() { rebuildMenu() }
     func refreshStatusItemUIForTesting() { refreshStatusItemUI() }
 }
-

@@ -54,11 +54,14 @@ public final class SecretStore {
         public let attempted: Int
         public let removed: Int
         public let failed: Int
+        public let deferred: Int
+        public var pending: Int { failed + deferred }
 
-        public init(attempted: Int = 0, removed: Int = 0, failed: Int = 0) {
+        public init(attempted: Int = 0, removed: Int = 0, failed: Int = 0, deferred: Int = 0) {
             self.attempted = attempted
             self.removed = removed
             self.failed = failed
+            self.deferred = deferred
         }
     }
 
@@ -136,6 +139,13 @@ public final class SecretStore {
 
     public func hasSecret(for id: UUID) -> Bool {
         return backing.contains(account: Self.account(for: id))
+    }
+
+    /// Holds the backing's value transaction across editor staging, metadata publication and
+    /// compensation. Acquire orphan protection first; the body may call store/read/remove.
+    /// False means exclusion was unavailable and the body did not run.
+    public func performExclusiveTransaction(_ body: () -> Void) -> Bool {
+        backing.performExclusiveTransaction(body)
     }
 
     /// Snippet IDs whose secrets still live in the legacy service (§8.10). Non-empty means the
@@ -262,7 +272,8 @@ public final class SecretStore {
     /// mutations never wait behind slow backing I/O. The provider must be value-free and must not
     /// call back into `SecretStore`.
     @discardableResult
-    func purgeOrphans(keepingLatest latestLiveIDs: () -> Set<UUID>?) -> PurgeSummary {
+    func purgeOrphans(keepingLatest latestLiveIDs: () -> Set<UUID>?,
+                      confirmingLatest confirmedLiveIDs: (() -> Set<UUID>?)? = nil) -> PurgeSummary {
         orphanPurgeExecutionLock.lock()
         defer { orphanPurgeExecutionLock.unlock() }
 
@@ -272,14 +283,19 @@ public final class SecretStore {
         var removed = 0
         var failed = 0
         var attempted = 0
+        var deferred = 0
         for account in storedAccounts.sorted() {
             guard let id = Self.snippetID(forAccount: account) else { continue }
 
             // This decision and claim publication are atomic with lease acquisition. Missing
             // canonical state is not an empty library: retain everything and retry later.
             orphanProtectionCondition.lock()
-            guard let liveIDs = latestLiveIDs(),
-                  !liveIDs.contains(id),
+            guard let liveIDs = latestLiveIDs() else {
+                orphanProtectionCondition.unlock()
+                deferred += 1
+                continue
+            }
+            guard !liveIDs.contains(id),
                   orphanProtectionCounts[id] == nil else {
                 orphanProtectionCondition.unlock()
                 continue
@@ -287,14 +303,23 @@ public final class SecretStore {
             orphanDeletionsInFlight.insert(id)
             orphanProtectionCondition.unlock()
 
-            attempted += 1
-            let status = backing.delete(account: account)
+            let status = backing.delete(account: account, if: {
+                // The backing may have waited behind an editor's complete transaction.
+                // Recheck after acquiring its lock, immediately before irreversible deletion.
+                let current: Set<UUID>?
+                if let confirmedLiveIDs { current = confirmedLiveIDs() }
+                else { current = latestLiveIDs() }
+                guard let current else { deferred += 1; return false }
+                return !current.contains(id)
+            })
 
             orphanProtectionCondition.lock()
             orphanDeletionsInFlight.remove(id)
             orphanProtectionCondition.broadcast()
             orphanProtectionCondition.unlock()
 
+            guard let status else { continue }
+            attempted += 1
             // A concurrent cleanup reaching the item first has already achieved the desired
             // state, so deletion remains idempotent.
             if status == errSecSuccess || status == errSecItemNotFound {
@@ -303,7 +328,7 @@ public final class SecretStore {
                 failed += 1
             }
         }
-        return PurgeSummary(attempted: attempted, removed: removed, failed: failed)
+        return PurgeSummary(attempted: attempted, removed: removed, failed: failed, deferred: deferred)
     }
 
     /// Pure policy: which stored accounts are orphans, given the live snippet IDs?
@@ -327,10 +352,14 @@ public final class SecretStore {
 /// the real keychain — which prompts, depends on the signing identity, and would leave items
 /// behind on the developer's machine.
 public protocol SecretBackingStore: AnyObject {
+    func performExclusiveTransaction(_ body: () -> Void) -> Bool
     func set(_ value: String, account: String) -> OSStatus
     func value(account: String) -> String?
     func contains(account: String) -> Bool
     func delete(account: String) -> OSStatus
+    /// Backings with deletion exclusion evaluate the predicate inside that same exclusion.
+    /// Nil means retained without attempting a delete; an unavailable lock remains an error.
+    func delete(account: String, if shouldDelete: () -> Bool) -> OSStatus?
     func accounts() -> Set<String>
     /// Legacy-service accounts that still need migrating (empty for stores with no legacy tier).
     func legacyAccountsPendingMigration() -> [String]
@@ -352,6 +381,12 @@ public protocol SecretBackingStore: AnyObject {
 }
 
 extension SecretBackingStore {
+    /// Unknown backings must explicitly opt into this stronger contract, never run unlocked.
+    public func performExclusiveTransaction(_ body: () -> Void) -> Bool { false }
+    public func delete(account: String, if shouldDelete: () -> Bool) -> OSStatus? {
+        guard shouldDelete() else { return nil }
+        return delete(account: account)
+    }
     /// Stores without a legacy tier (the in-memory test double) have nothing to migrate.
     public func legacyAccountsPendingMigration() -> [String] { [] }
     public func accountsNeedingAuthorization() -> [String] { [] }
@@ -1073,6 +1108,9 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     public static let archiveFileName = "secrets.enc"
 
     private let lock = UnfairLock()
+    private let transactionLock = NSRecursiveLock()
+    /// Guarded by transactionLock. Nested operations reuse the outer archive lease.
+    private var archiveTransactionDepth = 0
     private let tier: SecretBackingStore
     private let diagnostics: SecretAccessDiagnostics
     private let fileURL: URL
@@ -1154,12 +1192,24 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// One cross-process transaction covers both storage tiers: master-key discovery/creation,
     /// source reads, archive load→save→verify, and tier cleanup. Locking only the file write
     /// leaves key replacement, stale migration and delete resurrection possible across instances.
-    /// Callers already hold the instance lock; this lock is never nested.
+    /// Transaction exclusion precedes the brief instance-state lock. Metadata queries do not
+    /// take transaction exclusion, so a library writer checking value existence cannot deadlock
+    /// with an editor publishing metadata while holding this lease.
     ///
     /// Failure to acquire exclusion refuses the transaction. Running the body unlocked can
     /// destroy the only surviving credential copy. Contention is bounded to five seconds;
     /// diagnostics distinguish a refused transaction from an operation that ran.
     private func withArchiveLock<T>(_ body: () -> T) -> T? {
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while !transactionLock.try() {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                diagnostics.note("archive transaction busy — transaction refused")
+                return nil
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        defer { transactionLock.unlock() }
+        if archiveTransactionDepth > 0 { return body() }
         let directory = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let lockPath = fileURL.appendingPathExtension("lock").path
@@ -1188,7 +1238,6 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
             diagnostics.note("archive lock file invalid — transaction refused")
             return nil
         }
-        let deadline = ProcessInfo.processInfo.systemUptime + 5
         while flock(fd, LOCK_EX | LOCK_NB) != 0 {
             let error = errno
             guard error == EINTR || error == EWOULDBLOCK else {
@@ -1204,7 +1253,20 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         defer {
             if flock(fd, LOCK_UN) != 0 { diagnostics.note("archive unlock failed") }
         }
+        archiveTransactionDepth = 1
+        defer { archiveTransactionDepth = 0 }
         return body()
+    }
+
+    public func performExclusiveTransaction(_ body: () -> Void) -> Bool {
+        withArchiveLock { body(); return true } ?? false
+    }
+
+    public func delete(account: String, if shouldDelete: () -> Bool) -> OSStatus? {
+        withArchiveLock { () -> OSStatus? in
+            guard shouldDelete() else { return nil }
+            return delete(account: account)
+        } ?? errSecIO
     }
 
     /// The only sanctioned way to drop a keychain copy: reload the archive **from disk** and
@@ -1316,8 +1378,8 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     // MARK: SecretBackingStore
 
     public func set(_ value: String, account: String) -> OSStatus {
-        lock.lock(); defer { lock.unlock() }
         return withArchiveLock {
+            lock.lock(); defer { lock.unlock() }
             var entries: [String: String]
             switch loadArchive() {
             case .entries(let existing): entries = existing
@@ -1367,8 +1429,8 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     }
 
     public func value(account: String) -> String? {
-        lock.lock(); defer { lock.unlock() }
         let result: String? = withArchiveLock { () -> String? in
+            lock.lock(); defer { lock.unlock() }
             let archive = loadArchive()
             switch archive {
             case .unavailable:
@@ -1426,8 +1488,8 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// `||` that let a tier success report success while `contains`/`value` kept
     /// resolving the secret from the archive.
     public func delete(account: String) -> OSStatus {
-        lock.lock(); defer { lock.unlock() }
         return withArchiveLock {
+            lock.lock(); defer { lock.unlock() }
             var archiveHadEntry = false
             switch loadArchive() {
             case .entries(var entries):
@@ -1494,8 +1556,10 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     }
 
     public func consolidateIntoFile() -> SecretConsolidationSummary {
-        lock.lock(); defer { lock.unlock() }
-        return withArchiveLock { consolidateAllLocked() }
+        return withArchiveLock {
+            lock.lock(); defer { lock.unlock() }
+            return consolidateAllLocked()
+        }
             ?? SecretConsolidationSummary(remaining: consolidationCandidates().count)
     }
 
@@ -1611,11 +1675,24 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
 /// In-memory double for tests. Never used by the app.
 public final class InMemorySecretBackingStore: SecretBackingStore {
     private var storage: [String: String] = [:]
-    private let lock = UnfairLock()
+    private let lock = NSRecursiveLock()
     /// Forced failure for the error paths, which are otherwise unreachable without a keychain.
     public var forcedStatus: OSStatus?
 
     public init(seed: [String: String] = [:]) { storage = seed }
+
+    public func performExclusiveTransaction(_ body: () -> Void) -> Bool {
+        guard lock.lock(before: Date().addingTimeInterval(5)) else { return false }
+        defer { lock.unlock() }
+        body()
+        return true
+    }
+
+    public func delete(account: String, if shouldDelete: () -> Bool) -> OSStatus? {
+        lock.lock(); defer { lock.unlock() }
+        guard shouldDelete() else { return nil }
+        return delete(account: account)
+    }
 
     public func set(_ value: String, account: String) -> OSStatus {
         if let forcedStatus { return forcedStatus }
@@ -1677,7 +1754,7 @@ public enum SecretLibraryFilter {
 public enum SecretMenuEntryPolicy {
     public static func entries(from snippets: [SnippetModel], limit: Int = 20) -> [SnippetModel] {
         snippets
-            .filter(\.isSecret)
+            .filter { $0.isSecret && $0.enabled }
             .sorted { lhs, rhs in
                 if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
                 return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending

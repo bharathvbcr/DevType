@@ -18,12 +18,15 @@ DevType is engineered from the ground up as a **privacy-first, offline-only** ap
 - **Secure Text Fields**: Whenever a password field (`NSSecureTextField`) is active or macOS `IsSecureEventInputEnabled()` is true, DevType immediately pauses event tapping and prefix matching.
 - **App Muting**: Users can specify sensitive applications (e.g. password managers, financial software, terminal sessions) where DevType is completely deactivated.
 
-### 3. Secret Snippets Architecture
-For sensitive text (e.g. passwords, API tokens), DevType provides dedicated **Secret Snippets**:
+### 3. Secrets Architecture
+For sensitive text (e.g. passwords, API tokens), DevType provides an independent **Secrets** manager:
 - Encrypted at rest using **AES-GCM** with a 256-bit key stored securely in the macOS login Keychain.
-- Gated behind **Touch ID** or macOS local biometric/passcode authentication via `LocalAuthentication`.
-- Secrets are excluded from standard typed trigger expansion, regular library files (`snippets.json`), and diagnostic export logs.
-- When copied to the clipboard, secrets are marked with standard concealment flags (`org.nspasteboard.ConcealedType`, `com.agilebits.onepassword`) to prevent clipboard managers from capturing them, and are automatically purged from the clipboard after 90 seconds.
+- An app-level **Touch ID/login password** gate uses `LocalAuthentication`, enabled by default where available and controlled by the existing user preference.
+- `SecretModel` has no trigger or value field. Metadata occupies its own `secrets` collection in library schema 3; values are absent from library JSON, snippet exports, and diagnostic logs. Legacy UUIDs are preserved without accessing stored values during metadata migration.
+- The Secrets manager reuses the existing authentication and clipboard owners. Storage repair remains the explicit Preferences → Advanced → Repair Secret Storage action; an unreadable master key is never replaced during metadata migration.
+- Secret reads revalidate the selected metadata against the current library on disk. Disabled, deleted, edited, or unverifiable selections are refused, including changes made while authentication is pending.
+- Complete value-edit transactions share archive exclusion. Failed and partial writes are compensated conditionally; orphan deletion rechecks current references under that exclusion and reports deferred cleanup explicitly.
+- Clipboard writes carry concealed, transient, and auto-generated markers to request exclusion from compatible clipboard managers. A 90-second timer clears only the write DevType still owns; these markers cannot force another application to honor them.
 
 For full architectural details, see [SECRETS.md](SECRETS.md).
 

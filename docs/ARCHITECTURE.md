@@ -211,16 +211,36 @@ graph LR
 
 ---
 
-### 5. Encrypted Secret Snippets Storage
+### 5. Independent Secrets and Encrypted Storage
 
-Sensitive credentials are partitioned away from standard snippet files. Since the §8.11 redesign, storage is **file-first**:
+`SecretModel` owns secret metadata without a trigger, body, image, or AI action. Library schema 3
+persists `groups` and `secrets` as separate collections in one atomic document. `SnippetDocument`
+extracts old secret snippets while retaining their UUIDs and effective group restrictions.
+`SecretManagerViewController` and `SecretEditorController` manage this collection independently;
+`SecretLibraryEdit` delegates commits to `SnippetStore.mutateGroups` and `SnippetEditTransaction`
+through a value-free adapter, retaining the existing digest, rollback, and orphan-cleanup guards.
+Snippet resets and same-named group imports preserve the independent collection. User snippet
+exports omit it; full library backups and relocation retain both metadata collections.
+
+`SnippetStore.loadCurrentSecrets()` is the authority for sensitive reads and cleanup: it returns
+nil while a mutation owns the snapshot or disk no longer matches the cached digest. The gated
+resolver checks this before and after value retrieval, so delayed authentication cannot use a
+retired selection. `ConsolidatedSecretBackingStore.performExclusiveTransaction` extends archive
+exclusion across editor staging, metadata publication and conditional compensation. Its lock
+order leaves metadata queries available and shares one monotonic five-second contention budget.
+Cleanup confirms references after acquiring storage exclusion and carries a separate deferred
+count into the existing pending-cleanup UI.
+
+Metadata migration never accesses stored values. Unreadable master keys and Keychain fallback
+values retain the explicit Preferences → Advanced → Repair Secret Storage recovery path.
+Since the §8.11 redesign, value storage is **file-first**:
 
 - **Archive**: Each value is sealed with **CryptoKit AES-GCM** (fresh random nonce per seal; nonce + ciphertext + tag as one base64 blob) into a versioned JSON archive (`~/Library/Application Support/DevType/secrets.enc`, `0600`, atomic writes). Bytes the current build cannot vouch for are quarantined aside, never overwritten.
-- **Master Key**: One 256-bit key generated with `SecRandomCopyBytes` — the *only* keychain object. It lives in the login keychain under service `com.devtype.app.secret.v2`, account `com.devtype.masterkey`, is fetched at most once per process, and is warmed into memory at launch while the keychain is still unlocked (so copies keep working after an auto-lock). Consolidation from earlier per-item generations (§8.9/§8.10 services) happens automatically and losslessly.
+- **Master Key**: One 256-bit key generated with `SecRandomCopyBytes` lives in the login keychain under service `com.devtype.app.secret.v2`, account `com.devtype.masterkey`. A successful read is cached in memory. Per-item Keychain values remain when migration cannot safely complete; deletion requires verified encrypted publication, and unreadable keys retain the explicit repair path.
 - **Cross-Process Locking**: Every archive transaction holds a `flock` on a validated regular `<archive>.lock` file, covering source reads, master-key handling, verified publication and tier cleanup. Missing/invalid locks and contention beyond five seconds refuse the transaction with diagnostics; no unlocked transaction runs.
-- **Biometric Gate**: Access requires biometric authentication (`LocalAuthentication` / Touch ID) or system password, with a 30-second reuse window invalidated on app resign-active.
-- **Concealed Clipboard**: Copied secrets are marked with `org.nspasteboard.ConcealedType` to hide them from third-party clipboard managers, and are auto-purged after 90 seconds — only if the pasteboard still holds our write.
-- **Structural Redaction**: Secret values are absent from the snippet model's encoded form by construction, so they can never reach the library JSON, any export, the editor after save, or diagnostic reports.
+- **Biometric Gate**: The existing preference gates access with `LocalAuthentication` / Touch ID or system password when available. Reuse lasts 30 seconds and is invalidated on app resign-active; each authentication request delivers at most one completion.
+- **Concealed Clipboard**: Copied secrets carry concealed, transient and auto-generated markers requesting exclusion from compatible clipboard managers. They are auto-purged after 90 seconds only if the pasteboard still holds our write. Other applications must honor those markers for exclusion to work.
+- **Structural Redaction**: Secret metadata has no value field. Stored values are absent from library JSON, snippet exports and diagnostic reports, and are never prefilled in the editor.
 
 ---
 
