@@ -89,9 +89,36 @@ implementation would reach for. Documented on both methods, in `SECRETS.md`, and
 
 `SnippetRowView.configure`, the duplication planner branch, the thumbnail/sort helper and the
 delete-confirmation message in `SnippetManagerViewController` all still special-case `isSecret`.
-The manager's table is fed only by `loadSnippetGroups()`, so none of it can run. It is harmless
-display code for an impossible state rather than a correctness gap, and removing it is a separate
-concern from the filter-state fix; it is filed as follow-up work rather than bundled here.
+Removing them is a separate concern from the filter-state fix, so they are filed as follow-up
+work rather than bundled here.
+
+> **Correction, same day, after the follow-up landed in `8ce6538`.** The sentence that stood
+> here — "the manager's table is fed only by `loadSnippetGroups()`, so none of it can run ... it
+> is harmless display code for an impossible state" — was true of two of these four sites, and
+> **wrong about a third**. Acting on it as written would have deleted live code. Site by site:
+>
+> - `SnippetRowView.configure` and the delete-confirmation message **were** unreachable, for
+>   exactly the stated reason. Both are removed in `8ce6538`.
+> - The duplication planner branch **is** unreachable in production, but not for the stated
+>   reason. `SnippetDuplicationPlanner.duplicate` runs inside `mutateGroups`, whose `latest`
+>   *does* carry secrets. It is the *source* that cannot be one: it comes from the manager's
+>   table, and `validatedTargets` requires whole-model equality (`matches[0].snippet ==
+>   expected`), which a secret can never satisfy against a non-secret row. Retained — it is the
+>   generic type's own guard, and `SnippetManagerDuplicationTests` pins it.
+> - `SnippetManagerMutationCommitter.resourceProjection` — the "thumbnail/sort helper" — **is
+>   live and load-bearing. Do not remove it.** `mutateGroups` reads `loadGroupsUnlocked()`, the
+>   whole library, and `resetToDefaults()` rebuilds `transactionGroups`, which appends the
+>   secret projection group whose rows are `snippetAdapter`s with `isSecret: true`. Its
+>   `isSecret` comparison is what drives `allowsModelOnlyUndo` to `false` when a mutation
+>   changes the set of secrets — precisely the case where undo cannot restore a Keychain value.
+>   `PreferencesWindowController.resetLibrary()` is a second caller, outside the snippet
+>   manager entirely. `SecretModel.swift` says so directly: "Whole-library transactions still
+>   use loadGroups/mutateGroups so secret edits share their digest guards, rollback and
+>   cleanup."
+>
+> The general lesson: "the table is fed by `loadSnippetGroups()`" bounds what the *view* shows,
+> not what the *mutation* path walks. Those are different corpora, and only the first is free
+> of secrets.
 
 ## Verification
 
