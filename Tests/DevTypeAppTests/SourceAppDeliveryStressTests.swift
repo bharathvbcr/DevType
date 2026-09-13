@@ -14,18 +14,21 @@ import ExpanderEngine
 /// `DEVTYPE_DELIVERY_STRESS=8 swift test --filter SourceAppDeliveryStress` runs 8× the seeds.
 final class SourceAppDeliveryStressTests: XCTestCase {
 
-    private struct Random {
-        var state: UInt64
+    private final class Random: @unchecked Sendable {
+        private let lock = NSLock()
+        private var state: UInt64
         init(seed: UInt64) { state = seed &+ 0x9E37_79B9_7F4A_7C15 }
-        mutating func next() -> UInt64 {
+        func next() -> UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
             state = state &+ 0x9E37_79B9_7F4A_7C15
             var z = state
             z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
             z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
             return z ^ (z >> 31)
         }
-        mutating func next(_ bound: Int) -> Int { bound <= 0 ? 0 : Int(next() % UInt64(bound)) }
-        mutating func pick<T>(_ options: [T]) -> T { options[next(options.count)] }
+        func next(_ bound: Int) -> Int { bound <= 0 ? 0 : Int(next() % UInt64(bound)) }
+        func pick<T>(_ options: [T]) -> T { options[next(options.count)] }
     }
 
     private static let ownPID: pid_t = 10
@@ -58,7 +61,7 @@ final class SourceAppDeliveryStressTests: XCTestCase {
         focusStates: [SelectionReader.AXFocusObservation],
         allowTermination: Bool
     ) -> Trace {
-        var rng = Random(seed: seed)
+        let rng = Random(seed: seed)
         let trace = Trace()
         trace.frontmost = rng.pick(frontmostStates)
 
@@ -228,10 +231,9 @@ final class SourceAppDeliveryStressTests: XCTestCase {
     /// inherits the front. A dead pid cannot receive a paste.
     func testSourceTerminationMidWaitAlwaysAborts() {
         for seed in 1...UInt64(min(seedCount, 500)) {
-            var rng = Random(seed: seed)
+            let rng = Random(seed: seed)
             let trace = Trace()
             trace.frontmost = Self.sourcePID
-            var polls = 0
 
             SourceAppDelivery.perform(
                 sourcePID: Self.sourcePID,
@@ -242,8 +244,8 @@ final class SourceAppDeliveryStressTests: XCTestCase {
                     activate: { trace.activations += 1 },
                     schedule: { _, action in
                         trace.pending.append {
-                            polls += 1
-                            if polls >= rng.next(6) + 1 { trace.terminated = true }
+                            trace.polls += 1
+                            if trace.polls >= rng.next(6) + 1 { trace.terminated = true }
                             action()
                         }
                     },
