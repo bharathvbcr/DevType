@@ -342,11 +342,35 @@ public extension SelectionReader {
     static let sourceFocusMaxPolls = 25
     static let sourceFocusPollInterval: TimeInterval = 0.02
 
+    /// What a caller observed about system-wide AX focus while waiting for activation.
+    ///
+    /// `.notObserved` and `.owner(nil)` are deliberately different values: "this caller does not
+    /// probe AX focus" must never be spelled the same way as "AX answered, and nothing is
+    /// focused". Collapsing them would make every existing caller start paying a focus wait it
+    /// never asked for.
+    enum AXFocusObservation: Equatable, Sendable {
+        case notObserved
+        case owner(pid_t?)
+    }
+
+    /// - Parameter axFocus: who owns the AX focused element right now, when the caller probes it.
+    ///
+    ///   Activation and AX focus are two separate asynchronous events, and `NSWorkspace` reports
+    ///   the first: an app is frontmost for tens of milliseconds before its focused element
+    ///   exists. A caller that captures a paste target inside that window captures nothing — or
+    ///   our own panel — and the inject then refuses at its target check, because focus
+    ///   *arriving* is indistinguishable from the target *changing*.
+    ///
+    ///   So AX focus is preferred, never required: while the source app is frontmost but its
+    ///   focus has not landed this waits, and when the budget runs out it reads anyway, exactly
+    ///   as it did before. An app that publishes no focused element at all — common in Electron
+    ///   — is therefore never refused by this, it only pays the bounded wait.
     static func sourceFocusRetryDecision(
         sourcePID: pid_t,
         frontmostPID: pid_t?,
         sourceTerminated: Bool,
-        remainingPolls: Int
+        remainingPolls: Int,
+        axFocus: AXFocusObservation = .notObserved
     ) -> SourceFocusRetryDecision {
         guard sourcePID > 0,
               !sourceTerminated,
@@ -354,7 +378,11 @@ public extension SelectionReader {
               remainingPolls <= sourceFocusMaxPolls else {
             return .fail
         }
-        if frontmostPID == sourcePID { return .read }
+        if frontmostPID == sourcePID {
+            guard case .owner(let focusPID) = axFocus, focusPID != sourcePID else { return .read }
+            guard remainingPolls > 0 else { return .read }
+            return .wait(remainingPolls: remainingPolls - 1)
+        }
         guard remainingPolls > 0 else { return .fail }
         return .wait(remainingPolls: remainingPolls - 1)
     }

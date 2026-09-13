@@ -487,7 +487,7 @@ public final class PermissionCoordinator {
     /// public OSLog, the telemetry ring, status UI, or a copied diagnostic report. `path` is the
     /// pipeline's internal branch identifier; raw details can contain attachment paths or text
     /// mismatch evidence and therefore must never survive this boundary.
-    static func sanitizedRefusalReason(_ reason: String, path: String?) -> String {
+    public static func sanitizedRefusalReason(_ reason: String, path: String?) -> String {
         switch path {
         case "imagePaste":
             return reason.contains("missing or unreadable")
@@ -519,6 +519,30 @@ public final class PermissionCoordinator {
             return "Undo cancelled — input, target, or settings changed"
         case "undo", "undoAXRange", "undoAXDirect", "undoPaste":
             return "Undo refused — safe reversal could not be verified"
+        // Entry gate. These stay distinct from each other on purpose: they are the difference
+        // between "the source app never came back to the front" and "it did, then the focused
+        // element moved", and collapsing them would leave the next report as uninformative as
+        // the silent `return` these replaced.
+        case "entryGate_superseded":
+            return "Insertion superseded by a newer one"
+        case "entryGate_continuation":
+            return "Target application changed before insertion"
+        case "entryGate_secureInput":
+            return "Secure Input is active — expansion blocked"
+        case "entryGate_accessibility":
+            return "Accessibility unavailable — expansion blocked"
+        case "entryGate_targetChanged":
+            return "Target element or selection changed before insertion"
+        case "entryGate_unreproduced":
+            return "Insertion context changed before insertion"
+        // Panel-driven delivery (AI result, palette value, inline search expansion): the payload
+        // was already generated, so each of these is lost work, not a declined expansion.
+        case "aiResultDelivery", "paletteTextDelivery", "searchExpansionDelivery":
+            return "Source application did not return to the front"
+        case "aiResultPlanRefused", "searchExpansionPlanRefused":
+            return reason.localizedCaseInsensitiveContains("post events")
+                ? "Post Events permission is required for insertion"
+                : "Accessibility unavailable — expansion blocked"
         default:
             break
         }

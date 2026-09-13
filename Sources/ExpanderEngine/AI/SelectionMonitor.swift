@@ -550,9 +550,16 @@ public final class SelectionMonitor {
     /// `SelectionGate.cacheMatchesFrontmost`, which will not hand another app's cached text to a
     /// third app anyway.
     static func elementBelongsToOwnProcess(_ element: AXUIElement) -> Bool {
+        pid(owning: element) == ProcessInfo.processInfo.processIdentifier
+    }
+
+    /// Owning pid of `element`, or `nil` when AX cannot answer. The single reader of
+    /// `AXUIElementGetPid` — the three call sites that each spelled it out were free to
+    /// disagree about whether pid `0` counts as an answer. It does not.
+    public static func pid(owning element: AXUIElement) -> pid_t? {
         var pid: pid_t = 0
-        guard AXUIElementGetPid(element, &pid) == .success else { return false }
-        return pid == ProcessInfo.processInfo.processIdentifier
+        guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
+        return pid
     }
 
     /// Bundle ID of the app that owns `element`, or `nil` when the pid is unreadable or the
@@ -560,8 +567,7 @@ public final class SelectionMonitor {
     /// than an unlabelled entry, and every consumer re-checks the label against the app it is
     /// about to act in.
     static func bundleID(owning element: AXUIElement) -> String? {
-        var pid: pid_t = 0
-        guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
+        guard let pid = pid(owning: element) else { return nil }
         return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
     }
 

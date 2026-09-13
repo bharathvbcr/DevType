@@ -1610,10 +1610,47 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         sourceApp?.activate()
     }
 
+    /// Shared `onUnavailable` for every panel-driven delivery.
+    ///
+    /// By this point the payload is already resolved — a finished AI transform, a rendered
+    /// macro, a palette value — so giving up here destroys work the user watched happen. All
+    /// three call sites used to show a toast and record nothing, which is why a diagnostic
+    /// report could show a transform that succeeded with no inject attempt anywhere beside it.
+    private func reportDeliveryTargetUnavailable(path: String) {
+        PermissionCoordinator.shared.recordInjectOutcome(
+            .refused("Source application did not return to the front"),
+            refuseContext: nil,
+            path: path
+        )
+        ToastPanel.show(loc.s("voice.error.targetChanged"), symbol: "exclamationmark.triangle.fill")
+    }
+
+    /// Shared refusal for a delivery whose `InjectionPlanner` plan is `.refuse`.
+    ///
+    /// The planner only refuses on a missing capability (Accessibility revoked, or Post Events
+    /// missing in a terminal), so the reason is actionable and belongs in front of the user —
+    /// these call sites used to drop it with a bare `return`.
+    ///
+    /// Shown through `sanitizedRefusalReason` rather than raw: the planner's own strings are
+    /// internal prose ("refusing expand (fail-closed)"), and that sanitizer is already the
+    /// vocabulary the status UI and the diagnostic report speak.
+    private func reportDeliveryPlanRefusal(reason: String, path: String) {
+        PermissionCoordinator.shared.recordInjectOutcome(
+            .refused(reason),
+            refuseContext: nil,
+            path: path
+        )
+        ToastPanel.show(
+            PermissionCoordinator.sanitizedRefusalReason(reason, path: path),
+            symbol: "exclamationmark.triangle.fill",
+            preempt: true
+        )
+    }
+
     /// Insert resolved palette text (date tools / clipboard) with eraseCount 0, like hotkey insertText.
     private func injectPaletteText(_ text: String, sourceApp: NSRunningApplication?) {
         SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
-            ToastPanel.show(loc.s("voice.error.targetChanged"), symbol: "exclamationmark.triangle.fill")
+            reportDeliveryTargetUnavailable(path: "paletteTextDelivery")
         }) { [self] shouldContinue in
             TextInjectionPipeline.shared.inject(
                 snippet: SnippetModel(title: "Palette", triggerKeyword: "", replacementText: text),
@@ -1672,7 +1709,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
-            ToastPanel.show(loc.s("voice.error.targetChanged"), symbol: "exclamationmark.triangle.fill")
+            reportDeliveryTargetUnavailable(path: "aiResultDelivery")
         }) { [self] shouldContinue in
             let snapshot = PermissionCoordinator.shared.cachedSnapshot
             let snippet = SnippetModel(
@@ -1691,7 +1728,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 needsCursorHID: needsCursor,
                 isMultiLine: text.contains(where: \.isNewline)
             )
-            if case .refuse = plan { return }
+            if case .refuse(let reason) = plan {
+                reportDeliveryPlanRefusal(reason: reason, path: "aiResultPlanRefused")
+                return
+            }
 
             let suspension = EventTapEngine.shared.suspendMatching(reason: "secretPaste")
             TextInjectionPipeline.shared.inject(
@@ -1802,7 +1842,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
-            ToastPanel.show(loc.s("voice.error.targetChanged"), symbol: "exclamationmark.triangle.fill")
+            reportDeliveryTargetUnavailable(path: "searchExpansionDelivery")
         }) { [self] shouldContinue in
             let snapshot = PermissionCoordinator.shared.cachedSnapshot
             let needsCursor = InjectionPlanner.needsCursorHID(
@@ -1816,7 +1856,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 needsCursorHID: needsCursor,
                 isMultiLine: resolved.text.contains(where: \.isNewline)
             )
-            if case .refuse = plan { return }
+            if case .refuse(let reason) = plan {
+                reportDeliveryPlanRefusal(reason: reason, path: "searchExpansionPlanRefused")
+                return
+            }
 
             let suspension = EventTapEngine.shared.suspendMatching(reason: "expandFromSearch")
             TextInjectionPipeline.shared.inject(

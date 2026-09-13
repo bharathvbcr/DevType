@@ -1070,7 +1070,23 @@ public final class TextInjectionPipeline {
                 role: AXContextChecker.shared.focusedElementRole(),
                 phase: .beforeMutation
               )) else {
-            completion(.refused("Expansion cancelled — operation or target changed"))
+            // Never a bare `completion(.refused(…))`: this gate drops a payload that is already
+            // generated — an AI transform the model has finished, a voice segment already
+            // dictated — and recording nothing made that loss invisible to the user *and* to the
+            // diagnostic report, which then showed a successful transform with no inject attempt
+            // beside it and no way to tell which condition fired.
+            //
+            // `allowKeyReplay: false`: the premise of this refusal is that the operation or the
+            // target moved, so posting the swallowed key would type it into whatever is frontmost
+            // now rather than into the field that was matched.
+            refuseEntryGate(
+                operation: operation,
+                revision: inputRevision,
+                target: target,
+                allowSecureInput: secureClipboardPaste,
+                swallowed: swallowed,
+                completion: completion
+            )
             return
         }
         // Re-check Secure Input / IME / focus at inject time (may have changed since match).
@@ -1322,7 +1338,10 @@ public final class TextInjectionPipeline {
                     bundleID: context.frontBundleID,
                     shouldContinue: canProceedAfterMutation
                 ) { result in
-                    guard canProceedAfterMutation() else { completion(result == .notPosted ? .failedSilent : .postedUnverified); return }
+                    guard canProceedAfterMutation() else {
+                        self.finishAbandonedPaste(result: result, path: "imagePasteAbandoned", completion: completion)
+                        return
+                    }
                     // §3.4: the image path now reports what it actually observed instead of
                     // "posted, therefore succeeded".
                     let outcome: PermissionCoordinator.InjectOutcome
@@ -1823,7 +1842,10 @@ public final class TextInjectionPipeline {
             allowSecureInput: true,
             shouldContinue: shouldContinue
         ) { result in
-            guard shouldContinue() else { completion(result == .notPosted ? .failedSilent : .postedUnverified); return }
+            guard shouldContinue() else {
+                self.finishAbandonedPaste(result: result, path: "secureClipboardAbandoned", completion: completion)
+                return
+            }
             switch result {
             case .delivered:
                 self.hid.postTrailingKeys(keysToPress, shouldContinue: shouldContinue)
@@ -1879,7 +1901,10 @@ public final class TextInjectionPipeline {
         trailingKeys: [String] = [],
         completion: @escaping InjectionCompletion
     ) {
-        guard canContinue(context) else { completion(result == .notPosted ? .failedSilent : .postedUnverified); return }
+        guard canContinue(context) else {
+            finishAbandonedPaste(result: result, path: "clipboardAbandoned", completion: completion)
+            return
+        }
         let safeBundleID = DevTypeLog.boundedPublicIdentifier(
             context.frontBundleID,
             label: "bundleID"
@@ -2032,6 +2057,104 @@ public final class TextInjectionPipeline {
     ///
     /// An asynchronous refuse owes the user the swallowed key while its target is unchanged.
     /// Once input/focus changes, replay could type (or press Return) into the wrong field.
+    /// One owner for "the paste continuation was abandoned after ⌘V had been decided".
+    ///
+    /// All three post-paste continuations used to hand an outcome straight to the caller's
+    /// completion and record nothing. The caller clears `isExpanding` either way, so the inject
+    /// looked handled while the telemetry ring — the thing the diagnostic report reads — showed
+    /// no attempt at all for it. `.notPosted` never reached the app and is a silent failure;
+    /// anything else may still have landed, so it is recorded as posted-but-unverified rather
+    /// than claimed as either success or failure.
+    private func finishAbandonedPaste(
+        result: PasteDeliveryResult,
+        path: String,
+        completion: @escaping InjectionCompletion
+    ) {
+        let outcome: PermissionCoordinator.InjectOutcome =
+            result == .notPosted ? .failedSilent : .postedUnverified
+        PermissionCoordinator.shared.recordInjectOutcome(outcome, refuseContext: nil, path: path)
+        completion(outcome)
+    }
+
+    /// Which entry-gate condition refused an inject. Each case is its own line in the
+    /// diagnostic report, because each is a different bug: `.continuation` on a panel-driven
+    /// inject means the source app never came back to the front, while `.targetChanged` means
+    /// it did and then the focused element moved under us.
+    enum EntryGateRefusal: String {
+        case superseded
+        case continuation
+        case secureInput
+        case accessibility
+        case targetChanged
+        /// The gate refused, but no condition still reported false when the reason was
+        /// classified. Named rather than guessed — a label invented here would send whoever
+        /// reads the report after the wrong condition.
+        case unreproduced
+
+        var path: String { "entryGate_\(rawValue)" }
+
+        var reason: String {
+            switch self {
+            case .superseded: return "A newer insertion replaced this one"
+            case .continuation: return "Target application changed before insertion"
+            case .secureInput: return AXContextChecker.secureInputActiveReason
+            case .accessibility: return "Accessibility unavailable at insertion time"
+            case .targetChanged: return "Target element or selection changed before insertion"
+            case .unreproduced: return "Insertion context changed before insertion"
+            }
+        }
+    }
+
+    /// Pure: names the entry-gate refusal from what each half reported, in the order
+    /// `operationIsCurrent` tests them. Pure so every branch is reachable in tests without a
+    /// window server, an AX connection, or a focused app.
+    static func entryGateRefusal(
+        revisionCurrent: Bool,
+        continuationBlock: InjectCompletionGuard.ContinuationBlock?,
+        secureInputBlocked: Bool,
+        axUntrusted: Bool,
+        targetCurrent: Bool
+    ) -> EntryGateRefusal {
+        if !revisionCurrent { return .superseded }
+        if let continuationBlock {
+            return continuationBlock == .callerStopped ? .continuation : .superseded
+        }
+        if secureInputBlocked { return .secureInput }
+        if axUntrusted { return .accessibility }
+        if !targetCurrent { return .targetChanged }
+        return .unreproduced
+    }
+
+    /// Records and completes an entry-gate refusal. Re-reads each condition to label it; the
+    /// gate above already made the decision, so a condition that flipped back in between costs
+    /// an `.unreproduced` label, never a changed outcome.
+    private func refuseEntryGate(
+        operation: InjectCompletionGuard,
+        revision: UInt64,
+        target: PasteboardBroker.PasteTarget,
+        allowSecureInput: Bool,
+        swallowed: SwallowedKey,
+        completion: @escaping InjectionCompletion
+    ) {
+        let revisionCurrent = lastExpansionLock.withLock {
+            activeOperation === operation && inputRevision == revision
+        }
+        let refusal = Self.entryGateRefusal(
+            revisionCurrent: revisionCurrent,
+            continuationBlock: operation.continuationBlock(),
+            secureInputBlocked: !allowSecureInput && AXContextChecker.isSecureEventInputEnabledLive(),
+            axUntrusted: !allowSecureInput && !AXContextChecker.shared.isProcessTrusted(),
+            targetCurrent: target.isCurrent(checkRange: false)
+        )
+        refuseInject(
+            refusal.reason,
+            path: refusal.path,
+            swallowed: swallowed,
+            allowKeyReplay: false,
+            completion: completion
+        )
+    }
+
     private func refuseInject(
         _ reason: String,
         path: String,
@@ -2355,9 +2478,35 @@ final class InjectCompletionGuard {
 
     func cancel() { lock.withLock { cancelled = true } }
 
+    /// Why continuation is blocked, in the order the guard tests it. Exists so a refused
+    /// inject can name its cause instead of ending as a bare `return`: `.callerStopped` is
+    /// the caller's own `shouldContinue` (for panel-driven injects, "the source app is no
+    /// longer frontmost"), which is a different bug report from being superseded.
+    enum ContinuationBlock: String {
+        case cancelled = "supersededByNewerInject"
+        case timedOut = "watchdogTimedOut"
+        case alreadyCompleted = "alreadyCompleted"
+        case callerStopped = "callerStopped"
+    }
+
+    /// `nil` when continuation is allowed. Non-destructive, and the single owner of the rule —
+    /// `allowsContinuation` is this answer collapsed to a Bool, so the gate and the reason it
+    /// reports can never disagree.
+    func continuationBlock(observationOnly: Bool = false) -> ContinuationBlock? {
+        let local: ContinuationBlock? = lock.withLock {
+            if cancelled { return .cancelled }
+            if timedOut { return .timedOut }
+            if !observationOnly, invocations != 0 { return .alreadyCompleted }
+            return nil
+        }
+        // Preserves the original short-circuit: the caller's closure is only consulted once
+        // the local state says yes.
+        if let local { return local }
+        return shouldContinue() ? nil : .callerStopped
+    }
+
     func allowsContinuation(observationOnly: Bool = false) -> Bool {
-        lock.withLock { !cancelled && !timedOut && (observationOnly || invocations == 0) }
-            && shouldContinue()
+        continuationBlock(observationOnly: observationOnly) == nil
     }
 
     var didTimeOut: Bool {

@@ -11,6 +11,10 @@ final class SourceAppDeliveryTests: XCTestCase {
         var deliveries = 0
         var pending: [() -> Void] = []
         var continuation: (@Sendable () -> Bool)?
+        /// `nil` keeps the harness on the pre-focus-wait contract, so the original cases still
+        /// describe exactly the environment they were written against.
+        var axFocusOwner: pid_t??
+        var axFocusProbes = 0
 
         func start(sourcePID: pid_t = 20) {
             SourceAppDelivery.perform(
@@ -20,7 +24,13 @@ final class SourceAppDeliveryTests: XCTestCase {
                     frontmostPID: { [weak self] in self?.frontmost },
                     sourceTerminated: { [weak self] in self?.terminated ?? true },
                     activate: { self.activations += 1 },
-                    schedule: { _, action in self.pending.append(action) }
+                    schedule: { _, action in self.pending.append(action) },
+                    axFocus: { [weak self] in
+                        guard let self else { return .notObserved }
+                        self.axFocusProbes += 1
+                        guard let owner = self.axFocusOwner else { return .notObserved }
+                        return .owner(owner)
+                    }
                 ),
                 onUnavailable: { self.failures += 1 },
                 operation: {
@@ -98,6 +108,68 @@ final class SourceAppDeliveryTests: XCTestCase {
             XCTAssertEqual(h.activations, 0, "source \(source)")
             XCTAssertEqual(h.failures, 1, "source \(source)")
         }
+    }
+
+    // MARK: - Waiting for AX focus to land, not just for activation
+
+    /// The delivery operation's first act is to capture a paste target from AX. Activation
+    /// reaching `NSWorkspace` does not mean the source app has published a focused element yet,
+    /// and capturing in that gap produces a target the inject later refuses as "changed".
+    func testDeliveryWaitsForAXFocusToReachTheSourceApp() {
+        let h = Harness()
+        h.frontmost = 20
+        h.axFocusOwner = .some(10)  // our own panel still owns AX focus
+        h.start()
+        XCTAssertEqual(h.deliveries, 0, "must not capture a target while our own panel holds focus")
+        h.axFocusOwner = .some(20)
+        h.drain()
+        XCTAssertEqual(h.deliveries, 1)
+        XCTAssertEqual(h.failures, 0)
+    }
+
+    /// An app that publishes no focused element at all — common in Electron — must still be
+    /// delivered into. The wait is a preference with a bound, never a new refusal.
+    func testAppThatNeverPublishesFocusIsStillDeliveredAfterTheBudget() {
+        let h = Harness()
+        h.frontmost = 20
+        h.axFocusOwner = .some(nil)
+        h.start()
+        let polls = h.drain()
+        XCTAssertLessThanOrEqual(polls, SelectionReader.sourceFocusMaxPolls)
+        XCTAssertEqual(h.deliveries, 1, "focus is preferred, not required")
+        XCTAssertEqual(h.failures, 0)
+    }
+
+    /// Same for focus that lands on some third process and stays there.
+    func testForeignAXFocusStillDeliversOnceTheBudgetIsSpent() {
+        let h = Harness()
+        h.frontmost = 20
+        h.axFocusOwner = .some(30)
+        h.start()
+        h.drain()
+        XCTAssertEqual(h.deliveries, 1)
+        XCTAssertEqual(h.failures, 0)
+    }
+
+    /// A source app that never activates must not pay for AX round-trips it cannot benefit from.
+    func testAXFocusIsNotProbedWhileTheSourceAppIsNotFrontmost() {
+        let h = Harness()
+        h.axFocusOwner = .some(20)
+        h.start()
+        h.drain()
+        XCTAssertEqual(h.axFocusProbes, 0)
+        XCTAssertEqual(h.failures, 1)
+    }
+
+    /// Focus already settled on the first look delivers immediately — the common case must not
+    /// have grown a poll.
+    func testSettledFocusDeliversWithoutWaiting() {
+        let h = Harness()
+        h.frontmost = 20
+        h.axFocusOwner = .some(20)
+        h.start()
+        XCTAssertEqual(h.deliveries, 1)
+        XCTAssertTrue(h.pending.isEmpty)
     }
 
     func testNilFrontmostAndSourceTerminationDuringWaitAreBounded() {

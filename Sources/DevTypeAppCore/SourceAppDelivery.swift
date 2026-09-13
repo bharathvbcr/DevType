@@ -11,6 +11,9 @@ enum SourceAppDelivery {
         var sourceTerminated: @Sendable () -> Bool
         var activate: () -> Void
         var schedule: (TimeInterval, @escaping () -> Void) -> Void
+        /// Owner of the system-wide AX focused element. Defaults to `.notObserved` so a caller
+        /// that builds an `Environment` without it keeps the pre-focus-wait behaviour.
+        var axFocus: @Sendable () -> SelectionReader.AXFocusObservation = { .notObserved }
     }
 
     static func perform(
@@ -27,6 +30,15 @@ enum SourceAppDelivery {
                 activate: { sourceApp?.activate() },
                 schedule: { delay, action in
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+                },
+                // The operation's first act is to capture a paste target from AX, so waiting for
+                // activation to reach NSWorkspace is not enough — the capture has to see the
+                // source app's focused element, not the empty gap before it is published.
+                axFocus: {
+                    .owner(
+                        AXContextChecker.shared.focusedElement()
+                            .flatMap { SelectionMonitor.pid(owning: $0) }
+                    )
                 }
             ),
             onUnavailable: onUnavailable,
@@ -64,7 +76,10 @@ enum SourceAppDelivery {
                 sourcePID: sourcePID,
                 frontmostPID: currentPID,
                 sourceTerminated: sourceTerminated(),
-                remainingPolls: remainingPolls
+                remainingPolls: remainingPolls,
+                // Probed only once the frontmost check has a chance of passing, so a source app
+                // that never activates costs no AX round-trips at all.
+                axFocus: currentPID == sourcePID ? environment.axFocus() : .notObserved
             ) {
             case .read:
                 operation(shouldContinue)
