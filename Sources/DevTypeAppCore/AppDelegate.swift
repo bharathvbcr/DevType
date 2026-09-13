@@ -1733,7 +1733,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            let suspension = EventTapEngine.shared.suspendMatching(reason: "secretPaste")
+            // Named for this delivery, not copied from the secret path it was cloned from.
+            // This string is printed verbatim in the diagnostic report as "held by <reason>",
+            // so a suspension stuck during an AI delivery used to send whoever read the report
+            // into the secrets subsystem. Matches the `path:` this same function already
+            // reports its refusals under.
+            let suspension = EventTapEngine.shared.suspendMatching(reason: "aiResultDelivery")
             TextInjectionPipeline.shared.inject(
                 snippet: snippet,
                 triggerLength: 0,

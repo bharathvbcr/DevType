@@ -19,6 +19,95 @@ final class PasteTargetTests: XCTestCase {
         XCTAssertTrue(target.matches(pid: getpid(), element: original, range: nil, checkRange: false))
     }
 
+    /// "Target element or selection changed before insertion" is one sentence for what are
+    /// really five different bugs, and a diagnostic report that prints only that sentence
+    /// cannot tell an app switch from a caret landing in another field from focus that had not
+    /// been published yet. Each half of the comparison names itself.
+    func testTargetMismatchNamesWhichHalfOfTheComparisonFailed() {
+        let original = AXUIElementCreateApplication(getpid())
+        let different = AXUIElementCreateApplication(1)
+        let range = NSRange(location: 12, length: 3)
+        let target = PasteboardBroker.PasteTarget(pid: getpid(), element: original, range: range)
+
+        XCTAssertNil(target.mismatch(pid: getpid(), element: original, range: range, checkRange: true))
+        XCTAssertEqual(
+            target.mismatch(pid: 1, element: original, range: range, checkRange: true),
+            .processChanged
+        )
+        XCTAssertEqual(
+            target.mismatch(pid: getpid(), element: different, range: range, checkRange: true),
+            .elementChanged
+        )
+        XCTAssertEqual(
+            target.mismatch(pid: getpid(), element: nil, range: range, checkRange: true),
+            .focusLost
+        )
+        XCTAssertEqual(
+            target.mismatch(pid: getpid(), element: original, range: nil, checkRange: true),
+            .rangeChanged
+        )
+
+        // Focus arriving is not focus moving: a target captured before the app published a
+        // focused element must not be reported as the user's field having changed.
+        let captureBeforeFocusLanded = PasteboardBroker.PasteTarget(
+            pid: getpid(), element: nil, range: nil
+        )
+        XCTAssertEqual(
+            captureBeforeFocusLanded.mismatch(
+                pid: getpid(), element: original, range: nil, checkRange: false
+            ),
+            .focusArrived
+        )
+
+        // A target with no process fails closed, and says so rather than borrowing a label
+        // that would send the reader after an app switch that never happened.
+        let unpinned = PasteboardBroker.PasteTarget(pid: nil, element: original, range: nil)
+        XCTAssertEqual(
+            unpinned.mismatch(pid: getpid(), element: original, range: nil, checkRange: false),
+            .noCapturedProcess
+        )
+        XCTAssertEqual(
+            PasteboardBroker.PasteTarget(pid: 0, element: original, range: nil)
+                .mismatch(pid: 0, element: original, range: nil, checkRange: false),
+            .noCapturedProcess
+        )
+    }
+
+    /// The decision and the reason it reports come from one answer, so they cannot disagree —
+    /// the shape `continuationBlock` / `allowsContinuation` already use for the other gate.
+    func testMatchesIsExactlyTheAbsenceOfAMismatch() {
+        let original = AXUIElementCreateApplication(getpid())
+        let different = AXUIElementCreateApplication(1)
+        let range = NSRange(location: 4, length: 2)
+        let targets = [
+            PasteboardBroker.PasteTarget(pid: getpid(), element: original, range: range),
+            PasteboardBroker.PasteTarget(pid: getpid(), element: nil, range: nil),
+            PasteboardBroker.PasteTarget(pid: nil, element: original, range: range),
+        ]
+        for target in targets {
+            for element in [original, different, nil] {
+                for observed in [range, NSRange(location: 0, length: 0), nil] {
+                    for checkRange in [true, false] {
+                        for checkElement in [true, false] {
+                            let mismatch = target.mismatch(
+                                pid: getpid(), element: element, range: observed,
+                                checkRange: checkRange, checkElement: checkElement
+                            )
+                            XCTAssertEqual(
+                                target.matches(
+                                    pid: getpid(), element: element, range: observed,
+                                    checkRange: checkRange, checkElement: checkElement
+                                ),
+                                mismatch == nil,
+                                "matches must be mismatch == nil (mismatch=\(String(describing: mismatch)))"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     func testSelectionRangePolicyIsClosedForUnknownProcessesAndOpenAfterMutation() {
         XCTAssertTrue(
             PasteboardBroker.verifySelectionRange(

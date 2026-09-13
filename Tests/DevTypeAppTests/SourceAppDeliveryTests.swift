@@ -11,10 +11,20 @@ final class SourceAppDeliveryTests: XCTestCase {
         var deliveries = 0
         var pending: [() -> Void] = []
         var continuation: (@Sendable () -> Bool)?
-        /// `nil` keeps the harness on the pre-focus-wait contract, so the original cases still
-        /// describe exactly the environment they were written against.
-        var axFocusOwner: pid_t??
+        /// What the AX focus probe answers, poll by poll; the last entry repeats once the list
+        /// runs out, so a case describes only the polls it cares about.
+        ///
+        /// Empty is `.notObserved` — "this caller does not probe focus" — which keeps the
+        /// original cases on exactly the contract they were written against.
+        var axFocus: [SelectionReader.AXFocusObservation] = []
+        private var axFocusIndex = 0
         var axFocusProbes = 0
+
+        private func nextFocus() -> SelectionReader.AXFocusObservation {
+            guard !axFocus.isEmpty else { return .notObserved }
+            defer { axFocusIndex += 1 }
+            return axFocus[min(axFocusIndex, axFocus.count - 1)]
+        }
 
         func start(sourcePID: pid_t = 20) {
             SourceAppDelivery.perform(
@@ -28,8 +38,7 @@ final class SourceAppDeliveryTests: XCTestCase {
                     axFocus: { [weak self] in
                         guard let self else { return .notObserved }
                         self.axFocusProbes += 1
-                        guard let owner = self.axFocusOwner else { return .notObserved }
-                        return .owner(owner)
+                        return self.nextFocus()
                     }
                 ),
                 onUnavailable: { self.failures += 1 },
@@ -110,18 +119,19 @@ final class SourceAppDeliveryTests: XCTestCase {
         }
     }
 
-    // MARK: - Waiting for AX focus to land, not just for activation
+    // MARK: - Waiting for AX focus to leave our panel, not just for activation
 
     /// The delivery operation's first act is to capture a paste target from AX. Activation
-    /// reaching `NSWorkspace` does not mean the source app has published a focused element yet,
-    /// and capturing in that gap produces a target the inject later refuses as "changed".
-    func testDeliveryWaitsForAXFocusToReachTheSourceApp() {
+    /// reaching `NSWorkspace` does not mean focus has left DevType yet, and capturing in that
+    /// gap produces a target the inject later refuses as "changed".
+    func testDeliveryWaitsForAXFocusToLeaveOurOwnPanel() {
         let h = Harness()
         h.frontmost = 20
-        h.axFocusOwner = .some(10)  // our own panel still owns AX focus
+        h.axFocus = [.ownProcess, .ownProcess, .external(element: 7), .external(element: 7)]
         h.start()
         XCTAssertEqual(h.deliveries, 0, "must not capture a target while our own panel holds focus")
-        h.axFocusOwner = .some(20)
+        h.pending.removeFirst()()
+        XCTAssertEqual(h.deliveries, 0)
         h.drain()
         XCTAssertEqual(h.deliveries, 1)
         XCTAssertEqual(h.failures, 0)
@@ -132,7 +142,7 @@ final class SourceAppDeliveryTests: XCTestCase {
     func testAppThatNeverPublishesFocusIsStillDeliveredAfterTheBudget() {
         let h = Harness()
         h.frontmost = 20
-        h.axFocusOwner = .some(nil)
+        h.axFocus = [.unfocused]
         h.start()
         let polls = h.drain()
         XCTAssertLessThanOrEqual(polls, SelectionReader.sourceFocusMaxPolls)
@@ -140,36 +150,110 @@ final class SourceAppDeliveryTests: XCTestCase {
         XCTAssertEqual(h.failures, 0)
     }
 
-    /// Same for focus that lands on some third process and stays there.
-    func testForeignAXFocusStillDeliversOnceTheBudgetIsSpent() {
+    /// Focus served by a process other than the source app is the *normal* case for WebKit:
+    /// Safari publishes web-content elements from its WebContent process, so the element's pid
+    /// is never Safari's. Keying the wait on the source pid made that unsatisfiable — every
+    /// delivery into such an app burned the whole 500 ms budget, and the settle never engaged,
+    /// leaving the refusal bug unfixed there. What matters is that focus left *us*.
+    func testFocusServedByAHelperProcessSettlesInsteadOfBurningTheBudget() {
         let h = Harness()
         h.frontmost = 20
-        h.axFocusOwner = .some(30)
+        h.axFocus = [.external(element: 99)]
         h.start()
-        h.drain()
+        let polls = h.drain()
         XCTAssertEqual(h.deliveries, 1)
         XCTAssertEqual(h.failures, 0)
+        XCTAssertLessThanOrEqual(polls, 2, "a stable helper-served element must settle, not wait out the budget")
     }
 
     /// A source app that never activates must not pay for AX round-trips it cannot benefit from.
     func testAXFocusIsNotProbedWhileTheSourceAppIsNotFrontmost() {
         let h = Harness()
-        h.axFocusOwner = .some(20)
+        h.axFocus = [.external(element: 1)]
         h.start()
         h.drain()
         XCTAssertEqual(h.axFocusProbes, 0)
         XCTAssertEqual(h.failures, 1)
     }
 
-    /// Focus already settled on the first look delivers immediately — the common case must not
-    /// have grown a poll.
-    func testSettledFocusDeliversWithoutWaiting() {
+    /// A caller that does not probe focus at all keeps the original contract: deliver at once.
+    func testCallerThatDoesNotProbeFocusDeliversWithoutWaiting() {
         let h = Harness()
         h.frontmost = 20
-        h.axFocusOwner = .some(20)
         h.start()
         XCTAssertEqual(h.deliveries, 1)
         XCTAssertTrue(h.pending.isEmpty)
+    }
+
+    // MARK: - Waiting for the focused element to stop moving, not just to exist
+
+    /// The bug this exists for: an AI transform finishes, the source app is reactivated, and the
+    /// inject is refused with "target element or selection changed before insertion" — naming
+    /// the user's own field as having moved when it had only just arrived.
+    ///
+    /// Focus leaving us was waited for; stability was not. `.external` is true from the first
+    /// instant any element outside DevType is focused, and an app coming back to the front
+    /// republishes its focused element while the window server finishes the switch. The
+    /// delivery captured that element, the inject re-read focus a run loop later, saw a
+    /// different one, and refused — throwing away a payload the user watched being generated.
+    func testDeliveryWaitsForTheFocusedElementToStopMoving() {
+        let h = Harness()
+        h.frontmost = 20
+        h.axFocus = [.external(element: 1), .external(element: 2), .external(element: 2)]
+        h.start()
+        XCTAssertEqual(h.deliveries, 0, "focus having left us is focus arriving, not focus settled")
+
+        h.pending.removeFirst()()
+        XCTAssertEqual(h.deliveries, 0, "a different element on the next poll is focus still moving")
+
+        h.drain()
+        XCTAssertEqual(h.deliveries, 1, "the same element twice running is a target worth capturing")
+        XCTAssertEqual(h.failures, 0)
+    }
+
+    /// Focus that flicks back into our own panel mid-settle restarts the settle: `.ownProcess`
+    /// is not a settled external element, and the pair either side of it is not "twice running".
+    func testFocusReturningToOurPanelMidSettleDoesNotCountAsSettled() {
+        let h = Harness()
+        h.frontmost = 20
+        h.axFocus = [
+            .external(element: 5), .ownProcess, .external(element: 5),
+            .external(element: 5),
+        ]
+        h.start()
+        h.pending.removeFirst()()
+        h.pending.removeFirst()()
+        XCTAssertEqual(h.deliveries, 0, "a settle interrupted by our own panel is not a settle")
+        h.drain()
+        XCTAssertEqual(h.deliveries, 1)
+    }
+
+    /// The settle is a preference with a bound, exactly as the focus wait is. An app whose
+    /// focused element never stops changing still gets the payload at the end of the budget —
+    /// losing already-generated work would be a worse bug than the one this wait fixes.
+    func testFocusThatNeverSettlesStillDeliversWithinTheBudget() {
+        let h = Harness()
+        h.frontmost = 20
+        h.axFocus = (0..<40).map { .external(element: UInt64($0)) }
+        h.start()
+        let polls = h.drain()
+        XCTAssertLessThanOrEqual(polls, SelectionReader.sourceFocusMaxPolls)
+        XCTAssertEqual(h.deliveries, 1, "the settle must never become a new refusal")
+        XCTAssertEqual(h.failures, 0)
+    }
+
+    /// Waiting for a settle must not hand a third app the payload: the user switching away is
+    /// still an abort, not something to poll through.
+    func testSwitchingAwayDuringTheSettleWaitStillAborts() {
+        let h = Harness()
+        h.frontmost = 20
+        h.axFocus = [.external(element: 1), .external(element: 2)]
+        h.start()
+        XCTAssertEqual(h.deliveries, 0)
+        h.frontmost = 30
+        h.drain()
+        XCTAssertEqual(h.deliveries, 0)
+        XCTAssertEqual(h.failures, 1)
     }
 
     func testNilFrontmostAndSourceTerminationDuringWaitAreBounded() {

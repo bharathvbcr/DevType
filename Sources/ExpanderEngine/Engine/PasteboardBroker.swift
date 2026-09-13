@@ -498,6 +498,50 @@ public final class PasteboardBroker {
                         range: baseline?.selectedRange ?? element.flatMap { DeliveryVerifier.selectedRange(for: $0) })
         }
 
+        /// Which half of the comparison failed. `isCurrent` is this collapsed to a Bool, so the
+        /// gate and the reason it reports can never disagree — the same shape
+        /// `continuationBlock` / `allowsContinuation` use for the continuation gate.
+        ///
+        /// Kept as distinct cases because each is a different bug, and "Target element or
+        /// selection changed before insertion" is the same sentence for all of them. A report
+        /// that cannot tell `.elementChanged` (focus moved to another field) from
+        /// `.focusArrived` (the target was captured before the app published a focused element
+        /// at all) sends whoever reads it after the wrong cause — which is how a delivery race
+        /// survives a round of fixes.
+        enum Mismatch: String, Equatable {
+            /// Nothing was captured to compare against; a target with no process fails closed.
+            case noCapturedProcess
+            case processChanged
+            /// Captured a focused element, and now there is none.
+            case focusLost
+            /// Captured no focused element, and now there is one — focus *arriving*, not moving.
+            case focusArrived
+            case elementChanged
+            case rangeChanged
+        }
+
+        func mismatch(
+            pid currentPID: pid_t?,
+            element current: AXUIElement?,
+            range currentRange: NSRange?,
+            checkRange: Bool,
+            checkElement: Bool = true
+        ) -> Mismatch? {
+            guard let pid, pid > 0 else { return .noCapturedProcess }
+            guard pid == currentPID else { return .processChanged }
+            if checkElement {
+                switch (element, current) {
+                case (let original?, let observed?):
+                    guard CFEqual(original, observed) else { return .elementChanged }
+                case (nil, nil): break
+                case (_?, nil): return .focusLost
+                case (nil, _?): return .focusArrived
+                }
+            }
+            guard !checkRange || range == nil || range == currentRange else { return .rangeChanged }
+            return nil
+        }
+
         func matches(
             pid currentPID: pid_t?,
             element current: AXUIElement?,
@@ -505,25 +549,26 @@ public final class PasteboardBroker {
             checkRange: Bool,
             checkElement: Bool = true
         ) -> Bool {
-            guard let pid, pid > 0, pid == currentPID else { return false }
-            if checkElement {
-                switch (element, current) {
-                case (let original?, let observed?):
-                    guard CFEqual(original, observed) else { return false }
-                case (nil, nil): break
-                default: return false
-                }
-            }
-            return !checkRange || range == nil || range == currentRange
+            mismatch(pid: currentPID, element: current, range: currentRange,
+                     checkRange: checkRange, checkElement: checkElement) == nil
+        }
+
+        /// Compare against live AX state, keeping the mismatch that decided it.
+        ///
+        /// One read answers both questions on purpose. The refuse path used to re-read focus to
+        /// explain a decision a *previous* read had already made, so the label it printed could
+        /// describe a different instant from the refusal it was labelling.
+        func liveMismatch(checkRange: Bool, checkElement: Bool = true) -> Mismatch? {
+            let current = AXContextChecker.shared.focusedElement()
+            return mismatch(pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                            element: current,
+                            range: checkRange ? current.flatMap { DeliveryVerifier.selectedRange(for: $0) } : nil,
+                            checkRange: checkRange,
+                            checkElement: checkElement)
         }
 
         func isCurrent(checkRange: Bool, checkElement: Bool = true) -> Bool {
-            let current = AXContextChecker.shared.focusedElement()
-            return matches(pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
-                           element: current,
-                           range: checkRange ? current.flatMap { DeliveryVerifier.selectedRange(for: $0) } : nil,
-                           checkRange: checkRange,
-                           checkElement: checkElement)
+            liveMismatch(checkRange: checkRange, checkElement: checkElement) == nil
         }
     }
 

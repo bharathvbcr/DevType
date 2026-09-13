@@ -344,13 +344,37 @@ public extension SelectionReader {
 
     /// What a caller observed about system-wide AX focus while waiting for activation.
     ///
-    /// `.notObserved` and `.owner(nil)` are deliberately different values: "this caller does not
-    /// probe AX focus" must never be spelled the same way as "AX answered, and nothing is
-    /// focused". Collapsing them would make every existing caller start paying a focus wait it
-    /// never asked for.
+    /// `.notObserved` is "this caller does not probe AX focus" and must never be spelled the
+    /// same way as any *observed* state. Collapsing them would make every existing caller start
+    /// paying a focus wait it never asked for.
+    ///
+    /// The three observed states are the three the wait actually turns on. Nothing here records
+    /// *which* process holds focus, because the answer would be misleading — see `.external`.
     enum AXFocusObservation: Equatable, Sendable {
         case notObserved
-        case owner(pid_t?)
+        /// AX answered, and nothing anywhere holds focus. Focus has not arrived yet.
+        case unfocused
+        /// Focus is still inside DevType — our own panel has not given it up.
+        case ownProcess
+        /// Focus has left DevType and sits on the element with this identity.
+        ///
+        /// Deliberately *not* "owned by the source app". An app's focused element is not always
+        /// served by the app's own process: WebKit publishes web-content elements from its
+        /// WebContent process, so `AXUIElementGetPid` there answers a helper's pid and never
+        /// Safari's. A wait keyed on the source pid can therefore never be satisfied in those
+        /// apps — every delivery burns the whole budget, and the settle this wait exists for
+        /// never engages at all, which is to say the bug it fixes stays unfixed for them.
+        ///
+        /// Which process outside ours holds focus does not need to be known here: the caller
+        /// has already established that the source app is frontmost and aborts if a third app
+        /// takes over, and the inject's own entry gate re-verifies the target before writing.
+        ///
+        /// `element` identifies *which* element, so consecutive observations can be compared.
+        /// Supply `CFHash` of the `AXUIElement`: `AXUIElement` implements the CFRuntime
+        /// equal/hash pair, so two separately-copied references to one element hash alike and
+        /// references to different elements do not. A hash collision would cost one skipped
+        /// poll, never a wrong target — the entry gate still compares the elements themselves.
+        case external(element: UInt64)
     }
 
     /// - Parameter axFocus: who owns the AX focused element right now, when the caller probes it.
@@ -365,12 +389,29 @@ public extension SelectionReader {
     ///   focus has not landed this waits, and when the budget runs out it reads anyway, exactly
     ///   as it did before. An app that publishes no focused element at all — common in Electron
     ///   — is therefore never refused by this, it only pays the bounded wait.
+    ///
+    /// - Parameter previousAXFocus: what the *previous* poll observed, so this one can tell
+    ///   focus that has settled from focus that is still moving.
+    ///
+    ///   Focus having left us is not enough, and reading it as though it were is what this wait
+    ///   got wrong. `.external` means some element outside DevType is focused *at this instant*;
+    ///   an app coming back to the front republishes its focused element while the window server
+    ///   finishes the switch, so the first instant that is true is precisely the instant the
+    ///   element is most likely to be replaced. The delivery then captures that element, the
+    ///   inject re-reads focus a run loop later, sees a different one, and refuses with "target
+    ///   element or selection changed" — reporting the user's own target as having moved when it
+    ///   was only still arriving.
+    ///
+    ///   So the element must answer twice running before the target is captured. Costs one poll
+    ///   interval in the settled case; the budget is unchanged, and an app that never settles
+    ///   still reads at the end of it rather than losing the payload.
     static func sourceFocusRetryDecision(
         sourcePID: pid_t,
         frontmostPID: pid_t?,
         sourceTerminated: Bool,
         remainingPolls: Int,
-        axFocus: AXFocusObservation = .notObserved
+        axFocus: AXFocusObservation = .notObserved,
+        previousAXFocus: AXFocusObservation = .notObserved
     ) -> SourceFocusRetryDecision {
         guard sourcePID > 0,
               !sourceTerminated,
@@ -379,7 +420,21 @@ public extension SelectionReader {
             return .fail
         }
         if frontmostPID == sourcePID {
-            guard case .owner(let focusPID) = axFocus, focusPID != sourcePID else { return .read }
+            switch axFocus {
+            case .notObserved:
+                // This caller does not probe focus. Hold it to the original contract rather
+                // than making it wait out a budget it can never satisfy.
+                return .read
+            case .external(let element):
+                // Focus has left us. Read only once the same element has answered twice
+                // running — one observation says focus arrived, not that it stopped moving.
+                if case .external(let previous) = previousAXFocus, previous == element {
+                    return .read
+                }
+            case .unfocused, .ownProcess:
+                // Focus has not arrived, or has not left our panel yet.
+                break
+            }
             guard remainingPolls > 0 else { return .read }
             return .wait(remainingPolls: remainingPolls - 1)
         }

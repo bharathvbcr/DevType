@@ -196,6 +196,88 @@ final class DiagnosticReportTests: XCTestCase {
         XCTAssertTrue(header.contains("Post: Denied"), header)
     }
 
+    /// A target refusal has to arrive in the report saying *which* half moved.
+    ///
+    /// Field report that motivated this: an AI proofread succeeded, the inject was refused with
+    /// "Target element or selection changed before insertion", and the report carried nothing
+    /// else about the target at all — so the failing half had to be deduced from the order the
+    /// entry gate happens to test its conditions in. A refusal nobody can act on is how the
+    /// same delivery race survives a round of fixes.
+    func testFormatHeaderNamesWhichHalfOfTheTargetComparisonFailed() {
+        var context = Self.refuseContext(
+            reason: "Target element or selection changed before insertion",
+            targetMismatch: "elementChanged"
+        )
+        XCTAssertTrue(
+            DiagnosticReport.formatHeader(context).contains("Target mismatch: elementChanged"),
+            "the refusal must name the half that moved, not just that something did"
+        )
+
+        context = Self.refuseContext(
+            reason: "Target element or selection changed before insertion",
+            targetMismatch: "focusArrived"
+        )
+        XCTAssertTrue(
+            DiagnosticReport.formatHeader(context).contains("Target mismatch: focusArrived"),
+            "focus arriving must stay distinguishable from focus moving"
+        )
+
+        // A refusal that had no target comparison must not read as one that compared and found
+        // nothing — that is the same "a check that could not run looks like a check that
+        // passed" shape the entry gate itself was fixed for.
+        context = Self.refuseContext(
+            reason: "Secure Input is active — expansion blocked",
+            targetMismatch: nil
+        )
+        XCTAssertTrue(
+            DiagnosticReport.formatHeader(context).contains("Target mismatch: (not a target refusal)")
+        )
+    }
+
+    private static func refuseContext(
+        reason: String,
+        targetMismatch: String?
+    ) -> DiagnosticReport.Context {
+        let gate = DiagnosticReport.ExpandGateSnapshot(
+            canUseAX: true,
+            axTrusted: true,
+            focusedAvailable: true,
+            isSecureField: false,
+            hasIMEMarkedText: false,
+            shouldBlockExpand: false,
+            blockReason: "ok"
+        )
+        return DiagnosticReport.Context(
+            bundleID: "com.devtype.app",
+            appPath: "/Applications/DevType.app",
+            executablePath: "/Applications/DevType.app/Contents/MacOS/DevType",
+            cdHash: nil,
+            designatedRequirement: nil,
+            snapshot: PermissionSnapshot(canListenTap: true, canUseAX: true, canPostEvents: true),
+            tapRunning: true,
+            engineEnabled: true,
+            secureInputActive: false,
+            displayStatus: "Status: Active",
+            lastInjectOutcome: "refused — \(reason)",
+            frontmostAppName: "Claude",
+            frontmostBundleID: "com.anthropic.claudefordesktop",
+            frontmostPID: 15426,
+            mutedApps: [],
+            expandGate: gate,
+            expandGateAtLastRefuse: PermissionCoordinator.InjectRefuseProvenance(
+                refusedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                reason: reason,
+                frontmostAppName: "Claude",
+                frontmostBundleID: "com.anthropic.claudefordesktop",
+                frontmostPID: 15426,
+                targetMismatch: targetMismatch
+            ),
+            siblingPaths: [],
+            macOSVersion: "26.0",
+            appVersion: "1.1.0 (198)"
+        )
+    }
+
     func testFormatHeaderShowsNoneWhenNeverRefused() {
         let gate = DiagnosticReport.ExpandGateSnapshot(
             canUseAX: true,

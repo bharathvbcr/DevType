@@ -1063,13 +1063,22 @@ public final class TextInjectionPipeline {
         purpose: InjectionPurpose,
         completion: @escaping InjectionCompletion
     ) {
+        // One reading of the target, shared by the decision below and by the label the refusal
+        // reports. These used to be two readings taken at different moments under different
+        // rules: the guard resolved the range gate inline, and `refuseEntryGate` — which could
+        // not see it — took its own reading with the range gate off. So in an app whose AX
+        // range is trusted (Notes, Xcode), a refusal *caused* by the caret moving re-checked
+        // clean and was reported as `.unreproduced`, sending whoever read the report after a
+        // condition that never fired. One reading cannot disagree with itself.
+        let checkRange = PasteboardBroker.verifySelectionRange(
+            bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            role: AXContextChecker.shared.focusedElementRole(),
+            phase: .beforeMutation
+        )
+        let targetMismatch = target.liveMismatch(checkRange: checkRange)
         guard operationIsCurrent(operation, revision: inputRevision, target: target,
                                  allowSecureInput: secureClipboardPaste),
-              target.isCurrent(checkRange: PasteboardBroker.verifySelectionRange(
-                bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-                role: AXContextChecker.shared.focusedElementRole(),
-                phase: .beforeMutation
-              )) else {
+              targetMismatch == nil else {
             // Never a bare `completion(.refused(…))`: this gate drops a payload that is already
             // generated — an AI transform the model has finished, a voice segment already
             // dictated — and recording nothing made that loss invisible to the user *and* to the
@@ -1082,7 +1091,7 @@ public final class TextInjectionPipeline {
             refuseEntryGate(
                 operation: operation,
                 revision: inputRevision,
-                target: target,
+                targetMismatch: targetMismatch,
                 allowSecureInput: secureClipboardPaste,
                 swallowed: swallowed,
                 completion: completion
@@ -2125,13 +2134,35 @@ public final class TextInjectionPipeline {
         return .unreproduced
     }
 
-    /// Records and completes an entry-gate refusal. Re-reads each condition to label it; the
-    /// gate above already made the decision, so a condition that flipped back in between costs
-    /// an `.unreproduced` label, never a changed outcome.
+    /// Which target mismatch a refusal records, if any.
+    ///
+    /// Only a `.targetChanged` refusal may carry one. The gate reads the target before it knows
+    /// which condition will win, so a supersession or a Secure Input block can easily coincide
+    /// with a target that also happens to have moved — and a report that prints
+    /// `Refuse reason: superseded` beside `Target mismatch: elementChanged` sends the reader
+    /// after a focus bug that had nothing to do with the refusal. The mismatch is evidence for
+    /// exactly one label, so it is attached to exactly that one.
+    static func recordedTargetMismatch(
+        refusal: EntryGateRefusal,
+        mismatch: PasteboardBroker.PasteTarget.Mismatch?
+    ) -> String? {
+        refusal == .targetChanged ? mismatch?.rawValue : nil
+    }
+
+    /// Records and completes an entry-gate refusal. Re-reads the *live* conditions to label it;
+    /// the gate above already made the decision, so a condition that flipped back in between
+    /// costs an `.unreproduced` label, never a changed outcome.
+    ///
+    /// The target is the exception, and is handed in rather than re-read: it is the one
+    /// condition whose label has to name a sub-reason, and re-reading it let the sub-reason
+    /// describe a different instant — with a different range gate — from the decision it was
+    /// explaining. `.targetChanged` on its own cannot be acted on, because an app switch, a
+    /// caret landing in a different field, and focus that had not been published yet all print
+    /// that one sentence, so the mismatch travels with the refusal into the diagnostic report.
     private func refuseEntryGate(
         operation: InjectCompletionGuard,
         revision: UInt64,
-        target: PasteboardBroker.PasteTarget,
+        targetMismatch: PasteboardBroker.PasteTarget.Mismatch?,
         allowSecureInput: Bool,
         swallowed: SwallowedKey,
         completion: @escaping InjectionCompletion
@@ -2144,13 +2175,19 @@ public final class TextInjectionPipeline {
             continuationBlock: operation.continuationBlock(),
             secureInputBlocked: !allowSecureInput && AXContextChecker.isSecureEventInputEnabledLive(),
             axUntrusted: !allowSecureInput && !AXContextChecker.shared.isProcessTrusted(),
-            targetCurrent: target.isCurrent(checkRange: false)
+            targetCurrent: targetMismatch == nil
         )
         refuseInject(
             refusal.reason,
             path: refusal.path,
             swallowed: swallowed,
             allowKeyReplay: false,
+            refuseContext: PermissionCoordinator.InjectRefuseProvenance.capture(
+                reason: refusal.reason,
+                targetMismatch: Self.recordedTargetMismatch(
+                    refusal: refusal, mismatch: targetMismatch
+                )
+            ),
             completion: completion
         )
     }

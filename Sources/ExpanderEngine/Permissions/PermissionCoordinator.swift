@@ -183,6 +183,15 @@ public final class PermissionCoordinator {
         public var frontmostBundleID: String?
         public var frontmostPID: pid_t?
         public var axErrorRawValue: Int32?
+        /// Which half of the paste-target comparison failed, as
+        /// `PasteboardBroker.PasteTarget.Mismatch.rawValue`.
+        ///
+        /// A `String` rather than the enum because that type is internal to the engine while
+        /// this provenance is public and read by the diagnostics layer. Without it every
+        /// target refusal reaches the report as one sentence — "target element or selection
+        /// changed" — covering an app switch, a field change, and focus that had not arrived
+        /// yet, which are three different bugs with three different fixes.
+        public var targetMismatch: String?
 
         public init(
             refusedAt: Date = Date(),
@@ -191,7 +200,8 @@ public final class PermissionCoordinator {
             frontmostAppName: String? = nil,
             frontmostBundleID: String? = nil,
             frontmostPID: pid_t? = nil,
-            axErrorRawValue: Int32? = nil
+            axErrorRawValue: Int32? = nil,
+            targetMismatch: String? = nil
         ) {
             self.refusedAt = refusedAt
             self.reason = reason
@@ -200,13 +210,15 @@ public final class PermissionCoordinator {
             self.frontmostBundleID = frontmostBundleID
             self.frontmostPID = frontmostPID
             self.axErrorRawValue = axErrorRawValue
+            self.targetMismatch = targetMismatch
         }
 
         /// Capture frontmost + optional gate/focus error. Prefer calling on the main thread.
         public static func capture(
             reason: String,
             decision: AXContextChecker.ExpandGateDecision? = nil,
-            refusedAt: Date = Date()
+            refusedAt: Date = Date(),
+            targetMismatch: String? = nil
         ) -> InjectRefuseProvenance {
             let front = NSWorkspace.shared.frontmostApplication
             var axRaw: Int32?
@@ -220,7 +232,8 @@ public final class PermissionCoordinator {
                 frontmostAppName: front?.localizedName,
                 frontmostBundleID: front?.bundleIdentifier,
                 frontmostPID: front?.processIdentifier,
-                axErrorRawValue: axRaw
+                axErrorRawValue: axRaw,
+                targetMismatch: targetMismatch
             )
         }
     }

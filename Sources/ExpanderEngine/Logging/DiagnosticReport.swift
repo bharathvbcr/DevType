@@ -976,6 +976,10 @@ public enum DiagnosticReport {
             lines.append("Frontmost bundle ID: \(boundedOptionalScalar(refuse.frontmostBundleID, label: "frontmostBundleID", domain: "frontmost-bundle-id", nilValue: "(none)"))")
             lines.append("Frontmost PID: \(refuse.frontmostPID.map(String.init) ?? "(none)")")
             lines.append("AX error: \(refuse.axErrorRawValue.map(String.init) ?? "(none)")")
+            // "(not a target refusal)" rather than "(none)": every other line here means "we
+            // looked and found nothing", and a target refusal that recorded no mismatch would
+            // then be indistinguishable from a Secure Input refusal that never had one.
+            lines.append("Target mismatch: \(boundedOptionalScalar(refuse.targetMismatch, label: "targetMismatch", domain: "inject-target-mismatch", nilValue: "(not a target refusal)"))")
             if let gate = refuse.gateSnapshot {
                 lines.append(contentsOf: formatExpandGateLines(gate))
             } else {
