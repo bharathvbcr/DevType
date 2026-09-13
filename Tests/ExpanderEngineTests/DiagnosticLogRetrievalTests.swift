@@ -151,6 +151,60 @@ final class DiagnosticLogRetrievalTests: XCTestCase {
         XCTAssertEqual(mirror.count, 1)
     }
 
+    /// The poll overlap re-offers lines the ring already holds. Counting those as observed but
+    /// nowhere else is what made a healthy mirror report a large, unexplained shortfall; the
+    /// retention terms now add back up to the observation count.
+    func testOverlapDuplicatesAreCountedRatherThanLeftAsAnUnexplainedShortfall() {
+        let now = Date()
+        let entries = [
+            line("first incident", secondsAgo: 40, now: now),
+            line("second incident", secondsAgo: 30, now: now),
+        ]
+        let mirror = DevLogMirror(fetch: { _ in entries })
+
+        XCTAssertEqual(mirror.poll(now: now), .success(added: 2))
+        XCTAssertEqual(mirror.health.duplicateEntryCount, 0)
+
+        // Three more polls of the same window: every line is re-observed and already held.
+        for step in 1...3 {
+            let outcome = mirror.poll(
+                now: now.addingTimeInterval(DevLogMirror.defaultPollInterval * Double(step))
+            )
+            XCTAssertEqual(outcome, .success(added: 0), "step \(step)")
+        }
+
+        let health = mirror.health
+        XCTAssertEqual(health.observedEntryCount, 8)
+        XCTAssertEqual(health.retainedEntryCount, 2)
+        XCTAssertEqual(health.duplicateEntryCount, 6)
+        XCTAssertEqual(health.evictedEntryCount, 0)
+        XCTAssertEqual(
+            health.unaccountedEntryCount, 0,
+            "Observed must equal retained + duplicates + oversized + evicted on a healthy mirror."
+        )
+    }
+
+    /// The report prints every term of that arithmetic, so the reader never has to guess whether
+    /// the gap between observed and retained was loss.
+    func testMirrorRetentionLineAccountsForTheGapBetweenObservedAndRetained() {
+        let now = Date()
+        let entries = [line("only incident", secondsAgo: 30, now: now)]
+        let mirror = DevLogMirror(fetch: { _ in entries })
+        mirror.poll(now: now)
+        mirror.poll(now: now.addingTimeInterval(DevLogMirror.defaultPollInterval))
+
+        let lines = DiagnosticReport.mirrorReportLines(mirror: mirror)
+        let line = lines.first { $0.contains("mirror retention") } ?? ""
+        XCTAssertTrue(line.contains("observed=2"), line)
+        XCTAssertTrue(line.contains("retained=1/"), line)
+        XCTAssertTrue(line.contains("duplicates=1"), line)
+        XCTAssertTrue(line.contains("evicted=0"), line)
+        XCTAssertTrue(
+            line.contains("unaccounted=0"),
+            "A healthy mirror must say so in the one term that means loss.\n\(line)"
+        )
+    }
+
     func testRenderedLineFormatMatchesDiagnosticStyle() {
         let now = Date()
         let entry = line("undo widened over 2 unit(s)", secondsAgo: 5, category: "Inject", level: "info", now: now)

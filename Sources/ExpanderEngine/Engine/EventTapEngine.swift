@@ -115,14 +115,22 @@ public enum EngineDisplayStatus: Equatable {
         canUseAX: Bool = true,
         isTapRunning: Bool,
         isEnabled: Bool,
-        isSecureInputActive: Bool
+        isSecureInputActive: Bool,
+        hasAttemptedTapStart: Bool = true
     ) -> EngineDisplayStatus {
         // `.defaultTap` needs both capabilities; missing either is Needs Permissions, not Tap Failed.
         if !canListenTap || !canUseAX {
             return .needsPermissions
         }
-        // Only a tap that was asked to run can have failed.
-        if isEnabled && !isTapRunning {
+        // Only a tap that was asked to run can have failed — and `isEnabled` does not say that.
+        // It is the user's pause preference, true from the first line of launch, while the tap
+        // is not installed until the permission coordinator starts it tens of milliseconds
+        // later. Reading the two together reported a tap that had never been asked to start as
+        // one that had tried and failed, which is the launch-time Tap Failed flash.
+        //
+        // Defaulted to `true` so every caller that asks *after* startup — the recovery window,
+        // Preferences, the diagnostic report — keeps its existing behaviour untouched.
+        if isEnabled && hasAttemptedTapStart && !isTapRunning {
             return .tapFailed
         }
         if isSecureInputActive {
@@ -139,14 +147,16 @@ public enum EngineDisplayStatus: Equatable {
         snapshot: PermissionSnapshot,
         isTapRunning: Bool,
         isEnabled: Bool,
-        isSecureInputActive: Bool
+        isSecureInputActive: Bool,
+        hasAttemptedTapStart: Bool = true
     ) -> EngineDisplayStatus {
         resolve(
             canListenTap: snapshot.canListenTap,
             canUseAX: snapshot.canUseAX,
             isTapRunning: isTapRunning,
             isEnabled: isEnabled,
-            isSecureInputActive: isSecureInputActive
+            isSecureInputActive: isSecureInputActive,
+            hasAttemptedTapStart: hasAttemptedTapStart
         )
     }
 }
@@ -210,6 +220,9 @@ public final class EventTapEngine {
 
     private var _isEnabled: Bool = true
     private var _isTapRunning: Bool = false
+    /// Latched by the first `start()`, never cleared: the question it answers is "has this
+    /// process ever asked?", and a later stop does not make the answer no again.
+    private var _hasAttemptedTapStart: Bool = false
     private var _isExpanding: Bool = false
     /// §8.3: keystrokes typed while an expansion is in flight, held so they cannot land ahead of
     /// the paste. Guarded by `lock` — mutated from the tap callback and from `endExpansion`.
@@ -481,6 +494,21 @@ public final class EventTapEngine {
         lock.lock()
         defer { lock.unlock() }
         return _isTapRunning
+    }
+
+    /// Whether `start()` has been called at all in this process.
+    ///
+    /// The window between the status item appearing and `PermissionCoordinator.start()`
+    /// installing the tap is real — roughly 50ms at launch — and during it the tap is not
+    /// running for the most ordinary reason there is: nobody has asked it to yet. Any status
+    /// refresh landing in that window rendered Tap Failed, because "not running" was the only
+    /// thing the display could see. Startup order alone cannot fix that; one more early
+    /// refresh puts the flash straight back, which is why `setupStatusItem` carries a comment
+    /// telling the next reader not to add one.
+    public var hasAttemptedTapStart: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _hasAttemptedTapStart
     }
 
     /// True while an expansion inject + clipboard restore is in flight; matching is suppressed.
@@ -1367,6 +1395,9 @@ public final class EventTapEngine {
     }
 
     public func start() -> Bool {
+        lock.lock()
+        _hasAttemptedTapStart = true
+        lock.unlock()
         let listenGranted = CGPreflightListenEventAccess()
         let axOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
         let axGranted = AXIsProcessTrustedWithOptions(axOptions)

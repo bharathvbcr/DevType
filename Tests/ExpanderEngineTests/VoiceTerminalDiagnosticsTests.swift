@@ -87,6 +87,62 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
         XCTAssertFalse(recorder.terminalReportLines().joined(separator: "\n").contains(secret))
     }
 
+    /// A failure that names something the user can do must never also report that nothing can
+    /// be done. `retryClass` and `userAction` defaulted independently, so `noMicrophone` reached
+    /// a real diagnostic report as `recoverability=notRecoverable` while carrying
+    /// `userAction: .grantMicrophonePermission`.
+    func testARemedyIsNeverReportedAsUnrecoverable() {
+        let snapshot = makeSnapshot(speechProviderID: "apple_speech", route: .onDeviceOnly)
+        let failure = VoiceFailure(
+            stage: .audioCapture,
+            code: .noMicrophone,
+            userAction: .grantMicrophonePermission,
+            redactedDetail: "Hardware input format unavailable or invalid"
+        )
+
+        XCTAssertEqual(failure.retryClass, .none, "The stored input is left exactly as written…")
+        XCTAssertEqual(failure.effectiveRetryClass, .afterUserAction, "…and reconciled on read.")
+        XCTAssertEqual(
+            VoiceTerminalDiagnostic(failure: failure, snapshot: snapshot).recoverability,
+            .userActionRequired
+        )
+    }
+
+    /// Every remedy, not just the microphone one — the four other construction sites that got
+    /// this wrong named four different actions.
+    func testEveryRemedyActionReconcilesTheDefaultRetryClass() {
+        for action in [
+            UserAction.grantMicrophonePermission, .grantAccessibilityPermission, .enterAPIKey,
+            .configureEndpoint, .downloadModel, .freeDiskSpace, .retryWithOtherProvider,
+        ] {
+            let failure = VoiceFailure(stage: .recognition, code: .authFailed, userAction: action)
+            XCTAssertEqual(failure.effectiveRetryClass, .afterUserAction, "\(action)")
+        }
+    }
+
+    /// `reviewInHistory` is not a remedy: it says the audio survived and where it is, not how to
+    /// make the operation succeed. Reconciliation must not turn that into a promise of a retry.
+    func testReviewInHistoryStaysUnrecoverable() {
+        let failure = VoiceFailure(
+            stage: .recognition,
+            code: .speechProtocolViolation,
+            userAction: .reviewInHistory
+        )
+        XCTAssertEqual(failure.effectiveRetryClass, .none)
+        XCTAssertFalse(UserAction.reviewInHistory.isRemedy)
+    }
+
+    /// An explicit retry class is the caller's, and reconciliation leaves it alone.
+    func testAnExplicitRetryClassIsNeverOverridden() {
+        let failure = VoiceFailure(
+            stage: .recognition,
+            code: .endpointUnreachable,
+            retryClass: .jitteredBackoff,
+            userAction: .configureEndpoint
+        )
+        XCTAssertEqual(failure.effectiveRetryClass, .jitteredBackoff)
+    }
+
     func testKnownProviderUsesItsCanonicalLocalityInsteadOfTheRequestedRoute() {
         let snapshot = makeSnapshot(
             speechProviderID: VoiceSessionSnapshotFactory.ProviderID.appleSpeechLegacy,

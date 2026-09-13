@@ -337,6 +337,20 @@ public final class InjectTelemetryLog {
     /// Canonical bounded view for both the production report and Preferences. Storage eviction and
     /// projection truncation are reported separately: the retention line covers aggregate keys
     /// already evicted, while `HeaderProjection` covers report lines omitted by item/byte ceilings.
+    /// A refusal is identified by its reason *and* the caller that raised it. Keying on the
+    /// reason alone merged an AI result lost at delivery with an inline-search expansion lost the
+    /// same way, and printed one row that named neither.
+    private struct RefusalKey: Hashable, Comparable {
+        let reason: String
+        let path: String?
+
+        static func < (lhs: Self, rhs: Self) -> Bool {
+            lhs.reason == rhs.reason
+                ? (lhs.path ?? "") < (rhs.path ?? "")
+                : lhs.reason < rhs.reason
+        }
+    }
+
     func diagnosticSummaryProjection(
         topRefuseReasons: Int = 8,
         itemLimit: Int = DiagnosticReport.headerProjectionItemLimit,
@@ -352,7 +366,7 @@ public final class InjectTelemetryLog {
         let all = entries
         var byBundle: [String: BundleStats] = [:]
         var outcomes: [String: Int] = [:]
-        var refusals: [String: Int] = [:]
+        var refusals: [RefusalKey: Int] = [:]
         for entry in all {
             let bundle = entry.bundleID?.isEmpty == false ? entry.bundleID! : "(unknown)"
             var stats = byBundle[bundle] ?? BundleStats()
@@ -362,7 +376,7 @@ public final class InjectTelemetryLog {
             case .postedUnverified, .degradedAXOnly: stats.deliveredUnverified += 1
             case .refused(let reason):
                 stats.refused += 1
-                refusals[reason, default: 0] += 1
+                refusals[RefusalKey(reason: reason, path: entry.path), default: 0] += 1
             case .failedSilent: stats.failed += 1
             }
             byBundle[bundle] = stats
@@ -469,13 +483,24 @@ public final class InjectTelemetryLog {
             })
             let visibleRefusals = rankedRefusals.prefix(max(0, topRefuseReasons))
             independentlyOmittedLineCount = rankedRefusals.count - visibleRefusals.count
-            for (reason, count) in visibleRefusals {
+            for (key, count) in visibleRefusals {
                 let safeReason = DiagnosticPrivacy.boundedIdentifier(
-                    reason,
+                    key.reason,
                     label: "refuseReason",
                     domain: "inject-refuse-reason"
                 )
-                builder.observe("  \(count)× \(safeReason)")
+                // The path is recorded precisely so the report can say *which* caller refused —
+                // three panel deliveries share a vocabulary, and an entry-gate refusal and a
+                // lost AI result are not the same incident. Dropping it here is what made the
+                // recorded path unreadable from the artifact it exists to appear in.
+                let suffix = key.path.map { path in
+                    " [" + DiagnosticPrivacy.boundedIdentifier(
+                        path,
+                        label: "refusePath",
+                        domain: "inject-refuse-path"
+                    ) + "]"
+                } ?? ""
+                builder.observe("  \(count)× \(safeReason)\(suffix)")
             }
         }
         lock.unlock()

@@ -407,7 +407,8 @@ public enum DiagnosticReport {
             snapshot: resolvedSnapshot,
             isTapRunning: tapRunning,
             isEnabled: enabled,
-            isSecureInputActive: secure
+            isSecureInputActive: secure,
+            hasAttemptedTapStart: EventTapEngine.shared.hasAttemptedTapStart
         )
         let front = NSWorkspace.shared.frontmostApplication
         let outcome: String?
@@ -580,10 +581,18 @@ public enum DiagnosticReport {
         } else {
             "(mirror pending — no successful OSLog fetch yet)"
         }
+        // Every term that explains the gap between observed and retained is printed, because the
+        // gap is otherwise read as silent loss: `duplicates` is the deliberate poll overlap and
+        // on a healthy mirror it is most of the difference, and `unaccounted` is the only number
+        // here that means something went missing. Reporting observed and retained alone said
+        // "2457 entries vanished with 3874 slots free and nothing evicted" — a sentence about a
+        // mirror that was working perfectly.
         let retentionLine = "(mirror retention — observed=\(health.observedEntryCount); "
             + "retained=\(health.retainedEntryCount)/\(health.entryCapacity); "
             + "bytes=\(health.retainedUTF8Bytes)/\(health.byteCapacity); "
-            + "oversized=\(health.oversizedEntryCount); evicted=\(health.evictedEntryCount))"
+            + "duplicates=\(health.duplicateEntryCount); "
+            + "oversized=\(health.oversizedEntryCount); evicted=\(health.evictedEntryCount); "
+            + "unaccounted=\(health.unaccountedEntryCount))"
         guard total > 0 else { return [healthLine!, retentionLine] }
         var lines = snapshot.lines
         if total > lines.count {

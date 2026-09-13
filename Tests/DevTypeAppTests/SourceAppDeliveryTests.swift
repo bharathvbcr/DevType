@@ -9,6 +9,8 @@ final class SourceAppDeliveryTests: XCTestCase {
         var activations = 0
         var failures = 0
         var deliveries = 0
+        /// Every cause handed to `onUnavailable`, in order.
+        var causes: [SelectionReader.SourceUnavailability] = []
         var pending: [() -> Void] = []
         var continuation: (@Sendable () -> Bool)?
         /// What the AX focus probe answers, poll by poll; the last entry repeats once the list
@@ -41,7 +43,7 @@ final class SourceAppDeliveryTests: XCTestCase {
                         return self.nextFocus()
                     }
                 ),
-                onUnavailable: { self.failures += 1 },
+                onUnavailable: { self.failures += 1; self.causes.append($0) },
                 operation: {
                     self.deliveries += 1
                     self.continuation = $0
@@ -107,16 +109,77 @@ final class SourceAppDeliveryTests: XCTestCase {
         XCTAssertEqual(h.continuation?(), false)
     }
 
-    func testUnknownOwnAndTerminatedSourcesNeverActivateOrDeliver() {
-        for source in [0, -1, 10, 20] as [pid_t] {
+    /// The entry guard refuses four different situations, and each one reaches the caller under
+    /// its own name. They used to arrive as one indistinguishable callback, which is how a
+    /// refusal raised because DevType *was* the source came to be reported as the source app
+    /// failing to come back to the front.
+    func testEntryGuardNamesEachCauseInsteadOfCollapsingThem() {
+        let cases: [(pid_t, Bool, SelectionReader.SourceUnavailability)] = [
+            (0, false, .noSourceApp),
+            (-1, false, .noSourceApp),
+            (10, false, .ownProcess),
+            (20, true, .sourceTerminated),
+        ]
+        for (source, terminated, expected) in cases {
             let h = Harness()
-            h.terminated = source == 20
+            h.terminated = terminated
             h.start(sourcePID: source)
             h.drain()
             XCTAssertEqual(h.deliveries, 0, "source \(source)")
             XCTAssertEqual(h.activations, 0, "source \(source)")
             XCTAssertEqual(h.failures, 1, "source \(source)")
+            XCTAssertEqual(h.causes, [expected], "source \(source)")
         }
+    }
+
+    /// Our own process is refused *before* the source app is activated, and named as such. This
+    /// is the pre-check the AI palette consults so a transform is never generated for a delivery
+    /// that cannot land.
+    func testOwnProcessSourceIsRefusedWithoutActivating() {
+        let h = Harness()
+        h.start(sourcePID: 10)
+        h.drain()
+        XCTAssertEqual(h.causes, [.ownProcess])
+        XCTAssertEqual(h.activations, 0, "Activating ourselves would be a no-op with a cost")
+        XCTAssertEqual(
+            SelectionReader.SourceUnavailability.ownProcess.reason,
+            "DevType was frontmost — there was no other application to insert into"
+        )
+    }
+
+    /// A third app taking the front and the source never returning are different events with
+    /// different answers; only the second one is about focus failing to arrive.
+    func testPollTimeCausesAreDistinguished() {
+        let third = Harness()
+        third.frontmost = 30
+        third.start()
+        third.drain()
+        XCTAssertEqual(third.causes, [.replacedByAnotherApp])
+
+        let stalled = Harness()
+        stalled.frontmost = 10
+        stalled.start()
+        stalled.drain()
+        XCTAssertEqual(stalled.causes, [.focusNeverReturned])
+
+        // Quitting mid-wait is reported as the quit, not as the budget that happened to notice it.
+        let quit = Harness()
+        quit.frontmost = nil
+        quit.start()
+        quit.terminated = true
+        quit.drain()
+        XCTAssertEqual(quit.causes, [.sourceTerminated])
+    }
+
+    /// Every cause carries a distinct sentence — the whole point of splitting them.
+    func testEveryCauseHasItsOwnSentence() {
+        let reasons = SelectionReader.SourceUnavailability.allCases.map(\.reason)
+        XCTAssertEqual(
+            Set(reasons).count,
+            SelectionReader.SourceUnavailability.allCases.count,
+            "Two causes sharing a sentence puts the report back where it started."
+        )
+        XCTAssertFalse(reasons.contains { $0.isEmpty })
     }
 
     // MARK: - Waiting for AX focus to leave our panel, not just for activation

@@ -1,7 +1,15 @@
 import Cocoa
 import Foundation
 
-/// Single permission observation stream: app activation + become-active + ~2s poll.
+/// Single permission observation stream: workspace app activation + ~2s poll.
+///
+/// Our own `NSApplication.didBecomeActiveNotification` is deliberately **not** observed here.
+/// `PermissionCoordinator.handleApplicationDidBecomeActive` already answers that exact
+/// notification by way of the app delegate, and answers it with strictly more than a probe —
+/// it also attempts a tap start and may raise the tap-failure alert. Observing it in both
+/// places meant every activation paid three full TCC round trips (`CGPreflightListenEventAccess`
+/// + `AXIsProcessTrustedWithOptions` + `CGPreflightPostEventAccess`, each) on the main thread
+/// for one event, and printed the answer to the Console twice.
 public final class PermissionObserver {
     public static let shared = PermissionObserver()
 
@@ -9,7 +17,6 @@ public final class PermissionObserver {
 
     private let probe = PermissionProbe()
     private var workspaceObserver: NSObjectProtocol?
-    private var appActiveObserver: NSObjectProtocol?
     private var permissionPollTimer: DispatchSourceTimer?
     private var lastObservedSnapshot: PermissionSnapshot?
     private var onChanged: ((PermissionSnapshot) -> Void)?
@@ -37,16 +44,6 @@ public final class PermissionObserver {
             self?.emitIfChanged()
         }
 
-        // Accessory apps often miss workspace activation when returning from Settings.
-        appActiveObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            DevTypeLog.permission.info("[Permission] NSApp didBecomeActive — forcing preflight refresh")
-            self?.emitIfChanged(force: true)
-        }
-
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(
             deadline: .now() + Self.pollInterval,
@@ -65,10 +62,6 @@ public final class PermissionObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             workspaceObserver = nil
         }
-        if let observer = appActiveObserver {
-            NotificationCenter.default.removeObserver(observer)
-            appActiveObserver = nil
-        }
         permissionPollTimer?.cancel()
         permissionPollTimer = nil
         lastObservedSnapshot = nil
@@ -80,8 +73,18 @@ public final class PermissionObserver {
         emitIfChanged(force: true)
     }
 
-    private func emitIfChanged(force: Bool = false) {
-        let snapshot = probe.snapshot()
+    /// Publish a snapshot the caller has *already* taken, instead of taking another one.
+    ///
+    /// `PermissionCoordinator.refresh` needs a snapshot of its own for the tap lifecycle, and
+    /// used to call `refreshNow()` immediately before taking it — two full TCC probes, one line
+    /// apart, describing the same instant. Handing the probe it already has to the observer
+    /// keeps both sides in sync for the cost of one.
+    public func refreshNow(with snapshot: PermissionSnapshot) {
+        emitIfChanged(force: true, snapshot: snapshot)
+    }
+
+    private func emitIfChanged(force: Bool = false, snapshot probed: PermissionSnapshot? = nil) {
+        let snapshot = probed ?? probe.snapshot()
         // While any capability is denied, log full preflight each poll so Console matches Settings confusion.
         if !snapshot.isFullyCapable {
             DevTypeLog.permission.debug(

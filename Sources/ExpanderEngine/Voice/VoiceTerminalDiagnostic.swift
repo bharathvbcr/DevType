@@ -102,7 +102,9 @@ public struct VoiceTerminalDiagnostic: Codable, Equatable, Sendable, Identifiabl
             stage: failure.stage,
             provider: context.provider,
             locality: context.locality,
-            recoverability: Self.recoverability(for: failure.retryClass)
+            // `effectiveRetryClass`, not the stored one: a failure carrying a remedy the user can
+            // perform must never be reported as unrecoverable. See `VoiceFailure`.
+            recoverability: Self.recoverability(for: failure.effectiveRetryClass)
         )
     }
 

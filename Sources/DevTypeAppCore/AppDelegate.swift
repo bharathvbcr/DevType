@@ -1618,13 +1618,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// macro, a palette value — so giving up here destroys work the user watched happen. All
     /// three call sites used to show a toast and record nothing, which is why a diagnostic
     /// report could show a transform that succeeded with no inject attempt anywhere beside it.
-    private func reportDeliveryTargetUnavailable(path: String) {
+    private func reportDeliveryTargetUnavailable(
+        _ cause: SelectionReader.SourceUnavailability,
+        path: String
+    ) {
         PermissionCoordinator.shared.recordInjectOutcome(
-            .refused("Source application did not return to the front"),
+            .refused(cause.reason),
             refuseContext: nil,
             path: path
         )
-        ToastPanel.show(loc.s("voice.error.targetChanged"), symbol: "exclamationmark.triangle.fill")
+        // `.ownProcess` is the one cause with advice attached: the command ran with our own
+        // window in front, so there is no other app to insert into. "Target changed" is wrong
+        // there — nothing changed, and the app the toast implies the user should return to is
+        // the one they are already looking at.
+        let message = cause == .ownProcess
+            ? loc.s("delivery.fail.ownProcess")
+            : loc.s("voice.error.targetChanged")
+        ToastPanel.show(message, symbol: "exclamationmark.triangle.fill")
     }
 
     /// Shared refusal for a delivery whose `InjectionPlanner` plan is `.refuse`.
@@ -1651,8 +1661,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Insert resolved palette text (date tools / clipboard) with eraseCount 0, like hotkey insertText.
     private func injectPaletteText(_ text: String, sourceApp: NSRunningApplication?) {
-        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
-            reportDeliveryTargetUnavailable(path: "paletteTextDelivery")
+        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] cause in
+            reportDeliveryTargetUnavailable(cause, path: "paletteTextDelivery")
         }) { [self] shouldContinue in
             TextInjectionPipeline.shared.inject(
                 snippet: SnippetModel(title: "Palette", triggerKeyword: "", replacementText: text),
@@ -1710,8 +1720,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             sourceApp?.activate()
             return
         }
-        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
-            reportDeliveryTargetUnavailable(path: "aiResultDelivery")
+        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] cause in
+            reportDeliveryTargetUnavailable(cause, path: "aiResultDelivery")
         }) { [self] shouldContinue in
             let snapshot = PermissionCoordinator.shared.cachedSnapshot
             let snippet = SnippetModel(
@@ -1848,8 +1858,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             ToastPanel.show(failure.message, symbol: "exclamationmark.triangle.fill", preempt: true)
             return
         }
-        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] in
-            reportDeliveryTargetUnavailable(path: "searchExpansionDelivery")
+        SourceAppDelivery.perform(sourceApp: sourceApp, onUnavailable: { [self] cause in
+            reportDeliveryTargetUnavailable(cause, path: "searchExpansionDelivery")
         }) { [self] shouldContinue in
             let snapshot = PermissionCoordinator.shared.cachedSnapshot
             let needsCursor = InjectionPlanner.needsCursorHID(
@@ -2043,7 +2053,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             snapshot: snapshot,
             isTapRunning: EventTapEngine.shared.isTapRunning,
             isEnabled: EventTapEngine.shared.isEnabled,
-            isSecureInputActive: secureInputActive
+            isSecureInputActive: secureInputActive,
+            hasAttemptedTapStart: EventTapEngine.shared.hasAttemptedTapStart
         )
         if lastLoggedDisplayStatus != display {
             DevTypeLog.app.info(

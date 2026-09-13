@@ -476,7 +476,8 @@ final class HomeViewController: NSViewController {
             snapshot: snapshot,
             isTapRunning: engine.isTapRunning,
             isEnabled: engine.isEnabled,
-            isSecureInputActive: engine.isSecureInputActive
+            isSecureInputActive: engine.isSecureInputActive,
+            hasAttemptedTapStart: EventTapEngine.shared.hasAttemptedTapStart
         ).requiresAction {
             (NSApp.delegate as? AppDelegate)?.openPermissionRecovery(nil)
         } else {
@@ -566,7 +567,8 @@ final class HomeViewController: NSViewController {
             snapshot: snapshot,
             isTapRunning: engine.isTapRunning,
             isEnabled: engine.isEnabled,
-            isSecureInputActive: engine.isSecureInputActive
+            isSecureInputActive: engine.isSecureInputActive,
+            hasAttemptedTapStart: EventTapEngine.shared.hasAttemptedTapStart
         )
 
         switch display {

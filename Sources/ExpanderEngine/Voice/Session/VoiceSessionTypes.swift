@@ -235,6 +235,22 @@ public enum UserAction: String, Codable, Sendable {
     case freeDiskSpace
     case retryWithOtherProvider
     case reviewInHistory
+
+    /// Whether performing this action makes a retry viable.
+    ///
+    /// `reviewInHistory` is the one that does not: it tells the user the audio survived and
+    /// where to find it, not how to make the operation succeed. Everything else is a remedy —
+    /// a grant, a key, an endpoint, a download, disk space, a different provider — and a
+    /// failure that names one is recoverable once the user has acted on it.
+    public var isRemedy: Bool {
+        switch self {
+        case .grantMicrophonePermission, .grantAccessibilityPermission, .enterAPIKey,
+             .configureEndpoint, .downloadModel, .freeDiskSpace, .retryWithOtherProvider:
+            return true
+        case .reviewInHistory:
+            return false
+        }
+    }
 }
 
 public struct VoiceFailure: Error, Codable, Sendable, Equatable {
@@ -265,6 +281,23 @@ public struct VoiceFailure: Error, Codable, Sendable, Equatable {
         self.userAction = userAction
         self.diagnosticID = diagnosticID
         self.redactedDetail = redactedDetail
+    }
+
+    /// The retry class actually in force, reconciled against `userAction`.
+    ///
+    /// `retryClass` defaults to `.none` and `userAction` defaults to `nil`, independently, and
+    /// nothing tied them together — so one failure could say "grant microphone permission" and
+    /// "not recoverable" in the same breath. That combination reached a diagnostic report as
+    /// `code=noMicrophone … recoverability=notRecoverable`, telling whoever read it that nothing
+    /// could be done about a permission the user can grant in System Settings.
+    ///
+    /// Reconciled here rather than at the construction sites because the sites are where the
+    /// mistake keeps being made — three of them had it, one with an explicit `.none` — and
+    /// because this is the single value every consumer already reads. `.none` beside a
+    /// non-remedy action stays `.none`.
+    public var effectiveRetryClass: RetryClass {
+        guard retryClass == .none, userAction?.isRemedy == true else { return retryClass }
+        return .afterUserAction
     }
 }
 

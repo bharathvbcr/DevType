@@ -89,7 +89,7 @@ final class SourceAppDeliveryStressTests: XCTestCase {
                     return focus
                 }
             ),
-            onUnavailable: { trace.failures += 1 },
+            onUnavailable: { _ in trace.failures += 1 },
             operation: { _ in
                 trace.deliveries += 1
                 trace.frontmostAtDelivery = .some(trace.frontmost)
@@ -253,7 +253,7 @@ final class SourceAppDeliveryStressTests: XCTestCase {
                         return .external(element: UInt64(trace.focusProbes))
                     }
                 ),
-                onUnavailable: { trace.failures += 1 },
+                onUnavailable: { _ in trace.failures += 1 },
                 operation: { _ in trace.deliveries += 1 }
             )
             while !trace.pending.isEmpty { trace.pending.removeFirst()() }
@@ -284,7 +284,7 @@ final class SourceAppDeliveryStressTests: XCTestCase {
                 schedule: { _, action in trace.pending.append(action) },
                 axFocus: { .external(element: 1) }
             ),
-            onUnavailable: { trace.failures += 1 },
+            onUnavailable: { _ in trace.failures += 1 },
             operation: { continuation = $0 }
         )
         while !trace.pending.isEmpty { trace.pending.removeFirst()() }
