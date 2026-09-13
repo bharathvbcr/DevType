@@ -219,6 +219,16 @@ public enum DiagnosticReport {
         /// AX reported a write it did not perform, so DevType permanently pastes there instead.
         /// Bundle IDs only — never a snippet, never typed text.
         public var axWriteVerdictLines: [String]
+        /// The *built-in* AX-write defaults that apply right now — `AXWriteCapabilityStore`'s
+        /// seed table and its AX-unstable-role prior.
+        ///
+        /// These skip the AX write exactly like a learned verdict does, but nothing was ever
+        /// measured on this machine to produce them. `axWriteVerdictLines` above cannot show
+        /// them: it enumerates recorded verdicts only, so an app condemned purely because its
+        /// bundle ID matched a prefix left no trace in the report at all — and a reader
+        /// debugging a delivery failure could not tell "DevType watched this app lie" from
+        /// "DevType shipped with this app on a list". Bundle IDs and AX roles only.
+        public var axWriteSeedLines: [String]
         /// Prefix-debounce hold lifecycle counters (`EventTapEngine.prefixDebounceDiagnostics()`).
         /// `races-absorbed` counts debounce timers that lost to a keystroke at the deadline —
         /// each one used to be a possible double expansion.
@@ -292,6 +302,7 @@ public enum DiagnosticReport {
             injectTelemetryLines: [String] = [],
             overlongTriggerLines: [String] = [],
             axWriteVerdictLines: [String] = [],
+            axWriteSeedLines: [String] = [],
             aiLines: [String] = [],
             secretLines: [String] = [],
             prefixDebounceSummary: String? = nil,
@@ -330,6 +341,7 @@ public enum DiagnosticReport {
             self.injectTelemetryLines = injectTelemetryLines
             self.overlongTriggerLines = overlongTriggerLines
             self.axWriteVerdictLines = axWriteVerdictLines
+            self.axWriteSeedLines = axWriteSeedLines
             self.aiLines = aiLines
             self.secretLines = secretLines
             self.prefixDebounceSummary = prefixDebounceSummary
@@ -498,6 +510,7 @@ public enum DiagnosticReport {
             injectTelemetryLines: injectTelemetryProjection.retainedLines,
             overlongTriggerLines: overlongTriggerProjection.retainedLines,
             axWriteVerdictLines: axWriteVerdictProjection.retainedLines,
+            axWriteSeedLines: captureAXWriteSeedLines(frontmostBundleID: front?.bundleIdentifier),
             aiLines: captureAILines(),
             secretLines: captureSecretLines(
                 pendingMigrationCount: { SecretStore.shared.snippetIDsPendingMigration().count },
@@ -692,6 +705,71 @@ public enum DiagnosticReport {
         return builder.finish(totalObservedCount: source.observedCount)
     }
 
+    /// The built-in AX-write defaults in force for the frontmost app — the seeded half of the
+    /// picture, which the learned section structurally cannot show.
+    ///
+    /// Pure with respect to the store: `seedVerdict` is a static table lookup, and
+    /// `observedVerdict` is the deliberately non-mutating query, so generating a report can never
+    /// retire a condemnation and change what the next expansion does.
+    static func captureAXWriteSeedLines(
+        frontmostBundleID: String?,
+        store: AXWriteCapabilityStore = .shared
+    ) -> [String] {
+        var lines: [String] = []
+        if let frontmostBundleID, !frontmostBundleID.isEmpty {
+            let canonical = AXWriteCapabilityStore.canonicalBundleID(frontmostBundleID)
+            let key = DiagnosticPrivacy.boundedIdentifier(
+                canonical,
+                label: "axKey",
+                domain: "ax-write-key"
+            )
+            if canonical != frontmostBundleID {
+                // A Chromium PWA / Safari web app runs under its own bundle ID but answers to the
+                // host browser's verdict. Without this line the row below names an app the rest of
+                // the report never mentions.
+                lines.append("Frontmost resolves to \(key) (installed web app → host browser)")
+            }
+            if let observed = store.observedVerdict(bundleID: canonical, role: nil) {
+                lines.append(
+                    "\(key): not a default — \(axWriteVerdictName(observed)) was observed here (recorded from a real AX write)"
+                )
+            } else {
+                switch AXWriteCapabilityStore.seedVerdict(bundleID: canonical, role: nil) {
+                case .falseSuccess:
+                    lines.append(
+                        "\(key): falseSuccess (seeded — built-in default for this bundle ID; never measured here)"
+                    )
+                case .trusted:
+                    lines.append(
+                        "\(key): trusted (seeded — built-in default for this bundle ID; never measured here)"
+                    )
+                case .unknown:
+                    lines.append(
+                        "\(key): none — no seed and nothing observed; AX will be tried and verified"
+                    )
+                }
+            }
+        } else {
+            lines.append("(no frontmost app)")
+        }
+        // The other seeded source, and the one no per-app row can express: these roles are
+        // condemned in *every* app, so a falseSuccess in the field may be about the focused
+        // control rather than about the app the report names.
+        lines.append(
+            "Seeded falseSuccess in any app when the focused AX role is: "
+                + AXWriteCapabilityStore.axWriteUnstableRoles.sorted().joined(separator: ", ")
+        )
+        return lines
+    }
+
+    private static func axWriteVerdictName(_ verdict: AXWriteCapabilityStore.Verdict) -> String {
+        switch verdict {
+        case .trusted: return "trusted"
+        case .falseSuccess: return "falseSuccess"
+        case .unknown: return "unknown"
+        }
+    }
+
     /// Production report path for the persisted per-app mute set. The store selects a bounded,
     /// stable prefix under its lock and supplies the complete observed count; report formatting
     /// applies the independent byte limit without ever copying or sorting the full set.
@@ -728,13 +806,18 @@ public enum DiagnosticReport {
         )
     }
 
+    /// Every row under this heading came from `AXWriteCapabilityStore.learned`, which only
+    /// `recordTrusted` / `recordFalseSuccess` write — i.e. after an AX write was attempted and
+    /// checked in that app. The `observed` marker says so on the row, because the same two
+    /// verdicts are also produced by the built-in seed table without measuring anything; those
+    /// are rendered under their own heading so the two can never be read as the same evidence.
     private static func axWriteVerdictLine(
         _ entry: (key: String, verdict: AXWriteCapabilityStore.Verdict)
     ) -> String {
         let label: String
         switch entry.verdict {
-        case .trusted: label = "trusted (AX writes verified)"
-        case .falseSuccess: label = "falseSuccess (AX lied — pasting instead)"
+        case .trusted: label = "trusted (observed — AX writes verified here)"
+        case .falseSuccess: label = "falseSuccess (observed — AX lied here, pasting instead)"
         case .unknown: label = "unknown"
         }
         let key = DiagnosticPrivacy.boundedIdentifier(
@@ -1053,9 +1136,21 @@ public enum DiagnosticReport {
             context.axWriteVerdictProjection
                 ?? boundedHeaderProjection(context.axWriteVerdictLines),
             label: "ax-write-verdicts",
-            emptyLine: "(none learned yet)",
+            emptyLine: "(none learned yet — any verdict in force is a built-in default; see below)",
             to: &lines
         )
+
+        // The seeded half. Same behaviour, entirely different evidence: these lines say DevType
+        // shipped with this app on a list, not that DevType watched this app lie. Kept under its
+        // own heading so no row can be read as an observation, and printed even when nothing was
+        // learned — that is exactly the case where the reason for pasting is invisible otherwise.
+        lines.append("")
+        lines.append("-- Built-in AX write defaults (seeded — never observed) --")
+        if context.axWriteSeedLines.isEmpty {
+            lines.append("(not captured)")
+        } else {
+            lines.append(contentsOf: context.axWriteSeedLines)
+        }
 
         // §9.1: the mirror's own section. OSLog's direct fetch above is bounded by what logd
         // still holds; these lines were captured into process memory precisely so a report
