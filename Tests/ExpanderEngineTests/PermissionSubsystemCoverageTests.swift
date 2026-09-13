@@ -59,10 +59,15 @@ final class PermissionSubsystemCoverageTests: XCTestCase {
         observer.refreshNow()
         XCTAssertNotNil(notifiedSnapshot)
 
-        // Reset and fire didBecomeActiveNotification
+        // Our own become-active is the coordinator's to answer, through the app delegate, where
+        // the response is a tap start attempt and not merely a probe. The observer deliberately
+        // does not register for it a second time — see `testBecomeActiveIsProbedOnlyOnce`.
         notifiedSnapshot = nil
         NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
-        XCTAssertNotNil(notifiedSnapshot)
+        XCTAssertNil(
+            notifiedSnapshot,
+            "A second registration for this notification is a duplicate TCC probe per activation."
+        )
 
         // Reset and fire didActivateApplicationNotification
         notifiedSnapshot = nil
@@ -74,6 +79,28 @@ final class PermissionSubsystemCoverageTests: XCTestCase {
         notifiedSnapshot = nil
         observer.refreshNow()
         XCTAssertNil(notifiedSnapshot, "Observer stopped should not invoke callback")
+    }
+
+    /// One activation, one probe. The observer answered `didBecomeActive` with a forced probe
+    /// while the coordinator answered the same notification through the app delegate, and
+    /// `refresh` then probed a second time a line after asking the observer to — three TCC round
+    /// trips on the main thread for one event, on a path that runs on every palette and voice
+    /// gesture.
+    func testBecomeActiveIsProbedOnlyOnce() {
+        let observer = PermissionObserver()
+        var callbacks = 0
+        observer.start { _ in callbacks += 1 }
+        defer { observer.stop() }
+
+        callbacks = 0
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertEqual(callbacks, 0, "The observer must not answer our own become-active at all.")
+
+        // The coordinator's half: it probes once and hands that same snapshot to the observer,
+        // rather than making the observer take one of its own first.
+        let shared = PermissionProbe().snapshot()
+        observer.refreshNow(with: shared)
+        XCTAssertEqual(callbacks, 1)
     }
 
     // MARK: - PermissionCopy Localized

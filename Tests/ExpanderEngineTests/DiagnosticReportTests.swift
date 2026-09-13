@@ -656,8 +656,8 @@ final class DiagnosticReportTests: XCTestCase {
         let refusalRows = projection.retainedLines.filter { $0.contains("× reason-") }
 
         XCTAssertEqual(refusalRows.count, 8, "Visible output must preserve the ranked top-N cap.")
-        XCTAssertTrue(refusalRows.contains("  1× reason-00"))
-        XCTAssertTrue(refusalRows.contains("  1× reason-07"))
+        XCTAssertTrue(refusalRows.contains("  1× reason-00 [test]"))
+        XCTAssertTrue(refusalRows.contains("  1× reason-07 [test]"))
         XCTAssertFalse(projection.retainedLines.contains { $0.contains("reason-08") })
         XCTAssertFalse(projection.retainedLines.contains { $0.contains("reason-09") })
         XCTAssertEqual(
@@ -770,6 +770,45 @@ final class DiagnosticReportTests: XCTestCase {
             "Per-app aggregate retention: observed=3; retained=2/2; dropped=1"
         )
         XCTAssertFalse(lines.joined(separator: "\n").contains("com.example.beta"))
+    }
+
+    /// Two callers refusing for the same reason are two incidents, and the report names both.
+    /// The recorded `path` exists only so this line can distinguish them.
+    func testRefuseHistogramNamesTheCallerThatRefused() {
+        let telemetry = InjectTelemetryLog(capacity: 64)
+        let reason = SelectionReader.SourceUnavailability.focusNeverReturned.reason
+        telemetry.record(
+            outcome: .refused(reason),
+            bundleID: "com.example.alpha",
+            path: "aiResultDelivery"
+        )
+        telemetry.record(
+            outcome: .refused(reason),
+            bundleID: "com.example.alpha",
+            path: "searchExpansionDelivery"
+        )
+
+        let lines = telemetry.diagnosticSummaryProjection().retainedLines
+        XCTAssertTrue(
+            lines.contains("  1× \(reason) [aiResultDelivery]"),
+            "A lost AI result must be identifiable as one.\n\(lines.joined(separator: "\n"))"
+        )
+        XCTAssertTrue(
+            lines.contains("  1× \(reason) [searchExpansionDelivery]"),
+            "…and must not be merged with the inline-search path that shares its sentence."
+        )
+        XCTAssertFalse(
+            lines.contains("  2× \(reason)"),
+            "Merging two callers into one row is exactly what the path was recorded to prevent."
+        )
+    }
+
+    /// A refusal recorded without a path still prints, without an empty bracket beside it.
+    func testRefuseHistogramOmitsTheSuffixWhenNoPathWasRecorded() {
+        let telemetry = InjectTelemetryLog(capacity: 64)
+        telemetry.record(outcome: .refused("Secure Input is active"), bundleID: nil, path: nil)
+        let lines = telemetry.diagnosticSummaryProjection().retainedLines
+        XCTAssertTrue(lines.contains("  1× Secure Input is active"), lines.joined(separator: "\n"))
     }
 
     func testPreferencesTelemetrySummaryUsesTheCanonicalBoundedProjection() {

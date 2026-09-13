@@ -1017,7 +1017,7 @@ public final class VoiceDictationController: @unchecked Sendable {
     @MainActor
     private func deliverAIText(_ text: String, to destination: NSRunningApplication?) {
         guard !text.isEmpty else { return }
-        SourceAppDelivery.perform(sourceApp: destination, onUnavailable: {
+        SourceAppDelivery.perform(sourceApp: destination, onUnavailable: { _ in
             VoiceHUDPanel.shared.updateState(.error(
                 message: LocalizationManager.shared.s("voice.ai.targetUnavailable")
             ))

@@ -16,9 +16,22 @@ enum SourceAppDelivery {
         var axFocus: @Sendable () -> SelectionReader.AXFocusObservation = { .notObserved }
     }
 
+    /// Whether a delivery aimed at `sourceApp` would be refused before it ever activates
+    /// anything — asked by the panels *before* they spend the work delivery would then throw
+    /// away. `nil` means "nothing in the entry guard objects"; the focus wait still applies.
+    static func entryUnavailability(
+        sourceApp: NSRunningApplication?
+    ) -> SelectionReader.SourceUnavailability? {
+        SelectionReader.sourceEntryUnavailability(
+            sourcePID: sourceApp?.processIdentifier ?? 0,
+            ownPID: ProcessInfo.processInfo.processIdentifier,
+            sourceTerminated: { sourceApp?.isTerminated ?? true }
+        )
+    }
+
     static func perform(
         sourceApp: NSRunningApplication?,
-        onUnavailable: @escaping () -> Void,
+        onUnavailable: @escaping (SelectionReader.SourceUnavailability) -> Void,
         operation: @escaping (@escaping @Sendable () -> Bool) -> Void
     ) {
         let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -80,11 +93,15 @@ enum SourceAppDelivery {
         sourcePID: pid_t,
         ownPID: pid_t,
         environment: Environment,
-        onUnavailable: @escaping () -> Void,
+        onUnavailable: @escaping (SelectionReader.SourceUnavailability) -> Void,
         operation: @escaping (@escaping @Sendable () -> Bool) -> Void
     ) {
-        guard sourcePID > 0, sourcePID != ownPID, !environment.sourceTerminated() else {
-            onUnavailable()
+        if let unavailable = SelectionReader.sourceEntryUnavailability(
+            sourcePID: sourcePID,
+            ownPID: ownPID,
+            sourceTerminated: environment.sourceTerminated
+        ) {
+            onUnavailable(unavailable)
             return
         }
         let frontmostPID = environment.frontmostPID
@@ -99,7 +116,7 @@ enum SourceAppDelivery {
             // the window server reports no app). A third app is a user's focus
             // change: stop instead of waiting to paste when they switch back.
             if let currentPID, currentPID != ownPID, currentPID != sourcePID {
-                onUnavailable()
+                onUnavailable(.replacedByAnotherApp)
                 return
             }
             // Probed only once the frontmost check has a chance of passing, so a source app
@@ -124,7 +141,10 @@ enum SourceAppDelivery {
                     poll(remainingPolls: next, previousFocus: focus)
                 }
             case .fail:
-                onUnavailable()
+                // `sourceFocusRetryDecision` fails on a dead source and on an exhausted budget
+                // alike. Re-ask rather than reporting the budget for both: "quit" and "never
+                // came forward" are the difference between lost work and a stuck activation.
+                onUnavailable(sourceTerminated() ? .sourceTerminated : .focusNeverReturned)
             }
         }
 

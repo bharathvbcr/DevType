@@ -339,6 +339,68 @@ public extension SelectionReader {
         case fail
     }
 
+    /// Why a panel-driven delivery has no source application to deliver into.
+    ///
+    /// One case per cause, for the same reason the entry-gate refusals in `PermissionCoordinator`
+    /// stay distinct from each other: these are five different situations with five different
+    /// answers, and they all used to reach the diagnostic report as the single sentence "Source
+    /// application did not return to the front". That sentence is simply false for `.ownProcess`
+    /// — DevType is frontmost, and it *is* the source — and for `.sourceTerminated`, where the
+    /// app is gone rather than slow. A report that describes the one refusal it contains
+    /// incorrectly is worse than one that says nothing.
+    enum SourceUnavailability: Equatable, Sendable, CaseIterable {
+        /// The panel opened with no source application captured at all.
+        case noSourceApp
+        /// The source is DevType itself: the command ran with our own window in front, so there
+        /// is nothing behind the panel to insert into.
+        case ownProcess
+        /// The source application quit while the panel was open.
+        case sourceTerminated
+        /// A third application took the front. The user changed focus, and that is theirs to make.
+        case replacedByAnotherApp
+        /// The source application never returned to the front within the focus-wait budget.
+        case focusNeverReturned
+
+        /// Report-ready sentence. Owned here rather than at the delivery call sites so the
+        /// vocabulary has exactly one definition — `PermissionCoordinator.sanitizedRefusalReason`
+        /// recognises these and passes them through rather than flattening them again.
+        public var reason: String {
+            switch self {
+            case .noSourceApp:
+                return "No source application was captured when the panel opened"
+            case .ownProcess:
+                return "DevType was frontmost — there was no other application to insert into"
+            case .sourceTerminated:
+                return "Source application quit before insertion"
+            case .replacedByAnotherApp:
+                return "Another application took the front before insertion"
+            case .focusNeverReturned:
+                return "Source application did not return to the front"
+            }
+        }
+    }
+
+    /// Pure entry guard for a panel-driven delivery: is there a source application worth
+    /// activating at all?
+    ///
+    /// Shared by `SourceAppDelivery.perform` and by the panels' own pre-check, so a caller that
+    /// spends real work before delivering — a model call, a dictation session, a fill-in prompt —
+    /// can ask *before* the cost instead of discovering the same answer after it. `.ownProcess`
+    /// in particular is knowable the instant the hotkey fires.
+    ///
+    /// `sourceTerminated` stays a closure so the short-circuit — and its process round-trip — is
+    /// unchanged from the `guard` this replaced.
+    static func sourceEntryUnavailability(
+        sourcePID: pid_t,
+        ownPID: pid_t,
+        sourceTerminated: () -> Bool
+    ) -> SourceUnavailability? {
+        guard sourcePID > 0 else { return .noSourceApp }
+        guard sourcePID != ownPID else { return .ownProcess }
+        guard !sourceTerminated() else { return .sourceTerminated }
+        return nil
+    }
+
     static let sourceFocusMaxPolls = 25
     static let sourceFocusPollInterval: TimeInterval = 0.02
 

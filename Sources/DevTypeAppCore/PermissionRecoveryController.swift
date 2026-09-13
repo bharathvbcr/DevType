@@ -592,7 +592,8 @@ final class PermissionRecoveryController: NSViewController {
             snapshot: snapshot,
             isTapRunning: tapRunning,
             isEnabled: EventTapEngine.shared.isEnabled,
-            isSecureInputActive: EventTapEngine.shared.isSecureInputActive
+            isSecureInputActive: EventTapEngine.shared.isSecureInputActive,
+            hasAttemptedTapStart: EventTapEngine.shared.hasAttemptedTapStart
         )
         let identityChanged = ProcessIdentity.shouldReOnboardForIdentityChange(
             currentCDHash: cdHash,

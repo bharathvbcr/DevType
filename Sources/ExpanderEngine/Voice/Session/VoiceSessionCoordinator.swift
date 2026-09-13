@@ -958,7 +958,7 @@ public actor VoiceSessionCoordinator {
                                 stage: providerFailure.stage,
                                 code: providerFailure.code,
                                 providerID: recognizer.descriptor.id,
-                                retryClass: providerFailure.retryClass,
+                                retryClass: providerFailure.effectiveRetryClass,
                                 artifactState: providerFailure.artifactState,
                                 userAction: providerFailure.userAction,
                                 diagnosticID: providerFailure.diagnosticID,

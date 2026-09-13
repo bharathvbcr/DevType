@@ -156,6 +156,32 @@ final class InjectSilentAbortTests: XCTestCase {
         }
     }
 
+    /// The five delivery causes reach the report as five sentences. Flattening them here is what
+    /// made a refusal raised with DevType itself frontmost — where nothing had gone anywhere —
+    /// print as "the source application did not return to the front".
+    func testPanelDeliveryCausesSurviveTheSanitizer() {
+        let paths = ["aiResultDelivery", "paletteTextDelivery", "searchExpansionDelivery"]
+        for path in paths {
+            for cause in SelectionReader.SourceUnavailability.allCases {
+                XCTAssertEqual(
+                    PermissionCoordinator.sanitizedRefusalReason(cause.reason, path: path),
+                    cause.reason,
+                    "\(path) / \(cause)"
+                )
+            }
+        }
+    }
+
+    /// The sanitizer is still a sanitizer: internal prose on a delivery path does not reach the
+    /// report just because the path is one of the three.
+    func testUnknownDeliveryProseIsStillReplaced() {
+        let sanitized = PermissionCoordinator.sanitizedRefusalReason(
+            "refusing expand (fail-closed): /Users/someone/secret.txt",
+            path: "aiResultDelivery"
+        )
+        XCTAssertEqual(sanitized, "Source application did not return to the front")
+    }
+
     /// `InjectionPlanner` only refuses on a missing capability, so the reason is actionable and
     /// must reach the report intact instead of being dropped with a bare `return`.
     func testPlanRefusalKeepsTheActionableCapability() {

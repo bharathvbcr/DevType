@@ -545,6 +545,71 @@ final class EngineDisplayStatusAuditTests: XCTestCase {
         XCTAssertTrue(s.requiresAction)
     }
 
+    /// The launch window: permissions granted, user has not paused, and the tap is not running
+    /// because `PermissionCoordinator.start()` has not reached it yet. That is "not started",
+    /// not "failed", and rendering it as Tap Failed is the ~50ms flash the menu bar showed on
+    /// every launch. `isEnabled` cannot carry this — it is the pause preference, true from the
+    /// first line of `applicationDidFinishLaunching`.
+    func testTapNotYetAttemptedIsNotReportedAsFailure() {
+        let s = EngineDisplayStatus.resolve(
+            canListenTap: true,
+            canUseAX: true,
+            isTapRunning: false,
+            isEnabled: true,
+            isSecureInputActive: false,
+            hasAttemptedTapStart: false
+        )
+        XCTAssertEqual(s, .active)
+        XCTAssertFalse(s.requiresAction, "A tap nobody has started yet asks nothing of the user.")
+    }
+
+    /// …and the moment a start has been attempted and the tap still is not running, it is a
+    /// failure again. The new input must not be able to hide a real one.
+    func testTapFailureIsStillReportedOnceAStartHasBeenAttempted() {
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: true,
+                canUseAX: true,
+                isTapRunning: false,
+                isEnabled: true,
+                isSecureInputActive: false,
+                hasAttemptedTapStart: true
+            ),
+            .tapFailed
+        )
+    }
+
+    /// Secure Input and pause still outrank a not-yet-started tap, so the pre-start window
+    /// reports the same thing it would have if the tap were already up.
+    func testPreStartWindowStillHonoursSecureInputAndPause() {
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: true, canUseAX: true, isTapRunning: false, isEnabled: true,
+                isSecureInputActive: true, hasAttemptedTapStart: false
+            ),
+            .secure
+        )
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: true, canUseAX: true, isTapRunning: false, isEnabled: false,
+                isSecureInputActive: false, hasAttemptedTapStart: false
+            ),
+            .paused
+        )
+    }
+
+    /// A missing grant is still Needs Permissions before any start attempt — the pre-start
+    /// window must not swallow the one diagnosis the user can act on.
+    func testPreStartWindowStillReportsMissingPermissions() {
+        XCTAssertEqual(
+            EngineDisplayStatus.resolve(
+                canListenTap: false, canUseAX: true, isTapRunning: false, isEnabled: true,
+                isSecureInputActive: false, hasAttemptedTapStart: false
+            ),
+            .needsPermissions
+        )
+    }
+
     func testNeedsPermissionsWhenAXMissingEvenIfListenGranted() {
         let s = EngineDisplayStatus.resolve(
             canListenTap: true, canUseAX: false, isTapRunning: false, isEnabled: true, isSecureInputActive: false

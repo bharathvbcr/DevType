@@ -91,12 +91,31 @@ public final class DevLogMirror {
         /// All log entries offered by successful fetches/merges, including overlap duplicates
         /// and entries later rejected or evicted by a retention cap.
         public let observedEntryCount: Int
+        /// Of `observedEntryCount`, how many were entries the ring already held.
+        ///
+        /// Every poll deliberately re-reads `pollOverlap` seconds it has already seen, so this
+        /// climbs with uptime on a completely healthy mirror and is the bulk of the difference
+        /// between observed and retained. Without it the report showed a mirror holding 126 of
+        /// 4000 slots after 2583 observations with `evicted=0` — an accounting that cannot
+        /// happen, and that invites a reader to distrust every other counter beside it.
+        public let duplicateEntryCount: Int
         public let retainedEntryCount: Int
         public let retainedUTF8Bytes: Int
         public let entryCapacity: Int
         public let byteCapacity: Int
         public let oversizedEntryCount: Int
         public let evictedEntryCount: Int
+
+        /// Observations this mirror can account for: everything it kept, skipped as already
+        /// held, refused as oversized, or rotated out. Anything left over is unexplained loss,
+        /// and the report says so rather than leaving the subtraction to the reader.
+        public var unaccountedEntryCount: Int {
+            max(
+                0,
+                observedEntryCount - duplicateEntryCount - retainedEntryCount
+                    - oversizedEntryCount - evictedEntryCount
+            )
+        }
     }
 
     /// Atomic report snapshot: lines and counters describe the same instant.
@@ -112,6 +131,9 @@ public final class DevLogMirror {
     private var retainedLines: BoundedUTF8Tail<Line>
     private var knownIdentities: Set<Line.DeduplicationIdentity> = []
     private var observedEntryCount = 0
+    /// Observations skipped because `knownIdentities` already held that line — almost entirely
+    /// the deliberate poll overlap. Counted so `observedEntryCount` stops looking like loss.
+    private var duplicateEntryCount = 0
     /// Entries discarded while bounding the temporary OSLog enumeration before it reached the
     /// persistent tail. `retainedLines` separately accounts for persistent-tail drops.
     private var fetchOversizedEntryCount = 0
@@ -298,6 +320,7 @@ public final class DevLogMirror {
             lastSuccessfulPollAt: lastSuccessfulPollAt,
             lastFailureKind: lastFailureKind,
             observedEntryCount: observedEntryCount,
+            duplicateEntryCount: duplicateEntryCount,
             retainedEntryCount: retention.retainedCount,
             retainedUTF8Bytes: retention.retainedUTF8Bytes,
             entryCapacity: capacity,
@@ -316,6 +339,7 @@ public final class DevLogMirror {
         retainedLines = BoundedUTF8Tail(countLimit: capacity, byteLimit: byteCapacity)
         knownIdentities.removeAll()
         observedEntryCount = 0
+        duplicateEntryCount = 0
         fetchOversizedEntryCount = 0
         fetchEvictedEntryCount = 0
         pollCursor = nil
@@ -362,7 +386,10 @@ public final class DevLogMirror {
         var added = 0
         for line in batch {
             let identity = line.deduplicationIdentity
-            guard !knownIdentities.contains(identity) else { continue }
+            guard !knownIdentities.contains(identity) else {
+                duplicateEntryCount = Saturating.adding(duplicateEntryCount, 1)
+                continue
+            }
             let result = retainedLines.append(
                 line,
                 utf8ByteCount: line.retainedUTF8ByteCount

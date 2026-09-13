@@ -398,8 +398,12 @@ public final class PermissionCoordinator {
 
     /// Re-evaluate tap + emit (e.g. after Request / Open / relaunch UI).
     public func refresh(presentTapFailureAlert: Bool = false) {
-        observer.refreshNow()
+        // One probe, shared. This used to be `observer.refreshNow()` followed by our own
+        // `probe.snapshot()`: two full TCC round trips a line apart, both describing the same
+        // instant, and on the activation path a third arrived from the observer's own
+        // become-active registration.
         let snapshot = probe.snapshot()
+        observer.refreshNow(with: snapshot)
         let tapBefore = EventTapEngine.shared.isTapRunning
         applyTapLifecycle(for: snapshot, presentFailureAlert: presentTapFailureAlert)
         let tapAfter = EventTapEngine.shared.isTapRunning
@@ -551,7 +555,14 @@ public final class PermissionCoordinator {
         // Panel-driven delivery (AI result, palette value, inline search expansion): the payload
         // was already generated, so each of these is lost work, not a declined expansion.
         case "aiResultDelivery", "paletteTextDelivery", "searchExpansionDelivery":
-            return "Source application did not return to the front"
+            // `SelectionReader.SourceUnavailability` owns this vocabulary and already speaks the
+            // report's register, so it passes through intact. Flattening every cause to one
+            // sentence here is what made a refusal with DevType itself frontmost read as "the
+            // source app did not come back" — a sentence about an app that had never left.
+            // Anything outside that vocabulary is internal prose and still gets the generic one.
+            return SelectionReader.SourceUnavailability.allCases.contains { $0.reason == reason }
+                ? reason
+                : SelectionReader.SourceUnavailability.focusNeverReturned.reason
         case "aiResultPlanRefused", "searchExpansionPlanRefused":
             return reason.localizedCaseInsensitiveContains("post events")
                 ? "Post Events permission is required for insertion"

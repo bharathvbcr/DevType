@@ -43,6 +43,25 @@ enum AITransformFlow {
             modelUnavailable = reason
         }
 
+        // Before the selection read, and long before the model: `AIActionPanel` captures whatever
+        // is frontmost now as the source app, and `SourceAppDelivery` refuses to deliver into our
+        // own process. Invoked with a DevType window in front, every one of those steps runs — the
+        // read, the picker, the generation — and the finished result is then thrown away at the
+        // delivery guard. Asking the delivery's own entry gate up front turns a transform the user
+        // watched happen and lost into an instant, accurate refusal.
+        //
+        // `.noSourceSelection` already says the right thing ("DevType is in front, so there is no
+        // selected text behind it to read — switch to your text") in every shipped language.
+        if SourceAppDelivery.entryUnavailability(sourceApp: NSWorkspace.shared.frontmostApplication)
+            == .ownProcess {
+            softAlert(
+                title: SelectionReader.Failure.noSourceSelection.title(loc: loc),
+                message: SelectionReader.Failure.noSourceSelection.message(loc: loc),
+                loc: loc
+            )
+            return
+        }
+
         // Typed outcome, not `Result?`: the reason decides the message. "Select text first" is
         // actively misleading when the real cause is a revoked AX grant or Secure Input.
         //

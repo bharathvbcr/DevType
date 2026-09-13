@@ -1621,7 +1621,8 @@ final class PreferencesViewController: NSViewController,
             snapshot: snapshot,
             isTapRunning: EventTapEngine.shared.isTapRunning,
             isEnabled: EventTapEngine.shared.isEnabled,
-            isSecureInputActive: EventTapEngine.shared.isSecureInputActive
+            isSecureInputActive: EventTapEngine.shared.isSecureInputActive,
+            hasAttemptedTapStart: EventTapEngine.shared.hasAttemptedTapStart
         )
         let text: String
         let tint: NSColor
