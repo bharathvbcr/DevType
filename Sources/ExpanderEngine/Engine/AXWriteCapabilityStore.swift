@@ -269,14 +269,8 @@ public final class AXWriteCapabilityStore {
         guard !bundleID.isEmpty else { return .unknown }
         let canonical = Self.canonicalBundleID(bundleID)
         let compositeKey = Self.verdictKey(bundleID: canonical, role: role)
-        // Verdicts learned before canonicalization existed were stored under the raw web-app
-        // bundle ID — keep reading those so an existing install loses nothing.
-        let rawCompositeKey = Self.verdictKey(bundleID: bundleID, role: role)
-        lock.lock()
-        let composite = learned[compositeKey] ?? (canonical == bundleID ? nil : learned[rawCompositeKey])
-        let bundleOnly = learned[canonical] ?? (canonical == bundleID ? nil : learned[bundleID])
-        lock.unlock()
-        if let composite {
+        let recorded = recordedVerdicts(canonical: canonical, rawBundleID: bundleID, role: role)
+        if let composite = recorded.composite {
             if composite == .falseSuccess, retireStaleCondemnation(key: compositeKey, bundleID: canonical) {
                 return .unknown
             }
@@ -288,13 +282,59 @@ public final class AXWriteCapabilityStore {
         if Self.isAXWriteUnstableRole(role) {
             return .falseSuccess
         }
-        if let bundleOnly {
+        if let bundleOnly = recorded.bundleOnly {
             if bundleOnly == .falseSuccess, retireStaleCondemnation(key: canonical, bundleID: canonical) {
                 return .unknown
             }
             return bundleOnly
         }
         return Self.seedVerdict(bundleID: canonical, role: role)
+    }
+
+    /// Every *recorded* verdict for this app, under both key shapes, read under one lock.
+    ///
+    /// Shared by `verdict(for:role:)` and `observedVerdict(bundleID:role:)` so the two can never
+    /// disagree about which key wins. Nothing here is seeded: `learned` is written only by
+    /// `recordTrusted` / `recordFalseSuccess` (and reloaded from what those persisted), so an
+    /// entry existing *is* the evidence that an AX write was attempted and checked in this app.
+    private func recordedVerdicts(
+        canonical: String,
+        rawBundleID: String,
+        role: String?
+    ) -> (composite: Verdict?, bundleOnly: Verdict?) {
+        let compositeKey = Self.verdictKey(bundleID: canonical, role: role)
+        // Verdicts learned before canonicalization existed were stored under the raw web-app
+        // bundle ID — keep reading those so an existing install loses nothing.
+        let rawCompositeKey = Self.verdictKey(bundleID: rawBundleID, role: role)
+        lock.lock()
+        defer { lock.unlock() }
+        return (
+            composite: learned[compositeKey]
+                ?? (canonical == rawBundleID ? nil : learned[rawCompositeKey]),
+            bundleOnly: learned[canonical]
+                ?? (canonical == rawBundleID ? nil : learned[rawBundleID])
+        )
+    }
+
+    /// The verdict DevType actually *measured* in this app, or `nil` when it has never attempted
+    /// an AX write here.
+    ///
+    /// `verdict(for:role:)` cannot answer this: it collapses two very different things into one
+    /// `.falseSuccess` — a write this app was observed to lie about, and a built-in default from
+    /// `seedVerdict` that fired because the bundle ID matched a prefix. They drive identical
+    /// behaviour and mean opposite things to somebody debugging a delivery failure, so the
+    /// diagnostic report asks this question separately.
+    ///
+    /// Deliberately non-mutating: unlike `verdict(for:role:)` it never retires a stale
+    /// condemnation, because generating a report must not change what the next expansion does.
+    public func observedVerdict(bundleID: String, role: String?) -> Verdict? {
+        guard !bundleID.isEmpty else { return nil }
+        let recorded = recordedVerdicts(
+            canonical: Self.canonicalBundleID(bundleID),
+            rawBundleID: bundleID,
+            role: role
+        )
+        return recorded.composite ?? recorded.bundleOnly
     }
 
     /// True when the AX selected-text write should be skipped entirely for this app.
