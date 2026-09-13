@@ -29,6 +29,20 @@ public enum MacroPreview {
         return String(text.prefix(limit)) + "…"
     }
 
+    /// Characters the `%case:…%` transforms may rewrite across one preview.
+    ///
+    /// A case block re-transforms everything written since it opened, so k blocks over n
+    /// characters of output is k·n work — and the blocks need not even be closed. That is legal,
+    /// trivial to write, and fits easily inside the importer's 100,000-character replacement cap;
+    /// measured on a 99,000-character snippet it was over two seconds. This function renders once
+    /// per row of the inline search list and once per keystroke in the editor, on the main thread.
+    ///
+    /// Composing case transforms cannot be made cheaper without changing what they mean, so the
+    /// ceiling is on the total instead. Past it the remaining blocks are left untransformed — a
+    /// preview showing a block in the wrong case is still a preview; a two-second preview is a
+    /// frozen window. Ordinary snippets are thousands of times under this.
+    static let maximumCaseTransformCharacters = 200_000
+
     public static func render(_ content: String, now: Date = Date()) -> String {
         let tokens = MacroParser.parse(content)
         // Bracket-match every `%fillpart…% … %fillpartend%` pair in one linear
@@ -49,26 +63,49 @@ public enum MacroPreview {
         }
 
         var out = ""
+        // Tracked alongside `out` rather than recomputed. `out.count` walks the whole string, and
+        // it was read once per `%case:…%` opened — the same k·n the transforms below cost.
+        var outCount = 0
         var i = 0
-        // §3.5: open `%case:…%` blocks as (transform, out.count when the block opened).
+        // §3.5: open `%case:…%` blocks as (transform, output length when the block opened).
         var caseStack: [(transform: TextCaseTransform, start: Int)] = []
+        var caseBudget = maximumCaseTransformCharacters
+
+        func emit(_ text: String) {
+            guard !text.isEmpty else { return }
+            out += text
+            outCount += text.count
+        }
+
+        func applyCase(_ open: (transform: TextCaseTransform, start: Int)) {
+            guard open.start <= outCount else { return }
+            // A spent budget stops further re-casing; it never drops text. Everything the
+            // snippet produces is still shown, just not transformed again.
+            guard caseBudget > 0 else { return }
+            caseBudget -= outCount - open.start
+            let head = String(out.prefix(open.start))
+            let body = String(out.dropFirst(open.start))
+            out = head + open.transform.apply(to: body)
+            // Re-read rather than assumed: a transform can change length — `ß` uppercases to `SS`.
+            outCount = out.count
+        }
 
         while i < tokens.count {
             let token = tokens[i]
             switch token {
             case .text(let s):
-                out += s
+                emit(s)
 
             case .fillText(let name, let def), .fillArea(let name, let def):
-                out += def.isEmpty ? "(\(name))" : def
+                emit(def.isEmpty ? "(\(name))" : def)
 
             case .fillPopup(let name, let options, let def):
                 if !def.isEmpty {
-                    out += def
+                    emit(def)
                 } else if let first = options.first {
-                    out += first
+                    emit(first)
                 } else {
-                    out += "(\(name))"
+                    emit("(\(name))")
                 }
 
             case .fillPartStart(_, let defaultOn):
@@ -83,10 +120,10 @@ public enum MacroPreview {
                 break
 
             case .snippet(let abbrev):
-                out += "[\(abbrev)]"
+                emit("[\(abbrev)]")
 
             case .clipboard:
-                out += "[clipboard]"
+                emit("[clipboard]")
 
             case .key:
                 break
@@ -95,36 +132,29 @@ public enum MacroPreview {
                 break
 
             case .date(let format):
-                out += formattedDate(format, now: now)
+                emit(formattedDate(format, now: now))
 
             case .uuid:
-                out += "[uuid]"
+                emit("[uuid]")
 
             case .random:
-                out += "[random]"
+                emit("[random]")
 
             case .counter(let name, _):
                 // Peek only — previewing a snippet must never advance a live counter.
-                out += String(MacroCounterStore.shared.value(for: name))
+                emit(String(MacroCounterStore.shared.value(for: name)))
 
             case .caseStart(let transform):
-                caseStack.append((transform: transform, start: out.count))
+                caseStack.append((transform: transform, start: outCount))
 
             case .caseEnd:
-                if let open = caseStack.popLast(), open.start <= out.count {
-                    let head = String(out.prefix(open.start))
-                    let body = String(out.dropFirst(open.start))
-                    out = head + open.transform.apply(to: body)
-                }
+                if let open = caseStack.popLast() { applyCase(open) }
             }
             i += 1
         }
 
-        while let open = caseStack.popLast(), open.start <= out.count {
-            let head = String(out.prefix(open.start))
-            let body = String(out.dropFirst(open.start))
-            out = head + open.transform.apply(to: body)
-        }
+        // Unterminated blocks close here, innermost first — the same rule, and the same budget.
+        while let open = caseStack.popLast() { applyCase(open) }
         return out
     }
 

@@ -955,9 +955,10 @@ public final class EventTapEngine {
             // at the caret they were typed at. Replaying them after the click would type them
             // wherever the user just clicked.
             lock.lock()
+            let holdPID = _typeAhead.holdPID
             let stranded = _typeAhead.flushForCaretChange()
             lock.unlock()
-            replayTypeAhead(stranded, reason: "caret moved (click)")
+            replayTypeAhead(stranded, heldFor: holdPID, reason: "caret moved (click)")
             resetBuffer()
             // §3.1: same rule as escape/arrows below — the caret moved, so the recorded expansion
             // no longer describes what sits in front of it. Clicks were the one caret move that
@@ -1011,7 +1012,7 @@ public final class EventTapEngine {
                 case .swallow:
                     return nil
                 case .flushThenPassThrough(let replay):
-                    replayTypeAhead(replay, reason: "hold released early")
+                    replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
                 case .passThrough:
                     break
                 }
@@ -1301,7 +1302,7 @@ public final class EventTapEngine {
             case .swallow:
                 return nil
             case .flushThenPassThrough(let replay):
-                replayTypeAhead(replay, reason: "hold released early")
+                replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
             case .passThrough:
                 break
             }
@@ -2895,6 +2896,7 @@ public final class EventTapEngine {
     private func endExpansion() {
         lock.lock()
         _isExpanding = false
+        let holdPID = _typeAhead.holdPID
         let replay = _typeAhead.endExpansion()
         ringBuffer.removeAll()
         layoutBuffer.clear()
@@ -2902,12 +2904,14 @@ public final class EventTapEngine {
         lock.unlock()
         // §8.3: outside the lock — replaying posts HID events, and the tap callback for those
         // events takes this same lock.
-        replayTypeAhead(replay, reason: "expansion complete")
+        replayTypeAhead(replay, heldFor: holdPID, reason: "expansion complete")
     }
 
     /// Decides one keystroke against the type-ahead hold. Runs on the tap thread, so it reads the
     /// event directly and never touches AppKit.
-    private func admitTypeAhead(event: CGEvent) -> (decision: TypeAheadBuffer.Decision, contaminatesBlindUndo: Bool) {
+    private func admitTypeAhead(
+        event: CGEvent
+    ) -> (decision: TypeAheadBuffer.Decision, contaminatesBlindUndo: Bool, holdPID: pid_t?) {
         let flags = event.flags
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let resets = Self.shouldResetBuffer(flags: flags, keyCode: keyCode)
@@ -2930,6 +2934,9 @@ public final class EventTapEngine {
 
         let focusPID = frontmostContext.processID
         lock.lock()
+        // Read before `admit`: a decision that flushes clears the hold, and the app the
+        // characters were typed in is the only app they may be posted to.
+        let holdPID = _typeAhead.holdPID
         let decision = _typeAhead.admit(
             unicode: unicode,
             isSynthetic: false,
@@ -2947,15 +2954,37 @@ public final class EventTapEngine {
             isDelete: KeyClassifier.action(forKeyCode: Int(keyCode)) == .deleteLast,
             unicodeCount: length
         )
-        return (decision, decision != .swallow && contaminates)
+        return (decision, decision != .swallow && contaminates, holdPID)
     }
 
     /// Re-posts keystrokes held during an expansion, in the order they were typed.
     ///
     /// The queue's invariant is that everything admitted is replayed exactly once, so this is the
-    /// only exit and it must not be conditional on anything that could silently skip it.
-    private func replayTypeAhead(_ text: String, reason: String) {
+    /// only exit and it must not be conditional on anything that could silently skip it — with
+    /// the single exception the buffer documents: the app that was focused when the keys were
+    /// typed. `sourcePID` is therefore required rather than defaulted, so a new call site has to
+    /// state where its characters came from instead of inheriting a guess.
+    private func replayTypeAhead(_ text: String, heldFor sourcePID: pid_t?, reason: String) {
         guard !text.isEmpty else { return }
+
+        // A replay is an HID post, and an HID post lands in whatever is frontmost *now*. If that
+        // is provably not the app the characters were typed in, they are dropped: putting one
+        // app's typing into another leaks it and corrupts the field it arrives in, and these
+        // characters never reached the original app either way. The delivery-input window was
+        // already charged for them above; over-counting input only makes a later blind undo more
+        // reluctant, which is the safe direction to be wrong in.
+        let currentPID = frontmostContext.processID
+        guard TypeAheadBuffer.mayReplay(heldFor: sourcePID, intoFrontmost: currentPID) else {
+            let safeReason = DevTypeLog.boundedPublicIdentifier(reason, label: "replayReason")
+            DevTypeLog.inject.error(
+                """
+                [TypeAhead] dropped \(text.count, privacy: .public) held keystroke(s) — focus \
+                left the app they were typed in; replaying would deliver them elsewhere. \
+                reason=\(safeReason, privacy: .public)
+                """
+            )
+            return
+        }
         // `EventTapEngine` normally owns a dedicated tap run-loop thread. Replay must therefore
         // stay synchronous on whichever thread is ending the expansion: dispatching to main here
         // lets the triggering key pass through before the held characters and transposes input.

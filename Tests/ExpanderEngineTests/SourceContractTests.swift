@@ -202,6 +202,50 @@ final class SourceContractTests: XCTestCase {
     // MARK: - Source access
 
     /// Repo root derived from this file's location (`Tests/ExpanderEngineTests/…`).
+    /// A spoken AI command's output must go back to the app the user dictated into.
+    ///
+    /// The transform is asynchronous — the user waits on a model — and the pipeline's legacy
+    /// entry point captures whatever is frontmost when the work is *enqueued* and cannot be
+    /// handed a continuation predicate. So a completion arriving after a focus change delivered
+    /// the user's own selected or dictated text into whatever app had taken over, and the same
+    /// route put back the rollback text when a transform failed. The guarantee lives in
+    /// `SourceAppDelivery` (tested directly in `SourceAppDeliveryTests`); what this pins is that
+    /// the voice path actually goes through it, which is not expressible as a runtime assertion.
+    func testVoiceAIOutputIsDeliveredOnlyToTheAppItWasDictatedIn() throws {
+        let controller = try source("Sources/DevTypeAppCore/VoiceDictationController.swift")
+
+        XCTAssertTrue(
+            controller.contains("SourceAppDelivery.perform(sourceApp: destination"),
+            "AI output must be delivered through the source-app gate, not to whatever is frontmost"
+        )
+        XCTAssertTrue(
+            controller.contains("shouldContinue: shouldContinue"),
+            "The pipeline's later stages must stay bound to the originating process"
+        )
+        XCTAssertFalse(
+            controller.contains("swallowedFinalKey:"),
+            "The legacy inject overload takes no continuation predicate and captures a fresh "
+                + "target — it must not be how voice AI output reaches a field"
+        )
+
+        // The destination has to be read before the model is asked, not after it answers.
+        let capture = try XCTUnwrap(
+            controller.range(of: "let destination = lock.withLock { sessionSourceApp }"),
+            "the dictation's own target app must be captured for the transform"
+        )
+        let transform = try XCTUnwrap(controller.range(of: "AITextTransformer.shared.transform("))
+        XCTAssertTrue(
+            capture.upperBound <= transform.lowerBound,
+            "Reading the destination after the transform completes reads a focus that may have moved"
+        )
+
+        // Failure rollback is the same private text and must take the same route.
+        XCTAssertTrue(
+            controller.contains("private func restore(_ text: String?, to destination: NSRunningApplication?)"),
+            "Restoring text after a failed transform must be destination-bound too"
+        )
+    }
+
     private static var repoRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // ExpanderEngineTests

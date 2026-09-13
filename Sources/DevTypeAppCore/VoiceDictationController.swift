@@ -224,6 +224,10 @@ public final class VoiceDictationController: @unchecked Sendable {
         operation: VoiceAITransformLifecycle.Operation,
         handle: AITransformDiscardHandle
     )?
+    /// The app this dictation was aimed at. A spoken AI command finishes asynchronously — the
+    /// user is waiting on a model — and its output has to go back to the app they were dictating
+    /// into, not to whatever happens to be in front when the model answers.
+    private var sessionSourceApp: NSRunningApplication?
 
     private init() {}
 
@@ -333,6 +337,7 @@ public final class VoiceDictationController: @unchecked Sendable {
         liveRecognitionRequested: Bool
     ) {
         guard lock.withLock({ lifecycle.isPreparing(attempt: attempt) }) else { return }
+        lock.withLock { sessionSourceApp = app }
 
         if engine.uploadsRecordedAudio && !VoicePreferences.hasCloudAudioConsent {
             DevTypeLog.permission.notice(
@@ -900,6 +905,9 @@ public final class VoiceDictationController: @unchecked Sendable {
         VoiceHUDPanel.shared.updateState(.transcribing(
             modelName: LocalizationManager.shared.s("voice.ai.working", action)
         ))
+        // Read before the transform is started, not after it answers: by then focus may have
+        // moved, and the app that is frontmost then is not the one the user spoke to.
+        let destination = lock.withLock { sessionSourceApp }
 
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
@@ -914,29 +922,17 @@ public final class VoiceDictationController: @unchecked Sendable {
                     switch result {
                     case .success(let output) where !output.isEmpty:
                         VoiceHUDPanel.shared.updateState(.success(text: output))
-                        let snippet = SnippetModel(
-                            title: "Voice AI",
-                            triggerKeyword: "",
-                            replacementText: output
-                        )
-                        TextInjectionPipeline.shared.inject(
-                            snippet: snippet,
-                            triggerLength: 0,
-                            swallowedFinalKey: false,
-                            eraseCountOverride: 0,
-                            preResolvedText: output,
-                            secureClipboardPaste: false
-                        )
+                        self.deliverAIText(output, to: destination)
                     case .success:
                         VoiceHUDPanel.shared.updateState(.error(
                             message: LocalizationManager.shared.s("voice.ai.emptyOutput")
                         ))
-                        self.restore(fallback)
+                        self.restore(fallback, to: destination)
                     case .failure:
                         VoiceHUDPanel.shared.updateState(
                             .error(message: LocalizationManager.shared.s("voice.ai.failed"))
                         )
-                        self.restore(fallback)
+                        self.restore(fallback, to: destination)
                     }
                 }
             }
@@ -948,7 +944,7 @@ public final class VoiceDictationController: @unchecked Sendable {
         VoiceHUDPanel.shared.updateState(
             .error(message: LocalizationManager.shared.s("ai.availability.unsupportedOS"))
         )
-        restore(fallback)
+        restore(fallback, to: destination)
     }
 
     /// Starts a new spoken-command transform and invalidates any older result before its provider
@@ -1004,17 +1000,38 @@ public final class VoiceDictationController: @unchecked Sendable {
 
     /// Puts back text that was rolled back for a transform that then failed.
     @MainActor
-    private func restore(_ text: String?) {
-        guard let text, !text.isEmpty else { return }
-        let snippet = SnippetModel(title: "Voice AI", triggerKeyword: "", replacementText: text)
-        TextInjectionPipeline.shared.inject(
-            snippet: snippet,
-            triggerLength: 0,
-            swallowedFinalKey: false,
-            eraseCountOverride: 0,
-            preResolvedText: text,
-            secureClipboardPaste: false
-        )
+    private func restore(_ text: String?, to destination: NSRunningApplication?) {
+        guard let text else { return }
+        deliverAIText(text, to: destination)
+    }
+
+    /// Hands AI output back to the app the dictation was aimed at, and to no other.
+    ///
+    /// The pipeline's legacy entry point captures whatever is frontmost when the work is
+    /// enqueued and cannot be given a continuation predicate, so a completion that lands after
+    /// the user switched apps delivers there instead. That output is the user's own selected or
+    /// dictated text — and so is the rollback text a failed transform puts back. Going through
+    /// `SourceAppDelivery` reactivates the original process, refuses to deliver if a third app
+    /// has taken over, and carries a predicate that keeps the pipeline's own later stages — the
+    /// clipboard wait, the paste, the restore — bound to that same process.
+    @MainActor
+    private func deliverAIText(_ text: String, to destination: NSRunningApplication?) {
+        guard !text.isEmpty else { return }
+        SourceAppDelivery.perform(sourceApp: destination, onUnavailable: {
+            VoiceHUDPanel.shared.updateState(.error(
+                message: LocalizationManager.shared.s("voice.ai.targetUnavailable")
+            ))
+        }) { shouldContinue in
+            TextInjectionPipeline.shared.inject(
+                snippet: SnippetModel(title: "Voice AI", triggerKeyword: "", replacementText: text),
+                triggerLength: 0,
+                swallowed: .notSwallowed,
+                eraseCountOverride: 0,
+                preResolvedText: text,
+                secureClipboardPaste: false,
+                shouldContinue: shouldContinue
+            )
+        }
     }
 
     // MARK: - Messaging

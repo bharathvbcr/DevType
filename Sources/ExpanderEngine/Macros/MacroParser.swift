@@ -99,6 +99,7 @@ public enum MacroParser {
         var tokens: [MacroToken] = []
         var text = ""
         var i = content.startIndex
+        var allowance = scanAllowance(for: content)
 
         func flushText() {
             if !text.isEmpty { tokens.append(.text(text)); text = "" }
@@ -129,7 +130,7 @@ public enum MacroParser {
                 i = content.index(i, offsetBy: bare.literal.count)
                 continue
             }
-            if let (token, consumed) = parseDelimitedMacro(rest) {
+            if let (token, consumed) = parseDelimitedMacro(rest, allowance: &allowance) {
                 flushText()
                 tokens.append(token)
                 i = content.index(i, offsetBy: consumed)
@@ -166,10 +167,33 @@ public enum MacroParser {
     /// §3.6: Scans a macro body, treating `%%` as an escaped literal `%`. Falls back to the
     /// historical "first `%` wins" rule when no unescaped terminator exists, so nothing that
     /// parsed before parses differently now.
-    private static func scanBody(_ rest: Substring, from bodyStart: Substring.Index) -> ScannedBody? {
+    /// Characters `scanBody` may examine across one pass over a document.
+    ///
+    /// A scan that finds no unescaped terminator runs to the end of the input, building the whole
+    /// remainder as it goes — and the parser then restarts it at the next `%`. Text that is mostly
+    /// macro-shaped markers costs one full-length scan per marker, because `%case:upper%%case:upper%`
+    /// reads every adjacent `%%` as an escape and never terminates. At the importer's 100,000
+    /// character replacement cap that measured roughly two seconds of synchronous work on whichever
+    /// thread asked — and the snippet list renders a preview per row, the editor one per keystroke.
+    ///
+    /// Ordinary text is nowhere near this. A `%` only reaches `scanBody` when it already looks like
+    /// `%keyword:` or `%@`, and a real body is a handful of characters, so the allowance is four
+    /// times the input purely so no plausible document can reach it. Once it is spent the remaining
+    /// `%` are literal text rather than the start of another full-length scan.
+    static func scanAllowance(for content: String) -> Int {
+        max(200_000, content.count * 4)
+    }
+
+    private static func scanBody(
+        _ rest: Substring,
+        from bodyStart: Substring.Index,
+        allowance: inout Int
+    ) -> ScannedBody? {
         var body = ""
         var index = bodyStart
         while index < rest.endIndex {
+            guard allowance > 0 else { return nil }
+            allowance -= 1
             let character = rest[index]
             if character == "%" {
                 let next = rest.index(after: index)
@@ -187,7 +211,10 @@ public enum MacroParser {
             body.append(character)
             index = rest.index(after: index)
         }
-        // No unescaped terminator — legacy behavior.
+        // No unescaped terminator — legacy behavior. Charged too: it is a second pass over the
+        // same characters, and on marker-dense input it is reached once per marker.
+        guard allowance > 0 else { return nil }
+        allowance -= rest.distance(from: bodyStart, to: rest.endIndex)
         guard let legacy = rest[bodyStart...].firstIndex(of: "%") else { return nil }
         return ScannedBody(
             text: String(rest[bodyStart..<legacy]),
@@ -198,11 +225,14 @@ public enum MacroParser {
 
     /// Parses macros of the form %keyword:body% and returns the token plus
     /// the number of characters consumed.
-    private static func parseDelimitedMacro(_ rest: Substring) -> (MacroToken, Int)? {
+    private static func parseDelimitedMacro(
+        _ rest: Substring,
+        allowance: inout Int
+    ) -> (MacroToken, Int)? {
         // §3.5: TextExpander-style date math, `%@+1D%`.
         if rest.hasPrefix("%@") {
             let bodyStart = rest.index(rest.startIndex, offsetBy: 2)
-            if let scanned = scanBody(rest, from: bodyStart),
+            if let scanned = scanBody(rest, from: bodyStart, allowance: &allowance),
                DateOffset.parse(scanned.text) != nil {
                 return (.date(format: scanned.text), scanned.consumed)
             }
@@ -212,7 +242,7 @@ public enum MacroParser {
             let prefix = "%\(keyword):"
             guard rest.hasPrefix(prefix) else { continue }
             let bodyStart = rest.index(rest.startIndex, offsetBy: prefix.count)
-            guard let scanned = scanBody(rest, from: bodyStart) else { return nil }
+            guard let scanned = scanBody(rest, from: bodyStart, allowance: &allowance) else { return nil }
             guard let token = makeToken(keyword: keyword, body: scanned.text) else { return nil }
             return (token, scanned.consumed)
         }
@@ -346,6 +376,10 @@ public enum MacroParser {
         let marker = "%snippet:"
         var result = ""
         var i = content.startIndex
+        // Same unterminated-scan exposure as `parse`: `%snippet:a%%snippet:a%…` reads as one body
+        // running to the end, restarted at every marker. `NestedSnippetBudget` bounds how much
+        // text resolution may *produce*; this bounds how much it may *read* getting there.
+        var allowance = scanAllowance(for: content)
 
         while i < content.endIndex {
             guard content[i] == "%" else {
@@ -360,7 +394,7 @@ public enum MacroParser {
                 continue
             }
             let bodyStart = rest.index(rest.startIndex, offsetBy: marker.count)
-            guard let scanned = scanBody(rest, from: bodyStart) else {
+            guard let scanned = scanBody(rest, from: bodyStart, allowance: &allowance) else {
                 result.append(content[i])
                 i = content.index(after: i)
                 continue

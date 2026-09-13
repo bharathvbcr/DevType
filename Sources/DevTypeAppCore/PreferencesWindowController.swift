@@ -2154,10 +2154,14 @@ final class PreferencesViewController: NSViewController,
     }
 
     @objc private func requireBiometryChanged() {
-        SecretPreferences.setRequireBiometry(requireBiometrySwitch.state == .on)
-        // Turning it on must take effect now, not after the current reuse window expires.
-        BiometricGate.shared.invalidate()
-        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+        SecretPreferences.requestRequireBiometry(requireBiometrySwitch.state == .on) { [weak self] inForce in
+            guard let self else { return }
+            // The switch shows what is in force, not what was clicked: a downgrade the user
+            // failed or declined has to spring back rather than sit there claiming the gate is
+            // off while every read still prompts.
+            self.requireBiometrySwitch.state = inForce ? .on : .off
+            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+        }
     }
 
     private func buildSnippets(into stack: NSStackView) {
