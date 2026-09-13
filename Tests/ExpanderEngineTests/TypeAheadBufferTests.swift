@@ -275,6 +275,70 @@ final class TypeAheadBufferTests: XCTestCase {
             )
         }
     }
+    // MARK: - Where the replay is allowed to land
+
+    /// The buffer holds characters so they arrive *after* the expansion. It cannot hold them so
+    /// they arrive in a *different app*: a replay is an HID post, which lands wherever focus is
+    /// when it fires. Focus leaving the hold app during delivery turns "late" into "wrong
+    /// recipient" — one app's typing, which may be a password or a message, posted into another.
+    func testReplayIsRefusedWhenFocusProvablyLeftTheHoldApp() {
+        XCTAssertFalse(
+            TypeAheadBuffer.mayReplay(heldFor: 42, intoFrontmost: 99),
+            "characters typed in 42 must never be posted while 99 is frontmost"
+        )
+    }
+
+    func testReplayIsAllowedIntoTheAppTheKeysWereTypedIn() {
+        XCTAssertTrue(TypeAheadBuffer.mayReplay(heldFor: 42, intoFrontmost: 42))
+    }
+
+    /// Only a *proven* mismatch drops keystrokes. A missing reading is not evidence that focus
+    /// moved, and treating it as such would trade a rare leak for routinely eating input — the
+    /// failure this whole type exists to avoid.
+    func testUnknownFocusDoesNotDropTheUsersKeystrokes() {
+        XCTAssertTrue(TypeAheadBuffer.mayReplay(heldFor: nil, intoFrontmost: 42))
+        XCTAssertTrue(TypeAheadBuffer.mayReplay(heldFor: 42, intoFrontmost: nil))
+        XCTAssertTrue(TypeAheadBuffer.mayReplay(heldFor: nil, intoFrontmost: nil))
+    }
+
+    /// End to end over the two decisions the engine actually composes: a focus change flushes
+    /// the hold, and the app it flushed *into* is then not allowed to receive it. Before this,
+    /// the mismatch branch released the characters with no record of where they came from, and
+    /// the engine posted them into the new app.
+    func testFocusChangeFlushesAndTheNewAppIsRefusedTheCharacters() {
+        var buffer = TypeAheadBuffer()
+        buffer.beginExpansion(focusPID: 42, now: t0)
+
+        XCTAssertEqual(admit(&buffer, "s", at: 0.01), .swallow)
+        XCTAssertEqual(admit(&buffer, "e", at: 0.02), .swallow)
+
+        // The app the characters were typed in, read before the flush clears it — exactly what
+        // the engine captures.
+        let holdPID = buffer.holdPID
+        XCTAssertEqual(holdPID, 42)
+
+        guard case .flushThenPassThrough(let replay) = admit(&buffer, "c", pid: 99, at: 0.03) else {
+            return XCTFail("a focus change must release the hold")
+        }
+        XCTAssertEqual(replay, "se", "the characters are still accounted for")
+        XCTAssertFalse(
+            TypeAheadBuffer.mayReplay(heldFor: holdPID, intoFrontmost: 99),
+            "and must not be posted into the app that took focus"
+        )
+    }
+
+    /// The ordinary path is untouched: an expansion that completes with focus where it started
+    /// still replays.
+    func testCompletionInTheSameAppStillReplays() {
+        var buffer = TypeAheadBuffer()
+        buffer.beginExpansion(focusPID: 42, now: t0)
+        XCTAssertEqual(admit(&buffer, "a", at: 0.01), .swallow)
+
+        let holdPID = buffer.holdPID
+        XCTAssertEqual(buffer.endExpansion(), "a")
+        XCTAssertTrue(TypeAheadBuffer.mayReplay(heldFor: holdPID, intoFrontmost: 42))
+    }
+
 }
 
 // SplitMix64 moved to DeterministicRandom.swift — shared by every fuzz test here.

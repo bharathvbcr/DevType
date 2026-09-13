@@ -1,5 +1,4 @@
 import Foundation
-import Yams
 
 /// Imports static Espanso matches (Tier A) into DevType snippet groups.
 /// `image_path` matches import as image snippets; dynamic vars, forms,
@@ -750,21 +749,10 @@ public enum EspansoImporter {
         return nil
     }
 
+    /// Every YAML document an import reads comes through here, match files and package
+    /// manifests alike. `BoundedYAML` owns why this is not `Yams.load`.
     private static func loadYAMLDictionary(data: Data) throws -> [String: Any] {
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw CocoaError(.fileReadInapplicableStringEncoding)
-        }
-        guard let loaded = try Yams.load(yaml: text) else {
-            return [:]
-        }
-        if let dict = loaded as? [String: Any] {
-            return dict
-        }
-        // Yams may return NSDictionary bridging.
-        if let dict = loaded as? NSDictionary {
-            return dict as? [String: Any] ?? [:]
-        }
-        return [:]
+        try BoundedYAML.loadDictionary(data: data)
     }
 
     // MARK: - Accumulator

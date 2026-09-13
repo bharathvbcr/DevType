@@ -471,62 +471,84 @@ public enum AIMarkdownStripper {
     /// Removes every stacked line prefix in one call — `> ## Title`, `## ## x`, `>  > q`.
     /// One layer per call would mean the result depended on how many times the caller ran
     /// it, which is the same bug as any other non-fixed-point pass.
-    private static func strippingBlockPrefixes(_ line: String, allowed: AIMarkdownConstruct) -> String {
-        var result = line
-        // Each pass consumes from the front, so this is linear overall.
+    ///
+    /// Runs that fixed point over *slices* of `line` instead of rebuilding the remainder each
+    /// time. Rebuilding cost the whole remaining line per layer while the layer count is bounded
+    /// by the number of stacked markers, so a line of nothing but markers — `# # # # …`, which
+    /// fits easily inside the 200k selection cap — was quadratic in both time and allocation,
+    /// on the thread drawing the preview. A layer now costs the markers it removes rather than
+    /// the text it keeps.
+    // Not `private`: `AIMarkdownPrefixEquivalenceTests` checks this against the previous
+    // algorithm directly, which is the only way to show the rewrite kept every fixed point.
+    static func strippingBlockPrefixes(_ line: String, allowed: AIMarkdownConstruct) -> String {
+        // Leading whitespace is accumulated rather than sliced: unwrapping a blockquote level can
+        // expose more of it (`>   # x`), and that run is not adjacent in `line` to the run
+        // already collected. Each character moves here at most once, so this stays linear.
+        var indent = ""
+        var rest = Substring(line)
+
+        func absorbIndent() {
+            let lead = rest.prefix(while: { $0 == " " || $0 == "\t" })
+            guard !lead.isEmpty else { return }
+            indent += lead
+            rest = rest.dropFirst(lead.count)
+        }
+
+        absorbIndent()
+
+        // Every pass removes at least one marker or ends the loop, so the marker count bounds it.
         for _ in 0..<max(1, line.count) {
-            let next = strippingOneBlockPrefixLayer(result, allowed: allowed)
-            if next == result { break }
-            result = next
-        }
-        return result
-    }
+            let before = rest
 
-    private static func strippingOneBlockPrefixLayer(
-        _ line: String,
-        allowed: AIMarkdownConstruct
-    ) -> String {
-        let indent = String(line.prefix(while: { $0 == " " || $0 == "\t" }))
-        var rest = String(line.dropFirst(indent.count))
-
-        if allowed.contains(.blockquote) {
-            // Every nesting level in one pass, spaces between the markers included:
-            // `>  > x` must reach `x` here, or a second call would strip the level this
-            // one left behind and the result would depend on how many times it ran.
-            var scan = Substring(rest)
-            var unwrapped = false
-            while true {
-                let afterSpaces = scan.drop(while: { $0 == " " || $0 == "\t" })
-                guard afterSpaces.hasPrefix(">") else { break }
-                scan = afterSpaces.dropFirst()
-                if scan.hasPrefix(" ") { scan = scan.dropFirst() }
-                unwrapped = true
+            if allowed.contains(.blockquote) {
+                // Every nesting level in one pass, spaces between the markers included:
+                // `>  > x` must reach `x` here, or a second call would strip the level this
+                // one left behind and the result would depend on how many times it ran.
+                var scan = rest
+                var unwrapped = false
+                while true {
+                    let afterSpaces = scan.drop(while: { $0 == " " || $0 == "\t" })
+                    guard afterSpaces.hasPrefix(">") else { break }
+                    scan = afterSpaces.dropFirst()
+                    if scan.hasPrefix(" ") { scan = scan.dropFirst() }
+                    unwrapped = true
+                }
+                if unwrapped {
+                    rest = scan
+                    // Whitespace the blockquote uncovered is indentation now. The old code left
+                    // it in front of `rest`, which is why a heading behind a blockquote took an
+                    // extra pass to reach; the fixed point is the same either way.
+                    absorbIndent()
+                }
             }
-            if unwrapped { rest = String(scan) }
-        }
 
-        if allowed.contains(.heading), rest.hasPrefix("#") {
-            let hashes = rest.prefix(while: { $0 == "#" }).count
-            let after = rest.dropFirst(hashes)
-            if hashes <= 6, after.isEmpty || after.first == " " || after.first == "\t" {
-                rest = String(after.drop(while: { $0 == " " || $0 == "\t" }))
-                // Closing sequence: `## Title ##`
-                let tail = rest.reversed().prefix(while: { $0 == "#" }).count
-                if tail > 0 {
-                    let withoutTail = String(rest.dropLast(tail))
-                    if withoutTail.isEmpty || withoutTail.hasSuffix(" ") {
-                        while rest.hasSuffix("#") { rest.removeLast() }
-                        while rest.hasSuffix(" ") { rest.removeLast() }
+            if allowed.contains(.heading), rest.hasPrefix("#") {
+                let hashes = rest.prefix(while: { $0 == "#" }).count
+                let after = rest.dropFirst(hashes)
+                if hashes <= 6, after.isEmpty || after.first == " " || after.first == "\t" {
+                    rest = after.drop(while: { $0 == " " || $0 == "\t" })
+                    // Closing sequence: `## Title ##`
+                    let tail = rest.reversed().prefix(while: { $0 == "#" }).count
+                    if tail > 0 {
+                        let withoutTail = rest.dropLast(tail)
+                        if withoutTail.isEmpty || withoutTail.hasSuffix(" ") {
+                            rest = withoutTail
+                            while rest.hasSuffix(" ") { rest = rest.dropLast() }
+                        }
                     }
                 }
             }
-        }
 
-        if allowed.contains(.list), let marker = rest.first, marker == "*" || marker == "+" {
-            let after = rest.dropFirst()
-            if after.first == " " || after.first == "\t" {
-                return indent + "-" + after
+            if allowed.contains(.list), let marker = rest.first, marker == "*" || marker == "+" {
+                let after = rest.dropFirst()
+                if after.first == " " || after.first == "\t" {
+                    // The only rewrite here rather than a removal, and the only point where a
+                    // slice cannot carry the answer. Nothing strips a `-`, so this is terminal.
+                    return indent + "-" + after
+                }
             }
+
+            if rest == before { break }
         }
 
         return indent + rest

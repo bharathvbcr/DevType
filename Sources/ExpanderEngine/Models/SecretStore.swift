@@ -1786,7 +1786,85 @@ public enum SecretPreferences {
         return defaults.bool(forKey: requireBiometryKey)
     }
 
-    public static func setRequireBiometry(_ enabled: Bool, defaults: UserDefaults = .standard) {
+    /// Writes the preference with no authorization of any kind.
+    ///
+    /// Deliberately not `public`: it is the persistence primitive underneath
+    /// ``requestRequireBiometry(_:defaults:gate:reason:completion:)``, and a caller who reaches
+    /// past that one reintroduces the hole it closes. Every UI surface goes through the
+    /// authenticated entry point.
+    static func setRequireBiometry(_ enabled: Bool, defaults: UserDefaults = .standard) {
         defaults.set(enabled, forKey: requireBiometryKey)
+    }
+
+    /// Does moving from `current` to `requested` weaken the protection, and therefore need the
+    /// user to prove who they are first?
+    ///
+    /// Only one direction does. Turning the requirement **on** adds a check and can never be
+    /// worth attacking. Turning it **off** removes the single thing standing between someone at
+    /// an unlocked Mac and every stored password — so it has to satisfy the gate it is about to
+    /// switch off, or the gate protects the read while nothing protects the gate.
+    ///
+    /// A machine that cannot evaluate a policy at all is exempt: there is nothing to prove with,
+    /// and refusing the change would strand the preference in whatever state it happens to hold.
+    public static func downgradeNeedsAuthorization(
+        from current: Bool,
+        to requested: Bool,
+        availability: BiometricGate.Availability
+    ) -> Bool {
+        guard availability.canGate else { return false }
+        return current && !requested
+    }
+
+    /// Apply a requested change to the requirement, authenticating the direction that weakens it.
+    ///
+    /// A cancelled or failed check leaves the requirement exactly as it was. `completion` always
+    /// reports the value now **in force** rather than the value requested, so a caller can drive
+    /// its switch or menu item straight from the answer instead of assuming the click took
+    /// effect. Always called on the main queue.
+    public static func requestRequireBiometry(
+        _ enabled: Bool,
+        defaults: UserDefaults = .standard,
+        gate: BiometricGate = .shared,
+        reason: String? = nil,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let availability = gate.availability()
+        let current = requireBiometry(defaults: defaults, availability: availability)
+
+        func finish() {
+            let inForce = requireBiometry(defaults: defaults, availability: gate.availability())
+            // A requirement that is now in force has to bite on the next read rather than after
+            // the current reuse window drains — including when it stayed on because the user
+            // declined to switch it off.
+            if inForce { gate.invalidate() }
+            if Thread.isMainThread {
+                completion(inForce)
+            } else {
+                DispatchQueue.main.async { completion(inForce) }
+            }
+        }
+
+        guard downgradeNeedsAuthorization(from: current, to: enabled, availability: availability) else {
+            setRequireBiometry(enabled, defaults: defaults)
+            return finish()
+        }
+
+        // Ask now rather than accepting a check from up to 30 seconds ago. That reuse window
+        // exists so copying two secrets in a row does not prompt twice; spending it on switching
+        // the gate off would hand an attacker the user's own last unlock.
+        gate.invalidate()
+        gate.authorize(
+            reason: reason ?? LocalizationManager.shared.s("secret.auth.disableReason")
+        ) { outcome in
+            switch outcome {
+            case .authorized:
+                setRequireBiometry(enabled, defaults: defaults)
+            case .cancelled, .failed:
+                // The requirement stands. Nothing is written, so a stale completion cannot
+                // commit a downgrade the user declined.
+                break
+            }
+            finish()
+        }
     }
 }

@@ -230,9 +230,14 @@ reported explicitly.
 ## Threat model & limits
 
 - **Protected against:** the library file, exports, backups of the library, and the
-  diagnostic report carrying a value; clipboard managers retaining copies; another app reading
-  the archive (ciphertext without the key) or the master key (ACL'd to DevType's signing
-  identity); a casual user at an unlocked Mac (Touch ID gate).
+  diagnostic report carrying a value; another app reading the archive (ciphertext without the
+  key) or the master key (ACL'd to DevType's signing identity); a casual user at an unlocked Mac
+  (Touch ID gate, which is also required to *turn the gate off*).
+- **Clipboard managers — requested, not enforced.** A copied value carries
+  `org.nspasteboard.ConcealedType` and a 90-second auto-clear, but both are asks. A clipboard
+  manager that does not honour the marker keeps its copy, and nothing DevType can do from its own
+  process prevents that. Treat the marker as a courtesy that well-behaved managers observe, not as
+  a boundary.
 - **Shoulder-surfing the editor — qualified, and deliberately so.** The value field is
   concealed by default and an existing value is *never* prefilled, so opening the editor on a
   stored secret still shows nothing to read. But the editor now has a **Show** button that

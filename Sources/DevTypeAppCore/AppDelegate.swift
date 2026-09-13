@@ -907,14 +907,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleRequireBiometry(_ sender: NSMenuItem) {
         let availability = BiometricGate.shared.availability()
         let enabled = !SecretPreferences.requireBiometry(availability: availability)
-        SecretPreferences.setRequireBiometry(enabled)
-        // Turning it on must bite immediately rather than after the current reuse window.
-        BiometricGate.shared.invalidate()
-        rebuildSecretsMenu()
-        // The same switch lives in Preferences; an open window must not show the opposite of what
-        // is now in force.
-        if PreferencesWindowController.shared.window?.isVisible == true {
-            PreferencesWindowController.shared.refreshSecretsCard()
+        // Switching the requirement *off* is authenticated by the requirement itself, so the
+        // menu is rebuilt from what ended up in force rather than from what was clicked.
+        SecretPreferences.requestRequireBiometry(enabled) { [weak self] _ in
+            guard let self else { return }
+            self.rebuildSecretsMenu()
+            // The same switch lives in Preferences; an open window must not show the opposite of
+            // what is now in force.
+            if PreferencesWindowController.shared.window?.isVisible == true {
+                PreferencesWindowController.shared.refreshSecretsCard()
+            }
         }
     }
 

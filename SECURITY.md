@@ -1,17 +1,35 @@
 # Security & Privacy Policy
 
-DevType is engineered from the ground up as a **privacy-first, offline-only** application. Because DevType operates as a system-wide text expansion utility with accessibility and input monitoring permissions, we treat user security, privacy, and data isolation with the highest priority.
+DevType is engineered from the ground up as a **privacy-first, local-by-default** application. Because DevType operates as a system-wide text expansion utility with accessibility and input monitoring permissions, we treat user security, privacy, and data isolation with the highest priority.
+
+Local-by-default means nothing leaves this Mac unless you turn on a feature that says it will. Three things can send data off the machine, all of them off until you act: the opt-in Gemini dictation engine, the opt-in update check, and a snippet library you choose to store in a synced folder. Each is described precisely below — we would rather tell you exactly where the edges are than claim there are none.
 
 ---
 
 ## 🔒 Security Principles & Guarantees
 
-### 1. 100% On-Device & Zero Telemetry
-- DevType contains **zero** cloud telemetry, analytics trackers, or network reporting endpoints.
-- AI transformations run locally on-device using Apple Foundation Models (on supported macOS versions) alongside deterministic offline local text transformations (e.g. Remove Markdown). No text or prompts are transmitted over the network.
-- Speech dictation is local-first (Apple Speech, on-device Local AI, loopback Local Whisper) with an opt-in cloud engine (Gemini) that remains inactive until you supply your own API key.
-- Update checks are off by default, opt-in only, run at most once a day, and transmit zero telemetry, device identifiers, or usage data.
-- Your snippet database, usage statistics, audio recordings, and keystrokes never leave your Mac.
+### 1. On-Device by Default & Zero Telemetry
+- DevType contains **zero** cloud telemetry, analytics trackers, or network reporting endpoints. Nothing about your usage is ever reported anywhere.
+- AI transformations run on this Mac: Apple Foundation Models on supported macOS versions, plus deterministic offline transformations (e.g. Remove Markdown). Neither reaches the network.
+- Speech dictation is local-first — Apple Speech, Local AI, and Local Whisper all keep audio on this Mac.
+- Keystrokes and usage statistics never leave this Mac under any configuration. Recorded audio leaves only through the opt-in Gemini engine described below, and never otherwise.
+- Your snippet database stays on this Mac unless you move it (see below).
+
+#### Where data *can* leave this Mac
+
+Exhaustively, and only if you choose it:
+
+| Path | Default | What is sent, and to whom |
+|---|---|---|
+| **Gemini dictation** | Off | Your recorded audio and steering text go to Google (`generativelanguage.googleapis.com`). Requires selecting the Gemini engine, supplying your own API key, **and** granting a separate explicit cloud-audio consent — selecting the engine and saving a key are not by themselves consent. |
+| **Update check** | Off | An unauthenticated request to the GitHub releases API. No telemetry, device identifiers, or usage data. Automatic checks are spaced at least 24 hours apart; a check you trigger yourself from the menu runs when you ask it to. DevType never downloads or installs an update — it opens the release page in your browser. |
+| **Synced snippet library** | Off | If you point your library at a folder your sync client watches (iCloud Drive, Dropbox, and similar), that provider handles your snippet text, metadata, and attached images like any other file in that folder. DevType does not sync anything on its own; this is entirely a consequence of where you put the file. |
+
+#### Local network services
+
+Local Whisper and the Local AI correction service are *local*, not *offline*. They are ordinary HTTP requests to a server on this machine — `127.0.0.1` for Whisper, `localhost:11434` for correction by default — so your audio and transcript text cross a loopback socket in plaintext to whatever process is listening on that port.
+
+DevType restricts these requests to loopback addresses, refuses redirects, ignores system proxies, and bounds every response. It cannot verify *which* process answers: a program running under a different account on this Mac that claims an unused configured port before your real server does would receive what is sent there. If you enable a local engine, treat the port you configure as trusted.
 
 ### 2. Keystroke Protection & Fail-Closed Safety
 - **Volatile Ring Buffer**: Intercepted keystrokes are temporarily held in an in-memory ring buffer solely for abbreviation prefix matching. Keystrokes are never logged, written to disk, or retained.

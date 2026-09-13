@@ -24,6 +24,17 @@ import Foundation
 ///   * anything whose replay would be wrong — navigation, chords, Return, focus changes —
 ///     flushes what is queued and passes through, rather than being queued itself
 ///   * the caller must not admit anything when it cannot post events, since replay is a post
+///
+/// # The one exception
+///
+/// "Exactly once" means *into the app the keys were typed in*. A replay is an HID post, and an
+/// HID post goes wherever focus is **now** — so if focus left during the hold, replaying types
+/// the user's characters into whatever app took its place. That is not a late delivery, it is a
+/// delivery to the wrong recipient: it leaks what was typed in one app into another, and
+/// corrupts the field it lands in. Those characters never reached the original app either, so
+/// the only question the engine gets to answer is whether to *also* put them somewhere they
+/// were never meant to go. It does not. `mayReplay(heldFor:intoFrontmost:)` is that decision,
+/// and `EventTapEngine.replayTypeAhead` is the only place allowed to act on it.
 public struct TypeAheadBuffer: Equatable {
     /// What the tap should do with the event it is holding.
     public enum Decision: Equatable {
@@ -158,6 +169,16 @@ public struct TypeAheadBuffer: Equatable {
 
         queued += unicode
         return .swallow
+    }
+
+    /// May characters held while `sourcePID` was frontmost be posted now that `currentPID` is?
+    ///
+    /// Refused only on a *proven* mismatch — both sides known and different. An unknown PID on
+    /// either side is not evidence of misdelivery, and dropping the user's keystrokes on a
+    /// missing reading would trade a rare leak for a routine loss.
+    public static func mayReplay(heldFor sourcePID: pid_t?, intoFrontmost currentPID: pid_t?) -> Bool {
+        guard let sourcePID, let currentPID else { return true }
+        return sourcePID == currentPID
     }
 
     /// Empties the queue and closes the window — after a flush this buffer is no longer holding,
