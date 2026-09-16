@@ -60,18 +60,56 @@ public enum AITransformError: Error, Equatable, Sendable {
     case unknown(String)
 }
 
-/// Handle returned from a GCD-style transform. Call `discard()` to cancel delivery —
-/// the model may keep running, but the completion will not succeed afterward.
+/// Handle returned from a GCD-style transform. `discard()` drops the result *and* stops
+/// the work; `settled()` reports when that work has finished unwinding.
+///
+/// It used to only drop the result — "the model may keep running" was the documented
+/// contract. But a generation that keeps running keeps `AITextTransformer`'s single-flight
+/// latch, so the very next request (the Retry, the tone change, the transform the user
+/// asked for *instead*) was refused `.busy` by the request it had just replaced, and the
+/// preview panel went blank with an error it could never clear. Abandoned work has to
+/// release what it holds, and a caller replacing its own request has to be able to wait
+/// for that release rather than race it.
 public final class AITransformDiscardHandle: @unchecked Sendable {
     private let once: AITransformOnceCompletion
+    private let lock = UnfairLock()
+    private var task: Task<Void, Never>?
+    /// `discard()` can land before the task is attached — the handle is handed to the
+    /// caller from the same statement that creates the task — so the request is recorded
+    /// and applied on attach instead of being lost.
+    private var cancelRequested = false
 
     fileprivate init(once: AITransformOnceCompletion) {
         self.once = once
     }
 
-    /// Completes exactly once with `.discarded` if still pending. Late successes are dropped.
+    fileprivate func attach(_ task: Task<Void, Never>) {
+        let cancelNow: Bool = lock.withLock {
+            self.task = task
+            return cancelRequested
+        }
+        if cancelNow { task.cancel() }
+    }
+
+    /// Completes exactly once with `.discarded` if still pending, and cancels the
+    /// generation so it stops holding the model and the single-flight latch. Late
+    /// successes are dropped.
     public func discard() {
         once.complete(.failure(.discarded))
+        let running: Task<Void, Never>? = lock.withLock {
+            cancelRequested = true
+            return task
+        }
+        running?.cancel()
+    }
+
+    /// Resolves once the generation has finished unwinding and released the single-flight
+    /// latch. Cancellation is cooperative, so this can outlast `discard()` by however long
+    /// the model takes to reach its next suspension point; awaiting it is what makes a
+    /// replacement request deterministic instead of a race against `.busy`.
+    public func settled() async {
+        guard let task = lock.withLock({ self.task }) else { return }
+        await task.value
     }
 }
 
@@ -971,6 +1009,7 @@ public actor AITextTransformer {
         kind: AITransformKind,
         input: String,
         customInstructions: String? = nil,
+        after previous: AITransformDiscardHandle? = nil,
         completionQueue: DispatchQueue = .main,
         completion: @escaping @Sendable (Result<String, AITransformError>) -> Void
     ) -> AITransformDiscardHandle {
@@ -978,6 +1017,7 @@ public actor AITextTransformer {
             kind: kind,
             input: input,
             customInstructions: customInstructions,
+            after: previous,
             onPartial: nil,
             completionQueue: completionQueue,
             completion: completion
@@ -986,11 +1026,17 @@ public actor AITextTransformer {
 
     /// Streaming entry point. `onPartial` receives `PartiallyGenerated.text` (Optional)
     /// on `completionQueue` as snapshots arrive; may be `nil` before the first token.
-    /// Discard via the returned handle — Cancel must not claim generation stopped.
+    /// Discard via the returned handle, which stops the generation as well as its delivery.
+    ///
+    /// `previous` is the request this one replaces. The caller discards it (which cancels
+    /// it); this request then waits for it to finish unwinding before asking the actor for
+    /// the latch, so replacing your own in-flight transform is a handover rather than a
+    /// race your predecessor wins by answering `.busy`.
     public nonisolated func transformStreaming(
         kind: AITransformKind,
         input: String,
         customInstructions: String? = nil,
+        after previous: AITransformDiscardHandle? = nil,
         onPartial: (@Sendable (String?) -> Void)?,
         completionQueue: DispatchQueue = .main,
         completion: @escaping @Sendable (Result<String, AITransformError>) -> Void
@@ -998,7 +1044,12 @@ public actor AITextTransformer {
         let once = AITransformOnceCompletion(queue: completionQueue, handler: completion)
         let handle = AITransformDiscardHandle(once: once)
         let partialQueue = completionQueue
-        Task {
+        let task = Task {
+            await previous?.settled()
+            guard !Task.isCancelled else {
+                once.complete(.failure(.discarded))
+                return
+            }
             await self.runTransform(
                 kind: kind,
                 input: input,
@@ -1011,6 +1062,7 @@ public actor AITextTransformer {
                 once: once
             )
         }
+        handle.attach(task)
         return handle
     }
 
@@ -1047,6 +1099,12 @@ public actor AITextTransformer {
         onPartial: @escaping @Sendable (String?) -> Void,
         once: AITransformOnceCompletion
     ) async {
+        // A request cancelled before it started must not take the latch on its way out.
+        guard !Task.isCancelled else {
+            once.complete(.failure(.discarded))
+            return
+        }
+
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             once.complete(.failure(.emptyInput))
@@ -1187,6 +1245,9 @@ public actor AITextTransformer {
             pieces.reserveCapacity(chunks.count)
             var assembled = ""
             for (index, chunk) in chunks.enumerated() {
+                // A chunked run is the longest thing this actor does; it must be
+                // abandonable between chunks rather than only at the end.
+                try Task.checkCancellation()
                 let budget = try await evaluateBudget(
                     kind: kind,
                     instructions: instructions,
@@ -1284,6 +1345,8 @@ public actor AITextTransformer {
     ) async throws -> String {
         var lastFailure = AITransformError.languageDrift
         for extraAttempt in 0...1 {
+            // Never spend a re-roll on a request the caller has already taken back.
+            try Task.checkCancellation()
             let text = try await generateRaw(
                 kind: kind,
                 instructions: instructions,
@@ -1386,6 +1449,10 @@ public actor AITextTransformer {
             let stream = session.streamResponse(to: Prompt(prompt), options: options)
             var lastText = ""
             for try await snapshot in stream {
+                // Cancellation is cooperative and the stream is not ours, so check it at
+                // the one point we are guaranteed to reach: every snapshot. Without this a
+                // discarded generation would keep the latch for its full natural length.
+                try Task.checkCancellation()
                 lastText = snapshot.content
                 // A partial is not decoration: `AIPreviewPanel` keeps the last one as its
                 // result, and Replace stays enabled on it when generation then fails. So
@@ -1626,6 +1693,13 @@ public actor AITextTransformer {
         kind: AITransformKind,
         input: String
     ) -> AITransformError {
+        // A cancelled generation is the caller taking its request back, not the model
+        // failing. Classifying it as `.unknown` would log it, redact prose that does not
+        // exist, and record a failure in the diagnostics store every time a user changed
+        // the tone mid-stream — turning an ordinary interaction into a reliability signal.
+        if error is CancellationError {
+            return .discarded
+        }
         guard let generation = error as? LanguageModelSession.GenerationError else {
             // The log line and the returned error must carry the same redaction: third-party
             // error prose is untrusted, and `.unknown`'s description reaches UI/alert surfaces.

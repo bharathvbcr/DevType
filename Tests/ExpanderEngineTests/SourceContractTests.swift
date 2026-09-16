@@ -1025,13 +1025,71 @@ final class SourceContractTests: XCTestCase {
         )
     }
 
-    /// The AI preview panel animates its frame in, so it cannot take the lock; its one free-form
-    /// label (the error line) has to bound itself instead.
-    func testAnimatedPreviewPanelBoundsItsErrorLabel() throws {
+    /// The AI preview panel animates its frame in, so it cannot take the *equal*-size lock;
+    /// it takes a required upper bound instead, and its free-form labels yield to it. Bounding
+    /// the error label alone was not enough — the header pushed the panel to 652pt against a
+    /// declared 560, which left `positionNearTop` centring a width the panel never had.
+    func testAnimatedPreviewPanelBoundsItsOwnContentSize() throws {
         let preview = try source("Sources/DevTypeAppCore/AIPreviewPanel.swift")
         XCTAssertTrue(preview.contains("errorLabel.preferredMaxLayoutWidth = AIPreviewPanel.panelSize.width - 36"))
         XCTAssertTrue(preview.contains("errorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)"))
         XCTAssertFalse(preview.contains("dtLockContentSize("), "an animated frame would fight a required size")
+
+        for bound in [
+            "glass.widthAnchor.constraint(lessThanOrEqualToConstant: AIPreviewPanel.panelSize.width)",
+            "glass.heightAnchor.constraint(lessThanOrEqualToConstant: AIPreviewPanel.panelSize.height)"
+        ] {
+            XCTAssertTrue(preview.contains(bound), "Missing size bound: \(bound)")
+        }
+        for yielding in [
+            "titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)",
+            "subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)"
+        ] {
+            XCTAssertTrue(preview.contains(yielding), "Missing compression yield: \(yielding)")
+        }
+    }
+
+    /// Abandoning a transform has to stop it, not merely ignore its answer.
+    ///
+    /// `discard()` used to drop the result and leave the generation running, holding
+    /// `AITextTransformer`'s single-flight latch — so Retry, the tone menu and the kind menu
+    /// were each refused `.busy` by the request they had just replaced, and the preview went
+    /// blank. The three halves of the fix are recorded here because the machine that would
+    /// otherwise catch a regression needs an on-device model, and CI has none.
+    func testDiscardingATransformCancelsItAndFreesTheLatch() throws {
+        let transformer = try source("Sources/ExpanderEngine/AI/AITextTransformer.swift")
+        for contract in [
+            "public func settled() async",
+            "running?.cancel()",
+            "handle.attach(task)",
+            "await previous?.settled()",
+            "try Task.checkCancellation()",
+            "if error is CancellationError {"
+        ] {
+            XCTAssertTrue(transformer.contains(contract), "Missing cancellation contract: \(contract)")
+        }
+    }
+
+    /// A callback from a superseded request must be refused *before* it can touch the
+    /// presentation. The guards used to sit below `discardHandle = nil` and the spinner
+    /// teardown, so a discarded request silenced the spinner of the request that replaced it.
+    func testPreviewRefusesStaleCallbacksBeforeChangingAnything() throws {
+        let preview = try source("Sources/DevTypeAppCore/AIPreviewPanel.swift")
+        XCTAssertTrue(preview.contains("generation == self.generation && isCurrent()"))
+        XCTAssertTrue(preview.contains("after: superseded"))
+
+        let body = try XCTUnwrap(
+            preview.range(of: "private func applyCompletion(").map { String(preview[$0.lowerBound...]) }
+        )
+        let guardIndex = try XCTUnwrap(body.range(of: "guard isLive(generation) else { return }")?.lowerBound)
+        let mutationIndex = try XCTUnwrap(body.range(of: "stopPresentingWork()")?.lowerBound)
+        let resultIndex = try XCTUnwrap(body.range(of: "switch Self.normalized(result)")?.lowerBound)
+        XCTAssertLessThan(guardIndex, mutationIndex, "The liveness guard must precede any UI change")
+        XCTAssertLessThan(guardIndex, resultIndex, "The liveness guard must precede the result")
+        XCTAssertTrue(
+            preview.contains("guard isLive(generation), let partial else { return }"),
+            "A partial from a superseded request must be refused before it is rendered"
+        )
     }
 
     /// Every fixed-size panel built the same way shares the same failure, so every one of them
