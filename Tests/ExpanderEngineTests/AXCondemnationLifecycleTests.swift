@@ -47,6 +47,49 @@ final class AXCondemnationLifecycleTests: XCTestCase {
 
     // MARK: - The door opens exactly one build's worth
 
+    /// Field report 2026-09-16 (GitPulse 1.2.0): Prompt Enhance delivered through the
+    /// secure-clipboard path, which never issues an AX write. `verdict(for:)` was consulted
+    /// to decide whether that paste could trust AX range/delivery reads, and the query
+    /// retired `com.gitpulse.desktop|AXTextArea` ("re-testing once") without testing
+    /// anything. The learned list then lost the condemnation, so the next typed expansion
+    /// would pay the false-success AX probe it existed to skip.
+    func testAClipboardPathQueryDoesNotRetireAStaleCondemnation() {
+        let builds = Builds("1.1.0-1.1.0")
+        let store = makeStore(builds: builds)
+        let gitpulse = "com.gitpulse.desktop"
+        let role = "AXTextArea"
+        store.recordFalseSuccess(bundleID: gitpulse, role: role)
+        XCTAssertTrue(store.shouldSkipAXSelectedText(bundleID: gitpulse, role: role))
+        XCTAssertFalse(store.canConfirmDelivery(bundleID: gitpulse, role: role))
+
+        builds.value = "1.2.0-1.2.0"
+
+        XCTAssertFalse(
+            store.canConfirmDelivery(bundleID: gitpulse, role: role),
+            "Delivery-trust is a read of the verdict, not a license to re-test AX writes."
+        )
+        XCTAssertFalse(
+            PasteboardBroker.verifySelectionRange(
+                bundleID: gitpulse,
+                role: role,
+                phase: .beforeMutation,
+                store: store
+            ),
+            "A paste's caret-trust question must not open the write door either."
+        )
+        XCTAssertEqual(
+            store.verdict(for: gitpulse, role: role), .falseSuccess,
+            "A clipboard paste is not an AX re-test; the condemnation must still be there."
+        )
+        XCTAssertEqual(store.observedVerdict(bundleID: gitpulse, role: role), .falseSuccess)
+
+        XCTAssertFalse(
+            store.shouldSkipAXSelectedText(bundleID: gitpulse, role: role),
+            "The next AX write is the one-shot re-test the build change earned."
+        )
+        XCTAssertEqual(store.verdict(for: gitpulse, role: role), .unknown)
+    }
+
     func testCondemnationIsRetiredWhenTheAppIsUpdated() {
         let builds = Builds("1.0-100")
         let store = makeStore(builds: builds)
@@ -55,7 +98,12 @@ final class AXCondemnationLifecycleTests: XCTestCase {
 
         builds.value = "1.1-140" // the user updates the app
         XCTAssertEqual(
-            store.verdict(for: shell, role: role), .unknown,
+            store.verdict(for: shell, role: role), .falseSuccess,
+            "A query is not a re-test — paste-path reads must keep the condemnation."
+        )
+        XCTAssertFalse(store.canConfirmDelivery(bundleID: shell, role: role))
+        XCTAssertFalse(
+            store.shouldSkipAXSelectedText(bundleID: shell, role: role),
             "A verdict earned by a different build must not be inherited — AX gets one re-test."
         )
         // And it stays retired rather than flapping back on the next query.
@@ -69,9 +117,13 @@ final class AXCondemnationLifecycleTests: XCTestCase {
         store.recordFalseSuccess(bundleID: shell, role: role)
 
         for _ in 0..<5 {
+            XCTAssertTrue(
+                store.shouldSkipAXSelectedText(bundleID: shell, role: role),
+                "Nothing about the app changed; re-probing it would just re-learn the same lie."
+            )
             XCTAssertEqual(
                 store.verdict(for: shell, role: role), .falseSuccess,
-                "Nothing about the app changed; re-probing it would just re-learn the same lie."
+                "The write-path skip and the query must agree while the build is unchanged."
             )
         }
     }
@@ -86,6 +138,7 @@ final class AXCondemnationLifecycleTests: XCTestCase {
 
         // The app becomes locatable later — still no stamp to compare against, so no retirement.
         unresolvable.value = "2.0-200"
+        XCTAssertTrue(store.shouldSkipAXSelectedText(bundleID: shell, role: role))
         XCTAssertEqual(
             store.verdict(for: shell, role: role), .falseSuccess,
             "Without a recorded build there is nothing to say the app changed."
@@ -104,7 +157,11 @@ final class AXCondemnationLifecycleTests: XCTestCase {
 
         store.recordDeliveryConfirmed(bundleID: shell, role: role)
         builds.value = "1.1-140"
-        XCTAssertEqual(store.verdict(for: shell, role: role), .unknown)
+        XCTAssertTrue(
+            store.hasProvenDeliveryReads(bundleID: shell, role: role),
+            "A query after the update must not spend the re-test — proof stays until the write path opens the door."
+        )
+        XCTAssertFalse(store.shouldSkipAXSelectedText(bundleID: shell, role: role))
         XCTAssertFalse(
             store.hasProvenDeliveryReads(bundleID: shell, role: role),
             "A retired condemnation leaves an app unproven in both dimensions, not half-trusted."
@@ -119,6 +176,7 @@ final class AXCondemnationLifecycleTests: XCTestCase {
         store.recordFalseSuccess(bundleID: shell, role: role)
         builds.value = "2.0-200"
 
+        XCTAssertFalse(store.shouldSkipAXSelectedText(bundleID: shell, role: role))
         XCTAssertEqual(store.verdict(for: shell, role: role), .unknown)
         store.recordTrusted(bundleID: shell, role: role)
         XCTAssertEqual(
@@ -136,6 +194,7 @@ final class AXCondemnationLifecycleTests: XCTestCase {
         let store = makeStore(builds: builds)
         store.recordFalseSuccess(bundleID: shell, role: role)
         builds.value = "1.1-140"
+        XCTAssertFalse(store.shouldSkipAXSelectedText(bundleID: shell, role: role))
         XCTAssertEqual(store.verdict(for: shell, role: role), .unknown)
 
         // The update did not fix it: the very next unverifiable write returns it to condemned.
@@ -146,6 +205,8 @@ final class AXCondemnationLifecycleTests: XCTestCase {
         XCTAssertEqual(store.verdict(for: shell, role: role), .falseSuccess)
         // And it is re-stamped against the new build, so the next update re-tests once more.
         builds.value = "1.2-180"
+        XCTAssertEqual(store.verdict(for: shell, role: role), .falseSuccess)
+        XCTAssertFalse(store.shouldSkipAXSelectedText(bundleID: shell, role: role))
         XCTAssertEqual(store.verdict(for: shell, role: role), .unknown)
     }
 
@@ -182,6 +243,7 @@ final class AXCondemnationLifecycleTests: XCTestCase {
             "The stamp must describe the condemnation that actually happened."
         )
         builds.value = "2.0-200"
+        XCTAssertFalse(store.shouldSkipAXSelectedText(bundleID: shell, role: role))
         XCTAssertEqual(store.verdict(for: shell, role: role), .unknown)
     }
 
@@ -203,6 +265,11 @@ final class AXCondemnationLifecycleTests: XCTestCase {
         )
 
         builds.value = "1.1-140"
+        XCTAssertEqual(
+            reopened.verdict(for: shell, role: role), .falseSuccess,
+            "A restart must not itself spend the re-test; the stamp survives so the write path can."
+        )
+        XCTAssertFalse(reopened.shouldSkipAXSelectedText(bundleID: shell, role: role))
         XCTAssertEqual(
             reopened.verdict(for: shell, role: role), .unknown,
             "And the stamp must have survived with it, or the update is invisible after a restart."
@@ -338,7 +405,7 @@ final class AXCapabilityStoreStressTests: XCTestCase {
                     let app = apps[(worker + i) % apps.count]
                     switch i % 4 {
                     case 0: store.recordFalseSuccess(bundleID: app, role: "AXTextArea")
-                    case 1: _ = store.verdict(for: app, role: "AXTextArea")
+                    case 1: _ = store.shouldSkipAXSelectedText(bundleID: app, role: "AXTextArea")
                     case 2: _ = store.canConfirmDelivery(bundleID: app, role: "AXTextArea")
                     default:
                         buildsLock.lock()
@@ -372,7 +439,7 @@ final class AXCapabilityStoreStressTests: XCTestCase {
 
         for round in 0..<25 {
             build = round.isMultiple(of: 2) ? "2.0" : "1.0"
-            if store.verdict(for: shell) == .unknown {
+            if !store.shouldSkipAXSelectedText(bundleID: shell, role: nil) {
                 // Retired: the only way back to condemned is a fresh observation, exactly as a
                 // never-seen app would be treated. Simulate the app still being broken.
                 XCTAssertEqual(store.recordUnverifiableAfterWrite(bundleID: shell, role: nil), .condemned)

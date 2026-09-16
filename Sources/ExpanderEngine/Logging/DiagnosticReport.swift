@@ -717,9 +717,9 @@ public enum DiagnosticReport {
     /// The built-in AX-write defaults in force for the frontmost app — the seeded half of the
     /// picture, which the learned section structurally cannot show.
     ///
-    /// Pure with respect to the store: `seedVerdict` is a static table lookup, and
-    /// `observedVerdict` is the deliberately non-mutating query, so generating a report can never
-    /// retire a condemnation and change what the next expansion does.
+    /// Pure with respect to the store: `seedVerdict` is a static table lookup, and both
+    /// `observedVerdict` and `verdict(for:role:)` are non-mutating queries, so generating a
+    /// report can never retire a condemnation and change what the next expansion does.
     static func captureAXWriteSeedLines(
         frontmostBundleID: String?,
         store: AXWriteCapabilityStore = .shared

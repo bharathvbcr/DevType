@@ -265,30 +265,14 @@ public final class AXWriteCapabilityStore {
 
     /// §3.3: role-aware verdict. Falls back to the bundle-only verdict, then to the seed list, so
     /// nothing learned before roles were threaded through is lost.
+    ///
+    /// Non-mutating. A build change does not open the AX-write door from a query — that would
+    /// retire a condemnation as a side effect of asking whether a *paste* can trust AX reads
+    /// (field report 2026-09-16: GitPulse Prompt Enhance). The write path
+    /// (`shouldSkipAXSelectedText`) is what retires, because that is the call that is about to
+    /// attempt an AX write.
     public func verdict(for bundleID: String, role: String?) -> Verdict {
-        guard !bundleID.isEmpty else { return .unknown }
-        let canonical = Self.canonicalBundleID(bundleID)
-        let compositeKey = Self.verdictKey(bundleID: canonical, role: role)
-        let recorded = recordedVerdicts(canonical: canonical, rawBundleID: bundleID, role: role)
-        if let composite = recorded.composite {
-            if composite == .falseSuccess, retireStaleCondemnation(key: compositeKey, bundleID: canonical) {
-                return .unknown
-            }
-            return composite
-        }
-        // Role prior beats a bundle-only lesson: a trusted Notes textarea must not license
-        // selected-text writes on that app's combo box, and a never-seen desktop app must not
-        // pay the first-expansion AX probe that GitPulse just refused on.
-        if Self.isAXWriteUnstableRole(role) {
-            return .falseSuccess
-        }
-        if let bundleOnly = recorded.bundleOnly {
-            if bundleOnly == .falseSuccess, retireStaleCondemnation(key: canonical, bundleID: canonical) {
-                return .unknown
-            }
-            return bundleOnly
-        }
-        return Self.seedVerdict(bundleID: canonical, role: role)
+        resolvedVerdict(for: bundleID, role: role, allowRetirement: false)
     }
 
     /// Every *recorded* verdict for this app, under both key shapes, read under one lock.
@@ -316,6 +300,43 @@ public final class AXWriteCapabilityStore {
         )
     }
 
+    /// Shared implementation for `verdict(for:role:)` and `shouldSkipAXSelectedText`.
+    /// `allowRetirement` is true only on the AX-write seam: a paste-path query must not
+    /// spend the one-shot re-test that an app update earned.
+    private func resolvedVerdict(
+        for bundleID: String,
+        role: String?,
+        allowRetirement: Bool
+    ) -> Verdict {
+        guard !bundleID.isEmpty else { return .unknown }
+        let canonical = Self.canonicalBundleID(bundleID)
+        let compositeKey = Self.verdictKey(bundleID: canonical, role: role)
+        let recorded = recordedVerdicts(canonical: canonical, rawBundleID: bundleID, role: role)
+        if let composite = recorded.composite {
+            if composite == .falseSuccess,
+               allowRetirement,
+               retireStaleCondemnation(key: compositeKey, bundleID: canonical) {
+                return .unknown
+            }
+            return composite
+        }
+        // Role prior beats a bundle-only lesson: a trusted Notes textarea must not license
+        // selected-text writes on that app's combo box, and a never-seen desktop app must not
+        // pay the first-expansion AX probe that GitPulse just refused on.
+        if Self.isAXWriteUnstableRole(role) {
+            return .falseSuccess
+        }
+        if let bundleOnly = recorded.bundleOnly {
+            if bundleOnly == .falseSuccess,
+               allowRetirement,
+               retireStaleCondemnation(key: canonical, bundleID: canonical) {
+                return .unknown
+            }
+            return bundleOnly
+        }
+        return Self.seedVerdict(bundleID: canonical, role: role)
+    }
+
     /// The verdict DevType actually *measured* in this app, or `nil` when it has never attempted
     /// an AX write here.
     ///
@@ -325,8 +346,9 @@ public final class AXWriteCapabilityStore {
     /// behaviour and mean opposite things to somebody debugging a delivery failure, so the
     /// diagnostic report asks this question separately.
     ///
-    /// Deliberately non-mutating: unlike `verdict(for:role:)` it never retires a stale
-    /// condemnation, because generating a report must not change what the next expansion does.
+    /// Deliberately non-mutating, matching `verdict(for:role:)`. Generating a report — or asking
+    /// whether a paste can trust AX reads — must not retire a stale condemnation. Only
+    /// `shouldSkipAXSelectedText` does that, because that call is about to attempt a write.
     public func observedVerdict(bundleID: String, role: String?) -> Verdict? {
         guard !bundleID.isEmpty else { return nil }
         let recorded = recordedVerdicts(
@@ -343,7 +365,7 @@ public final class AXWriteCapabilityStore {
     }
 
     public func shouldSkipAXSelectedText(bundleID: String, role: String?) -> Bool {
-        verdict(for: bundleID, role: role) == .falseSuccess
+        resolvedVerdict(for: bundleID, role: role, allowRetirement: true) == .falseSuccess
     }
 
     /// §8.1: may this app's AX be believed when it says the pasted text is *not* in the field?

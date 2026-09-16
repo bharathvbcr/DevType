@@ -245,10 +245,13 @@ final class AXWriteVerdictProvenanceTests: XCTestCase {
             store.observedVerdict(bundleID: shell, role: nil), .falseSuccess,
             "Generating a report must not retire a condemnation."
         )
-
         XCTAssertEqual(
-            store.verdict(for: shell, role: nil), .unknown,
-            "The live path still retires it — the report is what must stay read-only."
+            store.verdict(for: shell, role: nil), .falseSuccess,
+            "A verdict query is also a read — only the AX-write seam may spend the re-test."
+        )
+        XCTAssertFalse(
+            store.shouldSkipAXSelectedText(bundleID: shell, role: nil),
+            "The live write path still retires it — the report is what must stay read-only."
         )
         XCTAssertNil(store.observedVerdict(bundleID: shell, role: nil))
     }
