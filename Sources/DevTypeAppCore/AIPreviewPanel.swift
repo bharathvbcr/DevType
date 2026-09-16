@@ -5,11 +5,21 @@ import ExpanderEngine
 /// Streaming preview for an AI transform result.
 ///
 /// Spinner until the first non-nil snapshot (~1.4s prefill), then streamed text.
-/// Buttons: Replace / Copy / Retry / Cancel. Cancel discards the pending result
-/// (generation may continue) and closes — late completions must not inject.
+/// Buttons: Replace / Copy / Retry / Cancel.
+///
+/// Anything that replaces the request in flight — Cancel, Retry, the tone menu, the kind
+/// menu, or another preview opening — discards it, which now both drops its result and
+/// cancels the generation, and then queues the replacement behind that unwind. Every
+/// callback carries the generation it belongs to, so a superseded request cannot write
+/// into the panel or tear down the presentation of the request that replaced it.
 enum AIPreviewPanel {
-    /// Sized once here so the panel and the labels that must fit inside it can never disagree.
-    static let panelSize = NSSize(width: 560, height: 460)
+    /// Sized once here so the panel and the labels that must fit inside it can never
+    /// disagree. The header (badge, title, delta pills, tone and kind menus) needs 652pt
+    /// in every shipped language; this was 560 while the panel silently laid out at 652,
+    /// so `positionNearTop` centred a width the panel never had and the error label
+    /// declared a wrap width 92pt narrower than the one it got. `loadView` caps the
+    /// content view at this size so the number stays true as strings change.
+    static let panelSize = NSSize(width: 660, height: 460)
 
     private static var panel: NSPanel?
     private static var controller: AIPreviewController?
@@ -18,6 +28,11 @@ enum AIPreviewPanel {
     private static let dismissWatchers = PanelDismissWatchers()
     /// Bumped on close so late partials / completions ignore a dismissed panel.
     private static var generationToken = UUID()
+    /// The generation the previous preview abandoned when it closed. The next preview waits
+    /// for it to unwind before asking for the model: without the handover, triggering a
+    /// second transform while the first panel was still generating had the closed panel's
+    /// own request refuse the new one as `.busy`.
+    private static var supersededHandle: AITransformDiscardHandle?
     /// Erased typed trigger to reinject when the panel is cancelled / dismissed.
     private static var pendingRestoreOnCancel: String?
     private static var pendingRestoreSourceApp: NSRunningApplication?
@@ -38,7 +53,7 @@ enum AIPreviewPanel {
         },
         onReplace: @escaping (String, NSRunningApplication?) -> Void
     ) {
-        if isOpen { close(discard: true) }
+        if isOpen { close() }
         open(
             input: input,
             kind: kind,
@@ -51,10 +66,17 @@ enum AIPreviewPanel {
         )
     }
 
-    static func close(discard: Bool = true, resumeMatching: Bool = true) {
+    /// Closing always stops generation. There used to be a `discard: false` path for the
+    /// Replace button, on the theory that an accepted result had nothing left to cancel —
+    /// but the generation behind it kept running and kept the single-flight latch, so the
+    /// next transform the user asked for was refused `.busy`. Once the user has taken an
+    /// answer, the rest of that generation is dead work in every case.
+    static func close(resumeMatching: Bool = true) {
         let token = UUID()
         generationToken = token
-        controller?.teardown(discard: discard)
+        if let abandoned = controller?.teardown() {
+            supersededHandle = abandoned
+        }
         removeDismissWatchers()
         panel?.close()
         panel = nil
@@ -95,11 +117,17 @@ enum AIPreviewPanel {
         DevTypeTheme.styleFloatingPanel(panel)
         panel.becomesKeyOnlyIfNeeded = false
 
+        // Consumed once: the request the previous panel abandoned, so this one queues
+        // behind its unwind instead of colliding with it.
+        let inherited = supersededHandle
+        supersededHandle = nil
+
         let controller = AIPreviewController(
             input: input,
             kind: kind,
             sourceApp: sourceApp,
             customInstructions: customInstructions,
+            superseding: inherited,
             loc: loc,
             isCurrent: { token == Self.generationToken && Self.panel != nil },
             clipboardWriter: clipboardWriter,
@@ -109,7 +137,7 @@ enum AIPreviewPanel {
                 pendingRestoreSourceApp = nil
                 AIUndoStore.stash(input)
                 ToastPanel.show(loc.s("ai.preview.undoToast"), symbol: "arrow.uturn.backward.circle")
-                close(discard: false, resumeMatching: true)
+                close(resumeMatching: true)
                 onReplace(text, app)
             },
             onCancel: {
@@ -138,7 +166,7 @@ enum AIPreviewPanel {
         let app = pendingRestoreSourceApp
         pendingRestoreOnCancel = nil
         pendingRestoreSourceApp = nil
-        close(discard: true, resumeMatching: true)
+        close(resumeMatching: true)
         if let trigger, !trigger.isEmpty {
             EventTapEngine.shared.injectAITransformResult(
                 text: trigger,
@@ -169,6 +197,27 @@ enum AIPreviewPanel {
     }
 }
 
+// MARK: - Delta pills
+
+/// The two pills in the preview header, which report how the result differs from the
+/// selection. A free function rather than a method on the controller so the rule can be
+/// checked without a model in the loop — only a lengthening transform exercises the sign,
+/// and every transform that lengthens text needs the model.
+enum AIPreviewDelta {
+    static func words(in text: String) -> Int {
+        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+    }
+
+    /// `%d` signs a loss and not a gain, so a result that grew read "8 chars" — which is
+    /// how a *total* reads, not a change. The sign is arithmetic rather than a word, so it
+    /// is prefixed outside the localized string; every shipped table puts the number first
+    /// ("%d words", "%d 단어", "%d 単語").
+    static func label(_ delta: Int, key: String, loc: LocalizationManager) -> String {
+        let localized = loc.s(key, delta)
+        return delta > 0 ? "+" + localized : localized
+    }
+}
+
 // MARK: - Controller
 
 private final class AIPreviewController: NSViewController {
@@ -191,6 +240,17 @@ private final class AIPreviewController: NSViewController {
     private let onCancel: () -> Void
 
     private var discardHandle: AITransformDiscardHandle?
+    /// Identifies which request a partial or completion belongs to.
+    ///
+    /// `isCurrent()` only answers "is this panel still the open one" — it cannot tell one
+    /// of this panel's own requests from another. So when the user changed the kind, the
+    /// tone, or pressed Retry, the *replaced* stream kept writing its partials into the
+    /// text view under the new title, and its `.discarded` notice tore down the
+    /// replacement's spinner and dropped the replacement's handle on its way to an early
+    /// return. Every callback now names its generation and stale ones stop at the door.
+    private var generation: UInt64 = 0
+    /// The request a still-unwinding predecessor left behind, consumed by the next start.
+    private var supersededHandle: AITransformDiscardHandle?
     private var resultText = ""
     private var keyMonitor: Any?
     private var showingDiff = false
@@ -217,6 +277,7 @@ private final class AIPreviewController: NSViewController {
         kind: AITransformKind,
         sourceApp: NSRunningApplication?,
         customInstructions: String?,
+        superseding: AITransformDiscardHandle?,
         loc: LocalizationManager,
         isCurrent: @escaping () -> Bool,
         clipboardWriter: @escaping (String) -> Bool,
@@ -227,6 +288,7 @@ private final class AIPreviewController: NSViewController {
         self.kind = kind
         self.sourceApp = sourceApp
         self.authoredInstructions = customInstructions
+        self.supersededHandle = superseding
         self.loc = loc
         self.isCurrent = isCurrent
         self.clipboardWriter = clipboardWriter
@@ -242,12 +304,16 @@ private final class AIPreviewController: NSViewController {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
     }
 
-    func teardown(discard: Bool) {
-        if discard {
-            discardHandle?.discard()
-        }
+    /// Stops generation and returns the request that was abandoned, so the next preview can
+    /// wait for it to unwind rather than be refused `.busy` by a panel that no longer exists.
+    func teardown() -> AITransformDiscardHandle? {
+        generation &+= 1
+        let abandoned = discardHandle ?? supersededHandle
         discardHandle = nil
+        supersededHandle = nil
+        abandoned?.discard()
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
+        return abandoned
     }
 
     override func loadView() {
@@ -256,7 +322,7 @@ private final class AIPreviewController: NSViewController {
             tint: DevTypeTheme.accent.withAlphaComponent(0.10),
             material: .popover
         )
-        glass.frame = NSRect(x: 0, y: 0, width: 560, height: 460)
+        glass.frame = NSRect(origin: .zero, size: AIPreviewPanel.panelSize)
         let root = glass.contentView
 
         let badge = IconBadgeView(symbol: "sparkles", tint: DevTypeTheme.accent, size: 32, pointSize: 14)
@@ -266,6 +332,12 @@ private final class AIPreviewController: NSViewController {
             color: DevTypeTheme.textPrimary
         )
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        // The header is the widest row, and every label in it resists compression at 750,
+        // which beats the window's own `windowSizeStayPut` (500) — so a longer transform
+        // title or a longer translation moves the panel instead of truncating. Both
+        // free-form labels yield first; the delta pills and the two menus are short.
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         wordsDeltaPill.translatesAutoresizingMaskIntoConstraints = false
         wordsDeltaPill.isHidden = true
@@ -284,6 +356,8 @@ private final class AIPreviewController: NSViewController {
             color: DevTypeTheme.textTertiary
         )
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let headerText = NSStackView(views: [titleRow, subtitleLabel])
         headerText.orientation = .vertical
@@ -476,7 +550,16 @@ private final class AIPreviewController: NSViewController {
 
             secondaryActions.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             secondaryActions.leadingAnchor.constraint(greaterThanOrEqualTo: root.leadingAnchor, constant: 18),
-            secondaryActions.bottomAnchor.constraint(equalTo: primaryActions.topAnchor, constant: -8)
+            secondaryActions.bottomAnchor.constraint(equalTo: primaryActions.topAnchor, constant: -8),
+
+            // The declared size, made true. `dtLockContentSize` pins a *required equal*
+            // size, which this panel cannot take: `FloatingPanelChrome.animateIn` settles
+            // it in from a frame inset by 12×8 and a required equality would fight that
+            // every time. An upper bound does the job the lock does — it outranks the 750
+            // intrinsic widths that were pushing the panel out to 652pt against a declared
+            // 560 — while still letting the animation come in smaller.
+            glass.widthAnchor.constraint(lessThanOrEqualToConstant: AIPreviewPanel.panelSize.width),
+            glass.heightAnchor.constraint(lessThanOrEqualToConstant: AIPreviewPanel.panelSize.height)
         ])
 
         view = glass
@@ -497,8 +580,19 @@ private final class AIPreviewController: NSViewController {
     }
 
     private func beginTransform() {
-        discardHandle?.discard()
+        generation &+= 1
+        let generation = self.generation
+
+        // Stop the request being replaced *before* asking for another. `discard()` now
+        // cancels it as well as dropping its result, and handing it to `after:` queues this
+        // request behind its unwind — the two halves of what "replace this request" means.
+        // Skipping either is what made Retry, the kind menu and the tone menu answer
+        // "Another AI transform is already running" and leave the panel blank.
+        let superseded = discardHandle ?? supersededHandle
         discardHandle = nil
+        supersededHandle = nil
+        superseded?.discard()
+
         resultText = ""
         showingDiff = false
         textView.string = ""
@@ -521,7 +615,7 @@ private final class AIPreviewController: NSViewController {
         titleLabel.stringValue = loc.s(kind.localizationKey)
 
         if let local = AILocalTransform.run(kind: kind, input: input) {
-            applyCompletion(local)
+            applyCompletion(local, generation: generation)
             return
         }
 
@@ -531,26 +625,33 @@ private final class AIPreviewController: NSViewController {
                 kind: kind,
                 input: input,
                 customInstructions: customInstructions,
+                after: superseded,
                 onPartial: { [weak self] partial in
                     Task { @MainActor in
-                        self?.applyPartial(partial)
+                        self?.applyPartial(partial, generation: generation)
                     }
                 },
                 completionQueue: .main
             ) { [weak self] result in
                 Task { @MainActor in
-                    self?.applyCompletion(result)
+                    self?.applyCompletion(result, generation: generation)
                 }
             }
             return
         }
         #endif
-        applyCompletion(.failure(.unavailable(.unsupportedOS)))
+        applyCompletion(.failure(.unavailable(.unsupportedOS)), generation: generation)
     }
 
-    private func applyPartial(_ partial: String?) {
-        guard isCurrent() else { return }
-        guard let partial else { return }
+    /// Whether a callback still speaks for what the panel is showing. Both halves matter:
+    /// the panel must still be the open one, *and* the callback must belong to the request
+    /// the panel is currently running.
+    private func isLive(_ generation: UInt64) -> Bool {
+        generation == self.generation && isCurrent()
+    }
+
+    private func applyPartial(_ partial: String?, generation: UInt64) {
+        guard isLive(generation), let partial else { return }
         if scrollView.isHidden {
             spinner.stopAnimation(nil)
             spinner.isHidden = true
@@ -564,27 +665,32 @@ private final class AIPreviewController: NSViewController {
         updateDeltas(for: partial)
     }
 
-    private func applyCompletion(_ result: Result<String, AITransformError>) {
-        guard isCurrent() else { return }
-        discardHandle = nil
-        spinner.stopAnimation(nil)
-        spinner.isHidden = true
-        waitingLabel.isHidden = true
-        retryButton.isEnabled = true
+    private func applyCompletion(_ result: Result<String, AITransformError>, generation: UInt64) {
+        // Before a single pixel changes. This guard used to sit below `discardHandle = nil`
+        // and the spinner teardown, so a superseded request's `.discarded` notice reached in
+        // and silenced the spinner of the request that had replaced it — leaving a panel
+        // with no text, no spinner and nothing on the way.
+        guard isLive(generation) else { return }
+        stopPresentingWork()
 
-        switch result {
+        // `.discarded` for the *live* request is unreachable from this panel — every discard
+        // bumps the generation first, so such a notice is stale by construction and was
+        // refused above. If one ever does arrive, the spinner is already down and Retry is
+        // live; there is no result and no failure to report.
+        if case .failure(.discarded) = result { return }
+
+        switch Self.normalized(result) {
         case .success(let text):
             resultText = text
             scrollView.isHidden = false
             textView.string = text
-            replaceButton.isEnabled = !text.isEmpty
-            replaceAndCopyButton.isEnabled = !text.isEmpty
-            copyButton.isEnabled = !text.isEmpty
-            diffButton.isEnabled = kind == .proofread && text != input && !text.isEmpty
+            replaceButton.isEnabled = true
+            replaceAndCopyButton.isEnabled = true
+            copyButton.isEnabled = true
+            diffButton.isEnabled = kind == .proofread && text != input
             errorLabel.isHidden = true
             updateDeltas(for: text)
         case .failure(let error):
-            if case .discarded = error { return }
             errorLabel.stringValue = AITransformFlow.localizedError(error, loc: loc)
             errorLabel.isHidden = false
             if resultText.isEmpty {
@@ -597,24 +703,44 @@ private final class AIPreviewController: NSViewController {
         }
     }
 
-    private func updateDeltas(for text: String) {
-        let inWords = input.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
-        let outWords = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
-        let wordDelta = outWords - inWords
+    /// The presentation of "a request is running", taken down. Retry becomes available in
+    /// success and in failure alike — it is the one control that is always correct once a
+    /// generation has ended, which is why the tests read it as the finished signal.
+    private func stopPresentingWork() {
+        discardHandle = nil
+        spinner.stopAnimation(nil)
+        spinner.isHidden = true
+        waitingLabel.isHidden = true
+        retryButton.isEnabled = true
+    }
 
-        let inChars = input.count
-        let outChars = text.count
-        let charDelta = outChars - inChars
+    /// A blank answer is a failed generation, not a result.
+    ///
+    /// `AITransformFlow.runDirect` already refuses to inject one, and `generateRaw` rejects
+    /// it for every model transform — but the preview calls `AILocalTransform` itself, ahead
+    /// of that check, so a whitespace-only selection reached the panel as a `.success` with
+    /// Replace enabled and offered to overwrite the selection with nothing.
+    private static func normalized(
+        _ result: Result<String, AITransformError>
+    ) -> Result<String, AITransformError> {
+        guard case .success(let text) = result else { return result }
+        guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return result }
+        return .failure(.decodingFailure)
+    }
+
+    private func updateDeltas(for text: String) {
+        let wordDelta = AIPreviewDelta.words(in: text) - AIPreviewDelta.words(in: input)
+        let charDelta = text.count - input.count
 
         wordsDeltaPill.isHidden = false
         wordsDeltaPill.update(
-            text: loc.s("ai.preview.delta.words", wordDelta),
+            text: AIPreviewDelta.label(wordDelta, key: "ai.preview.delta.words", loc: loc),
             tint: wordDelta >= 0 ? DevTypeTheme.statusBlue : DevTypeTheme.statusOrange
         )
 
         charsDeltaPill.isHidden = false
         charsDeltaPill.update(
-            text: loc.s("ai.preview.delta.chars", charDelta),
+            text: AIPreviewDelta.label(charDelta, key: "ai.preview.delta.chars", loc: loc),
             tint: DevTypeTheme.textTertiary
         )
     }
