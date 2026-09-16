@@ -1,353 +1,312 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DevType – Native macOS Text Expander & On-Device AI Writing Assistant</title>
-  <meta name="description" content="DevType is a fast, native macOS text expander and snippet manager with on-device AI text transformations powered by Apple Foundation Models. 100% private & open source.">
-  <meta name="keywords" content="macOS text expander, native Mac text expander, TextExpander alternative, Espanso Mac GUI, Apple Intelligence text tools, on-device AI text assistant, Swift text expander, Mac snippet manager">
-  <meta name="robots" content="index, follow">
-  <link rel="canonical" href="https://bharathvbcr.github.io/DevType/">
-
-  <!-- Open Graph / Facebook / LinkedIn -->
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DevType — Less typing. More of your own words.</title>
+  <meta name="description" content="A native Mac app for reusable snippets, voice dictation, on-device writing tools, and independent secrets. Free, open source, and built with Swift and AppKit.">
+  <link rel="canonical" href="https://devtype.vbcr.dev/">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://bharathvbcr.github.io/DevType/">
-  <meta property="og:title" content="DevType – Native macOS Text Expander & On-Device AI Assistant">
-  <meta property="og:description" content="Instant keyword expansion & local AI writing transforms powered by Apple Foundation Models. Zero cloud telemetry, 100% private & open source.">
-  <meta property="og:image" content="https://raw.githubusercontent.com/bharathvbcr/DevType/main/docs/assets/devtype_social_preview.jpg">
-
-  <!-- Twitter Cards -->
+  <meta property="og:url" content="https://devtype.vbcr.dev/">
+  <meta property="og:title" content="DevType — Less typing. More of your own words.">
+  <meta property="og:description" content="Snippets, dictation, and on-device writing tools. A little more room for what you want to say.">
+  <meta property="og:image" content="https://devtype.vbcr.dev/assets/devtype_social_preview.jpg">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:url" content="https://bharathvbcr.github.io/DevType/">
-  <meta name="twitter:title" content="DevType – Native macOS Text Expander & On-Device AI Assistant">
-  <meta name="twitter:description" content="Instant keyword expansion & local AI writing transforms powered by Apple Foundation Models. Zero cloud telemetry, 100% private & open source.">
-  <meta name="twitter:image" content="https://raw.githubusercontent.com/bharathvbcr/DevType/main/docs/assets/devtype_social_preview.jpg">
-
-  <!-- Favicon -->
+  <meta name="twitter:title" content="DevType — Less typing. More of your own words.">
+  <meta name="twitter:description" content="Native Mac snippets, dictation, and on-device writing tools. Free and open source.">
+  <meta name="twitter:image" content="https://devtype.vbcr.dev/assets/devtype_social_preview.jpg">
+  <meta name="theme-color" content="#f7f5f4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e0706" media="(prefers-color-scheme: dark)">
   <link rel="icon" type="image/png" href="assets/devtype_logo.png">
-
-  <!-- Schema.org Structured Data -->
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/site.js" defer></script>
   <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@type": "SoftwareApplication",
-    "name": "DevType",
-    "operatingSystem": "macOS 14.0+",
-    "applicationCategory": "ProductivityApplication",
-    "offers": {
-      "@type": "Offer",
-      "price": "0.00",
-      "priceCurrency": "USD"
-    },
-    "description": "Native macOS menu-bar text expander and on-device AI writing assistant powered by Apple Foundation Models.",
-    "license": "https://opensource.org/licenses/MIT",
-    "image": "https://raw.githubusercontent.com/bharathvbcr/DevType/main/docs/assets/devtype_logo.png",
-    "url": "https://github.com/bharathvbcr/DevType"
-  }
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"DevType","operatingSystem":"macOS 14+","applicationCategory":"ProductivityApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"license":"https://github.com/bharathvbcr/DevType/blob/main/LICENSE","url":"https://devtype.vbcr.dev/","description":"Native macOS snippets, voice dictation, on-device writing tools, and independent secret management."}
   </script>
-
-  <style>
-    :root {
-      --bg: #0d1117;
-      --card-bg: #161b22;
-      --border: #30363d;
-      --text: #c9d1d9;
-      --heading: #f0f6fc;
-      --accent: #58a6ff;
-      --accent-glow: rgba(88, 166, 255, 0.15);
-      --gradient: linear-gradient(135deg, #7928ca 0%, #ff0080 100%);
-    }
-
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: var(--bg);
-      color: var(--text);
-      line-height: 1.6;
-      padding: 0;
-    }
-
-    header {
-      text-align: center;
-      padding: 80px 20px 40px;
-      max-width: 900px;
-      margin: 0 auto;
-    }
-
-    .logo {
-      width: 110px;
-      height: 110px;
-      margin-bottom: 24px;
-      filter: drop-shadow(0 8px 16px rgba(0,0,0,0.4));
-    }
-
-    h1 {
-      font-size: 3.2rem;
-      font-weight: 800;
-      color: var(--heading);
-      letter-spacing: -0.03em;
-      margin-bottom: 16px;
-    }
-
-    .tagline {
-      font-size: 1.35rem;
-      color: #8b949e;
-      margin-bottom: 32px;
-      max-width: 680px;
-      margin-left: auto;
-      margin-right: auto;
-    }
-
-    .cta-group {
-      display: flex;
-      gap: 16px;
-      justify-content: center;
-      flex-wrap: wrap;
-      margin-bottom: 48px;
-    }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 14px 28px;
-      border-radius: 8px;
-      font-weight: 600;
-      font-size: 1.05rem;
-      text-decoration: none;
-      transition: all 0.2s ease;
-    }
-
-    .btn-primary {
-      background: #238636;
-      color: #ffffff;
-      border: 1px solid rgba(255,255,255,0.1);
-    }
-    .btn-primary:hover {
-      background: #2ea043;
-      transform: translateY(-2px);
-    }
-
-    .btn-secondary {
-      background: var(--card-bg);
-      color: var(--heading);
-      border: 1px solid var(--border);
-    }
-    .btn-secondary:hover {
-      background: #21262d;
-      border-color: #8b949e;
-      transform: translateY(-2px);
-    }
-
-    .preview-container {
-      max-width: 1000px;
-      margin: 0 auto 80px;
-      padding: 0 20px;
-    }
-
-    .preview-img {
-      width: 100%;
-      border-radius: 12px;
-      border: 1px solid var(--border);
-      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
-    }
-
-    .section {
-      max-width: 1000px;
-      margin: 0 auto 80px;
-      padding: 0 20px;
-    }
-
-    .section-title {
-      font-size: 2rem;
-      color: var(--heading);
-      text-align: center;
-      margin-bottom: 40px;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 24px;
-    }
-
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 28px;
-      transition: border-color 0.2s ease;
-    }
-    .card:hover {
-      border-color: var(--accent);
-    }
-
-    .card-icon {
-      font-size: 2rem;
-      margin-bottom: 16px;
-    }
-
-    .card h3 {
-      font-size: 1.25rem;
-      color: var(--heading);
-      margin-bottom: 8px;
-    }
-
-    .table-container {
-      overflow-x: auto;
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      text-align: left;
-    }
-
-    th, td {
-      padding: 16px 20px;
-      border-bottom: 1px solid var(--border);
-    }
-
-    th {
-      background: #21262d;
-      color: var(--heading);
-    }
-
-    footer {
-      text-align: center;
-      padding: 40px 20px;
-      border-top: 1px solid var(--border);
-      color: #8b949e;
-      font-size: 0.95rem;
-    }
-
-    footer a { color: var(--accent); text-decoration: none; }
-  </style>
 </head>
 <body>
-
-  <header>
-    <img src="assets/devtype_logo.png" alt="DevType macOS Text Expander Logo" class="logo">
-    <h1>DevType</h1>
-    <p class="tagline">Native macOS Text Expander & On-Device AI Writing Assistant</p>
-    
-    <div class="cta-group">
-      <a href="https://github.com/bharathvbcr/DevType/releases/latest" class="btn btn-primary">
-         Download for macOS (Latest Release)
-      </a>
-      <a href="https://github.com/bharathvbcr/DevType" class="btn btn-secondary">
-        GitHub Repository
-      </a>
-    </div>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="nav wrap" aria-label="Main navigation">
+      <a class="brand" href="#" aria-label="DevType home"><img src="assets/devtype_logo.png" width="34" height="34" alt="">DevType</a>
+      <div class="nav-links"><a href="#features">Features</a><a href="#privacy">Privacy</a><a href="#docs">Docs</a>
+</div>
+      <a class="nav-download" href="https://github.com/bharathvbcr/DevType/releases/latest">Download <span aria-hidden="true">↗</span></a>
+    </nav>
   </header>
-
-  <main>
-    <section class="preview-container">
-      <img src="assets/devtype_social_preview.jpg" alt="DevType macOS Text Expander Social Preview Banner" class="preview-img">
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> A little shortcut for your day</p>
+        <h1 id="hero-title">Your words.<br><span>A little faster.</span>
+</h1>
+        <p class="hero-description">The signature you type again. The thought you’d rather say out loud. The sentence that needs a second look. Make room for all of it.</p>
+        <div class="actions"><a class="button primary" href="https://github.com/bharathvbcr/DevType/releases/latest">Download for Mac <span aria-hidden="true">↗</span></a><a class="text-link" href="#playground">Try a snippet <span aria-hidden="true">↓</span></a>
+</div>
+        <p class="fine-print">macOS 14+ <span aria-hidden="true">·</span> Free &amp; open source <span aria-hidden="true">·</span> Native Swift + AppKit</p>
+        <a class="release-link" href="https://github.com/bharathvbcr/DevType/releases">Release notes &amp; signing information <span aria-hidden="true">↗</span></a>
+      </div>
+      <div class="hero-visual" id="playground">
+        <div class="demo-window">
+          <div class="window-bar">
+<div class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i>
+</div><span>A note to Alex</span><span class="window-tag">Snippet demo</span>
+</div>
+          <div class="note-meta"><span>To</span> Alex <span class="note-subject">A quick follow-up</span>
+</div>
+          <label for="demo-editor" class="visually-hidden">Try a snippet: type semicolon sig, semicolon meet, or semicolon date</label>
+          <textarea id="demo-editor" spellcheck="false" maxlength="4000" aria-describedby="demo-help demo-status" placeholder="Hi Alex,&#10;&#10;Thanks for the conversation today.&#10;&#10;Type ;sig here…"></textarea>
+          <div class="demo-bottom"><span id="demo-status" role="status" aria-live="polite">A few characters. A complete thought.</span><button id="demo-reset" type="button" hidden>Reset</button>
+</div>
+        </div>
+        <div class="demo-controls" hidden><span>Try it</span><button type="button" data-snippet=";sig">;sig <span>Signature</span></button><button type="button" data-snippet=";meet">;meet <span>Follow-up</span></button><button type="button" data-snippet=";date">;date <span>Today</span></button>
+</div>
+        <p id="demo-help" class="demo-caption">An illustrative browser demo. Text stays on this page; nothing is saved or sent.</p>
+        <noscript><p class="demo-caption">Enable JavaScript to try expansion. In DevType, typing <code>;sig</code> can insert a saved signature.</p></noscript>
+      </div>
     </section>
+    <div class="intro-strip wrap"><p>Fits into the way you already work.</p>
+<div><span>Write less</span><span>Say more</span><span>Stay in flow</span>
+</div>
+</div>
+    <nav class="section-jumps wrap" aria-label="Explore DevType"><a href="#workflows">Workflows</a><a href="#tools">Palette</a><a href="#writing">Writing</a><a href="#voice">Voice</a><a href="#customize">Make it yours</a><a href="#secrets">Secrets</a><a href="#library">Your library</a><a href="#help">Get help</a></nav>
+    <section class="section wrap" id="features" aria-labelledby="features-title">
+      <div class="section-heading"><p class="eyebrow">Small actions. Less repetition.</p>
+<h2 id="features-title">A familiar place for<br>the things you repeat.</h2><p>Keep the words. Skip the retyping.</p>
+</div>
+      <div class="feature-grid">
+        <article class="feature feature-snippets">
+          <span class="feature-number">01 / SNIPPETS</span>
+<h3>A few keys.<br>The whole message.</h3><p>Turn a short trigger into a signature, a reply, an image, or a template with dates and fill-in fields. Bring your TextExpander or Espanso library with you.</p>
+          <div class="expansion-example" aria-label="Example: semicolon intro expands to a greeting"><code>;intro</code><span aria-hidden="true">→</span>
+<div>Hi there,<br>Lovely to meet you.</div>
+</div>
+          <a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/MACRO_REFERENCE.md">Explore templates <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="feature feature-palette">
+          <span class="feature-number">02 / COMMAND PALETTE</span>
+<h3>Less searching.<br>More finding.</h3><p>Snippets, dates, calculations, and text tools in one search field. Filter your library by group or tag, or turn a phrase into <code>snake_case</code>.</p>
+          <div class="shortcut-art" aria-label="Command slash"><kbd>⌘</kbd><kbd>/</kbd>
+</div>
+          <a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/USER_GUIDE.md#7-fuzzy-command-palette-">Meet the palette <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="feature feature-voice"><span class="feature-number">03 / VOICE</span>
+<h3>Say what’s on your mind.</h3><p>Hold a shortcut and dictate. Watch words arrive in your document or keep them in the floating bubble until you finish. Choose Apple Speech, a local model route, or optional cloud transcription.</p>
+<div class="voice-art" aria-hidden="true"><span class="voice-dot"></span> A thought, before it gets away.<span class="voice-bars"><i></i><i></i><i></i><i></i><i></i></span>
+</div><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/VOICE_DICTATION.md">Choose a voice engine <span aria-hidden="true">↗</span></a>
+</article>
+        <article class="feature feature-ai"><span class="feature-number">04 / WRITING TOOLS</span>
+<h3>Your draft. A second look.</h3><p>Select text and proofread, rewrite, condense, or translate with Apple Foundation Models. Preview the result and decide what to keep.</p>
+<div class="writing-example"><span class="before">thanks for you’re help</span><span class="after">Thanks for your help.</span>
+</div><p class="feature-note">AI needs macOS 26+ and an available Apple Intelligence model. Deterministic tools such as Remove Markdown also work on macOS 14+.</p>
+</article>
+      </div>
+    </section>
+    <section class="section wrap workflows-section" id="workflows" aria-labelledby="workflows-title">
+      <div class="section-heading">
+        <p class="eyebrow">Put it to work</p>
+        <h2 id="workflows-title">Start with the words<br>you typed twice today.</h2>
+        <p>A useful library starts small. Save one reply, one template, or one bit of text you keep looking up.</p>
+      </div>
+      <div class="workflow-list">
+        <article class="workflow-row">
+          <div class="workflow-copy"><span class="feature-number">01 / REPLIES</span><h3>A personal reply,<br>without starting over.</h3><p>Save the structure of a message and fill in the parts that change. DevType asks for the name and topic when the snippet expands.</p></div>
+          <div class="template-example"><div class="example-heading"><span>Snippet content</span><code>;followup</code></div><pre><code>Hi %filltext:name=Name%,
 
-    <section class="section">
-      <h2 class="section-title">Why DevType?</h2>
-      <div class="grid">
-        <div class="card">
-          <div class="card-icon">⚡</div>
-          <h3>Instant Keyword Expansion</h3>
-          <p>Low-latency swallowing ring buffer that replaces typed abbreviations instantly in any app via Accessibility APIs.</p>
+Thanks for taking the time to discuss
+%filltext:name=Topic%.
+
+I’ll follow up with the next steps.</code></pre><p>The trigger is yours to choose. Fill-in fields run in the Mac app.</p></div>
+        </article>
+        <article class="workflow-row">
+          <div class="workflow-copy"><span class="feature-number">02 / NOTES</span><h3>Make the routine parts<br>take care of themselves.</h3><p>Use a date macro for a daily note and a cursor marker to land exactly where you want to start writing. Build reusable headings, checklists, and meeting outlines.</p></div>
+          <div class="template-example"><div class="example-heading"><span>Snippet content</span><code>;daily</code></div><pre><code># Daily note — {{date:iso}}
+
+Focus
+{{cursor}}
+
+Decisions
+
+Next steps</code></pre><p>The date is evaluated when you expand; the marker sets the caret.</p></div>
+        </article>
+        <article class="workflow-row">
+          <div class="workflow-copy"><span class="feature-number">03 / DRAFTS</span><h3>Get the thought down.<br>Then find the words.</h3><p>Dictate a rough draft, select a passage, and ask for a rewrite or a shorter version. Review model output before using it, especially names, facts, and numbers.</p></div>
+          <ol class="writing-steps"><li><kbd>⌘⌥V</kbd><div><strong>Dictate</strong><p>Capture the thought with a ready voice engine.</p></div></li><li><kbd>⌘⌥A</kbd><div><strong>Refine</strong><p>Choose an action for the selected text.</p></div></li><li><span class="step-label">Review</span><div><strong>Keep what sounds like you</strong><p>Use preview delivery for a chance to compare, copy, or replace.</p></div></li></ol>
+        </article>
+      </div>
+      <a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/MACRO_REFERENCE.md">Build your own templates <span aria-hidden="true">↗</span></a>
+    </section>
+    <section class="library-section section wrap" aria-labelledby="library-title">
+      <div class="section-heading centered"><p class="eyebrow">At home on your Mac</p>
+<h2 id="library-title">A library you can actually see.</h2><p>Groups, tags, search, and an editor for the details.<br>Your snippets have a home. Your work stays in its own app.</p>
+</div>
+      <figure class="product-shot"><img src="assets/screenshots/snippet-library.png" alt="DevType snippet manager with a group sidebar, searchable snippet rows, and library controls" loading="lazy" width="1400" height="898">
+<figcaption>DevType’s native snippet manager. Screenshots may predate recent interface changes.</figcaption>
+</figure>
+    </section>
+    <section class="section wrap tools-section" id="tools" aria-labelledby="tools-title">
+      <div class="section-heading"><p class="eyebrow">One place for the small stuff</p><h2 id="tools-title">The tools between the tasks.</h2><p>Open the palette with <kbd>⌘/</kbd>. Find a snippet or handle a small text job without opening another utility.</p></div>
+      <div class="tools-layout">
+        <figure class="palette-shot"><img src="assets/screenshots/command-palette.png" width="1280" height="920" loading="lazy" alt="DevType command palette showing searchable commands and snippets"><figcaption>The native command palette. Interface details may vary by version.</figcaption></figure>
+        <dl class="tool-catalog">
+          <div><dt>Find the right snippet</dt><dd>Search a phrase, a group, or a tag: <code>group:&quot;Client Work&quot; -tag:draft</code>.</dd></div>
+          <div><dt>Clean up text</dt><dd>Change case, sort lines, remove duplicates, or strip Markdown without an AI model.</dd></div>
+          <div><dt>Work with structured text</dt><dd>Format JSON, encode a URL component, or convert Base64. Naming tools cover snake_case, kebab-case, camelCase, and PascalCase.</dd></div>
+          <div><dt>Calculate and generate</dt><dd>Try <code>= 45 * 12.5</code>, insert a relative date such as <code>+3w</code>, or generate a UUID.</dd></div>
+        </dl>
+      </div>
+    </section>
+    <section class="section wrap writing-section" id="writing" aria-labelledby="writing-title">
+      <div class="section-heading"><p class="eyebrow">A little help with the next draft</p><h2 id="writing-title">Find the right shape<br>for what you mean.</h2><p>Select a passage, open the AI action palette with <kbd>⌘⌥A</kbd>, and choose what it needs. On-device writing actions use Apple Foundation Models when available.</p></div>
+      <div class="writing-catalog">
+        <article><span class="feature-number">REFINE</span><h3>Keep the thought.<br>Improve the sentence.</h3><p>Proofread a reply, paraphrase a paragraph, or make a message more formal or friendly. Condense a long draft or expand an outline into a starting point.</p></article>
+        <article><span class="feature-number">RESHAPE</span><h3>Give your notes<br>some structure.</h3><p>Turn a passage into bullet points, merge and rewrite rough notes, or convert text to Markdown. Translation actions help you work across languages.</p></article>
+        <article><span class="feature-number">DEVELOP</span><h3>A second reader<br>for your code.</h3><p>Ask for a code or regex explanation, a docstring, suggested unit tests, or a commit message. Review generated code and run it through your own checks before using it.</p></article>
+      </div>
+      <div class="workflow-row writing-detail">
+        <div class="workflow-copy"><h3>Have something<br>more specific in mind?</h3><p>In the command palette, start with <code>&gt;</code> and write an instruction for the selected text. Give it a clear goal, audience, and anything that should stay intact.</p></div>
+        <div class="template-example"><div class="example-heading"><span>Example palette instruction</span></div><pre><code>&gt; Turn this into a brief project update.
+Keep the dates and owners unchanged.
+End with the next action.</code></pre><p>A custom instruction runs on your selection. Check the result for changes to meaning or facts.</p></div>
+      </div>
+      <div class="library-note"><h3>Choose how each action delivers.</h3><p>Preferences → AI lets you choose direct replacement or a diff preview for individual actions. Proofread and Remove Markdown default to direct replacement; the other writing actions default to preview. Use preview when you want to compare the result before replacing your text.</p></div>
+      <p class="section-footnote">Model-based actions need macOS 26+, Apple Intelligence, and a ready model. Remove Markdown is a deterministic tool and works without an AI model on macOS 14+.</p>
+    </section>
+    <section class="voice-section" id="voice" aria-labelledby="voice-title">
+      <div class="wrap section">
+        <div class="section-heading"><p class="eyebrow">A voice setup that fits</p><h2 id="voice-title">Choose how your words<br>become text.</h2><p>Each engine has its own readiness checks. Start with Apple Speech, or configure the route that suits your workflow.</p></div>
+        <div class="engine-comparison">
+          <article class="engine-row"><h3>Apple Speech<span class="engine-label">Default engine</span></h3><div><h4>Processing</h4><p>On-device recognition with built-in cleanup rules.</p></div><div><h4>What you need</h4><p>Microphone and Speech Recognition permission, a supported locale, and ready speech assets.</p></div></article>
+          <article class="engine-row"><h3>Local AI<span class="engine-label">Local model correction</span></h3><div><h4>Processing</h4><p>Apple speech recognition, then correction with Apple Foundation Models or a local model server.</p></div><div><h4>What you need</h4><p>Ready Apple recognition and an available correction model. Local servers need their own setup.</p></div></article>
+          <article class="engine-row"><h3>Local Whisper<span class="engine-label">Local server</span></h3><div><h4>Processing</h4><p>Audio is sent to a whisper.cpp server running on the same Mac.</p></div><div><h4>What you need</h4><p>An installed server and a verified model. Initial model setup can require an internet download.</p></div></article>
+          <article class="engine-row"><h3>Gemini<span class="engine-label">Optional cloud engine</span></h3><div><h4>Processing</h4><p>Recorded audio and steering instructions are sent to Google for transcription.</p></div><div><h4>What you need</h4><p>Your API key and separate cloud-audio consent. The service may have its own usage costs.</p></div></article>
         </div>
-        <div class="card">
-          <div class="card-icon">🎙️</div>
-          <h3>Smart Voice Dictation</h3>
-          <p>Push-to-talk speech-to-text with self-correction resolution, filler stripping, and four selectable recognizers (Apple Speech, Local AI, Local Whisper, and Gemini).</p>
-        </div>
-        <div class="card">
-          <div class="card-icon">🤖</div>
-          <h3>100% On-Device AI</h3>
-          <p>Powered by Apple Foundation Models (macOS 26+). Proofread, rewrite, and condense text offline with zero API keys.</p>
-        </div>
-        <div class="card">
-          <div class="card-icon">📝</div>
-          <h3>Local Markdown & Text Tools</h3>
-          <p>Instant case conversion, formatting, and offline Markdown stripping that runs locally on all macOS versions without an AI model.</p>
-        </div>
-        <div class="card">
-          <div class="card-icon">🔍</div>
-          <h3>Hybrid Command Palette</h3>
-          <p>Press ⌘/ to search snippets, run AI transforms, insert date calculations, or access pasteboard history instantly.</p>
-        </div>
-        <div class="card">
-          <div class="card-icon">🛡️</div>
-          <h3>Fail-Closed Privacy</h3>
-          <p>Automatically pauses expansion in password fields, Secure Event Input locks, IME composition, or muted apps.</p>
-        </div>
-        <div class="card">
-          <div class="card-icon">🔒</div>
-          <h3>Encrypted Secret Snippets</h3>
-          <p>Store passwords AES-GCM-encrypted behind Touch ID. Secure Input changes the menu bar to Copy Secret. Click to open Search Secrets, choose a secret, and paste with ⌘V; the concealed clipboard clears automatically.</p>
+        <div class="delivery-heading"><h3>And choose when the words arrive.</h3><p>Under Preferences → Voice → While you speak:</p></div>
+        <ol class="delivery-options"><li><strong>Type as you speak</strong><p>Words arrive progressively, with final correction applied when it can be done safely.</p></li><li><strong>Preview in the bubble</strong><p>Follow the live transcript in the HUD. The finished text is inserted at the end.</p></li><li><strong>Insert at the end</strong><p>Keep the live transcript hidden and insert the finished text when the session completes.</p></li></ol>
+        <p class="section-footnote">Delivery is automatic in these modes. Voice recovery can retain recordings and transcripts locally; review the voice guide for data and recovery details.</p>
+        <a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/VOICE_DICTATION.md">Set up dictation <span aria-hidden="true">↗</span></a>
+      </div>
+    </section>
+    <section class="section wrap" id="customize" aria-labelledby="customize-title">
+      <div class="section-heading"><p class="eyebrow">Settle into your own rhythm</p><h2 id="customize-title">Make DevType feel like yours.</h2><p>Start with the defaults, then adjust the details you notice during the day. Your shortcuts, vocabulary, and app preferences are close at hand.</p></div>
+      <div class="tools-layout">
+        <figure class="palette-shot"><img src="assets/screenshots/preferences-hotkeys.png" width="1400" height="1091" loading="lazy" alt="DevType Hotkeys preferences with controls for recording keyboard shortcuts"><figcaption>Shortcut settings in the native app. Screenshots may predate recent interface changes.</figcaption></figure>
+        <dl class="tool-catalog">
+          <div><dt>Shortcuts your hands remember</dt><dd>Re-record the palette, AI, and dictation shortcuts in Preferences → Hotkeys if the defaults conflict with another app. Add hotkey macros for text insertion or opening a URL.</dd></div>
+          <div><dt>Names you say every day</dt><dd>Add custom vocabulary in Voice preferences for names and specialized terms. Choose a tone such as Natural, Email, Chat, Code, or Verbatim for your dictation workflow.</dd></div>
+          <div><dt>Room for apps with their own rules</dt><dd>Use Mute Frontmost App from the menu bar, or manage the Muted Apps list in General preferences. Keep expansion out of a game, terminal, or another app where you want plain typing.</dd></div>
+          <div><dt>A familiar language and startup</dt><dd>Follow the system language or choose English, Korean, or Japanese for the interface. Turn Launch at Login on when you want DevType ready at the start of the day.</dd></div>
+        </dl>
+      </div>
+      <div class="library-note"><h3>Decide what Backspace means.</h3><p>By default, Backspace can undo a recent snippet expansion. Switch off Undo expansion with Backspace in General preferences to use ordinary deletion instead. The choice takes effect immediately and persists across launches. Native ⌘Z and Undo last AI are separate controls.</p></div>
+    </section>
+    <section class="privacy-section" id="privacy" aria-labelledby="privacy-title">
+<div class="wrap privacy-layout">
+<div><p class="eyebrow">Your choices, made clear</p>
+<h2 id="privacy-title">Local at heart.<br>Explicit at the edges.</h2><p>Core expansion and text tools run on your Mac. No analytics. No automatic update installation.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/SECURITY.md">Read the privacy details <span aria-hidden="true">↗</span></a>
+</div>
+<div class="privacy-facts">
+<article>
+<h3>Choose where dictation runs.</h3><p>Apple recognition stays on-device. Local servers receive data over loopback. Gemini sends audio to Google only with your API key and separate consent. Model setup can require downloads; recovery recordings are saved locally.</p>
+</article>
+<article>
+<h3>Keep secrets separate.</h3><p>A dedicated Secrets manager, encrypted values, and deliberate copy-and-paste. No typed password triggers. Clipboard copies clear after 90 seconds if DevType still owns them; clipboard managers may retain copies.</p>
+</article>
+<article>
+<h3>Keep control of the target.</h3><p>Expansion pauses during secure input and in muted apps. Delivery rechecks the target before changing text. You can turn Backspace expansion undo off whenever you prefer.</p>
+</article>
+</div>
+</div>
+</section>
+    <section class="section wrap" id="delivery" aria-labelledby="delivery-title">
+      <div class="section-heading"><p class="eyebrow">When the moment changes</p><h2 id="delivery-title">Your text has a destination.</h2><p>A shortcut can finish after your attention has moved. DevType checks the target again before delayed text changes, and can cancel an expansion when the original context no longer matches.</p></div>
+      <ol class="delivery-options"><li><strong>Stay in the intended field</strong><p>Let the expansion finish before switching apps or moving the cursor. A changed target can cancel pending work; return to the field before trying again.</p></li><li><strong>Respect a paused session</strong><p>Secure Input and muted apps pause expansion. If a trigger stays as ordinary text, check those states as well as the engine’s pause setting.</p></li><li><strong>Inspect an uncertain paste</strong><p>“Posted, unverified” means a paste was sent but its receipt was not confirmed. Check the document before retrying so you do not insert the same text twice.</p></li></ol>
+      <a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/SUPPORT.md">Understand delivery status <span aria-hidden="true">↗</span></a>
+    </section>
+    <section class="section wrap secrets-section" id="secrets" aria-labelledby="secrets-title">
+      <div class="secrets-layout">
+        <div class="section-heading"><p class="eyebrow">A deliberate action for sensitive text</p><h2 id="secrets-title">Passwords belong<br>in their own place.</h2><p>Manage secrets separately from everyday snippets. They have names and values, with no typed trigger that could expand into the wrong conversation.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/SECRETS.md">Understand secret storage <span aria-hidden="true">↗</span></a></div>
+        <ol class="secret-steps"><li><span>01</span><div><h3>Save it in Secrets.</h3><p>Open Copy Secret → Manage Secrets. Stored values are never prefilled in the editor; Show/Hide reveals only what you are entering.</p></div></li><li><span>02</span><div><h3>Choose it deliberately.</h3><p>Use the copy menu, Search Secrets, or the manager. Authenticate when required, then paste into the intended field yourself.</p></div></li><li><span>03</span><div><h3>Know what is protected.</h3><p>Values are encrypted and excluded from snippet exports. The clipboard clears after 90 seconds if DevType still owns it; another clipboard app may retain a copy.</p></div></li></ol>
+      </div>
+    </section>
+    <section class="section wrap portability-section" id="library" aria-labelledby="portability-title">
+      <div class="section-heading"><p class="eyebrow">Bring what already works</p><h2 id="portability-title">Your library, with room to move.</h2><p>You do not have to rewrite every snippet to get started—or keep your library in one format forever.</p></div>
+      <div class="portability-grid">
+        <article><h3>Bring snippets in.</h3><p>Import TextExpander settings bundles and backups, or Espanso YAML files, match folders, and packages. Review the import results for anything that needs attention.</p><ul class="format-list" aria-label="Supported import sources"><li>TextExpander</li><li>Espanso YAML</li></ul></article>
+        <article><h3>Take snippets with you.</h3><p>Export to DevType JSON, Espanso YAML, an Espanso match folder, or CSV. Snippet exports do not include secret records, secret values, or all device preferences.</p><ul class="format-list" aria-label="Supported export formats"><li>JSON</li><li>YAML</li><li>Match folder</li><li>CSV</li></ul></article>
+      </div>
+      <div class="library-note"><h3>Choose where the library lives.</h3><p>Preferences → Snippets lets you move the library or link an existing one. If you choose a folder watched by iCloud Drive or another sync client, that provider handles those files. Secret keys are device-only; moving the library is not a portable secret backup.</p></div>
+    </section>
+    <section class="help-section" id="help" aria-labelledby="help-title">
+      <div class="section wrap">
+        <div class="section-heading"><p class="eyebrow">A clear next step</p><h2 id="help-title">When something needs<br>a little attention.</h2><p>Start with the symptom you see. The support guide explains the checks in more detail.</p></div>
+        <div class="help-grid">
+          <article><h3>A snippet stays as a trigger.</h3><p>Check whether expansion is paused, the app is muted, or Secure Input is active. Open Permission Recovery from the menu to inspect Accessibility and Input Monitoring, then try the same snippet in TextEdit or Notes.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/PERMISSIONS_GUIDE.md">Check permissions <span aria-hidden="true">↗</span></a></article>
+          <article><h3>It works in one editor only.</h3><p>Some editors expose less information to macOS accessibility. Look at Last inject in the diagnostic readout. A refusal to erase text is different from a missing permission; share the affected app and status when asking for help.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/SUPPORT.md">Troubleshoot expansion <span aria-hidden="true">↗</span></a></article>
+          <article><h3>Dictation is not ready.</h3><p>Open Voice preferences and check the selected engine’s readiness. Confirm microphone and speech permissions for Apple recognition, server and model setup for local routes, or the API key and separate consent for Gemini.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/VOICE_DICTATION.md">Review voice setup <span aria-hidden="true">↗</span></a></article>
+          <article><h3>A writing action is unavailable.</h3><p>Check the status in AI preferences: the macOS version, device eligibility, Apple Intelligence setting, and model readiness each matter. You can still use ordinary snippets and deterministic text tools while the model is unavailable.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/USER_GUIDE.md">Open the user guide <span aria-hidden="true">↗</span></a></article>
         </div>
       </div>
     </section>
-
-    <section class="section">
-      <h2 class="section-title">Feature Comparison</h2>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Feature</th>
-              <th>DevType</th>
-              <th>TextExpander</th>
-              <th>Espanso</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>License</td>
-              <td><strong>Free & MIT Open Source</strong></td>
-              <td>Subscription ($40+/yr)</td>
-              <td>Free (GPL)</td>
-            </tr>
-            <tr>
-              <td>Engine</td>
-              <td><strong>Native Swift / AppKit</strong></td>
-              <td>Electron / Web</td>
-              <td>Rust / CLI</td>
-            </tr>
-            <tr>
-              <td>Smart Dictation</td>
-              <td><strong>4 Engines (3 Local & Offline)</strong></td>
-              <td>None</td>
-              <td>None</td>
-            </tr>
-            <tr>
-              <td>On-Device AI</td>
-              <td><strong>Apple Foundation Models + Local Transforms</strong></td>
-              <td>None</td>
-              <td>None</td>
-            </tr>
-            <tr>
-              <td>Importers</td>
-              <td><strong>Espanso YAML & TextExpander Bundles</strong></td>
-              <td>None</td>
-              <td>Manual</td>
-            </tr>
-            <tr>
-              <td>Secret Snippets</td>
-              <td><strong>AES-GCM + Touch ID</strong></td>
-              <td>None</td>
-              <td>Plaintext YAML</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <section class="section wrap" id="start" aria-labelledby="start-title">
+<div class="section-heading"><p class="eyebrow">Make yourself at home</p>
+<h2 id="start-title">Your first shortcut starts here.</h2>
+</div>
+<ol class="setup-steps">
+<li><span>01</span>
+<h3>Move it to Applications.</h3><p>Download the Mac disk image, open it, and drag DevType into Applications. Check the release notes for signing information.</p>
+</li>
+<li><span>02</span>
+<h3>Give it permission.</h3><p>Follow the setup for Accessibility and Input Monitoring. Microphone and speech permissions are for dictation.</p>
+</li>
+<li><span>03</span>
+<h3>Save something you repeat.</h3><p>Open Snippet Manager, add a short trigger and some text, then try it in a regular text field.</p>
+</li>
+</ol><p class="setup-note">The release workflow permits ad-hoc signed, unnotarized artifacts. See the <a href="https://github.com/bharathvbcr/DevType/blob/main/docs/USER_GUIDE.md#installation">installation guide</a> for macOS opening and permission help.</p>
+</section>
+    <section class="section wrap docs-section" id="docs" aria-labelledby="docs-title">
+<div class="section-heading"><p class="eyebrow">A little guidance</p>
+<h2 id="docs-title">Get comfortable. Then go deeper.</h2>
+</div>
+<div class="doc-links"><a href="https://github.com/bharathvbcr/DevType/blob/main/docs/USER_GUIDE.md"><span>User guide<small>From your first snippet to your everyday workflow</small></span><span aria-hidden="true">↗</span></a><a href="https://github.com/bharathvbcr/DevType/blob/main/docs/PERMISSIONS_GUIDE.md"><span>Permissions &amp; recovery<small>Get expansion and dictation ready</small></span><span aria-hidden="true">↗</span></a><a href="https://github.com/bharathvbcr/DevType/blob/main/SECRETS.md"><span>Secrets<small>Storage, authentication, and the limits explained</small></span><span aria-hidden="true">↗</span></a><a href="https://github.com/bharathvbcr/DevType/blob/main/docs/README.md"><span>All documentation<small>Macros, architecture, development, and release history</small></span><span aria-hidden="true">↗</span></a>
+</div>
+</section>
+    <section class="section wrap faq-section" aria-labelledby="faq-title">
+<h2 id="faq-title">A few things to know.</h2>
+<div class="faq">
+<details>
+<summary>Does everything need Apple Intelligence?</summary><p>No. Snippets, palette utilities, Secrets, and deterministic text tools work on macOS 14+. Foundation Models actions need macOS 26+, a compatible Mac, Apple Intelligence enabled, and a ready system model. Voice engines have their own requirements.</p>
+</details>
+<details>
+<summary>Can I use my existing snippet library?</summary><p>Import TextExpander settings bundles or Espanso YAML from the app. Export snippets as DevType JSON, Espanso YAML or a match folder, or CSV. Secret values are stored separately and are not part of snippet exports.</p>
+</details>
+<details>
+<summary>Will it work in every text field?</summary><p>Editors expose text and selection differently. DevType checks the target and can refuse an unsafe or unverifiable replacement. Password fields and muted apps pause expansion. Check the destination before retrying a paste reported as unverified.</p>
+</details>
+<details>
+<summary>Is it free?</summary><p>DevType is free and MIT-licensed. Optional services you configure yourself, such as Gemini, may have their own costs. You can use snippets and local text tools without a cloud account.</p>
+</details>
+<details>
+<summary>Can I change the shortcuts or pause expansion?</summary><p>Yes. Preferences → Hotkeys lets you rebind the palette, AI, and voice shortcuts. Add apps to the Muted Apps list to pause expansion there. Preferences → General also controls whether Backspace reverses a recent expansion.</p>
+</details>
+<details>
+<summary>Does DevType download updates automatically?</summary><p>No. Automatic update checks are off by default. If enabled, they check at most once a day and offer a link to the release page. You choose when to download and install a release.</p>
+</details>
+<details>
+<summary>What if dictation or a paste does not finish?</summary><p>Check the target document before retrying. A paste reported as “posted, unverified” may already have arrived. Voice recovery can retain a recording or transcript when a session is interrupted; a saved transcript alone does not prove it was inserted.</p>
+</details>
+<details>
+<summary>Can I contribute or build it myself?</summary><p>Yes. DevType is built with Swift and AppKit and released under the MIT license. The <a href="https://github.com/bharathvbcr/DevType/blob/main/CONTRIBUTING.md">contributing guide</a> covers setup, tests, and the contribution workflow; the <a href="https://github.com/bharathvbcr/DevType/blob/main/docs/DEVELOPMENT.md">developer guide</a> explains packaging and signing.</p>
+</details>
+</div>
+</section>
+    <section class="closing wrap"><img src="assets/devtype_logo.png" width="64" height="64" alt="">
+<h2>A little less typing.<br>A little more you.</h2><a class="button primary" href="https://github.com/bharathvbcr/DevType/releases/latest">Get DevType for Mac <span aria-hidden="true">↗</span></a><p>Free. Native. Open source.</p>
+</section>
   </main>
-
-  <footer>
-    <p>Released under the <a href="https://github.com/bharathvbcr/DevType/blob/main/LICENSE">MIT License</a>. Built for macOS power users.</p>
-  </footer>
-
+  <footer class="wrap footer"><a class="brand" href="#">DevType</a><p>Made by <a href="https://github.com/bharathvbcr">Bharath Chandra Vaddaram</a></p>
+<div><a href="https://github.com/bharathvbcr/DevType">GitHub</a><a href="https://github.com/bharathvbcr/DevType/blob/main/SUPPORT.md">Support</a><a href="https://github.com/bharathvbcr/DevType/blob/main/LICENSE">MIT license</a>
+</div>
+</footer>
 </body>
 </html>

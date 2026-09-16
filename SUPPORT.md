@@ -12,7 +12,7 @@ Before submitting an issue, please check our documentation resources:
 - **[Voice Dictation Guide](docs/VOICE_DICTATION.md)**: Details on Smart Voice Dictation, speech engines, and thought-revision processing.
 - **[Macro Reference](docs/MACRO_REFERENCE.md)**: Syntax reference for Mustache tags (`{{date}}`, `{{calc}}`, `{{clipboard}}`) and TextExpander tokens (`%filltext%`, `%|`, `%date%`).
 - **[Permissions Guide](docs/PERMISSIONS_GUIDE.md)**: Resolving macOS Input Monitoring and Accessibility permission issues.
-- **[Secret Snippets Guide](SECRETS.md)**: Details on Touch ID protected secret snippets and password storage.
+- **[Secrets Guide](SECRETS.md)**: Independent secret management, authentication, encrypted storage, and clipboard limits.
 - **[Architecture & Internals](docs/ARCHITECTURE.md)**: Deep dive into the internal engineering of DevType.
 
 ---
@@ -24,19 +24,19 @@ Before submitting an issue, please check our documentation resources:
 2. Check the menu-bar status. A pause indicator means expansion is paused. A key with **Copy Secret** means macOS Secure Input is active: click it to open Search Secrets, choose a saved secret, then paste with `⌘V` in the password field. Right-click or Control-click the button for the full menu. Typed triggers stay paused there.
 3. Ensure the active application is not in your **Muted Apps** list.
 4. Try typing in standard macOS applications like TextEdit or Notes to verify system-level expansion.
-5. Check **Last inject** in the diagnostic report (**Diagnostics**, `⇧⌘D`). An **Erase precondition failed** message means the replacement reached its safety check; resetting permissions does not address the reported text/cursor disagreement. In v0.1.4, a zero or near-zero reported cursor can recover through keyboard deletion and paste when the trigger is found and no selection is reported. When the menu shows **⚠**, it is on Diagnostics, not Permission Recovery.
+5. Check **Last inject** in the diagnostic report (**Diagnostics**, `⇧⌘D`). An **Erase precondition failed** message means the replacement reached its safety check; resetting permissions does not address the reported text/cursor disagreement. When the menu shows **⚠**, it is on Diagnostics, not Permission Recovery.
 6. If the report says **input or target application changed**, place the cursor in the intended field and retype the trigger. DevType cancels instead of erasing or replaying a key into a changed target.
-7. If the trigger is erased and then typed back (`failedSilent` / `restoring trigger`) in Cursor, VS Code, Antigravity, or another Chromium app, open **Diagnostics**. A permission failure is not the cause when Listen, Accessibility, and Post Events are granted. v0.1.7 posts clipboard paste without requiring a stable accessibility caret range after the erase; if paste still fails, the log names the refuse (target field/app changed, clipboard ownership lost, Post Events, Secure Input, or Cmd+V not posted).
+7. If the trigger is erased and then typed back (`failedSilent` / `restoring trigger`) in Cursor, VS Code, Antigravity, or another Chromium app, open **Diagnostics**. A permission failure is not the cause when Listen, Accessibility, and Post Events are granted. Chromium/Electron delivery does not require a stable accessibility caret range after the erase; if paste still fails, the log names the refusal (target field/app changed, clipboard ownership lost, Post Events, Secure Input, or Cmd+V not posted).
 8. If the diagnostic report identifies a permission failure, follow the [Permissions Guide](docs/PERMISSIONS_GUIDE.md). For an erase refusal, include the target app and the diagnostic report with the bug report. `expectedTextInScan` records whether the trigger was found; `scan=caretWindow` means only part of a large field was searched.
 
 ### 2. How do I trigger On-Device AI text transforms?
-Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A). You can also type assigned trigger abbreviations (e.g. `:fix`, `:rw`) when configured in **Preferences → AI**. Note that on-device Apple Foundation Models require macOS 26+, while **Remove Markdown** runs offline locally on all supported macOS versions (macOS 14+).
+Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A). You can also type assigned trigger abbreviations (e.g. `:fix`, `:rw`) when configured in **Preferences → AI**. Note that on-device Apple Foundation Models require macOS 26+, a compatible Mac, Apple Intelligence enabled, and an available system model, while **Remove Markdown** runs offline locally on all supported macOS versions (macOS 14+).
 
 ### 3. How do I use Smart Voice Dictation?
 Press or hold **`⌘⌥V`** to activate push-to-talk or toggle dictation. You can configure your speech recognition engine (Apple Speech, Local AI, Local Whisper, or Gemini) and custom vocabulary under **Preferences → Voice**.
 
 ### 4. How do I migrate my snippets from TextExpander or Espanso?
-Open the DevType menu bar icon and choose **Import Snippets…** (or go to Preferences → Snippets), then select your TextExpander settings bundle (`.textexpandersettings` / `.textexpanderbackup`) or an Espanso config folder / match YAML file. Your library can be exported again as DevType JSON, Espanso YAML, or CSV via **Export…**.
+Open the DevType menu bar icon and choose **Import Snippets…** (or go to Preferences → Snippets), then select your TextExpander settings bundle (`.textexpandersettings` / `.textexpanderbackup`) or an Espanso config folder / match YAML file. Your library can be exported again as DevType JSON, Espanso YAML, an Espanso match folder, or CSV via **Export…**.
 
 ---
 

@@ -10,10 +10,16 @@ struct EngineDisplayPresentation: Equatable {
     let statusName: String
     let toolTip: String
 
+    /// - Parameter injectIssueIsSafeRefusal: the last expansion was *refused by a guard that was
+    ///   working* — the erase precondition held, the target moved, Secure Input was up — rather
+    ///   than failing. Both states deserve the urgent badge, but only one of them is a failure,
+    ///   and calling a correct safety decision "failed" is what sends users hunting for a broken
+    ///   engine that is in fact healthy.
     init(
         display: EngineDisplayStatus,
         snapshot: PermissionSnapshot,
         urgentInject: Bool,
+        injectIssueIsSafeRefusal: Bool = false,
         loc: LocalizationManager = .shared
     ) {
         statusName = Self.statusName(for: display, urgentInject: urgentInject, loc: loc)
@@ -42,7 +48,11 @@ struct EngineDisplayPresentation: Equatable {
             toolTip = loc.s("status.secure.copyHelp", loc.s("menu.copySecret"))
         case .active:
             if urgentInject {
-                toolTip = loc.s("status.tooltip.injectIssue")
+                toolTip = loc.s(
+                    injectIssueIsSafeRefusal
+                        ? "status.tooltip.injectRefused"
+                        : "status.tooltip.injectIssue"
+                )
             } else if snapshot.isDegradedInject {
                 toolTip = loc.s(
                     "status.tooltip.degraded",
@@ -92,6 +102,7 @@ struct StatusItemPresentation {
         libraryUnhealthy: Bool,
         differentiateWithoutColor: Bool,
         highlighted: Bool,
+        injectIssueIsSafeRefusal: Bool = false,
         loc: LocalizationManager = .shared
     ) {
         let urgent = urgentInject || snapshot.isDegradedInject
@@ -99,6 +110,7 @@ struct StatusItemPresentation {
             display: display,
             snapshot: snapshot,
             urgentInject: urgentInject,
+            injectIssueIsSafeRefusal: injectIssueIsSafeRefusal,
             loc: loc
         )
         statusName = enginePresentation.statusName

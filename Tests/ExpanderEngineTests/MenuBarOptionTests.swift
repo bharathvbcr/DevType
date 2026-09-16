@@ -51,11 +51,25 @@ final class MenuBarOptionTests: XCTestCase {
 
     /// The menu item's visibility must be bound to the recorded outcome, and the restart action
     /// must clear that outcome — otherwise the item either never appears or never disappears.
+    ///
+    /// The binding used to be `!urgentInject`, which offered a restart for *every* refusal —
+    /// including the safety refusals (erase precondition, target moved, Secure Input) that leave
+    /// a perfectly healthy engine behind, and whose only effect was to send the user to
+    /// Permission Recovery to read "All capabilities granted". Visibility is still derived from
+    /// the recorded outcome; it now also consults whether a restart could plausibly help.
     func testRestartMenuItemIsWiredToTheFailureState() throws {
         let source = try appSource("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertTrue(
-            source.contains("restartEngineMenuItem?.isHidden = !urgentInject"),
-            "Restart must be visible exactly while the last expansion refused or failed."
+            source.contains("restartEngineMenuItem?.isHidden = !offersEngineRestart"),
+            "Restart must be visible exactly while a restart could change the outcome."
+        )
+        XCTAssertTrue(
+            source.contains("lastRecordedInjectOutcome"),
+            "Restart visibility must still be derived from the recorded outcome."
+        )
+        XCTAssertTrue(
+            source.contains("warrantsEngineRestart"),
+            "Refusals must be filtered by whether a restart helps, not offered indiscriminately."
         )
         XCTAssertTrue(
             source.contains("func restartEngine(_ sender: NSMenuItem)"),

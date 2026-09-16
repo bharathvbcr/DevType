@@ -1,30 +1,36 @@
 # DevType User Guide
 
+[All documentation](README.md) · [Support](../SUPPORT.md)
+
 Welcome to the comprehensive user manual for **DevType** — the fast, native macOS text expander and on-device AI writing assistant.
 
 ---
 
 ## 📑 Table of Contents
-1. [Installation & First Launch](#1-installation--first-launch)
+1. [Installation](#installation)
 2. [Permissions Setup](#2-permissions-setup)
 3. [Creating & Managing Snippets](#3-creating--managing-snippets)
 4. [Using Dynamic Macros & Templates](#4-using-dynamic-macros--templates)
 5. [On-Device AI Assistant (macOS 26+)](#5-on-device-ai-assistant-macos-26)
 6. [Smart Voice Dictation (`⌘⌥V`)](#6-smart-voice-dictation-v)
 7. [Fuzzy Command Palette (`⌘/`)](#7-fuzzy-command-palette-)
-8. [Secret Snippets & Touch ID](#8-secret-snippets--touch-id)
+8. [Secrets & Touch ID](#8-secrets--touch-id)
 9. [Importing & Exporting Libraries](#9-importing--exporting-libraries)
 10. [Preferences & Customization](#10-preferences--customization)
 11. [Troubleshooting & FAQs](#11-troubleshooting--faqs)
 
 ---
 
-## 1. Installation & First Launch
+## Installation
 
 ### Download Release
 1. Download the latest `.dmg` from the [GitHub Releases Page](https://github.com/bharathvbcr/DevType/releases/latest).
 2. Open the disk image and drag **DevType.app** to your `/Applications` folder.
 3. Launch DevType from `/Applications` or Spotlight (`⌘Space`).
+
+Read the release notes for signing status. The release workflow permits ad-hoc signed, unnotarized artifacts, which Gatekeeper may refuse. If you trust the downloaded source, use macOS **Privacy & Security → Open Anyway** when offered. Do not disable Gatekeeper globally.
+
+Core features require macOS 14+. Apple Foundation Models actions additionally require macOS 26+, a compatible Mac, Apple Intelligence enabled, and an available model.
 
 ---
 
@@ -55,8 +61,9 @@ Click the **DevType icon** in your macOS menu bar and select **Snippet Manager�
 - **Plain Text**: Standard text expansion.
 - **Dynamic Template**: Text containing Mustache (`{{...}}`) or TextExpander (`%...%`) macro tags.
 - **Image Snippets**: Paste a rich image directly from a trigger keyword.
-- **Secret Snippets**: Passwords and sensitive keys stored in AES-GCM encrypted storage behind Touch ID.
 - **AI Action Snippets**: Triggers that run an on-device AI transform over your current text selection (created from the built-in template catalog or the editor).
+
+Secrets are managed separately in **menu bar → Copy Secret → Manage Secrets…**; they are not a snippet type in the editor.
 
 ### Searching Snippets
 Type in the search field at the top of the Snippet Manager to quickly filter your library. Multi-word queries match conjunctively across triggers, labels, tags, and content (e.g. `sig email`), matching the same ranking logic used in the Command Palette.
@@ -101,7 +108,7 @@ Thank you for reaching out regarding %filltext:name=Project%. We will follow up 
 Best,
 Alex
 ```
-When you type the trigger, a sleek popup dialog will prompt you for the field values before expanding! Multi-line (`%fillarea%`), drop-down (`%fillpopup%`), and optional sections (`%fillpart%…%fillpartend%`) are supported too.
+Typing the trigger opens a dialog for the field values before expansion. Multi-line (`%fillarea%`), drop-down (`%fillpopup%`), and optional sections (`%fillpart%…%fillpartend%`) are supported too.
 
 For the full list of tags and modifiers, see the [Macro Reference Guide](MACRO_REFERENCE.md).
 
@@ -116,7 +123,7 @@ DevType comes with private, on-device AI writing tools powered by Apple Foundati
 3. Choose an Action:
    - ✍️ **Proofread**: Fix grammar, punctuation, and typos directly in place.
    - 🔄 **Rewrite** / 🗣️ **Paraphrase**: Polish text for clarity, flow, or fresh wording.
-   - 🔀 **Merge & Rewrite**: Deduplicate and fold overlapping notes, fragments, or resume bullets into one coherent passage while strictly preserving facts, metrics, tools, and list formatting.
+   - 🔀 **Merge & Rewrite**: Deduplicate and fold overlapping notes, fragments, or resume bullets into one coherent passage with instructions to preserve facts and formatting. Review the result before accepting it.
    - 📈 **Expand** / 📉 **Condense**: Elaborate on ideas or tighten text while preserving meaning.
    - 👔 **Tone Shift**: Make text more *Formal* or *Friendly*.
    - 📋 **Bulletize**: Transform paragraph text into clean bullet points.
@@ -125,9 +132,9 @@ DevType comes with private, on-device AI writing tools powered by Apple Foundati
      - **Explain Code**: Algorithmic and logic breakdown.
      - **Docstring Generator**: Generate language-idiomatic doc comments (SwiftDoc, JSDoc, PyDoc, RustDoc).
      - **Fix Code**: Detect and repair logic bugs and syntax issues.
-     - **Unit Test Generator**: Comprehensive unit tests for your code.
+     - **Unit Test Generator**: Draft tests for selected code; run and review them in your project.
      - **Explain Regex**: Plain-English token-by-token regular expression explanation.
-     - **SQL Query Generator**: Generate optimized SQL queries from natural language requests.
+     - **SQL Query Generator**: Draft SQL from natural-language requests.
    - 📦 **Git Commit Message**: Conventional commit summaries (`feat:`, `fix:`, `refactor:`) from diffs.
    - 🗂️ **JSON Converter**: Convert lists, tables, or unformatted data into clean JSON.
    - 🌐 **Translate**: To English from romanized Telugu/Hindi (or native script), or English → romanized Telugu / Hindi.
@@ -147,9 +154,9 @@ DevType includes local-first, privacy-respecting speech-to-text dictation with t
 
 - **Push-to-Talk or Toggle**: Press or hold **`⌘⌥V`** to dictate into whatever application has focus.
 - **Selectable Recognizers** in **Preferences → Voice**:
-  - 🍎 **Apple Speech**: Fully on-device `SFSpeechRecognizer` with deterministic formatting. Zero configuration.
+  - 🍎 **Apple Speech**: On-device recognition with deterministic formatting. macOS 26 prefers SpeechAnalyzer when ready; the legacy recognizer is a readiness-checked fallback. Locale support, permissions, and speech assets matter.
   - 🧠 **Local AI**: On-device Apple Speech recognition polished by local Apple Intelligence Foundation Models (macOS 26+) or a local HTTP endpoint (Ollama / llama.cpp).
-  - ⚡ **Local Whisper**: Talks to a local `whisper.cpp` server on loopback (`http://127.0.0.1:8080/inference`). Fully offline and detects or installs models seamlessly.
+  - ⚡ **Local Whisper**: Talks to a local `whisper.cpp` server on loopback (`http://127.0.0.1:8080/inference`). Runs locally once its server and model are ready. Setup can require a model download.
   - ☁️ **Gemini 3.5 Transcribe**: Opt-in cloud engine with native disfluency and punctuation handling. Inert until you store your own API key in your login Keychain and separately grant cloud-audio consent in Preferences; a missing prerequisite is refused before recording.
 - **Thought-Revision & Smart Polish**: Automatically handles mid-sentence self-corrections ("tomorrow at 3... actually make that 4 PM"), removes verbal fillers (*"um"*, *"uh"*, *"like"*), and applies custom vocabulary.
 - **Multi-Register Tone**: Style transcripts for *Natural*, *Email*, *Chat*, *Code* (identifier formatting), or *Verbatim*.
@@ -166,7 +173,7 @@ Press **`⌘/`** anywhere in macOS to bring up DevType's unified Command Palette
 - **Selection-Aware Suggestions**: When opened with selected text, the empty palette automatically surfaces AI transforms and local text operations first, keeping perishable actions above the fold while pushing navigation down.
 - **Dynamic Section Leading**: Sections are led by their best hit rather than a static commands/AI/snippets order, so a high-scoring snippet or transform immediately surfaces above lower-scoring commands.
 - **Search Snippets**: Type fuzzy or multi-word keywords to find and insert snippets without remembering abbreviations. Results highlight matches, honor diacritics, and are ranked by how often (and how recently) *you* use them — the top rows show `⌘1`–`⌘9` quick-insert hints. The palette processes at most 512 characters and 12 terms per query. Body search covers the first 2,000 characters of each snippet.
-- **Precise Library Search**: Use `"best regards"` for a phrase, `title:signature`, `trigger:sig`, `group:"Client Work"`, `tag:billing`, or `content:invoice` to select a field, and `-draft` or `-tag:personal` to exclude literal matches. Combine terms to narrow the result. The manager also supports `is:enabled`, `is:disabled`, `is:secret`, `is:image`, `is:ai`, and `is:text`; the insertion palette still omits disabled entries. These filters share one search engine. Direct manager queries process at most 4,096 UTF-8 bytes and 12 terms. Queries that exceed the limits or have an empty filter value show a reason and no results. Shorten the query or finish the filter to continue; exclusions are never silently discarded.
+- **Precise Library Search**: Use `"best regards"` for a phrase, `title:signature`, `trigger:sig`, `group:"Client Work"`, `tag:billing`, or `content:invoice` to select a field, and `-draft` or `-tag:personal` to exclude literal matches. Combine terms to narrow the result. The manager also supports `is:enabled`, `is:disabled`, `is:image`, `is:ai`, and `is:text`; the insertion palette still omits disabled entries. These filters share one search engine. Direct manager queries process at most 4,096 UTF-8 bytes and 12 terms. Queries that exceed the limits or have an empty filter value show a reason and no results. Shorten the query or finish the filter to continue; exclusions are never silently discarded.
 - **Conversational Search (optional)**: Turn on **Preferences → AI → Semantic Search Routing** to let available on-device Apple Foundation Models resolve a natural-language query through DevType's date, text-operation, or snippet tools. Routing has an 8-second safety deadline; offline results appear immediately.
 - **Math Calculator**: Type `= 45 * 12.5` to evaluate inline and insert or copy the result.
 - **Custom AI**: Type `> make this sound like a Slack message` to run a one-shot on-device AI instruction over your current selection.
@@ -179,18 +186,18 @@ Press **`⌘/`** anywhere in macOS to bring up DevType's unified Command Palette
 
 ---
 
-## 8. Secret Snippets & Touch ID
+## 8. Secrets & Touch ID
 
-Need to store passwords, API keys, or recovery codes?
-1. Open the Snippet Manager (`⌘⇧M`) and mark the snippet as **Secret**.
-2. DevType encrypts the snippet with **AES-GCM** into a sealed archive; the single master key lives in your macOS Keychain.
-3. Secrets **never** expand from typed triggers (preventing accidental disclosure in chat windows or screen shares).
-4. Focus the password field. When macOS Secure Input is active, the menu bar shows a key and **Copy Secret**. Click it to open **Search Secrets** directly, then single-click a result to copy it. You can also use the arrow keys and press Return. Right-click or Control-click the button to open the full DevType menu. The Copy Secret submenu also remains available during ordinary typing.
-5. DevType prompts for **Touch ID** (password fallback available; one check covers 30 seconds of back-to-back copies), copies the secret to the clipboard with concealment flags (hiding it from clipboard managers), and auto-clears the clipboard after 90 seconds.
-6. Return to the password field and press **`⌘V`** to paste. Typed triggers remain paused while Secure Input is active.
-7. The Touch ID gate itself can be toggled under **Preferences → Snippets → Secrets** or from the bottom of the **Copy Secret** menu.
+Open **menu bar → Copy Secret → Manage Secrets…** to add a secret with a name and value. There is no trigger or shortcut to configure. The **Secrets** chip in the snippet manager opens this separate manager.
 
-An explicit Search Secrets click replaces an already-open palette and focuses the search field. Opening the window does not read any secret values. If no secrets are saved yet, create one in the Snippet Manager; the full menu’s Copy Secret submenu also provides this guidance.
+1. Add or edit a secret. Stored values are never prefilled. The editor conceals newly entered text by default; **Show/Hide** reveals only what you are entering in that sheet.
+2. Select an enabled secret and copy it from the manager, **Copy Secret** submenu, or **Search Secrets**. Return copies the selected manager row; Delete removes it when the list has focus.
+3. Authenticate when required. Touch ID supports a system-password fallback; the short reuse window is invalidated when DevType resigns active. Turning off an active, available authentication requirement needs fresh authentication; cancelling leaves it enabled.
+4. Focus the destination and paste with `⌘V`. When macOS Secure Input is active, the menu bar's **Copy Secret** button opens Search Secrets directly. Control-click or right-click opens the full menu.
+
+Copies clear after 90 seconds if DevType still owns the clipboard. Concealed/transient markers request exclusion from compatible clipboard managers, but cannot stop another app from retaining a copy. The submenu shows up to 20 entries and reports omitted entries; use Search Secrets for the rest.
+
+Values are AES-GCM encrypted with a master key in Keychain. Secret metadata occupies a separate collection in the library; values do not enter library JSON or snippet exports. If storage needs attention, use **Preferences → Advanced → Repair Secret Storage**. See [Secrets](../SECRETS.md) for recovery and device-only key limitations.
 
 ---
 
@@ -205,12 +212,12 @@ Easily migrate your entire snippet library:
 
 ### Exporting
 Use **Export…** in the menu bar (or Preferences → Snippets) to save your library as:
-- **DevType JSON**: Full-fidelity backup preserving all settings and groups.
+- **DevType JSON**: Snippet groups and their metadata; device preferences and secret values are not included.
 - **Espanso YAML**: Standard YAML configuration compatible with Espanso.
 - **Espanso folder**: A `match/`-style directory containing one YAML file per group, written atomically.
 - **CSV**: Spreadsheet-friendly export with columns for title, trigger, replacement, and group.
 
-Secret snippet *values* are structurally excluded from every export — at most an empty placeholder appears.
+Snippet exports omit secret records and values. DevType JSON is a snippet-library export, not a backup of your encrypted secret archive or its device-only Keychain key.
 
 Preferences → Snippets also shows the active library location. **Move Library…** copies the
 library to a folder such as iCloud Drive or Dropbox, **Link to Existing…** adopts an existing
@@ -225,7 +232,7 @@ Open **DevType Preferences** from the menu bar or press **`⌘,`**. The window f
 
 1. 🏠 **Home**: First-class getting started dashboard displaying engine status, quick actions (New Snippet, Templates, Import), live scratchpad test field, active shortcuts summary, and top/recent snippets.
 2. ⚙️ **General**: Startup settings (Launch at login), the Backspace expansion-undo switch, application language (System, English, 한국어, 日本語), opt-in update check (at most once a day, zero telemetry), and the **Muted Apps** list (apps where DevType pauses expansion).
-3. 📚 **Snippets**: Secret snippets security configuration (Touch ID requirement), library location controls, import/export buttons, trigger-conflict detection, and detailed usage statistics.
+3. 📚 **Snippets**: Secrets security configuration (Touch ID requirement), library location controls, import/export buttons, trigger-conflict detection, and detailed usage statistics.
 4. ⌨️ **Hotkeys**: Customizable shortcut recorders for Command Palette (`⌘/`), AI Action Palette (`⌘⌥A`), Smart Dictation (`⌘⌥V`), and hotkey macro actions.
 5. 🎙️ **Voice**: Speech engine selector (Apple Speech, Local AI, Local Whisper, Gemini) with live readiness indicators, prompt tone styles, a "While you speak" mode (type as you speak, show words in the bubble and insert at the end, or show nothing and insert at the end), custom phonetic vocabulary dictionary, voice action triggers, and microphone permissions.
 6. ✨ **AI** (macOS 26+): Enable on-device transforms, configure per-action output delivery (direct replace vs diff preview), manage application allowlists, and toggle optional semantic search routing.

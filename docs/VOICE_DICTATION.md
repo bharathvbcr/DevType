@@ -1,107 +1,64 @@
-# Voice Smart Dictation in DevType
+# Voice dictation
 
-DevType integrates Smart Speech-to-Text and Dictation across four selectable engines — three of them fully local — paired with Google Gemini **Jot**-inspired thought revision and disfluency resolution, rendered in a floating dictation HUD that adopts Apple **Liquid Glass** on macOS 26+ (`NSGlassEffectView`) with a material fallback below.
+[Documentation](README.md) · [Permissions](PERMISSIONS_GUIDE.md) · [Privacy](../SECURITY.md)
 
----
+Press `⌘⌥V` to use push-to-talk or toggle dictation. Configure the shortcut in **Preferences → Hotkeys** and choose the engine and delivery behavior in **Preferences → Voice**. Check readiness before starting: a selected engine is not necessarily ready to record or transcribe.
 
-## 🎙️ Architecture & Features
+## Choose an engine
 
-### 1. Four Selectable Speech Engines
+| Engine | Recognition and correction | Setup and data route |
+|---|---|---|
+| Apple Speech | On-device Apple recognition plus deterministic cleanup | Default. Needs microphone and Speech Recognition grants and a supported, ready locale |
+| Local AI | Apple recognition, then local model correction | Prefers available Apple Foundation Models on macOS 26+; can use a configured loopback correction server |
+| Local Whisper | A local `whisper.cpp` server plus deterministic cleanup | Needs an installed server and verified model; audio goes to the configured loopback endpoint |
+| Gemini | Cloud transcription with built-in formatting, followed by local cleanup | Requires your API key and separate cloud-audio consent; audio and steering instructions go to Google |
 
-Pick the recognizer in **Preferences $\to$ Voice**. Each engine reports its own readiness, so what is actually installed and reachable is visible before you hold the key.
+On macOS 26+, Apple recognition prefers **SpeechAnalyzer** when its locale assets and service are ready. Older systems use the legacy `SFSpeechRecognizer` path with on-device recognition required. The registry can fall back to the legacy provider only after that provider independently reports ready. An unavailable cloud provider is refused rather than silently changing the selected route.
 
-* **Apple Speech (Rule-based)**:
-  - On-device `SFSpeechRecognizer` recognition followed by DevType's deterministic cleanup rules.
-  - Nothing to download, nothing to configure, no API key. This is where dictation lands when nothing else is set up.
-* **Local AI (On-Device)**:
-  - The same on-device Apple Speech recognition, with the transcript polished by a local language model.
-  - Apple Intelligence Foundation Models on macOS 26+; otherwise a loopback endpoint — Ollama at `http://localhost:11434/v1/chat/completions` by default, or any OpenAI-compatible local server you point it at.
-  - Audio never leaves the Mac; only the recognized text is handed to the local model.
-  - Endpoint validation is enforced for local correction paths (loopback hosts only, no redirect fan-out, and operation-specific response-size limits).
-* **Local Whisper (whisper.cpp)**:
-  - A `whisper-server` on loopback (`http://127.0.0.1:8080/inference` by default), noticeably stronger than Apple Speech on technical vocabulary and fully offline.
-  - DevType detects an installed binary, can fetch the default `ggml-base.en.bin` (~148 MB) into `~/.cache/whisper.cpp`, and can start the server for you — or defer to one you already have running and leave it under your control.
-  - The local server path is guarded by the same transport policy used by other local providers.
-* **Gemini 3.5 Transcribe (Cloud, opt-in)**:
-  - Cloud transcription that handles disfluency removal, self-correction collapse, punctuation, and formatting natively in a single pass.
-  - Requires a Google API key that you supply; it is held in the login keychain. With no key stored, Gemini remains selected and dictation fails closed with an actionable credential prompt rather than silently changing providers.
+Speech assets may need installation. **Preferences → Voice** offers readiness and setup actions; checking readiness itself does not authorize a download. Local Whisper setup can download the pinned `base.en` model from Hugging Face. Once assets are installed, local recognition does not require an internet connection. A local server remains a separate process responsible for the data it receives.
 
-### 2. Jot Inspirations & Thought-Revision Polish
-Inspired by Google Gemini's [Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS), DevType runs post-processing speech intelligence:
-* **Thought Revisions & Self-Corrections**:
-  - Automatically resolves mid-sentence corrections (e.g. *"Let's meet at 1:00 PM... actually, make it 2:00 PM"* $\to$ *"Let's meet at 2:00 PM"*).
-* **Disfluency & Filler Stripping**:
-  - Strips verbal hesitations (*"um"*, *"uh"*, *"er"*, *"ah"*, *"like"*, *"you know"*), Korean fillers (*"음"*, *"어"*, *"그"*), and Japanese fillers (*"えーと"*, *"あの"*, *"うーん"*).
-* **Custom Vocabulary & Jargon**:
-  - Dynamic phonetic replacement dictionary mapping spoken phrases to exact camelCase or custom brand casing (e.g., *"dev type"* $\to$ `DevType`, *"next js"* $\to$ `Next.js`).
-* **Multi-Register Tone Styling**:
-  - **Natural**: Balanced conversational register with polished punctuation.
-  - **Email**: Professional register with formal sentence structuring.
-  - **Chat**: Casual, modern chat messaging style with contractions.
-  - **Code**: Automatic identifier and operator formatting (e.g. *"user profile manager"* $\to$ `userProfileManager`, *"fat arrow"* $\to$ `=>`, *"strict equal"* $\to$ `===`, *"constant case api url"* $\to$ `API_URL`).
-  - **Verbatim**: Exact transcription without styling.
+The default Whisper endpoint is `http://127.0.0.1:8080/inference`. The default correction endpoint is `http://localhost:11434/v1/chat/completions`. DevType accepts loopback hosts only, rejects URL credentials and redirects, and bounds responses. Correction routing supports Ollama-native and OpenAI-compatible endpoints; a configured URL is not proof that a model is loaded.
 
-### 3. What Happens While You Speak
+## Decide when words arrive
 
-Recognizing speech and typing it into your document are separate decisions, chosen in
-**Preferences → Voice → "While you speak"**:
+**Preferences → Voice → While you speak** controls delivery separately from the recognizer:
 
-* **Type into the document as I speak** (default) — recognized words are typed progressively and
-  reconciled against the corrected transcript when the session ends. Fastest to read back, but the
-  document is rewritten under the caret mid-sentence.
-* **Show words in the bubble, insert at the end** — the dictation HUD shows the running transcript
-  while your document is left untouched; the finished, proofread text arrives in a single insertion.
-* **Show nothing, insert at the end** — no live recognition at all. The HUD shows only that it is
-  listening, and the finished text arrives in one insertion. This is the only mode that does not
-  need the Speech Recognition grant for a preview.
+| Mode | While recording | At the end |
+|---|---|---|
+| Type into the document as I speak | Inserts live words | Reconciles with the corrected transcript when safe |
+| Show words in the bubble, insert at the end | Shows live words in the HUD | Inserts the finished text |
+| Show nothing, insert at the end | Shows listening status without live recognition | Inserts the finished text |
 
-Insertion is automatic in every mode — there is no confirm step. Delivery goes through
-`TextInjectionPipeline`, which writes via the Accessibility API and a synthetic paste, snapshotting
-and restoring your clipboard around it. The one exception is a password field under macOS Secure
-Input, where a synthetic paste can be dropped; DevType holds the text on the clipboard longer there
-so you can paste it yourself.
+Insertion is automatic; these modes do not add an approval step. Apple final transcription needs Speech Recognition permission. Gemini and Whisper also need that permission when using Apple live previews; the no-preview mode avoids that additional requirement.
 
-Whatever the mode, a finished transcript may only *replace* on-screen dictated text while it stays
-inside the same deletion ceiling the correction policy declares (`maxDeletionRatio`). A transcript
-that accounts for materially less than what you can see is refused, and the words already on screen
-are kept — losing formatting is recoverable, losing the sentences is not.
+Keep the intended document focused. Delivery rechecks the target and session before changing text. It can refuse when focus, selection, permissions, or the session changes. A final correction that would remove too much visible dictated text is refused so the existing words remain. If delivery is **posted, unverified**, inspect the destination before retrying: posting a paste is not proof that the editor accepted it.
 
-### 4. Hardened Audio Pipeline & Crash Journaling
-* **Audio Interruption Resilience**: Listens to `AVAudioEngineConfigurationChange` to handle headphones / AirPods switching without dropped taps or leaks.
-* **Millisecond-1 Audio Journaling**: 16kHz mono 16-bit PCM capture written continuously to `capture.caf` in a per-session directory under `~/Library/Application Support/DevType/VoiceSessions/`, so a crash mid-sentence leaves a recoverable recording rather than nothing.
-* **Single-Shot Watchdog Transcription**: Each session is armed with a watchdog sized from the snapshot it started with (the configured local-model timeout plus headroom, never under 5 seconds), so a wedged recognizer or corrector ends the session instead of stalling dictation.
-* **Session ownership**: Handler setup, microphone start/finalization, and audio-level callbacks recheck the session generation so retired work cannot reopen the microphone or update the current HUD.
-* **Recoverable records**: Manifest and transcript files are published with unique, owner-only staging files and atomic replacement. Writers reject records beyond recovery's limits: 1 MiB for manifests/raw transcripts, 4 MiB for final transcripts, and 64 KiB for delivery receipts.
-* **Bounded Apple Intelligence correction**: Deadline or cancellation abandons the response after a short cleanup grace. An engine that ignores cancellation keeps its admission slot until it exits, so later sessions use fallback instead of accumulating model operations.
+## Correction and vocabulary
 
-### 5. Voice Dictation HUD (`VoiceHUDPanel`)
-* Floating non-activating AppKit HUD that never steals key focus from the target field:
-  - **Legible Liquid Glass on macOS 26+**: runtime `NSGlassEffectView` regular style with a restrained crimson tint; `NSVisualEffectView` material fallback with a crimson hairline on older macOS.
-  - **Minimal content hierarchy**: one small SF Symbol/status line and the live transcript — no duplicate title, badge, cursor, or decorative waveform row.
-  - **Inset organic silhouette**: DevType-owned Bezier geometry (`LiquidBlobGeometry`) that stays inside the panel bounds and breathes subtly with live mic RMS.
-  - **Transcript-driven expansion**: the transparent surface eases wider and then taller as live STT tokens arrive (coalesced, not one animation per token), capped at 500×188 points.
-  - **Compact fluid metering**: an original two-harmonic meter shares the status line (Apple does not ship Siri orb / Liquid Glass shader assets for application embedding).
-  - **Fast transient motion**: 140 ms entrance/exit fades; successful insertions hold for 750 ms while errors retain a longer 2 s reading window.
-  - **Accessibility**: Reduce Transparency → solid fill; Reduce Motion → frozen silhouette; localized status strings and live accessibility values.
+The correction pipeline supports filler cleanup, self-correction handling, custom vocabulary, and Natural, Email, Chat, Code, or Verbatim styling. Use vocabulary entries for names or identifiers that recognition repeatedly misses. Model output can still change meaning; review dictated text, especially names, numbers, and code.
 
----
+Local AI captures the correction provider plan at session start. Apple Foundation Models can fall back through the configured local correction routes; deterministic cleanup remains a bounded fallback. Optional **proofread before insert** uses the on-device proofreading path on supported macOS versions. Verbatim mode bypasses model cleanup.
 
-## ⌨️ Shortcuts & Hotkey Controls
+## Recordings and recovery
 
-* **Global Push-to-Talk / Toggle**: Default `⌘⌥V` (configurable in **Preferences $\to$ Voice**).
-* **Command Palette**: Type `> voice` or `voice` in Inline Search (`⌘/`) to trigger smart dictation.
-* **Status Bar Menu**: Quick access via the menu bar icon $\to$ **Smart Dictation (Voice)**.
+Audio is journaled to `capture.caf` inside a per-session folder at:
 
----
+```text
+~/Library/Application Support/DevType/VoiceSessions/
+```
 
-## 🔒 Privacy & Security
+These local records can contain your voice and transcript. They support recovery when recording, transcription, or delivery is interrupted; local processing does not mean nothing is saved. Use the application's voice history/recovery controls to inspect saved sessions.
 
-* **Local by default**: With **Apple Speech**, **Local AI**, or **Local Whisper** selected, no audio leaves your Mac — Apple Speech and Local AI recognize on-device, and Local Whisper talks only to a `whisper.cpp` server on loopback. Local AI additionally sends the *recognized text* (never the audio) to your local model endpoint.
-* **Cloud requires two explicit choices**: **Gemini 3.5 Transcribe** is the one engine that uploads audio, to Google. It remains inert until you both store your own API key in the login keychain and grant the separate cloud-audio consent in Preferences. If either prerequisite is missing, DevType refuses before capture rather than silently changing providers or routes.
-* **Routes are enforced, not merely documented**: every session is stamped with the privacy route its engine implies (`onDeviceOnly`, `localNetworkOnly`, `cloudPermitted`), and the speech provider registry will not hand back a provider whose own route that session does not permit.
+The session coordinator owns capture, recognition, correction, and delivery. Generation checks reject retired work; a watchdog bounds the overall session. Recovery writes use atomic replacement and size limits. A transcript existing on disk does not prove it reached the target app.
 
----
+Detailed voice tracing is **off by default** and can include dictated text when enabled. Review local recordings and traces before sharing them. Ordinary diagnostic summaries use bounded, redacted outcomes; do not attach your entire application-support folder to a bug report.
 
-## 🤝 Acknowledgement
+## Troubleshooting
 
-Special appreciation to the Google Gemini team for [Jot (`jot-gemini-transcribe-macOS`)](https://github.com/google-gemini/jot-gemini-transcribe-macOS), which pioneered thought-revision handling and millisecond-1 audio journaling on macOS.
+- **Not ready:** read the selected engine's reason in Voice preferences. Resolve its permission, asset, model, or endpoint requirement before recording again.
+- **No microphone:** check the selected input device and Microphone grant; reconnecting headphones can change the active device.
+- **Local server unavailable:** start the configured server and confirm its model is loaded. Readiness of the server and installation of its model are separate checks.
+- **Cloud refuses before capture:** both the API key and the explicit cloud-audio consent must be present. Choosing Gemini alone grants neither.
+- **Words did not arrive:** inspect the target, delivery outcome, and saved session before retrying. Refocus the intended field; avoid replaying an ambiguous paste.
+
+See [Architecture](ARCHITECTURE.md) for lifecycle details and [Support](../SUPPORT.md) for reporting an issue. The workflow draws inspiration from [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS).

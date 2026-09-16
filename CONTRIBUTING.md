@@ -17,7 +17,7 @@ By participating in this project, you agree to abide by our [Code of Conduct](CO
 ### Requirements
 
 - **macOS 14.0 (Sonoma)** or later (macOS 26+ required for on-device Apple Foundation Models support).
-- **Xcode 15.0+** (or Command Line Tools) with **Swift 5.9+**.
+- **Full Xcode** with a Swift 5.9+ toolchain; use an SDK containing Foundation Models for the macOS 26 AI paths. The test wrapper selects full Xcode when available.
 - Standard macOS developer utilities: `plutil`, `codesign`, `security`.
 
 ### 1. Clone the Repository
@@ -66,40 +66,16 @@ This creates a certificate named `DevType Local Signing` in your login keychain.
 
 The project is organized into modular SwiftPM targets:
 
-```
-DevType/
-├── Sources/
-│   ├── DevTypeApp/          # AppKit Application Layer (UI, Menus, Panels, ViewControllers)
-│   │   ├── main.swift                     # App entry point
-│   │   ├── AppDelegate.swift              # App lifecycle, status item, menus
-│   │   ├── SnippetManagerViewController   # Snippet editor and list view
-│   │   ├── InlineSearchPanel.swift        # Command palette (⌘/)
-│   │   ├── AIActionPanel.swift            # AI quick transform palette (⌘⌥A)
-│   │   ├── AIPreviewPanel.swift           # AI diff and review overlay
-│   │   ├── DevTypeTheme.swift             # UI theme tokens and styling
-│   │   └── ...
-│   │
-│   ├── ExpanderEngine/      # Core Business Logic & Expansion Engine
-│   │   ├── Engine/                        # CGEventTap, text injection, type-ahead buffer
-│   │   ├── Matching/                      # Prefix tree, abbreviation matching, fuzzy search
-│   │   ├── Macros/                        # Mustache & TextExpander parser, math evaluation
-│   │   ├── AI/                            # Apple Foundation Models, selection gates, offline Markdown transforms
-│   │   ├── Voice/                         # Smart Dictation engines, correction pipeline, crash journaling
-│   │   ├── Models/                        # Snippet models, SecretStore, usage stats
-│   │   ├── Permissions/                   # TCC checks, AX verification, recovery
-│   │   ├── Sync/                          # Import/export (TextExpander bundles, Espanso YAML), search, palette catalog
-│   │   └── Updates/                       # Version parsing/ordering, opt-in GitHub release check
-│   │
-│   └── DevTypeSafety/       # Objective-C Runtime Exception Trampoline
-│       └── include/DevTypeSafety.h        # @try/@catch wrappers for unsafe AppKit/AX calls
-│
-├── Tests/
-│   └── ExpanderEngineTests/ # Headless unit tests, fuzz tests, stress tests
-│
-├── Scripts/                 # Build, test, packaging, and helper scripts
-├── Resources/               # App icon, Info.plist, entitlements
-└── docs/                    # Architectural guides, user guides, reference docs
-```
+| Target / directory | Ownership |
+|---|---|
+| `Sources/DevTypeApp/` | Executable entry point (`main.swift`) |
+| `Sources/DevTypeAppCore/` | AppDelegate, windows, menus, preferences, and panels |
+| `Sources/ExpanderEngine/` | Matching, macros, injection, AI, voice, storage, and platform adapters |
+| `Sources/DevTypeSafety/` | Objective-C window/KVC exception boundaries and legacy Keychain bridge |
+| `Tests/ExpanderEngineTests/` | Engine behavior and isolated platform tests |
+| `Tests/DevTypeAppTests/` | AppKit controller and application integration tests |
+| `Scripts/` | Build, validation, packaging, and release commands |
+| `docs/` | Current guides, versioned records, and static website |
 
 For detailed component interaction, data flow diagrams, and safety contracts, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -111,9 +87,9 @@ When writing code for DevType, please keep the following core principles in mind
 
 ### 1. Zero Telemetry & Absolute Privacy
 - **Zero telemetry, always**: never add analytics, network logging, crash reporting, or usage-tracking SDKs. There is no exception to this one, and no setting that turns it on.
-- **Offline by default; network only when the user asks**: every feature works with the network unplugged. A handful of features *may* reach out, but only after the user explicitly enables them, and each is off until they do — cloud transcription (`GeminiTranscriptionClient`), local LLM servers on `localhost` (`OllamaCorrector`, `OpenAICompatibleCorrector`), Whisper model downloads (`WhisperServerController`), and the update check (`UpdateChecker`). If you add a network path, it must follow the same shape: opt-in, off by default, disclosed in the UI, and sending nothing about the user or their machine beyond what the feature strictly requires.
+- **Offline by default; network only when the user asks**: core expansion and deterministic tools work without the internet; speech assets and local models must first be available. A handful of features *may* reach out, but only after the user explicitly enables them, and each is off until they do — cloud transcription (`GeminiTranscriptionClient`), local LLM servers on `localhost` (`OllamaCorrector`, `OpenAICompatibleCorrector`), Whisper model downloads (`WhisperServerController`), and the update check (`UpdateChecker`). If you add a network path, it must follow the same shape: opt-in, off by default, disclosed in the UI, and sending nothing about the user or their machine beyond what the feature strictly requires.
 - **Fail-Closed Security**: Never capture or process keystrokes during password entry (`NSSecureTextField`), Secure Event Input locks, or in muted applications.
-- **Secrets Protection**: Secret snippets are AES-GCM encrypted and gated behind Touch ID. Never log secrets, leak them to clipboard history, or expose them in diagnostic exports.
+- **Secrets Protection**: Secrets are independent records with AES-GCM-protected values and a configurable authentication gate. Never expose values in logs or diagnostic exports. Clipboard markers request exclusion from compatible managers but cannot enforce another process’s retention policy.
 
 ### 2. Thread Safety & Concurrency
 - **UI Safety**: All AppKit UI operations, windows, and panels MUST execute on `@MainActor`.
@@ -141,7 +117,7 @@ Every fix and feature must be accompanied by comprehensive unit tests.
 ./Scripts/test.sh --coverage
 
 # Run specific test suite
-swift test --filter SecretSnippetTests
+./Scripts/test.sh --filter SecretSnippetTests
 
 # Run full local validation suite
 ./Scripts/ci-local.sh

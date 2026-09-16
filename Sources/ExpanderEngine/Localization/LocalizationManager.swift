@@ -945,6 +945,8 @@ public final class LocalizationManager: ObservableObject {
                 "%@. The typing monitor is active, but text insertion is degraded. Open Permission Recovery (⌘⇧P).",
             "status.tooltip.injectIssue":
                 "DevType is running, but the last text insertion failed. Open Permission Recovery (⌘⇧P).",
+            "status.tooltip.injectRefused":
+                "DevType is running. The last expansion was refused to avoid editing the wrong text — open Permission Recovery (⌘⇧P) to see why.",
             "status.menu": "Status: %@",
             "status.menu.attention": "Status: %@ ⚠",
 
@@ -1676,6 +1678,22 @@ public final class LocalizationManager: ObservableObject {
                 "The last expand was blocked because focus could not be verified. Click into a normal text field and retry once focus settles.",
             "recovery.refuse.generic":
                 "The last expand was blocked (%@). Click into a normal text field (not a password field), then retry.",
+            "recovery.refuse.erase":
+                "The last expand was refused because the field no longer held the trigger — DevType will not erase text it cannot account for. Retype the trigger, or click back into the field and try again.",
+            "recovery.refuse.postEvents":
+                "The last expand needs the Post Events capability. Grant it above, then Re-check.",
+            "recovery.refuse.targetMoved":
+                "The last expand was cancelled because the target app, field, or selection changed first. Click back into the field and retry without switching apps.",
+            "recovery.refuse.fillIn":
+                "The last expand still needs its fill-in values. Complete the fill-in fields, then insert.",
+            "recovery.refuse.image":
+                "The last expand could not read its image attachment. Re-add the image to the snippet, then retry.",
+            "recovery.refuse.secureClipboard":
+                "The last secure insertion could not be completed. Secure snippets paste text only — use ⌘/ (Inline Search) or a hotkey in the target field.",
+            "recovery.refuse.undo":
+                "Undo was refused because the original insertion could not be verified. Use ⌘Z in the app instead — DevType will not reverse an edit it cannot prove it made.",
+            "recovery.refuse.selectionSource":
+                "The generated text could not be delivered because the source field was no longer available. Click back into it and retry.",
             "recovery.health.idle": "Inject health: idle",
             "recovery.health.tapExpected": "Tap expected but not running — the UI will not show a stale Active.",
             "recovery.health.full": "Inject path: full (AX + HID).",
@@ -1847,6 +1865,22 @@ public final class LocalizationManager: ObservableObject {
             "voice.error.secureInput": "Secure input is active — text cannot be inserted here",
             "voice.error.sessionSave": "Could not save the session",
             "voice.error.superseded": "Session superseded",
+            "voice.remedy.grantMicrophone":
+                "Allow microphone access in System Settings, then try again.",
+            "voice.remedy.grantAccessibility":
+                "Grant Accessibility in System Settings, then try again.",
+            "voice.remedy.enterAPIKey":
+                "Add your API key in Preferences → Voice.",
+            "voice.remedy.configureEndpoint":
+                "Check the endpoint in Preferences → Voice.",
+            "voice.remedy.downloadModel":
+                "Download the speech model in Preferences → Voice.",
+            "voice.remedy.freeDiskSpace":
+                "Free up disk space, then try again.",
+            "voice.remedy.otherProvider":
+                "Try a different transcription engine in Preferences → Voice.",
+            "voice.remedy.reviewInHistory":
+                "The recording was kept — open Recent Activity to review it.",
             "voice.result.copiedCharacters": "Copied %d characters",
             "voice.ai.empty.lastInsertion": "Nothing was dictated yet for %@",
             "voice.ai.empty.selection": "No text selected for %@",
@@ -2922,6 +2956,8 @@ public final class LocalizationManager: ObservableObject {
                 "%@. 입력 감시는 활성 상태이지만 텍스트 삽입 기능이 제한됩니다. 권한 복구(⌘⇧P)를 여세요.",
             "status.tooltip.injectIssue":
                 "DevType가 실행 중이지만 마지막 텍스트 삽입에 실패했습니다. 권한 복구(⌘⇧P)를 여세요.",
+            "status.tooltip.injectRefused":
+                "DevType가 실행 중입니다. 잘못된 텍스트를 고치지 않기 위해 마지막 확장이 거부되었습니다 — 이유는 권한 복구(⌘⇧P)에서 확인하세요.",
             "status.menu": "상태: %@",
             "status.menu.attention": "상태: %@ ⚠",
 
@@ -3619,6 +3655,22 @@ public final class LocalizationManager: ObservableObject {
                 "포커스를 확인할 수 없어 마지막 확장이 차단되었습니다. 일반 텍스트 필드를 클릭하고 포커스가 안정된 뒤 다시 시도하세요.",
             "recovery.refuse.generic":
                 "마지막 확장이 차단되었습니다 (%@). 암호 필드가 아닌 일반 텍스트 필드를 클릭한 뒤 다시 시도하세요.",
+            "recovery.refuse.erase":
+                "필드에 더 이상 트리거가 없어 마지막 확장이 거부되었습니다 — DevType은 확인할 수 없는 텍스트를 지우지 않습니다. 트리거를 다시 입력하거나 필드를 클릭한 뒤 다시 시도하세요.",
+            "recovery.refuse.postEvents":
+                "마지막 확장에는 이벤트 전송 권한이 필요합니다. 위에서 허용한 뒤 다시 확인하세요.",
+            "recovery.refuse.targetMoved":
+                "대상 앱·필드·선택 영역이 먼저 바뀜 마지막 확장이 취소되었습니다. 필드를 다시 클릭하고 앱을 전환하지 않은 채 다시 시도하세요.",
+            "recovery.refuse.fillIn":
+                "마지막 확장에는 입력 값이 필요합니다. 입력 필드를 채운 뒤 삽입하세요.",
+            "recovery.refuse.image":
+                "마지막 확장이 이미지 첨부를 읽지 못했습니다. 스니펫에 이미지를 다시 추가한 뒤 시도하세요.",
+            "recovery.refuse.secureClipboard":
+                "마지막 보안 삽입을 완료하지 못했습니다. 보안 스니펫은 텍스트만 붙여넣습니다 — 대상 필드에서 ⌘/(인라인 검색)이나 단축키를 사용하세요.",
+            "recovery.refuse.undo":
+                "원래 삽입을 확인할 수 없어 실행 취소가 거부되었습니다. 대신 앱에서 ⌘Z를 사용하세요 — DevType은 자신이 했다고 증명할 수 없는 편집을 되돌리지 않습니다.",
+            "recovery.refuse.selectionSource":
+                "원본 필드를 더 이상 사용할 수 없어 생성된 텍스트를 전달하지 못했습니다. 해당 필드를 다시 클릭한 뒤 시도하세요.",
             "recovery.health.idle": "삽입 상태: 유휴",
             "recovery.health.tapExpected": "탭이 필요하지만 실행 중이 아닙니다 — 오래된 활성 상태는 표시되지 않습니다.",
             "recovery.health.full": "삽입 경로: 전체 (AX + HID).",
@@ -3785,6 +3837,22 @@ public final class LocalizationManager: ObservableObject {
             "voice.error.secureInput": "보안 입력이 활성화되어 여기에 텍스트를 삽입할 수 없습니다",
             "voice.error.sessionSave": "세션을 저장할 수 없습니다",
             "voice.error.superseded": "세션이 새 요청으로 교체되었습니다",
+            "voice.remedy.grantMicrophone":
+                "시스템 설정에서 마이크 접근을 허용한 뒤 다시 시도하세요.",
+            "voice.remedy.grantAccessibility":
+                "시스템 설정에서 손쉬운 사용을 허용한 뒤 다시 시도하세요.",
+            "voice.remedy.enterAPIKey":
+                "환경설정 → 음성에서 API 키를 추가하세요.",
+            "voice.remedy.configureEndpoint":
+                "환경설정 → 음성에서 엔드포인트를 확인하세요.",
+            "voice.remedy.downloadModel":
+                "환경설정 → 음성에서 음성 모델을 다운로드하세요.",
+            "voice.remedy.freeDiskSpace":
+                "디스크 공간을 확보한 뒤 다시 시도하세요.",
+            "voice.remedy.otherProvider":
+                "환경설정 → 음성에서 다른 전사 엔진을 사용해 보세요.",
+            "voice.remedy.reviewInHistory":
+                "녹음은 보관되었습니다 — 최근 활동에서 확인하세요.",
             "voice.result.copiedCharacters": "%d자를 복사했습니다",
             "voice.ai.empty.lastInsertion": "%@ 작업을 적용할 받아쓰기 내용이 아직 없습니다",
             "voice.ai.empty.selection": "%@ 작업을 적용할 텍스트를 선택하지 않았습니다",
@@ -4862,6 +4930,8 @@ public final class LocalizationManager: ObservableObject {
                 "%@。入力監視は動作中ですが、テキスト挿入機能が制限されています。権限の復旧（⌘⇧P）を開いてください。",
             "status.tooltip.injectIssue":
                 "DevType は実行中ですが、直前のテキスト挿入に失敗しました。権限の復旧（⌘⇧P）を開いてください。",
+            "status.tooltip.injectRefused":
+                "DevType は実行中です。誤ったテキストを編集しないよう直前の展開を拒否しました — 理由は権限の復旧（⌘⇧P）で確認してください。",
             "status.menu": "状態: %@",
             "status.menu.attention": "状態: %@ ⚠",
 
@@ -5563,6 +5633,22 @@ public final class LocalizationManager: ObservableObject {
                 "フォーカスを確認できなかったため直前の展開がブロックされました。通常のテキストフィールドをクリックし、フォーカスが落ち着いてから再試行してください。",
             "recovery.refuse.generic":
                 "直前の展開がブロックされました (%@)。パスワードフィールドではない通常のテキストフィールドをクリックしてから再試行してください。",
+            "recovery.refuse.erase":
+                "フィールドにトリガーが残っていなかったため、直前の展開を拒否しました — DevType は根拠のないテキストを削除しません。トリガーを入力し直すか、フィールドをクリックしてから再試行してください。",
+            "recovery.refuse.postEvents":
+                "直前の展開にはイベント送信の権限が必要です。上で許可してから再確認してください。",
+            "recovery.refuse.targetMoved":
+                "対象のアプリ・フィールド・選択範囲が先に変わったため、直前の展開はキャンセルされました。フィールドをクリックし直し、アプリを切り替えずに再試行してください。",
+            "recovery.refuse.fillIn":
+                "直前の展開には入力値が必要です。入力欄を埋めてから挿入してください。",
+            "recovery.refuse.image":
+                "直前の展開で画像添付を読み取れませんでした。スニペットに画像を追加し直してから再試行してください。",
+            "recovery.refuse.secureClipboard":
+                "直前のセキュア挿入を完了できませんでした。セキュアスニペットはテキストのみをペーストします — 対象フィールドで ⌘/（インライン検索）かショートカットを使ってください。",
+            "recovery.refuse.undo":
+                "元の挿入を確認できなかったため、取り消しを拒否しました。代わりにアプリ側で ⌘Z を使ってください — DevType は自分が行ったと証明できない編集を元に戻しません。",
+            "recovery.refuse.selectionSource":
+                "元のフィールドが利用できなくなったため、生成テキストを配信できませんでした。そのフィールドをクリックし直してから再試行してください。",
             "recovery.health.idle": "挿入の状態: アイドル",
             "recovery.health.tapExpected": "タップが必要ですが動作していません — 古い動作中表示は行いません。",
             "recovery.health.full": "挿入経路: フル（AX + HID）。",
@@ -5732,6 +5818,22 @@ public final class LocalizationManager: ObservableObject {
             "voice.error.secureInput": "セキュア入力が有効なため、ここにはテキストを挿入できません",
             "voice.error.sessionSave": "セッションを保存できませんでした",
             "voice.error.superseded": "セッションは新しいリクエストに置き換えられました",
+            "voice.remedy.grantMicrophone":
+                "システム設定でマイクのアクセスを許可してから再試行してください。",
+            "voice.remedy.grantAccessibility":
+                "システム設定でアクセシビリティを許可してから再試行してください。",
+            "voice.remedy.enterAPIKey":
+                "環境設定 → 音声で API キーを追加してください。",
+            "voice.remedy.configureEndpoint":
+                "環境設定 → 音声でエンドポイントを確認してください。",
+            "voice.remedy.downloadModel":
+                "環境設定 → 音声で音声モデルをダウンロードしてください。",
+            "voice.remedy.freeDiskSpace":
+                "ディスクの空き容量を確保してから再試行してください。",
+            "voice.remedy.otherProvider":
+                "環境設定 → 音声で別の文字起こしエンジンを試してください。",
+            "voice.remedy.reviewInHistory":
+                "録音は保持されています — 最近のアクティビティで確認してください。",
             "voice.result.copiedCharacters": "%d文字をコピーしました",
             "voice.ai.empty.lastInsertion": "%@を適用する音声入力がまだありません",
             "voice.ai.empty.selection": "%@を適用するテキストが選択されていません",

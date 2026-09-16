@@ -1048,11 +1048,45 @@ public final class VoiceDictationController: @unchecked Sendable {
         }
     }
 
+    /// Codes whose own sentence already names the remedy that `userAction` would repeat.
+    ///
+    /// "Allow microphone access in System Settings" followed by the `.grantMicrophonePermission`
+    /// remedy would say the same thing twice. Everything *not* listed here gets its remedy
+    /// appended — which is the whole point: `manifestWriteFailed` carries `.freeDiskSpace` and
+    /// used to reach the user as "Could not save the session", naming the fault and no fix.
+    ///
+    /// `RefusalRemedyTests` walks every `FailureCode` × `UserAction` pair and holds this honest:
+    /// a code either names its own remedy or is given one.
+    static let codesNamingTheirOwnRemedy: Set<FailureCode> = [
+        .microphonePermissionDenied,
+        .speechRecognitionPermissionDenied,
+        .accessibilityPermissionDenied,
+        .missingAPIKey,
+        .credentialUnavailable,
+        .authFailed,
+        .diskFull,
+        .modelNotFound,
+        .modelLoadFailed,
+        .cloudAudioConsentRequired,
+        .buildLacksSpeechAnalyzer
+    ]
+
     /// Maps a structured failure to something the user can act on. The failure already
     /// carries a `userAction`, so the message names the fix rather than the fault.
     static func message(
         for failure: VoiceFailure,
         localization: LocalizationManager = .shared
+    ) -> String {
+        let sentence = baseMessage(for: failure, localization: localization)
+        guard let action = failure.userAction,
+              !codesNamingTheirOwnRemedy.contains(failure.code) else { return sentence }
+        return sentence + " " + localization.s(action.remedyKey)
+    }
+
+    /// The fault half — what happened, with no remedy attached. Callers want `message(for:)`.
+    private static func baseMessage(
+        for failure: VoiceFailure,
+        localization: LocalizationManager
     ) -> String {
         switch failure.code {
         case .noMicrophone: return localization.s("voice.error.noMicrophone")

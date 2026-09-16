@@ -1,283 +1,79 @@
-<p align="center">
-  <img src="docs/assets/devtype_logo.png" alt="DevType macOS Text Expander Logo" width="128" height="128">
-</p>
+<p align="center"><img src="docs/assets/devtype_logo.png" width="96" height="96" alt="DevType app icon"></p>
 
-<h1 align="center">DevType</h1>
+# DevType
 
-<p align="center">
-  <strong>Native macOS Text Expander & On-Device AI Writing Assistant</strong>
-</p>
+**Less typing. More of your own words.**
 
-<p align="center">
-  <a href="https://devtype.vbcr.dev/"><img src="https://img.shields.io/badge/website-devtype.vbcr.dev-EC4899?style=flat&logo=apple&logoColor=white" alt="Live Website"></a>
-  <a href="https://github.com/bharathvbcr/DevType/actions/workflows/ci.yml"><img src="https://github.com/bharathvbcr/DevType/actions/workflows/ci.yml/badge.svg" alt="CI Status"></a>
-  <img src="https://img.shields.io/badge/platform-macOS%2014.0%2B-blue" alt="macOS 14+">
-  <img src="https://img.shields.io/badge/language-Swift%205.9-orange" alt="Swift 5.9">
-  <img src="https://img.shields.io/badge/AI-Apple%20Foundation%20Models-purple" alt="Apple Intelligence">
-  <img src="https://img.shields.io/badge/telemetry-100%25%20Offline-brightgreen" alt="Zero Telemetry">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
-  <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-  <a href="#-contributors"><img src="https://img.shields.io/badge/all_contributors-1-orange.svg" alt="All Contributors"></a>
-  <!-- ALL-CONTRIBUTORS-BADGE:END -->
-</p>
+A native macOS menu bar app for reusable snippets, voice dictation, on-device writing tools, and deliberately copied secrets. Built with Swift and AppKit. Free and open source under the MIT license.
 
----
+[Download for macOS](https://github.com/bharathvbcr/DevType/releases/latest) · [User guide](docs/USER_GUIDE.md) · [Documentation](docs/README.md) · [Release notes](docs/releases/)
 
-<p align="center">
-  <img src="docs/assets/devtype_social_preview.jpg" alt="DevType macOS Text Expander Social Preview Banner" width="100%">
-</p>
+![DevType snippet library](docs/assets/screenshots/snippet-library.png)
 
-<p align="center">
-  <a href="https://devtype.vbcr.dev/"><strong>Explore the Live Interactive Typing Sandbox &amp; Documentation (devtype.vbcr.dev) &rarr;</strong></a>
-</p>
+## What you can do
 
-**DevType** is a fast, lightweight, native macOS text expander and snippet manager built with Swift and AppKit. Equipped with on-device AI text transformations powered by Apple Foundation Models, DevType offers sub-millisecond keyword expansion and offline writing tools with zero cloud telemetry.
+- **Expand a few characters into the text you reuse.** Organize text, image, template, and AI-action snippets into groups. Import TextExpander bundles or Espanso YAML; export to JSON, YAML, an Espanso folder, or CSV.
+- **Find it with `⌘/`.** Search snippets, calculate, insert dates, change case, format JSON, generate UUIDs, or run a custom AI instruction. Structured queries such as `group:"Client Work" -tag:draft` narrow your library.
+- **Work on selected text with `⌘⌥A`.** Proofread, rewrite, condense, translate, and use code-oriented actions through Apple Foundation Models. Remove Markdown and other deterministic text operations also work without an AI model.
+- **Dictate with `⌘⌥V`.** Choose Apple Speech, Local AI, Local Whisper, or optional Gemini cloud transcription. Type progressively, preview in the floating bubble, or insert at the end.
+- **Keep secrets separate.** Add passwords in **Copy Secret → Manage Secrets…**, then deliberately copy and paste. Secrets have no typed trigger. Values live in encrypted storage, separate from snippet exports.
+- **Control where expansion happens.** Mute apps, pause during secure input, rebind global shortcuts, and choose whether Backspace reverses a recent expansion.
 
-It expands typed triggers in place, renders Mustache and TextExpander macros, runs local AI proofreading and rewriting, and keeps passwords in an encrypted, Touch ID-gated store. Existing TextExpander and Espanso libraries import directly.
+## Start here
 
----
+1. Download a `.dmg` from [GitHub Releases](https://github.com/bharathvbcr/DevType/releases/latest), move **DevType.app** to **Applications**, and open it.
+2. Follow the permission setup for **Accessibility** and **Input Monitoring**. See [permission recovery](docs/PERMISSIONS_GUIDE.md) if macOS does not recognize the grant.
+3. Open **Snippet Manager** from the menu bar. Create a text snippet with trigger `;sig` and a short signature, then try it in a regular text field.
+4. Open **Preferences → Hotkeys** to review the palette, AI, and voice shortcuts.
 
-## 📑 Table of Contents
+The repository's release workflow permits ad-hoc signed, unnotarized builds. Read the notes for the artifact you download; signing and Gatekeeper approval are different checks. See [installation help](docs/USER_GUIDE.md#installation).
 
-- [📸 Screenshots](#-screenshots)
-- [✨ Key Features](#-key-features)
-- [⌨️ Keyboard Shortcuts](#️-keyboard-shortcuts)
-- [🚀 Quick Start & Installation](#-quick-start--installation)
-- [📚 Documentation Suite](#-documentation-suite)
-- [🤖 On-Device AI Transforms](#-on-device-ai-transforms-macos-26)
-- [🎙️ Smart Dictation](#️-smart-dictation)
-- [🔒 Secrets (Touch ID)](#-secrets-passwords)
-- [🧩 Template & Macro Engine](#-template-engine-reference)
-- [🤝 Open Source & Contributing](#-open-source--contributing)
-- [❓ Frequently Asked Questions (FAQ)](#-frequently-asked-questions-faq)
-- [📄 License & Attribution](#-license--attribution)
+## Requirements
 
----
+| Feature | Requirement |
+|---|---|
+| Snippets, palette, deterministic text tools, Secrets | macOS 14 or later; core expansion needs Accessibility and Input Monitoring |
+| Apple Foundation Models actions | macOS 26 or later, a compatible Mac, Apple Intelligence enabled, and an available system model |
+| Dictation | Microphone permission and a ready selected recognizer; Apple transcription and live previews also use Speech Recognition permission |
+| Local Whisper / local model correction | A ready loopback server and its model; setup may require downloads |
+| Gemini dictation | Your Google API key plus separate cloud-audio consent |
 
-## 📸 Screenshots
+App availability and model readiness are separate. Preferences reports the selected engine's current state; an OS version alone does not guarantee it can run.
 
-<p align="center">
-  <img src="docs/assets/screenshots/preferences-home.png" alt="DevType Preferences — Home tab showing engine status, quick actions, and most-used snippets" width="90%">
-</p>
+## Shortcuts
 
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/assets/screenshots/command-palette.png" alt="DevType command palette searching snippets, dates, and text tools"><br>
-      <sub><b>Command palette (<code>⌘/</code>)</b> — snippets, AI tools, math, dates, and text operations in one search field.</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/assets/screenshots/snippet-library.png" alt="DevType snippet library with groups in the sidebar and snippets listed by trigger"><br>
-      <sub><b>Snippet library</b> — groups, filters, and per-snippet usage counts.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/assets/screenshots/snippet-editor.png" alt="DevType snippet editor showing title, trigger, group, replacement text, and behaviour toggles"><br>
-      <sub><b>Snippet editor</b> — live trigger validation, macro insertion, and per-snippet behaviour.</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/assets/screenshots/menu-bar.png" alt="DevType menu bar dropdown listing preferences, snippet manager, palette, dictation, and diagnostics" width="55%"><br>
-      <sub><b>Menu bar</b> — status, secrets, recent expansions, and permission recovery.</sub>
-    </td>
-  </tr>
-</table>
+| Default global shortcut | Action |
+|---|---|
+| `⌘/` | Command palette |
+| `⌘⌥A` | AI action palette for selected text |
+| `⌘⌥V` | Voice dictation |
 
----
+These shortcuts are configurable in **Preferences → Hotkeys**. Menu commands also expose **Snippet Manager** (`⌘⇧M`), **Preferences** (`⌘,`), and **Permission Recovery** (`⌘⇧P`); they are not additional globally registered hotkeys.
 
-## ✨ Key Features
+## Privacy, with the boundaries explained
 
-- ⚡ **Instant Expand-on-Match**: Replaces typed triggers using Accessibility range replacement, with guarded keyboard/paste recovery for inconsistent cursor reports. Input and application changes observed during the erase check cancel the operation.
-- 🎙️ **Smart Dictation**: Push-to-talk speech-to-text with thought-revision / self-correction resolution, filler stripping, and custom vocabulary (inspired by [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)). Pick the recognizer in **Preferences → Voice**: Apple Speech, an on-device local model, or a local `whisper.cpp` server — all offline. A cloud engine is available but stays off unless you supply your own API key. See [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
-- 🤖 **On-Device AI Transforms**: Built-in AI text actions (proofread, rewrite, paraphrase, merge & rewrite, expand, condense, tone shift, bulletize, prompt enhance, code explain/fix/test, git commit message, translate, convert to Markdown) using Apple Foundation Models (macOS 26+), plus a first-class offline **Remove Markdown** action running locally without an AI model on all supported macOS versions (macOS 14+). 100% private, zero API keys required.
-- 🔍 **Hybrid Command Palette** (`⌘/`): Lightning-fast fuzzy and conversational search for snippets and AI tools, selection-aware suggestion ranking, optional on-device semantic routing, inline math (`= 45 * 12.5`), custom one-shot AI prompts (`> …`), date offsets (`tomorrow`, `+3w`, `next friday`), instant text operations (case, sort, dedupe, Base64/URL/JSON, SHA-256/MD5), generators (UUID, lorem, password), and quick app navigation — ranked by your own usage.
-- 🗂️ **Structured Snippet Search**: Find phrases (`"best regards"`), combine fields (`group:"Client Work" tag:billing`), exclude matches (`-draft`), and filter snippet types (`is:image`) in the existing manager and palette.
-- 🔤 **Offline Naming Tools**: Convert text to `snake_case`, `kebab-case`, `camelCase`, or `PascalCase` from the palette or either macro syntax.
-- 🧩 **Dual Macro Engine**: Full support for both Mustache (`{{date:iso:+1d}}`, `{{clipboard}}`, `{{calc: 1+2}}`, `{{uuid}}`, `{{cursor}}`) and TextExpander (`%filltext:name=X%`, `%@+1D%`, `%snippet:x%`, `%|`, `%key:enter%`) template syntaxes.
-- 🖼️ **Rich Image Snippets**: Paste images directly from snippet triggers with full Espanso `image_path` import support.
-- 📦 **One-Click Importers**: Seamlessly import existing snippet libraries from TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML match configs — with export to Espanso YAML, an atomic Espanso `match/` folder, CSV, or DevType JSON.
-- 🛡️ **Privacy & Fail-Closed Security**: Automatic expansion pause during password entry (`NSSecureTextField`), Secure Event Input locks, IME composition, or in muted apps.
-- 🔒 **Independent Secrets**: Manage passwords without triggers or shortcuts, with encrypted storage, an optional Touch ID gate, and an auto-clearing concealed clipboard. Stored values stay out of the library file, snippet exports, and diagnostics. See [SECRETS.md](SECRETS.md).
-- 🔑 **Stable Identity TCC**: Packaged `.app` bundle with dedicated code identity (`com.devtype.app`) so macOS Accessibility & Input Monitoring permissions persist cleanly across updates.
-- 🔔 **Opt-In Update Checks**: DevType can tell you when a new release ships — **off by default**, at most once a day, and it never downloads or installs anything on its own. The request carries no version, machine, or usage data; you get a notice with the release notes and a button to the release page. "Check for Updates…" in the menu bar and Preferences always works regardless of the setting.
+Trigger matching and deterministic text tools run locally. Apple Foundation Models actions use the on-device system model. DevType has no analytics or automatic update installation.
 
----
+Optional features have different data paths: Gemini uploads recorded audio and instructions to Google after consent; local servers receive audio or transcript text over loopback; model setup downloads assets; update checks contact GitHub; a library placed in a synced folder is handled by your sync provider. Voice recovery stores recordings and transcripts on disk. See the [privacy policy](SECURITY.md) and [voice guide](docs/VOICE_DICTATION.md) before choosing a route.
 
-## ⌨️ Keyboard Shortcuts
+Secret copies clear after 90 seconds only if DevType still owns the clipboard. Concealment markers request exclusion from compatible clipboard managers; they cannot prevent another app from retaining a copy. [Secrets design and limits →](SECRETS.md)
 
-| Shortcut | Action | Description |
-|---|---|---|
-| **`⌘/`** | **Command Palette** | Global fuzzy search across all snippets, math evaluation, date tools, and text utilities |
-| **`⌘⌥A`** | **AI Action Palette** | Highlight text and trigger on-device AI transforms, code tools, translations, or custom prompts |
-| **`⌘⌥V`** | **Smart Dictation** | Push-to-talk or hands-free voice dictation with the recognizer you pick in Preferences → Voice |
-| **`⌘⇧M`** | **Snippet Manager** | Open the full snippet library and editor window |
-| **`⌘,`** | **Preferences** | Open the 7-tab Preferences window (Home, General, Snippets, Hotkeys, Voice, AI, Advanced) |
-| **`:trigger`** | **Typed Expansion** | Type any snippet abbreviation to instantly expand the template in place |
-| **`⌘⇧P`** | **Permission Recovery** | Open the status/diagnostics window to fix Accessibility & Input Monitoring grants |
-| **`Esc`** | **Dismiss / Cancel** | Close active panels, search palettes, or AI previews |
+## Build and contribute
 
-Every global shortcut is rebindable in **Preferences → Hotkeys**, which is also where you bind a key straight to a block of text or a URL.
+Use a full Xcode installation. The package declares Swift tools 5.9 and a macOS 14 deployment target; building the Foundation Models paths requires an SDK that includes them.
 
-<p align="center">
-  <img src="docs/assets/screenshots/preferences-hotkeys.png" alt="DevType Preferences — Hotkeys tab with a shortcut recorder for the command palette and a hotkey macro list" width="85%">
-</p>
-
----
-
-## 🚀 Quick Start & Installation
-
-### Option 1: Download Pre-built Release
-Download the latest macOS disk image (`.dmg`) directly from the [DevType GitHub Releases Page](https://github.com/bharathvbcr/DevType/releases/latest).
-
-> **Signing note:** the GitHub release DMG is ad-hoc signed and unnotarized. Local builds may use Apple Development signing.
-> A valid local signature does not establish Gatekeeper approval. If you trust the source,
-> use **Open** from Finder or **System Settings → Privacy & Security → Open Anyway** when required.
-
-1. Open the downloaded `.dmg`.
-2. Drag **DevType.app** to your `/Applications` folder.
-3. Open DevType and follow the Permissions Setup Wizard.
-
-### Option 2: Building from Source
-
-```bash
-# 1. Clone the repository
+```sh
 git clone https://github.com/bharathvbcr/DevType.git
 cd DevType
-
-# 2. Sign with a stable identity so TCC grants survive rebuilds.
-#    If Xcode has an Apple Development certificate (a free Apple ID is enough),
-#    the build picks it up automatically and this step is unnecessary.
-#    Otherwise, create the self-signed fallback:
-./Scripts/make-signing-cert.sh
-
-# 3. Build and package the application bundle (.build/DevType.app)
+./Scripts/test.sh
 ./Scripts/package-app.sh release
-
-# 4. Install to /Applications
-./Scripts/install-app.sh release
-open /Applications/DevType.app
 ```
 
----
+The bundle is written to `.build/DevType.app`. Use `./Scripts/signing-identity.sh` to inspect the selected identity. Packaging, local installation, and release publication are distinct operations; the [developer guide](docs/DEVELOPMENT.md) covers each.
 
-## 📚 Documentation Suite
+[Contributing](CONTRIBUTING.md) · [Architecture](docs/ARCHITECTURE.md) · [Support](SUPPORT.md) · [Security reports](SECURITY.md#-reporting-a-vulnerability)
 
-Explore our complete documentation in the [`docs/`](docs/) directory:
-
-- 📖 **[User Guide](docs/USER_GUIDE.md)**: End-user manual for creating snippets, organizing groups, fill-in forms, Smart Dictation, and preferences.
-- 🏛️ **[Technical Architecture](docs/ARCHITECTURE.md)**: Deep dive into event taps, text injection pipelines, threading models, and exception safety.
-- 🧩 **[Macro Syntax Reference](docs/MACRO_REFERENCE.md)**: Exhaustive reference cheat sheet for Mustache, TextExpander, math, and date tokens.
-- 🔐 **[Permissions & TCC Guide](docs/PERMISSIONS_GUIDE.md)**: Setting up and troubleshooting macOS Accessibility and Input Monitoring permissions.
-- 🛠️ **[Developer Guide](docs/DEVELOPMENT.md)**: Build tooling, running the engine and AppKit-core test suites, debugging, and release automation.
-- 📦 **[Release notes](docs/releases/v1.0.0.md)**: v1.0.0 adds structured snippet search, four offline naming conversions, portable text tools, and cache/calculator hardening. See the [audit and distribution gates](docs/audits/2026-09-10-productivity-release.md). (See also [v0.1.9](docs/releases/v0.1.9.md)).
-- 🔒 **[Secrets Design](SECRETS.md)**: Independent metadata, encrypted storage, recovery, and Touch ID gating.
-
----
-
-## 🤖 On-Device AI Transforms (macOS 26+)
-
-Run Apple Foundation Models text transformations on-device with zero cloud telemetry, plus offline local Markdown tools that run on all macOS versions (macOS 14+).
-
-<p align="center">
-  <img src="docs/assets/screenshots/preferences-ai.png" alt="DevType Preferences — AI tab with the on-device transform toggle, palette hotkey, and per-action output modes" width="85%">
-</p>
-
-- **Enable**: Go to **Preferences → AI** and turn on `Enable on-device AI transforms`.
-- **Action Palette** (`⌘⌥A`): Highlight text in any application and press `⌘⌥A` to bring up the AI action menu.
-- **Typed Triggers**: Assign AI actions directly to triggers (e.g. typing `:fix` or `:rw` over selected text automatically replaces or previews the transformed text).
-- **Available Actions**: Proofread (direct replace), Rewrite, Paraphrase, Merge & Rewrite, Expand, Condense, Tone Shift (Formal/Friendly), Bulletize, Prompt Enhance, Code tools (Explain Code, Docstring, Fix Code, Unit Tests, Regex Explain, SQL Query), Git Commit Message, JSON conversion, Translation (English ⇄ romanized Telugu/Hindi), Convert to Markdown, and Freeform Prompting (`> custom prompt` from the Command Palette).
-- **Offline Local Transform**: **Remove Markdown** strips Markdown formatting and leaves clean prose locally on all supported macOS versions (macOS 14+) without an AI model.
-- **Preview or Direct**: Proofread and Remove Markdown replace in place by default; every other action streams into a diff preview (Replace / Copy / Retry / Cancel). Per-action delivery is switchable in **Preferences → AI**, and **Undo last AI** in the palette reverts a transform.
-
----
-
-## 🎙️ Smart Dictation
-
-Hold `⌘⌥V` to talk and DevType types what you said into the frontmost app, resolving self-corrections ("no wait, make that Tuesday") and stripping fillers along the way.
-
-- **Choose your recognizer** in **Preferences → Voice**: Apple Speech, Local AI, a loopback `whisper.cpp` server, or the opt-in Gemini cloud engine. Each engine reports its own readiness so you know what is actually installed or reachable.
-- **Cloud requires explicit consent**: the cloud engine is inert until you add your own API key and separately grant cloud-audio consent in Preferences; it is never the default, and a missing prerequisite is refused before recording.
-- **Custom vocabulary** teaches DevType the names, products, and jargon that generic recognizers get wrong.
-
-Full detail in [docs/VOICE_DICTATION.md](docs/VOICE_DICTATION.md).
-
-<p align="center">
-  <img src="docs/assets/screenshots/preferences-voice.png" alt="DevType Preferences — Voice tab listing microphone access, selectable speech engines with readiness, and smart dictation settings" width="85%">
-</p>
-
----
-
-## 🔒 Secrets (Passwords)
-
-<p align="center">
-  <img src="docs/assets/screenshots/preferences-snippets.png" alt="DevType Preferences — Snippets tab with the Touch ID requirement for secrets and expansion statistics" width="85%">
-</p>
-
-Open **menu bar → Copy Secret → Manage Secrets…** to add, edit, copy, or delete secrets independently of snippets. Secrets need a name and value, with no trigger or keyboard shortcut. Values remain AES-GCM-sealed in the encrypted archive (or retained in Keychain fallback storage until repair). Existing secret entries migrate with their UUIDs preserved.
-
-Secret metadata lives in a separate collection in library schema 3. Snippet editing, resetting, and exports stay separate. For an unreadable master key, use **Preferences → Advanced → Repair Secret Storage**, also reachable from the Secrets manager.
-
-- **Copy, don't type**: secrets never expand from typed triggers — macOS Secure Event Input withholds keystrokes in password fields, and a typo firing a password into a chat window is avoided by design. Use **menu bar → Copy Secret ▸** or **Search Secrets…**, then paste with `⌘V`.
-- **Password-field shortcut**: when macOS Secure Input is active, the menu bar shows a key and **Copy Secret**. Click it to open **Search Secrets** directly. Right-click or Control-click the button for the full DevType menu.
-- **Touch ID gate**: enabled by default where available, with password fallback and a 30-second reuse window. The existing preference controls it.
-- **Auto-clearing clipboard**: copies request exclusion from compatible clipboard managers and clear after 90 seconds if DevType still owns the write.
-- **Separate values**: stored values are absent from `snippets.json`, snippet exports, and diagnostic reports, and are never prefilled in the editor.
-
----
-
-## 🧩 Template Engine Reference
-
-DevType parses Mustache `{{...}}` tags and TextExpander `%...%` tags seamlessly.
-
-### Mustache (`{{...}}`)
-| Tag | Description |
-|---|---|
-| `{{date}}` / `{{date:yyyy-MM-dd}}` | Insert current date (standard patterns or named presets like `us`, `iso`, `eu`) |
-| `{{date:iso:+1d}}` / `{{date:+1w}}` | Date arithmetic — offset a preset or pattern by `y/M/w/d/h/m/s` units |
-| `{{time}}` | Insert current time |
-| `{{clipboard}}` | Insert current pasteboard text (read on-demand only) |
-| `{{calc: 1+2}}` | Perform safe inline arithmetic evaluation |
-| `{{cursor}}` | Position the caret after snippet expansion |
-| `{{snippet:trigger_name}}` | Nest another snippet recursively (max depth 10) |
-| `{{uuid}}` | Generate an upper-case UUID (lower-case via `{{uuid:lower}}`) |
-| `{{random:1-100}}` | Random value — integer range, `a\|b\|c` choices, or `hex:`/`alnum:`/`digits:`/`letters:` specs |
-| `{{counter:name}}` | Persistent named counter (optional step, e.g. `{{counter:ticket:+5}}`) |
-| `{{upper:text}}` … `{{sentence:text}}` | Case transforms — also work around nested tags and fill-ins |
-
-### TextExpander (`%...%`)
-| Tag | Description |
-|---|---|
-| `%filltext:name=Field%` | Display interactive fill-in dialog before expanding (also `%fillarea%`, `%fillpopup%`, optional `%fillpart%…%fillpartend%` sections) |
-| `%date:FORMAT%` | Format date with `DateFormatter` pattern or preset (`%date:us%`, `%date:full%`) |
-| `%@+1D%` | TextExpander-style date math (`y M w d h m s` units) |
-| `%clipboard` | Insert pasteboard text |
-| `%|` | Position caret marker |
-| `%snippet:abbrev%` | Nest another snippet |
-| `%key:enter%` / `%key:tab%` | Post trailing keystroke after injection (also `return`, `esc`, `space`) |
-| `%uuid%`, `%random:1-100%`, `%counter:name%` | Generated values |
-| `%case:upper% … %caseend%` | Case-transform the enclosed block |
-
-Inside a macro body, `%%` is an escaped literal `%`. Unknown `%…%` sequences (like URL-encoded text) are left untouched.
-
-See the full [Macro Reference](docs/MACRO_REFERENCE.md) for more examples.
-
----
-
-## 🤝 Open Source & Contributing
-
-We welcome contributions from the open source community!
-
-- 💻 **[Contributing Guide](CONTRIBUTING.md)**: How to set up your environment, coding standards, and submit pull requests.
-- 📜 **[Code of Conduct](CODE_OF_CONDUCT.md)**: Community standards and guidelines.
-- 🛡️ **[Security Policy](SECURITY.md)**: Vulnerability reporting and security principles.
-- 💬 **[Support & Help](SUPPORT.md)**: Getting help, asking questions, and reporting bugs.
-- 🐛 **[Issue Tracker](https://github.com/bharathvbcr/DevType/issues)**: Report bugs or request features.
-
-New here? Issues labelled **[`good first issue`](https://github.com/bharathvbcr/DevType/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)** are scoped to be self-contained, and **[`help wanted`](https://github.com/bharathvbcr/DevType/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)** marks work that is ready for someone to pick up.
-
-### ✨ Contributors
-
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)) — code, design, docs, and bug reports all count:
+## Contributors
 
 <!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
 <!-- prettier-ignore-start -->
@@ -295,34 +91,6 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
-This list is maintained by the [All Contributors](https://allcontributors.org/) bot. To add someone, comment on any issue or PR:
+## License and acknowledgements
 
-```
-@all-contributors please add @username for code, doc
-```
-
----
-
-## ❓ Frequently Asked Questions (FAQ)
-
-### Is DevType free and open source?
-Yes! DevType is completely free and open-source under the MIT License.
-
-### Does DevType collect or send my keystrokes to the cloud?
-No. Keystrokes are processed locally in a volatile memory ring buffer solely for matching triggers, and they never leave your Mac. Expansion and AI transforms make no network requests — AI runs on Apple Foundation Models on-device. The only two features that can reach the network are the opt-in update check (off by default, and it sends no version, machine, or usage data) and the cloud dictation engine, which is inert unless you add your own API key.
-
-### Can I import my existing snippets from TextExpander or Espanso?
-Yes. DevType includes built-in importers for TextExpander settings bundles (`.textexpandersettings` / `.textexpanderbackup`) and Espanso YAML config folders or match files, preserving your triggers, replacements, and image attachments. Libraries can be exported back out as DevType JSON, a single Espanso YAML file, an atomic Espanso `match/` folder, or CSV.
-
-### How does DevType handle passwords and secure fields?
-DevType automatically pauses keyword expansion whenever a secure text field (`NSSecureTextField`) is active or macOS Secure Event Input is locked. While macOS Secure Input is active, the menu bar offers **Copy Secret**; choose a secret and paste it yourself with `⌘V`. Storage: **secret snippets** hold passwords AES-GCM-encrypted behind Touch ID and copy them from the menu bar with an auto-clearing clipboard — see [SECRETS.md](SECRETS.md).
-
----
-
-## 📄 License & Attribution
-
-DevType is licensed under the [MIT License](LICENSE). See [NOTICE](NOTICE) for third-party component attributions.
-
-### Acknowledgements & Tributes
-- **[Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS)**: Special thanks to the Google Gemini team for pioneering intelligent thought-revision processing and crash-resilient speech journaling.
-- **[whisper.cpp](https://github.com/ggerganov/whisper.cpp)**: For the fast, fully local speech recognition server that DevType's Local Whisper engine detects, fetches models for, and runs on loopback.
+[MIT](LICENSE). See [NOTICE](NOTICE) for component attributions. Voice workflow inspiration includes [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS); local Whisper integration uses [whisper.cpp](https://github.com/ggml-org/whisper.cpp).

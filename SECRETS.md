@@ -100,6 +100,7 @@ internal storage operations also read values to verify writes and perform compen
 - The gate is a switch, on by default where the machine can evaluate one: **Preferences →
   Snippets → Secrets**, mirrored as a checkable item at the bottom of the **Copy Secret**
   menu.
+- Turning an active requirement off requires a fresh authentication check when the machine can evaluate the gate. Cancelling or failing leaves it on; enabling the requirement is immediate.
 - Scope, stated honestly: the gate stops someone at your unlocked Mac from lifting a secret
   out of a menu. It does not stop software already running as you — no macOS password
   manager's prompt does.

@@ -2070,7 +2070,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 return false
             }
         }()
-        restartEngineMenuItem?.isHidden = !urgentInject
+        // The status item keeps reporting that the last expansion did not land, but the
+        // "Expansion Failed — Restart Engine" *action* is only offered when a restart could
+        // plausibly change the outcome. Most refusals come from a guard that was working —
+        // the erase precondition held the line, the target moved, Secure Input was up — and
+        // leave a perfectly healthy engine behind. Offering a restart for those is what sent
+        // users into Permission Recovery to read "All capabilities granted".
+        let offersEngineRestart: Bool = {
+            switch PermissionCoordinator.shared.lastRecordedInjectOutcome {
+            case .failedSilent:
+                return true
+            case .refused:
+                // Absent provenance we cannot prove the engine is fine, so keep the escape hatch.
+                return PermissionCoordinator.shared
+                    .lastRecordedInjectRefuseProvenance?.kind.warrantsEngineRestart ?? true
+            case .postedUnverified, .degradedAXOnly, .succeeded, .none:
+                return false
+            }
+        }()
+        restartEngineMenuItem?.isHidden = !offersEngineRestart
         let presentation = StatusItemPresentation(
             display: display,
             snapshot: snapshot,
@@ -2079,6 +2097,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             libraryUnhealthy: LibraryHealthMonitor.shared.condition != nil,
             differentiateWithoutColor: DevTypeAccessibility.differentiateWithoutColor,
             highlighted: statusItemContext.menuIsOpen,
+            // Urgent, but not a failure: a guard refused and the engine is fine.
+            injectIssueIsSafeRefusal: urgentInject && !offersEngineRestart,
             loc: loc
         )
         let name = presentation.statusName

@@ -1,6 +1,8 @@
 # DevType Technical Architecture & Internals
 
-This document provides a deep technical walkthrough of the architecture, internal subsystems, concurrency models, and security boundaries in **DevType**.
+[All documentation](README.md) · [Support](../SUPPORT.md)
+
+This guide describes implemented subsystem ownership and contracts. Source and tests are the authority; a diagram or a dated audit is not proof of runtime behavior on every host. Start with [Development](DEVELOPMENT.md) for commands or [the documentation index](README.md) for user guides.
 
 ---
 
@@ -9,37 +11,24 @@ This document provides a deep technical walkthrough of the architecture, interna
 DevType is structured into four SwiftPM targets designed for separation of concerns, testability, and crash resilience:
 
 ```mermaid
-graph TD
-    UserKeystroke[User Keystrokes] --> EventTap[CGEventTap / TapRunLoopThread]
-    EventTap --> Buffer[TypeAheadBuffer / AbbreviationMatcher]
-    
-    subgraph ExpanderEngine Target
-        Buffer --> MatchFound{Snippet Match?}
-        MatchFound -- Yes --> Prepare[Deferred preparation / MacroRenderContext]
-        Prepare --> MacroEngine[MacroParser + DynamicTemplateEngine]
-        MacroEngine --> RenderedText[Evaluated Text / Image]
-        RenderedText --> InjectPipeline[TextInjectionPipeline]
-        
-        InjectPipeline --> AXWriter[AXTextWriter / Range Replace]
-        InjectPipeline -. Fallback .-> HIDPoster[HIDKeyPoster + PasteboardBroker]
-        
-        AIStore[AI Engine / Foundation Models] --> SelectionGate[SelectionGate / SelectionReader]
-        SelectionGate --> AIAction[AI Action / Transform Flow]
-        
-        SecretStore[SecretStore / AES-GCM] --> KeychainKey[Login Keychain Key]
-        SecretStore --> Biometrics[BiometricGate / Touch ID]
-    end
-
-    subgraph DevTypeSafety Target
-        AXWriter --> ObjCTrampoline[DevTypeSafety @try/@catch]
-        ObjCTrampoline --> TargetApp[Target macOS Application]
-    end
-
-    subgraph DevTypeApp Target
-        AppDelegate[AppDelegate / Menus / Status Item]
-        UIViews[Snippet Editor / Command Palette / Preferences]
-        AIViews[AI Action Palette / AI Preview Panel]
-    end
+flowchart TD
+    Entry[DevTypeApp: main.swift] --> App[DevTypeAppCore: AppDelegate and AppKit UI]
+    App --> Engine[ExpanderEngine]
+    Input[CGEventTap / TapRunLoopThread] --> Match[TypeAheadBuffer / AbbreviationMatcher]
+    Match --> Render[MacroParser / DynamicTemplateEngine]
+    Render --> Inject[TextInjectionPipeline]
+    App --> Select[Selection capture / AI transform]
+    Select --> Inject
+    App --> Voice[VoiceSessionCoordinator]
+    Voice --> Inject
+    Inject --> AX[AXTextWriter]
+    Inject --> Paste[HIDKeyPoster / PasteboardBroker]
+    AX --> Target[Target application]
+    Paste --> Target
+    App --> Gate[SecretMenuFlow / BiometricGate]
+    Gate --> Secret[SecretStore / AES-GCM archive + Keychain key]
+    Gate --> Clipboard[SecretClipboard: deliberate copy]
+    App --> Safety[DevTypeSafety: window / KVC / legacy Keychain bridge]
 ```
 
 ---
@@ -47,13 +36,13 @@ graph TD
 ## 📦 Target Breakdown
 
 ### 1. `ExpanderEngine` (Swift Target)
-The headless core library containing all business logic, matching algorithms, injection pipelines, macro evaluators, voice dictation subsystem, update checkers, and storage models.
+The core library containing matching and business logic, matching algorithms, injection pipelines, macro evaluators, voice dictation subsystem, update checkers, and storage models.
 - **Subsystems**: `Engine` (event taps, text injection, type-ahead buffers), `Matching` (prefix search, abbreviation trie), `Macros` (Mustache & TextExpander parsing, safe math, date arithmetic), `AI` (Apple Foundation Models, selection gating, offline Markdown transforms), `Voice` (smart dictation, multi-engine ASR, durable audio capture, thought-revision correction), `Models` (snippets, groups, encrypted secret store, usage stats), `Permissions` (TCC verification, AX capability learning), `Sync` (TextExpander & Espanso importers, JSON/YAML/CSV exporters), and `Updates` (distance-aware version ordering, GitHub Releases update checker).
-- **Independence**: Has zero UI/AppKit window dependencies, enabling fast, headless unit testing in CI (1,900+ tests).
+- **Independence**: Uses AppKit and system frameworks for platform adapters, while keeping window/controller ownership in `DevTypeAppCore`. Tests inject or isolate system boundaries; importing the library alone does not make every operation headless.
 - **Thread Safety**: Concurrency uses locks, serial queues and operation/generation checks. Measured latency and adversarial tests support individual paths; they do not establish a universal timing or race-free guarantee.
 
 ### 2. `DevTypeSafety` (Objective-C Target)
-An Objective-C trampoline layer that wraps fragile macOS Accessibility (`AXUIElement`) and Cocoa Pasteboard APIs in `@try / @catch` blocks. Swift cannot natively catch Objective-C runtime exceptions (e.g. `NSGenericException` or corrupted AX pointers); this layer ensures such crashes are contained and degraded to safe fallbacks.
+Small Objective-C entry points contain window-ordering and KVC exceptions and bridge legacy Keychain operations. The AppKit call itself stays inside Objective-C so an exception does not unwind through Swift frames. This is not a general wrapper around Accessibility or pasteboard calls; those callers inspect return values and maintain their own validation. See `Sources/DevTypeSafety/DevTypeSafety.m`.
 
 ### 3. `DevTypeAppCore` (Swift Library Target)
 The AppKit application layer providing the menu bar status item, snippet editor, inline search palette (`⌘/`), AI action palette (`⌘⌥A`), live diff preview, Smart Dictation Liquid Glass HUD, 7-tab Preferences window (`⌘,`), and onboarding setup wizard.
@@ -159,7 +148,7 @@ Snippet bodies are rendered by two cooperating parsers — `MacroParser` (TextEx
   - Generated values `%uuid%`, `%random:1-100%`, `%counter:name%`; case blocks `%case:upper% … %caseend%`.
   - `%%` escapes a literal `%` inside macro bodies; unknown `%…%` sequences pass through untouched.
 
-Both engines resolve nested snippets in place without disturbing sibling macros, and secret snippets are structurally excluded from nesting lookups.
+Both engines resolve nested snippets in place without disturbing sibling macros, and secret records are excluded from nesting lookups.
 
 `MacroRenderContext` pins one source and its resolved nested dependencies, date, clipboard, and operation-owned volatile store. UUID/random/counter occurrences evaluate once even across a delayed fill-in render; a separate expansion creates a new context. Counter reservation can leave cancellation gaps, and counter persistence is serialized separately from its reader lock.
 
@@ -198,7 +187,7 @@ graph LR
     DiffUI -- Reject --> Discard[Discard Transform]
 ```
 
-- **Zero Cloud Privacy**: Models execute strictly on the Apple Neural Engine / GPU via local Apple Intelligence APIs. Zero bytes are sent over the network.
+- **On-device transforms**: AI actions use the Apple Foundation Models API. The OS owns execution and model availability; DevType does not select a particular hardware execution unit. Voice correction has its own provider routing, described below.
 - **Interactive Actions**: Proofreading, rewriting, paraphrasing, condensing, expanding, tone shifting (friendly/formal), bulletizing, prompt enhancement, code engineering (explain code, docstring generator, fix code, unit tests, regex explanation, SQL queries), conventional git commit messages, JSON conversion, and translation (English ⇄ romanized Telugu/Hindi).
 - **Offline Local Markdown Stripper (`AIMarkdownStripper`)**: A dedicated deterministic transform (`.removeMarkdown`) that strips Markdown formatting in microseconds without an AI model, functioning across all supported macOS versions (macOS 14+).
 - **Delivery Modes**: Each kind declares `direct` or `preview` output. Proofread and Remove Markdown default to direct in-place replacement; the rest stream into a diff preview panel (Replace / Copy / Retry / Cancel). Users can override per kind in Preferences → AI.
@@ -309,7 +298,8 @@ The Command Palette and snippet search are offline-first:
 
 The Voice Dictation subsystem provides speech-to-text with semantic formatting, local-first and provider-neutral: recognition and correction are separate capabilities, resolved per session rather than hard-wired to one model.
 
-- **Selectable Engines (`TranscriptionEngine`)**: four shipping choices — `.appleSpeech` (on-device `SFSpeechRecognizer` + deterministic rules), `.localLLM` (on-device recognition + Apple Intelligence Foundation Models, or an Ollama / OpenAI-compatible loopback endpoint), `.whisperLocal` (a `whisper.cpp` server on loopback, detected, downloadable, and startable by `WhisperServerSetup` / `WhisperServerController`), and `.gemini` (cloud, opt-in, keyed by `GeminiAPIKeyStore`). Selecting the cloud engine without a stored key resolves back to Apple Speech via `VoicePreferences.effectiveEngine`.
+- **Selectable engines (`TranscriptionEngine`)**: `.appleSpeech` uses on-device Apple recognition and deterministic cleanup; `.localLLM` adds Apple Foundation Models or loopback correction; `.whisperLocal` uses the configured loopback Whisper server; `.gemini` uses explicitly consented cloud transcription. `VoicePreferences.effectiveEngine` preserves the selected engine even when its key is missing. Missing cloud prerequisites fail before recording and never silently switch providers.
+- **Readiness and assets**: `VoiceSessionSnapshotFactory` prefers SpeechAnalyzer on macOS 26+ and the legacy Apple recognizer below it. `SpeechProviderRegistry` probes the preferred provider and can use the legacy floor only after it independently reports ready. SpeechAnalyzer assets install through an explicit Preferences action. Whisper setup verifies its model artifact independently from endpoint readiness.
 - **Immutable Session Snapshot (`VoiceSessionSnapshotFactory`)**: at the moment dictation starts, the engine choice is frozen into a snapshot carrying the speech provider, correction provider, privacy route, correction policy, vocabulary, target lease, and timeout — so changing a preference mid-dictation cannot retarget a running session, and the manifest on disk records exactly what produced each transcript.
 - **Enforced Privacy Routes (`PrivacyRoute`)**: each engine implies `onDeviceOnly`, `localNetworkOnly`, or `cloudPermitted`; `SpeechProviderRegistry` filters and resolves providers against the session's route rather than trusting the call site.
 - **Segment admission (`SpeechSegment` / `VoiceSessionReducer`)**: live and batch streams ignore older revisions, conflicting equal-revision replays and final-to-volatile downgrades. A same-revision volatile-to-final promotion remains supported. Each result has a 128 KiB text/alternatives budget, at most 32 alternatives and a 256-byte ID; timestamps/confidence must be valid. Retained session data is bounded to 1 MiB, with 512 live or 4,096 batch segments. A budget violation fails visibly and cleans up, preserving existing artifacts. Completion repair considers all accepted batch segments.
@@ -338,7 +328,7 @@ DevType contains a dedicated, privacy-conscious update checking module (`Sources
 - **Navigation Safety**: Release URLs are strictly constructed locally for `https://github.com/bharathvbcr/DevType/releases/tag/v...` using strict alphanumeric and semantic version checks to prevent arbitrary URI scheme or host traversal.
 - **Fail-Closed Outcome Typing (`UpdateCheckOutcome`)**: Distinguishes between `.upToDate`, `.updateAvailable`, `.failed`, and `.undeterminedLocalVersion`, ensuring network outages never report a false "up to date" result.
 
-## Shared runtime and UI owners in v0.1.7
+## Shared runtime and UI owners
 
 - `DebouncedSidecarWriter` owns usage-sidecar scheduling, serialized atomic writes, retry scheduling and termination flush. The snippet and command usage stores implement `SidecarPayloadSource` to supply their pending bytes and re-arm failed writes.
 - `SupportDirectory` resolves the application-support location with a temporary-directory fallback; `FilePermissions` owns file mode application and atomic publication for secret archives and voice session records. Its unique staging file is owner-only before the first content write and replaces the destination with one rename. Voice record limits match the recovery reader. Saturating arithmetic is shared by timing, capability and usage counters where those callers require the same overflow behavior.
@@ -350,7 +340,7 @@ DevType contains a dedicated, privacy-conscious update checking module (`Sources
 
 These components replace prior copies at their existing call sites. They do not introduce a second expansion coordinator or a second clipboard/recovery policy.
 
-## Productivity search and text operations (1.0)
+## Productivity search and text operations
 
 `SnippetSearch` owns phrase/field/type/exclusion parsing and matching for both the manager and command palette. `SnippetManagerFilter` applies one indexed pass to the complete groups and then intersects the resulting IDs with the manager's current group/chip selection. Search bodies are capped at 2,000 characters; queries at 4,096 UTF-8 bytes and 12 terms, with the palette's additional 512-character limit.
 

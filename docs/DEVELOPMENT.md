@@ -1,5 +1,7 @@
 # DevType Developer Guide
 
+[All documentation](README.md) · [Support](../SUPPORT.md)
+
 This guide covers everything you need to know to build, test, debug, package, and release **DevType**.
 
 ---
@@ -7,7 +9,7 @@ This guide covers everything you need to know to build, test, debug, package, an
 ## 🛠️ Environment & Prerequisites
 
 - **macOS 14.0 (Sonoma)** or later (macOS 26+ for Apple Foundation Models AI testing).
-- **Xcode 15+** or Apple Command Line Tools (`xcode-select --install`).
+- **Full Xcode**, with its developer directory selected. The package declares Swift tools 5.9; use an SDK containing Foundation Models to compile the macOS 26 AI paths. Command Line Tools alone are not the supported test setup.
 - **Swift 5.9+** toolchain.
 - Standard developer tools (`codesign`, `plutil`, `security`, `hdiutil`).
 
@@ -153,28 +155,30 @@ differ. Verify deep/strict codesign and Gatekeeper separately.
 DevType checks for updates itself (`Sources/ExpanderEngine/Updates/`); Sparkle is not embedded, and the inert `SUFeedURL` / `SUEnableInstallerLauncherService` keys that used to sit in `Info.plist` have been removed — they configured a framework that was never present, and pointed at an account that is not this project's.
 
 - **`AppVersion`** parses and orders version strings. It is deliberately not a plain SemVer comparator: `git describe`'s `-<N>-g<sha>` suffix means *N commits **after*** the tag, while SemVer reads the same characters as a *pre-release **of*** it. Reading it the SemVer way tells anyone running a post-tag build to "update" to the release they are already ahead of, so the distance suffix is detected specifically and ordered above the bare tag. `AppVersionTests` pins the full ordering.
-- **`UpdateChecker`** asks the GitHub Releases API for the latest release, and does nothing else — it never downloads or installs. Acting on a result opens the release page in the browser. The current GitHub workflow publishes an explicitly marked development-signed, unnotarized DMG because this project does not have Developer ID/notarization credentials; Gatekeeper may reject it and users must approve it manually. An in-place updater remains disabled until trusted distribution is available.
-- **Off by default.** Nothing contacts the network until the user enables *Preferences → General → Updates*; automatic checks then run at most once a day. "Check for Updates…" in the menu bar is an explicit request and always works.
+- **`UpdateChecker`** asks the GitHub Releases API for the latest release, and does nothing else — it never downloads or installs. Acting on a result opens the release page in the browser. The GitHub workflow permits an explicitly marked ad-hoc signed, unnotarized DMG; inspect the artifact’s release notes and trust checks. Gatekeeper may reject it. An in-place updater remains disabled until trusted distribution is available.
+- **Automatic update checks are off by default.** This subsystem contacts GitHub after the user enables *Preferences → General → Updates*; automatic checks then run at most once a day. "Check for Updates…" in the menu bar is an explicit request and always works.
 - **Failure is never silence.** `UpdateCheckOutcome` keeps `.failed` and `.undeterminedLocalVersion` distinct from `.upToDate`, so a check that could not run never renders as one that ran and found nothing.
 - The request carries no version, machine, or install identifier — a static `User-Agent`, an ephemeral session with no cookie or credential storage, and a bounded response read.
 
 ### Creating a Release
 ```bash
 # One-time: notarytool credentials (paid Apple Developer Program + Developer ID certificate required)
-xcrun notarytool store-credentials DevTypeNotary \
-  --apple-id you@example.com --team-id TEAMID --password <app-specific-password>
+xcrun notarytool store-credentials DevTypeNotary
 
+# Set release_tag to the intended NEW vMAJOR.MINOR.PATCH version first.
+: "${release_tag:?Set the intended new release tag before continuing}"
+# Ensure docs/releases/<tag>.md is included in the release commit.
 # Commit and tag locally, then validate that exact clean release commit.
 # If the tag already exists, inspect its local and remote state first; never
 # move a published tag. Preserve an unpublished tag object before replacing it.
 git commit -m "your release changes"
-git tag -a v0.1.4 -m "Release v0.1.4"
+git tag -a "$release_tag" -m "Release $release_tag"
 ./ci:local
-./Scripts/release-preflight.sh v0.1.4
+./Scripts/release-preflight.sh "$release_tag"
 
 # Local release installation using the available signing identity
 ./Scripts/install-app.sh release
-./Scripts/verify-release-version.sh v0.1.4 \
+./Scripts/verify-release-version.sh "$release_tag" \
   "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/DevType.app/Contents/Info.plist)"
 
 # Build, sign, notarize, staple, and produce dist/DevType-<version>.dmg
@@ -184,7 +188,7 @@ DEVTYPE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./Scripts/r
 DEVTYPE_SKIP_NOTARIZE=1 ./Scripts/release.sh
 
 # Explicit untrusted tagged publication when Developer ID/notarization is unavailable
-DEVTYPE_RELEASE_TAG=v0.1.4 \
+DEVTYPE_RELEASE_TAG="$release_tag" \
   DEVTYPE_SKIP_AUTO_CERT=1 \
   DEVTYPE_SKIP_NOTARIZE=1 \
   DEVTYPE_ALLOW_UNTRUSTED_RELEASE=1 \
@@ -206,15 +210,13 @@ Before submitting changes, ensure:
 2. `SecureInputMonitor` and `NSSecureTextField` fail-closed protection remain fully tested.
 3. Sensitive credentials are only handled via `SecretStore` with AES-GCM encryption.
 
-## Local v0.1.7 installation and release verification
+## Verify an installation separately
 
-Commit the complete merged source and version notes, then run `DEVTYPE_BENCH=1 DEVTYPE_SKIP_AUTO_CERT=1 ./Scripts/ci-local.sh` against that clean commit. The script validates shell/plist inputs, release/installer fixtures, all tests, debug/release builds and the packaged signature. Create the annotated `v0.1.7` tag at the verified commit, run `./Scripts/release-preflight.sh v0.1.7`, and package/install with `./Scripts/install-app.sh release`. Export `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` for these commands when the selected toolchain is Command Line Tools.
+The installer validates the new package, swaps the canonical application recoverably, quarantines the displaced app, and compares designated signing requirements before deciding whether TCC needs recovery. Read the actual installed bundle's version, executable hash, signature, and running process path. Passing a hardcoded expected version to the checker is not an installation check.
 
-The installer validates the new package, swaps the canonical application recoverably, quarantines the displaced app and duplicate package, and compares designated signing requirements before deciding whether TCC needs a reset. Verify the installed bundle is exactly `0.1.7` using `./Scripts/verify-release-version.sh v0.1.7 0.1.7`, plus the bundle plist, executable hash, strict codesign and running process path. The version checker accepts version strings; callers must read the actual installed plist value rather than assume it.
+Inventory old builds before packaging; the packager removes known legacy bundles. Preserve release logs, tag provenance, and a recoverable archive when replacing artifacts. A local install or tag does not publish a GitHub release. Pushing a version tag triggers publication and must be deliberate.
 
-Inventory old builds before packaging: the packager removes known legacy bundles. Move old build directories and installers to a dated recoverable archive with their original paths recorded. Keep the running application until the validated replacement is ready; move the installer's quarantine to the same archive afterward. Keep release logs and a Git bundle separately from active build outputs.
-
-An Apple Development signature supports local installation and stable identity; it does not establish notarized distribution. Run `spctl --assess --type execute` separately and report its result. A local tag/install does not publish a GitHub release. Pushing a `v*.*.*` tag triggers the repository's publication workflow and is a separate distribution action.
+An Apple Development signature supports local installation; it does not establish notarized distribution. Run Gatekeeper assessment separately from `codesign` and report the actual outcome.
 
 ## Productivity release stress checks
 
@@ -233,3 +235,7 @@ DEVTYPE_SKIP_AUTO_CERT=1 DEVTYPE_REQUIRE_FOUNDATION_MODELS=1 DEVTYPE_BENCH=1 ./S
 For cache clients, supply `libraryID` together with `revision` only when both identify the exact groups passed. Filtering or modifying a snapshot requires its own identity/revision or the default content fingerprint. Existing calls remain source-compatible. See the [1.0 audit](audits/2026-09-10-productivity-release.md) for observed results and platform/distribution gates.
 
 Selection hardening regressions include extreme UTF-16 ranges, non-finite cache ages, reentrant/concurrent consumption, incomplete multi-range reads, deadline exhaustion, permission revocation during a command chord, clipboard ownership loss and delayed source-app activation. Multi-range fallback accepts at most 64 complete pieces and 200,000 aggregate characters including separators. Source restoration polls at 20 ms intervals for at most 25 waits. These finite tests and limits do not qualify every editor, keyboard layout, OS or native IPC stall; see the [selection delivery audit](audits/2026-09-10-selection-delivery-hardening.md) for evidence and remaining gates.
+
+## Documentation and website changes
+
+The website is static HTML, CSS, and JavaScript under `docs/`, with no package manager or build step. Follow [Website maintenance](WEBSITE.md) for local serving, browser checks, and the hosting boundary. Check Markdown links and source-backed claims when changing guides. Historical audit results should retain their original date and scope. Documentation-only edits do not establish a new app test, signing, or release result.

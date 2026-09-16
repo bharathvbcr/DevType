@@ -1,5 +1,7 @@
 # DevType Macro & Template Reference
 
+[All documentation](README.md) · [Support](../SUPPORT.md)
+
 DevType features a versatile dual template engine that natively parses both **Mustache** (`{{...}}`) and **TextExpander** (`%...%`) syntaxes. You can use either style or combine them within your snippets.
 
 ---

@@ -782,6 +782,7 @@ final class PermissionRecoveryController: NSViewController {
                 if snapshot.canListenTap && tapRunning {
                     summaryLabel.stringValue = loc.s("recovery.inject.refusedSummary", engineLabel)
                     guidanceLabel.stringValue = Self.guidanceForInjectRefuse(
+                        kind: Self.refusalKind(for: reason),
                         reason: reason,
                         canUseAX: snapshot.canUseAX
                     )
@@ -848,33 +849,38 @@ final class PermissionRecoveryController: NSViewController {
         return health
     }
 
-    /// Honest Recovery copy: do not blame Accessibility when AX is already granted.
+    /// The kind recorded alongside this refusal, or — if provenance is somehow missing — the kind
+    /// re-derived from the sentence by the *same* canonical classifier. The fallback reuses
+    /// `PermissionCoordinator.refusalKind` rather than introducing a second rule set, so there is
+    /// still exactly one place that decides what a refusal means.
+    private static func refusalKind(for reason: String) -> InjectRefusalKind {
+        PermissionCoordinator.shared.lastRecordedInjectRefuseProvenance?.kind
+            ?? PermissionCoordinator.refusalKind(reason, path: nil)
+    }
+
+    /// Honest Recovery copy: do not blame Accessibility when AX is already granted, and name the
+    /// *fix* rather than the fault.
     ///
-    /// The `reason` strings come from `PermissionCopy` / the inject pipeline and
-    /// stay English (they are engine diagnostics, matched on here); the guidance
-    /// wrapped around them is localized.
-    private static func guidanceForInjectRefuse(reason: String, canUseAX: Bool) -> String {
+    /// The `reason` string stays English (it is an engine diagnostic, and is only ever displayed
+    /// — never matched on any more); the guidance wrapped around it is localized.
+    ///
+    /// This used to substring-match the refusal sentence, which meant almost everything fell
+    /// through to the generic "click into a normal text field (not a password field)" — advice
+    /// that was wrong for an erase-precondition refusal (the user was already in a normal text
+    /// field) and actively misleading for a Post Events refusal (a permission problem). The kind
+    /// now comes from the pipeline's own branch identifier, so each refusal gets its own remedy.
+    static func guidanceForInjectRefuse(
+        kind: InjectRefusalKind,
+        reason: String,
+        canUseAX: Bool
+    ) -> String {
         let loc = LocalizationManager.shared
-        if !canUseAX
-            || reason.contains("Accessibility unavailable")
-            || reason.contains("AXIsProcessTrusted false") {
-            return loc.s("recovery.refuse.ax", reason)
-        }
-        if reason.contains("Secure Input") {
-            return loc.s("recovery.refuse.secureInput")
-        }
-        if reason.localizedCaseInsensitiveContains("secure text field") {
-            return loc.s("recovery.refuse.secureField")
-        }
-        if reason.contains("IME") {
-            return loc.s("recovery.refuse.ime")
-        }
-        if reason.contains("timed out")
-            || reason.contains("No focused")
-            || reason.contains("focus query failed") {
-            return loc.s("recovery.refuse.focus")
-        }
-        return loc.s("recovery.refuse.generic", reason)
+        // A missing Accessibility grant outranks whichever branch refused: nothing else can be
+        // acted on until it is restored.
+        guard canUseAX else { return loc.s("recovery.refuse.ax", reason) }
+        return kind.guidanceTakesReason
+            ? loc.s(kind.guidanceKey, reason)
+            : loc.s(kind.guidanceKey)
     }
 
     private func updateStatusLabel(_ label: NSTextField, isGranted: Bool) {

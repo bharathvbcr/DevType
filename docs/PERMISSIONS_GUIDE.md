@@ -1,5 +1,7 @@
 # macOS Permissions & TCC Setup Guide
 
+[All documentation](README.md) · [Support](../SUPPORT.md)
+
 To provide seamless, low-latency text expansion, trigger-swallowing, and Smart Voice Dictation across macOS, **DevType** requires specific system permissions governed by Apple's Transparency, Consent, and Control (TCC) subsystem.
 
 This guide explains why each permission is needed, how to grant and maintain them, and how to troubleshoot permission issues.
@@ -56,7 +58,7 @@ When you first launch DevType, the **Permission Onboarding Wizard** will open au
 
 macOS TCC binds permission grants directly to an application's **Code Signing Designated Requirement (DR)** and bundle identifier (`com.devtype.app`).
 
-If you compile DevType locally using ad-hoc signing (`-`), Xcode or SwiftPM generates a new ephemeral ad-hoc signature on every build, causing macOS to invalidate your TCC permissions repeatedly.
+If you compile DevType locally using ad-hoc signing (`-`), Xcode or SwiftPM generates a new ephemeral ad-hoc signature on every build, which can cause macOS to invalidate prior TCC permissions.
 
 ### Which identity gets used
 
@@ -67,9 +69,9 @@ If you compile DevType locally using ad-hoc signing (`-`), Xcode or SwiftPM gene
 | 1 | `Developer ID Application: …` | Paid Apple Developer Program. The only identity that can be notarized for distribution. |
 | 2 | `Apple Development: …` | **A free Apple ID is enough.** Preferred for everyday development. |
 | 3 | `DevType Local Signing` | Self-signed fallback from `./Scripts/make-signing-cert.sh`. |
-| 4 | ad-hoc (`-`) | Last resort. TCC grants reset on every rebuild. |
+| 4 | ad-hoc (`-`) | Last resort. Changed code can invalidate prior grants. |
 
-Any of the first three keeps the DR pinned to a certificate, so TCC grants survive rebuilds. Set `DEVTYPE_SIGN_IDENTITY` to override the choice, or to `-` to force ad-hoc.
+A stable designated requirement supports permission continuity across rebuilds; verify the installed copy and live TCC state after an identity change. Set `DEVTYPE_SIGN_IDENTITY` to override the choice, or to `-` to force ad-hoc.
 
 ### Preferred: an Apple Development certificate (free Apple ID)
 

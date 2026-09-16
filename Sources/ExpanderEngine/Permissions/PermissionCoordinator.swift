@@ -193,6 +193,11 @@ public final class PermissionCoordinator {
         /// yet, which are three different bugs with three different fixes.
         public var targetMismatch: String?
 
+        /// The structured meaning of `reason`. Set by `recordInjectOutcome` from the same
+        /// classification that produced the sentence, so consumers never re-derive it by
+        /// substring-matching prose (which is both lossy and English-only).
+        public var kind: InjectRefusalKind = .unknown
+
         public init(
             refusedAt: Date = Date(),
             reason: String,
@@ -201,10 +206,12 @@ public final class PermissionCoordinator {
             frontmostBundleID: String? = nil,
             frontmostPID: pid_t? = nil,
             axErrorRawValue: Int32? = nil,
-            targetMismatch: String? = nil
+            targetMismatch: String? = nil,
+            kind: InjectRefusalKind = .unknown
         ) {
             self.refusedAt = refusedAt
             self.reason = reason
+            self.kind = kind
             self.gateSnapshot = gateSnapshot
             self.frontmostAppName = frontmostAppName
             self.frontmostBundleID = frontmostBundleID
@@ -457,11 +464,16 @@ public final class PermissionCoordinator {
             recordedOutcome = .postedUnverified
             DevTypeLog.inject.notice("[Inject] outcome=postedUnverified")
         case .refused(let refuseReason):
-            let safeReason = Self.sanitizedRefusalReason(refuseReason, path: path)
+            // One classification, used for the sentence *and* the structured kind. Classifying
+            // twice — once here for prose, once downstream by matching that prose — is exactly
+            // the drift this shares a single call to avoid.
+            let refusal = InjectRefusalKind.classify(refuseReason, path: path)
+            let safeReason = refusal.sentence
             reason = safeReason
             var safeProvenance = refuseContext
                 ?? InjectRefuseProvenance.capture(reason: safeReason)
             safeProvenance.reason = safeReason
+            safeProvenance.kind = refusal.kind
             provenance = safeProvenance
             recordedOutcome = .refused(safeReason)
             DevTypeLog.inject.notice("[Inject] outcome=refused reason=\(safeReason, privacy: .public)")
@@ -505,97 +517,14 @@ public final class PermissionCoordinator {
     /// pipeline's internal branch identifier; raw details can contain attachment paths or text
     /// mismatch evidence and therefore must never survive this boundary.
     public static func sanitizedRefusalReason(_ reason: String, path: String?) -> String {
-        switch path {
-        case "imagePaste":
-            return reason.contains("missing or unreadable")
-                ? "Image attachment missing or unreadable"
-                : "Image paste unavailable"
-        case "fillInRequired":
-            return "Fill-in values are required before insertion"
-        case "shellNoPostEvents":
-            return "Post Events permission is required for multi-line shell insertion"
-        case "eraseContextChanged":
-            return "Input or target application changed before insertion"
-        case "eraseIncomplete":
-            return "Trigger erase did not complete"
-        case "erasePrecondition", "guardedErase":
-            return "Erase precondition failed — the target text changed"
-        case "axOnlyRange":
-            return "AX insertion failed — Post Events permission is required for fallback"
-        case "secureClipboardPaste":
-            return reason.contains("image")
-                ? "Secure clipboard insertion does not support images"
-                : "Secure clipboard insertion unavailable"
-        case "undoUnverifiable":
-            return "Undo refused — target could not be read after intervening input"
-        case "undoOriginalPosition":
-            return "Undo refused — original insertion position could not be verified"
-        case "undoSelection":
-            return "Undo refused — a text selection is active"
-        case "undoContextChanged":
-            return "Undo cancelled — input, target, or settings changed"
-        case "undo", "undoAXRange", "undoAXDirect", "undoPaste":
-            return "Undo refused — safe reversal could not be verified"
-        // Entry gate. These stay distinct from each other on purpose: they are the difference
-        // between "the source app never came back to the front" and "it did, then the focused
-        // element moved", and collapsing them would leave the next report as uninformative as
-        // the silent `return` these replaced.
-        case "entryGate_superseded":
-            return "Insertion superseded by a newer one"
-        case "entryGate_continuation":
-            return "Target application changed before insertion"
-        case "entryGate_secureInput":
-            return "Secure Input is active — expansion blocked"
-        case "entryGate_accessibility":
-            return "Accessibility unavailable — expansion blocked"
-        case "entryGate_targetChanged":
-            return "Target element or selection changed before insertion"
-        case "entryGate_unreproduced":
-            return "Insertion context changed before insertion"
-        // Panel-driven delivery (AI result, palette value, inline search expansion): the payload
-        // was already generated, so each of these is lost work, not a declined expansion.
-        case "aiResultDelivery", "paletteTextDelivery", "searchExpansionDelivery":
-            // `SelectionReader.SourceUnavailability` owns this vocabulary and already speaks the
-            // report's register, so it passes through intact. Flattening every cause to one
-            // sentence here is what made a refusal with DevType itself frontmost read as "the
-            // source app did not come back" — a sentence about an app that had never left.
-            // Anything outside that vocabulary is internal prose and still gets the generic one.
-            return SelectionReader.SourceUnavailability.allCases.contains { $0.reason == reason }
-                ? reason
-                : SelectionReader.SourceUnavailability.focusNeverReturned.reason
-        case "aiResultPlanRefused", "searchExpansionPlanRefused":
-            return reason.localizedCaseInsensitiveContains("post events")
-                ? "Post Events permission is required for insertion"
-                : "Accessibility unavailable — expansion blocked"
-        default:
-            break
-        }
+        InjectRefusalKind.classify(reason, path: path).sentence
+    }
 
-        if reason.localizedCaseInsensitiveContains("secure input") {
-            return "Secure Input is active — expansion blocked"
-        }
-        if reason.localizedCaseInsensitiveContains("ime") {
-            return "Active IME marked text — expansion blocked"
-        }
-        if reason.localizedCaseInsensitiveContains("accessibility")
-            || reason.contains("AXIsProcessTrusted") {
-            return "Accessibility unavailable — expansion blocked"
-        }
-        if reason.localizedCaseInsensitiveContains("post events") {
-            return "Post Events permission is required for insertion"
-        }
-        if reason.localizedCaseInsensitiveContains("focused")
-            || reason.localizedCaseInsensitiveContains("focus") {
-            return "Focused text field unavailable — expansion blocked"
-        }
-        if reason.localizedCaseInsensitiveContains("erase precondition") {
-            return "Erase precondition failed — the target text changed"
-        }
-        if reason.localizedCaseInsensitiveContains("target application changed")
-            || reason.localizedCaseInsensitiveContains("input or target") {
-            return "Input or target application changed before insertion"
-        }
-        return "Injection refused"
+    /// The structured meaning behind the same refusal, for callers that must *act* on it rather
+    /// than display it. Shares `classify`'s single switch with `sanitizedRefusalReason`, so the
+    /// sentence and the kind can never describe different things.
+    public static func refusalKind(_ reason: String, path: String?) -> InjectRefusalKind {
+        InjectRefusalKind.classify(reason, path: path).kind
     }
 
     /// §3.2 / §2.10: diagnostic block for `DiagnosticReport` — per-app delivery ratios, refuse

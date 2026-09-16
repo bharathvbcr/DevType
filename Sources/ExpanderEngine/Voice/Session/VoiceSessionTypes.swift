@@ -173,7 +173,7 @@ public enum FailureStage: String, Codable, Sendable {
     case protocolViolation
 }
 
-public enum FailureCode: String, Codable, Sendable {
+public enum FailureCode: String, Codable, Sendable, CaseIterable {
     case noMicrophone
     case microphonePermissionDenied
     case accessibilityPermissionDenied
@@ -226,7 +226,7 @@ public enum ArtifactState: String, Codable, Sendable {
     case corrupted
 }
 
-public enum UserAction: String, Codable, Sendable {
+public enum UserAction: String, Codable, Sendable, CaseIterable {
     case grantMicrophonePermission
     case grantAccessibilityPermission
     case enterAPIKey
@@ -249,6 +249,25 @@ public enum UserAction: String, Codable, Sendable {
             return true
         case .reviewInHistory:
             return false
+        }
+    }
+
+    /// Localisation key for the sentence that tells the user how to act on this.
+    ///
+    /// A failure that names a `userAction` knows the remedy; before this existed the remedy was
+    /// computed and then dropped, so `manifestWriteFailed` — which carries `.freeDiskSpace` —
+    /// reached the user as "Could not save the session" and nothing else. The fault was named;
+    /// the fix was not.
+    public var remedyKey: String {
+        switch self {
+        case .grantMicrophonePermission: return "voice.remedy.grantMicrophone"
+        case .grantAccessibilityPermission: return "voice.remedy.grantAccessibility"
+        case .enterAPIKey: return "voice.remedy.enterAPIKey"
+        case .configureEndpoint: return "voice.remedy.configureEndpoint"
+        case .downloadModel: return "voice.remedy.downloadModel"
+        case .freeDiskSpace: return "voice.remedy.freeDiskSpace"
+        case .retryWithOtherProvider: return "voice.remedy.otherProvider"
+        case .reviewInHistory: return "voice.remedy.reviewInHistory"
         }
     }
 }
