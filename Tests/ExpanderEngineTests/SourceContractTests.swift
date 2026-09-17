@@ -259,6 +259,49 @@ final class SourceContractTests: XCTestCase {
     /// the focus bug is documented right next to the call it guards), so scanning raw text
     /// matches the documentation and not the code. Stripping comments first is what makes the
     /// assertions mean what they say.
+    /// A text view handed to a scroll view as its document view must be told to follow the
+    /// viewport's width.
+    ///
+    /// A scroll view does not size its document view. `NSTextView()` starts at a zero frame,
+    /// so without `autoresizingMask = [.width]` (and an unbounded `maxSize`, which otherwise
+    /// captures whatever width the scroll view had when it was first tiled) the text view
+    /// keeps its birth width forever. On the shipped 1.2.0 build that width was zero in the
+    /// AI preview panel: its accessibility tree read `AXScrollArea [632x277]` wrapping
+    /// `AXTextArea [0x277]` carrying the whole result — present in the text storage,
+    /// announced to VoiceOver, inserted correctly by Replace, and drawn nowhere.
+    ///
+    /// Whether AppKit happens to give it a usable width depends on when the scroll view is
+    /// first tiled, which differs between a test process and the shipped app — so the panel
+    /// tests could not see it. This is the invariant that holds in both.
+    func testEveryTextViewInAScrollViewIsToldToFollowItsViewport() throws {
+        let owners = try sourceFilesContaining(".documentView = ")
+        XCTAssertFalse(owners.isEmpty, "expected to find scroll views with document views")
+
+        for path in owners.sorted() {
+            let text = try source(path)
+            // Only the sites that put an NSTextView in the scroll view are in scope; a table
+            // or a custom document view sizes itself by other means.
+            guard text.contains("NSTextView(") else { continue }
+            XCTAssertTrue(
+                text.contains("autoresizingMask = [.width]"),
+                "\(path): a document-view text view must follow its viewport's width, "
+                    + "or it keeps whatever width it was born with — zero, in the shipped preview panel"
+            )
+            XCTAssertTrue(
+                text.contains("isVerticallyResizable = true"),
+                "\(path): a document-view text view must be allowed to grow as text arrives"
+            )
+            XCTAssertTrue(
+                text.contains("widthTracksTextView = true"),
+                "\(path): the text container must follow the text view, or glyphs wrap to the old width"
+            )
+            XCTAssertTrue(
+                text.contains("CGFloat.greatestFiniteMagnitude"),
+                "\(path): maxSize must not be left to capture the viewport width at birth"
+            )
+        }
+    }
+
     private func source(_ relativePath: String) throws -> String {
         let url = Self.repoRoot.appendingPathComponent(relativePath)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {

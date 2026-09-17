@@ -424,6 +424,27 @@ private final class AIPreviewController: NSViewController {
         textView.font = DevTypeTheme.font(13)
         textView.textColor = DevTypeTheme.textPrimary
         textView.textContainerInset = NSSize(width: 4, height: 4)
+        // A scroll view does not size its document view — the document view has to be told
+        // to follow the viewport. `NSTextView()` starts at a zero frame, and without this
+        // the width AppKit happens to give it when the scroll view is first tiled is the
+        // width it keeps forever. On the shipped 1.2.0 build that width is zero: the
+        // panel's accessibility tree reads `AXScrollArea [632x277]` wrapping
+        // `AXTextArea [0x277]` holding the whole result, so the answer was present,
+        // announced to VoiceOver and insertable by Replace — with nowhere to draw.
+        // This is the same setup every other text view in the app already uses.
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: AIPreviewPanel.panelSize.width - 28,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = true
         textView.setAccessibilityLabel(loc.s("ai.preview.result"))
         scrollView.documentView = textView
         root.addSubview(scrollView)

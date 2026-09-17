@@ -107,6 +107,23 @@ final class RecoveredDictationWindowController: NSWindowController {
         textView.textColor = DevTypeTheme.textPrimary
         textView.backgroundColor = .clear
         textView.textContainerInset = NSSize(width: 10, height: 10)
+        // A document view has to be told to follow its viewport; a scroll view will not size
+        // it. Without this the text view keeps whatever width AppKit gave it when the scroll
+        // view was first tiled — which in the AI preview panel, built the same way, was zero
+        // on the shipped build, leaving a full transcript with nowhere to draw.
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: 440,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = true
         textView.setAccessibilityLabel(LocalizationManager.shared.s("activity.recovery.transcript"))
 
         let scroll = NSScrollView()
