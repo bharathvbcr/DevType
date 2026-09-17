@@ -164,6 +164,187 @@ final class AIPreviewPanelPresentationTests: XCTestCase {
         }
     }
 
+    // MARK: - The result is actually drawn
+
+    /// The union of the laid-out text, in the text view's own coordinates.
+    ///
+    /// Reads TextKit 2 first and only falls back to `layoutManager`: touching
+    /// `layoutManager` on a TextKit 2 view forces a permanent downgrade to TextKit 1, so
+    /// asking in the wrong order would measure a different text system than the one the
+    /// panel actually draws with.
+    private func laidOutTextRect(_ textView: NSTextView) -> NSRect {
+        if let layout = textView.textLayoutManager {
+            layout.ensureLayout(for: layout.documentRange)
+            var union = NSRect.null
+            layout.enumerateTextLayoutFragments(
+                from: layout.documentRange.location,
+                options: [.ensuresLayout]
+            ) { fragment in
+                union = union.union(fragment.layoutFragmentFrame)
+                return true
+            }
+            return union.isNull ? .zero : union
+        }
+        guard let manager = textView.layoutManager, let container = textView.textContainer else {
+            return .zero
+        }
+        manager.ensureLayout(for: container)
+        return manager.usedRect(for: container)
+    }
+
+    /// A result the user cannot see is not a preview.
+    ///
+    /// `textView.string` and `enclosingScrollView.isHidden` were the only things asserted
+    /// about the result, and both stay correct when the text is never drawn: the panel
+    /// builds its text view with a bare `NSTextView()`, whose frame and text container are
+    /// zero-sized, and hands it straight to `scrollView.documentView` without the six
+    /// document-view sizing properties every other text view in this app sets
+    /// (`AlertPresenter`, `TestExpansionLab`, `PermissionDiagnosticsController`,
+    /// `SnippetEditorSheet`). The string reaches the text storage, VoiceOver reads it and
+    /// Replace inserts it — nothing lays it out, so the panel renders an empty box.
+    func testCompletedResultIsLaidOutAndNotJustStored() throws {
+        let panel = try present("""
+            # Heading
+
+            Some **bold** body text that runs on for long enough to wrap onto more than one \
+            line inside the preview's text area.
+            """)
+        let views = descendants(of: try XCTUnwrap(panel.contentView))
+        let textView = try XCTUnwrap(views.compactMap { $0 as? NSTextView }.first)
+        let scrollView = try XCTUnwrap(textView.enclosingScrollView)
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let viewport = scrollView.contentView.bounds.width
+        XCTAssertGreaterThan(viewport, 0, "precondition: the scroll view must have a viewport")
+
+        XCTAssertEqual(
+            textView.frame.width,
+            viewport,
+            accuracy: 1,
+            "The document view must fill its viewport, not keep its zero init frame"
+        )
+
+        let drawn = laidOutTextRect(textView)
+        XCTAssertGreaterThan(
+            drawn.width,
+            0,
+            "The result is stored but never laid out — text view frame \(textView.frame), "
+                + "container \(String(describing: textView.textContainer?.size))"
+        )
+        XCTAssertGreaterThan(drawn.height, 0, "The result has no drawn height: \(drawn)")
+        XCTAssertTrue(
+            drawn.intersects(textView.bounds),
+            "The text lays out at \(drawn), outside the text view's own bounds \(textView.bounds)"
+        )
+    }
+
+    /// The result text view must be *configured* to fill its viewport, not merely happen to.
+    ///
+    /// A document view is not sized by its scroll view; it fills the viewport only if it is
+    /// told to. The panel builds its text view with a bare `NSTextView()` — a zero frame —
+    /// and assigns it as `documentView` without any of the document-view sizing that
+    /// `AlertPresenter`, `TestExpansionLab`, `PermissionDiagnosticsController` and
+    /// `SnippetEditorSheet` all set, so its width is whatever AppKit gave it at birth and
+    /// nothing ever corrects it. In this process that is the viewport width and the text
+    /// draws; on the shipped 1.2.0 build it is zero, and the panel's accessibility tree
+    /// reads `AXScrollArea [632x277]` wrapping `AXTextArea [0x277]` carrying the full
+    /// result — present, announced to VoiceOver, insertable by Replace, and drawn nowhere.
+    ///
+    /// Asserting the geometry at one instant cannot tell those two apart, so assert the
+    /// contract that makes the width correct at *every* instant.
+    func testResultTextViewIsConfiguredToFillItsViewport() throws {
+        let panel = try present("# Heading\n\nbody text long enough to need a real width")
+        let views = descendants(of: try XCTUnwrap(panel.contentView))
+        let textView = try XCTUnwrap(views.compactMap { $0 as? NSTextView }.first)
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(
+            textView.autoresizingMask.contains(.width),
+            "The document view must follow its viewport's width; mask is \(textView.autoresizingMask)"
+        )
+        XCTAssertTrue(textView.isVerticallyResizable, "must grow downwards as the answer arrives")
+        XCTAssertFalse(textView.isHorizontallyResizable, "the preview wraps, it does not scroll sideways")
+        XCTAssertEqual(
+            textView.maxSize.width,
+            CGFloat.greatestFiniteMagnitude,
+            "A maxSize captured from the viewport at birth caps the width forever: \(textView.maxSize)"
+        )
+        // `minSize` is deliberately not asserted: AppKit overwrites it with the clip view's
+        // size when the document view is installed, so its value reports what the scroll
+        // view did, not what the panel asked for. `maxSize` above is the one that binds.
+        XCTAssertLessThanOrEqual(
+            textView.minSize.width,
+            AIPreviewPanel.panelSize.width,
+            "minSize must never demand more width than the panel has"
+        )
+        XCTAssertEqual(
+            textView.textContainer?.widthTracksTextView,
+            true,
+            "the text container has to follow the text view, or the glyphs wrap to the old width"
+        )
+    }
+
+    /// The result text view must track the width of its viewport.
+    ///
+    /// This is the defect behind "the preview shows no text". Measured on the shipped
+    /// 1.2.0 build, the panel's accessibility tree reads:
+    ///
+    ///     AXScrollArea [632x277]
+    ///       AXTextArea  [0x277]  VALUE(134)="we were talking about the api design…"
+    ///
+    /// — the full result is in the text view and the text view is zero points wide, so
+    /// there is nowhere for it to draw. The panel builds it with a bare `NSTextView()`
+    /// (a zero frame) and assigns it as `documentView` without the document-view sizing
+    /// every other text view in this app sets, so nothing ever ties its width to the clip
+    /// view's. Whether the initial layout happens to give it a width depends on when the
+    /// scroll view is first tiled; the panel animates its frame in from a smaller size,
+    /// so the width it is given at birth is not the width it must end up with.
+    func testResultTextViewTracksItsViewportWidth() throws {
+        let panel = try present("# Heading\n\nbody text long enough to need a real width")
+        let views = descendants(of: try XCTUnwrap(panel.contentView))
+        let textView = try XCTUnwrap(views.compactMap { $0 as? NSTextView }.first)
+        let scrollView = try XCTUnwrap(textView.enclosingScrollView)
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        // `FloatingPanelChrome.animateIn` starts the panel 24pt narrower than its final
+        // size and grows it, so the viewport width genuinely changes after the text view
+        // is installed. Drive the same change directly.
+        for width in [AIPreviewPanel.panelSize.width - 90, AIPreviewPanel.panelSize.width] {
+            panel.setContentSize(NSSize(width: width, height: AIPreviewPanel.panelSize.height))
+            panel.contentView?.layoutSubtreeIfNeeded()
+            scrollView.layoutSubtreeIfNeeded()
+
+            XCTAssertEqual(
+                textView.frame.width,
+                scrollView.contentView.bounds.width,
+                accuracy: 1,
+                "At panel width \(width) the document view is \(textView.frame.width)pt wide "
+                    + "inside a \(scrollView.contentView.bounds.width)pt viewport — text cannot draw"
+            )
+            XCTAssertGreaterThan(
+                laidOutTextRect(textView).width,
+                0,
+                "Nothing is laid out at panel width \(width): frame \(textView.frame)"
+            )
+        }
+    }
+
+    /// The same guarantee while the answer is still streaming: partials go down the
+    /// `applyPartial` path, which is a different assignment from the completion's.
+    func testStreamingPartialIsLaidOutTheSameWayAFinalResultIs() throws {
+        let panel = try present("# Heading\n\n**bold** body")
+        let views = descendants(of: try XCTUnwrap(panel.contentView))
+        let textView = try XCTUnwrap(views.compactMap { $0 as? NSTextView }.first)
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        textView.string = "a streamed partial answer arriving one chunk at a time"
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let drawn = laidOutTextRect(textView)
+        XCTAssertGreaterThan(drawn.width, 0, "A partial must lay out too: frame \(textView.frame)")
+        XCTAssertGreaterThan(drawn.height, 0, "A partial must lay out too: \(drawn)")
+    }
+
     // MARK: - Delta pills
 
     /// The pills report a change. `%d` signs a loss and not a gain, so a result that grew

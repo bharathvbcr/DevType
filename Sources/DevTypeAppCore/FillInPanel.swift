@@ -346,6 +346,23 @@ private final class FillInFormController: NSViewController {
             text.backgroundColor = .clear
             text.insertionPointColor = DevTypeTheme.accentBright
             text.textContainerInset = NSSize(width: 6, height: 5)
+            // A document view has to be told to follow its viewport; a scroll view will not
+            // size it. Without this the field keeps whatever width AppKit gave it when the
+            // scroll view was first tiled — which in the AI preview panel, built the same
+            // way, was zero on the shipped build, leaving the text with nowhere to draw.
+            text.minSize = NSSize(width: 0, height: 0)
+            text.maxSize = NSSize(
+                width: CGFloat.greatestFiniteMagnitude,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            text.isVerticallyResizable = true
+            text.isHorizontallyResizable = false
+            text.autoresizingMask = [.width]
+            text.textContainer?.containerSize = NSSize(
+                width: 394,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            text.textContainer?.widthTracksTextView = true
             // §4: an unlabelled NSTextView announces only "text entry area".
             text.setAccessibilityLabel(field.name)
             scroll.documentView = text

@@ -236,6 +236,10 @@ final class PermissionDiagnosticsController: NSViewController {
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
+        // A scroll view does not size its document view: without this the log preview keeps
+        // whatever width AppKit gave it when the scroll view was first tiled, which for a
+        // zero-frame `NSTextView()` can be nothing at all.
+        textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(
             width: 520,
