@@ -279,6 +279,7 @@ final class EngineDeliveryCoverageTests: XCTestCase {
         _ = EraseExecutor.TextAccess.live.value(sys)
         _ = EraseExecutor.TextAccess.live.selectedRange(sys)
         _ = EraseExecutor.TextAccess.live.stringForRange(sys, NSRange(location: 0, length: 0))
+        _ = EraseExecutor.TextAccess.live.role(sys)
 
         let executor = EraseExecutor()
         let plan = ErasePlan(text: ";short")

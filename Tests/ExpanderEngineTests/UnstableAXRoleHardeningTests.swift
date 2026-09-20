@@ -216,6 +216,32 @@ final class UnstableAXRoleHardeningTests: XCTestCase {
         )
     }
 
+    // MARK: - Erase precondition cannot treat a combo-box AXValue as the typed buffer
+
+    /// Field incident 2026-09-19 (GitPulse `AXComboBox`): prefix-debounce fired, AXValue was a
+    /// 56-unit selected item ending in two NBSPs, range probe agreed with that window, and the
+    /// vouched 2-character trigger was absent from the scan. The 2026-09-11 hardening skipped AX
+    /// writes and survived element retarget; this remaining refuse blocked the HID erase those
+    /// priors already chose.
+    func testComboBoxSelectedItemDoesNotRefuseAVouchedTypedTrigger() {
+        let trigger = "`x"
+        let value = String(repeating: "x", count: 54) + "\u{00A0}\u{00A0}"
+        XCTAssertEqual(value.utf16.count, 56)
+        let executor = EraseExecutor(textAccess: .init(
+            value: { _ in value },
+            selectedRange: { _ in NSRange(location: 56, length: 0) },
+            stringForRange: { _, _ in "\u{00A0}\u{00A0}" },
+            role: { _ in "AXComboBox" }
+        ))
+        let result = executor.evaluateErasePrecondition(
+            plan: ErasePlan(text: trigger),
+            element: AXUIElementCreateApplication(1234),
+            retryOnMismatch: false
+        )
+        XCTAssertFalse(result.blocksErase, "\(result)")
+        XCTAssertTrue(result.requiresHID)
+    }
+
     func testLegacyGuardedErasePathStillSanitizesWithoutLeakingFieldText() {
         let hostile = "Erase precondition failed before paste — field no longer holds the trigger /Users/person/secret.txt"
         XCTAssertEqual(
@@ -321,5 +347,60 @@ final class UnstableAXRoleStressTests: XCTestCase {
             )
         )
         _ = different
+    }
+
+    func testUnstableRoleEraseRecoverySurvivesAdversarialBuffers() {
+        let unstable = Array(AXWriteCapabilityStore.axWriteUnstableRoles)
+        let triggers = ["`x", ";;", "ab", "🎓x", "e\u{0301}y", "a b"]
+        let started = Date()
+        for seed: UInt64 in [1, 9, 42, 2026, 0xBAD_C0DE] {
+            var rng = SplitMix64(seed: seed)
+            for _ in 0..<400 {
+                let trigger = triggers[Int(rng.next() % UInt64(triggers.count))]
+                let pad = Int(rng.next() % 80)
+                let nbspPad = String(repeating: "\u{00A0}", count: trigger.utf16.count)
+                let value = String(repeating: "z", count: pad) + nbspPad
+                let role = unstable[Int(rng.next() % UInt64(unstable.count))]
+                var rangeReads = 0
+                let executor = EraseExecutor(textAccess: .init(
+                    value: { _ in value },
+                    selectedRange: { _ in NSRange(location: value.utf16.count, length: 0) },
+                    stringForRange: { _, _ in
+                        rangeReads += 1
+                        return nbspPad
+                    },
+                    role: { _ in role }
+                ))
+                let result = executor.evaluateErasePrecondition(
+                    plan: ErasePlan(text: trigger),
+                    element: AXUIElementCreateApplication(1234),
+                    retryOnMismatch: false
+                )
+                XCTAssertFalse(result.blocksErase, "seed \(seed) role \(role) trigger \(trigger)")
+                XCTAssertTrue(result.requiresHID, "seed \(seed) role \(role)")
+                XCTAssertEqual(rangeReads, 0, "Unstable roles must not range-probe a selected-item buffer")
+            }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), StressWallClock.terminationGuard)
+    }
+
+    func testStableRolesNeverInheritComboBoxEraseRecovery() {
+        let value = String(repeating: "x", count: 54) + "\u{00A0}\u{00A0}"
+        for role: String? in ["AXTextArea", "AXTextField", "AXSearchField", "AXWebArea", nil, ""] {
+            let executor = EraseExecutor(textAccess: .init(
+                value: { _ in value },
+                selectedRange: { _ in NSRange(location: 56, length: 0) },
+                stringForRange: { _, _ in "\u{00A0}\u{00A0}" },
+                role: { _ in role }
+            ))
+            XCTAssertTrue(
+                executor.evaluateErasePrecondition(
+                    plan: ErasePlan(text: "`x"),
+                    element: AXUIElementCreateApplication(1234),
+                    retryOnMismatch: false
+                ).blocksErase,
+                "\(role ?? "nil") must still refuse a genuine missing trigger"
+            )
+        }
     }
 }

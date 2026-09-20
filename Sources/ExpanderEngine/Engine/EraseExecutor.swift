@@ -59,6 +59,22 @@ public final class EraseExecutor {
         var value: (AXUIElement) -> String?
         var selectedRange: (AXUIElement) -> NSRange?
         var stringForRange: (AXUIElement, NSRange) -> String?
+        /// Focused `kAXRoleAttribute`. Combo boxes and menus report a selected item as
+        /// `AXValue`, not the typed filter; tests inject the role so that policy can be
+        /// pinned without a live AX tree.
+        var role: (AXUIElement) -> String?
+
+        init(
+            value: @escaping (AXUIElement) -> String?,
+            selectedRange: @escaping (AXUIElement) -> NSRange?,
+            stringForRange: @escaping (AXUIElement, NSRange) -> String?,
+            role: @escaping (AXUIElement) -> String? = { _ in nil }
+        ) {
+            self.value = value
+            self.selectedRange = selectedRange
+            self.stringForRange = stringForRange
+            self.role = role
+        }
 
         static let live = TextAccess(
             value: { element in
@@ -74,7 +90,8 @@ public final class EraseExecutor {
                 guard let parameter = AXValueCreate(.cfRange, &cfRange) else { return nil }
                 return SelectionReader.copyStringForRange(element, parameter, attributed: false)
                     ?? SelectionReader.copyStringForRange(element, parameter, attributed: true)
-            }
+            },
+            role: { AXContextChecker.shared.focusedElementRole(element: $0) }
         )
     }
 
@@ -244,6 +261,26 @@ public final class EraseExecutor {
             insertionPointFollowsExpectedText: !intent.isUndo && insertionPointFollowsExpectedText
         )
         guard case .mismatch(let reason) = result else { return result }
+
+        // Combo boxes, menus and lists report a selected item as AXValue, not the typed
+        // filter the tap just vouched for. Range-probing that same buffer cannot
+        // corroborate the trigger (GitPulse 2026-09-19: 56-unit selected item ending in
+        // NBSP, rangeProbe=mismatch, expectedTextInScan=absent). The 2026-09-11
+        // hardening already skipped AX writes and survived element retarget for these
+        // roles; treating their AXValue as a field change blocks the HID erase those
+        // priors chose. Undo, voice, and an active selection cannot borrow this.
+        let role = textAccess.role(axElement)
+        if !intent.isUndo, insertionPointFollowsExpectedText,
+           range?.length == 0,
+           AXWriteCapabilityStore.isAXWriteUnstableRole(role) {
+            let roleName = role ?? ""
+            DevTypeLog.inject.info(
+                "[Inject] AXValue of unstable role \(roleName, privacy: .public) is not the typed buffer — using HID erase"
+            )
+            return .unavailable(
+                "\(reason); unstableRole=\(roleName) — AXValue is not the typed buffer, HID only"
+            )
+        }
 
         // Some editors expose a stale/flattened AXValue while their range API still
         // describes the live text. Ask only for the exact erase window, and only while
