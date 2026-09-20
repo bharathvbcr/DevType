@@ -63,17 +63,23 @@ public final class EraseExecutor {
         /// `AXValue`, not the typed filter; tests inject the role so that policy can be
         /// pinned without a live AX tree.
         var role: (AXUIElement) -> String?
+        /// Whether the focused element advertises any settable text attribute; `nil` when AX
+        /// could not answer. Second half of the conjunctive projection test, injected so a
+        /// read-only host can be reproduced without a live AX tree.
+        var acceptsTextMutation: (AXUIElement) -> Bool?
 
         init(
             value: @escaping (AXUIElement) -> String?,
             selectedRange: @escaping (AXUIElement) -> NSRange?,
             stringForRange: @escaping (AXUIElement, NSRange) -> String?,
-            role: @escaping (AXUIElement) -> String? = { _ in nil }
+            role: @escaping (AXUIElement) -> String? = { _ in nil },
+            acceptsTextMutation: @escaping (AXUIElement) -> Bool? = { _ in nil }
         ) {
             self.value = value
             self.selectedRange = selectedRange
             self.stringForRange = stringForRange
             self.role = role
+            self.acceptsTextMutation = acceptsTextMutation
         }
 
         static let live = TextAccess(
@@ -91,7 +97,8 @@ public final class EraseExecutor {
                 return SelectionReader.copyStringForRange(element, parameter, attributed: false)
                     ?? SelectionReader.copyStringForRange(element, parameter, attributed: true)
             },
-            role: { AXContextChecker.shared.focusedElementRole(element: $0) }
+            role: { AXContextChecker.shared.focusedElementRole(element: $0) },
+            acceptsTextMutation: { AXContextChecker.shared.acceptsTextMutation(element: $0) }
         )
     }
 
@@ -262,23 +269,35 @@ public final class EraseExecutor {
         )
         guard case .mismatch(let reason) = result else { return result }
 
-        // Combo boxes, menus and lists report a selected item as AXValue, not the typed
-        // filter the tap just vouched for. Range-probing that same buffer cannot
-        // corroborate the trigger (GitPulse 2026-09-19: 56-unit selected item ending in
-        // NBSP, rangeProbe=mismatch, expectedTextInScan=absent). The 2026-09-11
-        // hardening already skipped AX writes and survived element retarget for these
-        // roles; treating their AXValue as a field change blocks the HID erase those
-        // priors chose. Undo, voice, and an active selection cannot borrow this.
+        // A host whose AXValue is a projection — a combo box's selected item, a terminal grid
+        // padded with NBSP, a static row — disagrees with the expected trigger on every
+        // expansion while the real insertion point still holds it. Range-probing that same
+        // buffer cannot corroborate (GitPulse 2026-09-19: 56-unit selected item ending in NBSP,
+        // rangeProbe=mismatch, expectedTextInScan=absent; 2026-09-20: three refusals with the
+        // same shape under a role the closed list did not name). Classify the value instead of
+        // enumerating roles. Undo, voice, and an active selection cannot borrow this.
         let role = textAccess.role(axElement)
+        // The role attached to every disagreement below. A field report that says only
+        // "the target text changed" cannot distinguish "your text moved" from "this app's
+        // AXValue was never the buffer", which is exactly why the 2026-09-19 role recovery
+        // could not be confirmed or refuted from one.
+        let roleEvidence = "focusedRole=\(role ?? "unreadable")"
+        // Settability is a live AX round trip; skip it whenever role alone already decides.
+        let needsMutationProbe = role != nil
+            && !AXWriteCapabilityStore.isAXWriteUnstableRole(role)
+            && !AXWriteCapabilityStore.isTextEntryRole(role)
+        let authority = ErasePreconditionChecker.classifyAXValue(
+            role: role,
+            acceptsTextMutation: needsMutationProbe ? textAccess.acceptsTextMutation(axElement) : nil
+        )
         if !intent.isUndo, insertionPointFollowsExpectedText,
            range?.length == 0,
-           AXWriteCapabilityStore.isAXWriteUnstableRole(role) {
-            let roleName = role ?? ""
+           case .projection(let why) = authority {
             DevTypeLog.inject.info(
-                "[Inject] AXValue of unstable role \(roleName, privacy: .public) is not the typed buffer — using HID erase"
+                "[Inject] AXValue of \(why, privacy: .public) is not the typed buffer — using HID erase"
             )
             return .unavailable(
-                "\(reason); unstableRole=\(roleName) — AXValue is not the typed buffer, HID only"
+                "\(reason); \(why) — AXValue is not the typed buffer, HID only"
             )
         }
 
@@ -294,36 +313,36 @@ public final class EraseExecutor {
               let expected = plan.expectedText,
               expected.utf16.count == plan.utf16Count,
               expected.count == plan.backspaceCount else {
-            return .mismatch("\(reason); rangeProbe=ineligible")
+            return .mismatch("\(reason); \(roleEvidence); rangeProbe=ineligible")
         }
         let eraseRange = NSRange(location: range.location - plan.utf16Count, length: plan.utf16Count)
         if let value, ErasePreconditionChecker.splitsCharacter(
             value, start: eraseRange.location, end: range.location
         ) {
-            return .mismatch("erase window splits a Unicode character; rangeProbe=ineligible")
+            return .mismatch("erase window splits a Unicode character; \(roleEvidence); rangeProbe=ineligible")
         }
         guard let rangedText = textAccess.stringForRange(axElement, eraseRange) else {
-            return .mismatch("\(reason); rangeProbe=unavailable")
+            return .mismatch("\(reason); \(roleEvidence); rangeProbe=unavailable")
         }
         guard textAccess.selectedRange(axElement) == range else {
-            return .mismatch("\(reason); rangeProbe=selectionChanged")
+            return .mismatch("\(reason); \(roleEvidence); rangeProbe=selectionChanged")
         }
         // A host ignoring the requested range (or returning a truncated/oversized answer)
         // has supplied no evidence for the destructive window. Check width before folding.
         guard rangedText.utf16.count == plan.utf16Count else {
-            return .mismatch("\(reason); rangeProbe=invalidLength")
+            return .mismatch("\(reason); \(roleEvidence); rangeProbe=invalidLength")
         }
         let rangeResult = ErasePreconditionChecker.evaluate(
             plan: plan, value: rangedText, caretLocation: plan.utf16Count, selectionLength: 0,
             insertionPointFollowsExpectedText: false
         )
         guard rangeResult == .ok else {
-            return .mismatch("\(reason); rangeProbe=mismatch")
+            return .mismatch("\(reason); \(roleEvidence); rangeProbe=mismatch")
         }
         DevTypeLog.inject.info("[Inject] AXValue disagrees but the stable caret range holds the trigger — using HID erase")
         // Conflicting views must skip AX writes. `.unavailable` also preserves the existing
         // refusal after a possible write, so this evidence cannot cause duplicate delivery.
-        return .unavailable("AXValue disagrees with the stable caret range — HID only; rangeProbe=matched")
+        return .unavailable("AXValue disagrees with the stable caret range — HID only; \(roleEvidence); rangeProbe=matched")
     }
 
     // MARK: - Guarded erase

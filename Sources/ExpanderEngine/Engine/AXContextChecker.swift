@@ -677,6 +677,40 @@ public final class AXContextChecker {
         return role
     }
 
+    /// Text attributes whose settability distinguishes an editable field from a rendered
+    /// projection. `AXValue` covers plain fields; `AXSelectedText` covers views that only accept
+    /// ranged edits (most web and document editors report the latter and not the former).
+    static let textMutationAttributes: [String] = [
+        kAXValueAttribute as String,
+        kAXSelectedTextAttribute as String
+    ]
+
+    /// Whether the element advertises any settable text attribute.
+    ///
+    /// - Returns: `true`/`false` when AX answered for at least one attribute, `nil` when it could
+    ///   not answer at all (timeout, dead element, a process that does not implement the API).
+    ///   The nil case must never be read as "not editable": an unanswered probe is the same
+    ///   "AX cannot tell us" baseline as an unreadable value, and callers treat it as such.
+    public func acceptsTextMutation(element: AXUIElement) -> Bool? {
+        var answered = false
+        var settableAny = false
+        for attribute in Self.textMutationAttributes {
+            var settable: DarwinBoolean = false
+            switch AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) {
+            case .success:
+                answered = true
+                if settable.boolValue { settableAny = true }
+            case .attributeUnsupported, .noValue:
+                // A definite answer: the element does not offer this way in.
+                answered = true
+            default:
+                // cannotComplete / invalidUIElement / notImplemented — no answer, not a "no".
+                continue
+            }
+        }
+        return answered ? settableAny : nil
+    }
+
     /// Pure fail-closed policy: AX unavailable or no focused element ⇒ treat as unsafe.
     public static func mustRefuseExpandWhenFocusedUnknown(
         axTrusted: Bool,
@@ -793,6 +827,10 @@ public final class AXContextChecker {
         case .available(let element):
             let secure = isFocusedElementSecure(element: element)
             let ime = hasActiveIMEMarkedText(element: element)
+            // One bounded round trip on a path that already made two. The erase guard branches
+            // on this role, so leaving it out of the report is what makes an erase refusal
+            // unreadable after the fact.
+            let role = focusedElementRole(element: element)
             if secure {
                 let snapshot = DiagnosticReport.ExpandGateSnapshot(
                     canUseAX: true,
@@ -801,7 +839,8 @@ public final class AXContextChecker {
                     isSecureField: true,
                     hasIMEMarkedText: ime,
                     shouldBlockExpand: true,
-                    blockReason: "Focused secure text field — expand blocked"
+                    blockReason: "Focused secure text field — expand blocked",
+                    focusedRole: role
                 )
                 return ExpandGateDecision(
                     shouldBlock: true,
@@ -818,7 +857,8 @@ public final class AXContextChecker {
                     isSecureField: false,
                     hasIMEMarkedText: true,
                     shouldBlockExpand: true,
-                    blockReason: "Active IME marked text — expand blocked"
+                    blockReason: "Active IME marked text — expand blocked",
+                    focusedRole: role
                 )
                 return ExpandGateDecision(
                     shouldBlock: true,
@@ -834,7 +874,8 @@ public final class AXContextChecker {
                 isSecureField: false,
                 hasIMEMarkedText: false,
                 shouldBlockExpand: false,
-                blockReason: "ok"
+                blockReason: "ok",
+                focusedRole: role
             )
             return ExpandGateDecision(
                 shouldBlock: false,

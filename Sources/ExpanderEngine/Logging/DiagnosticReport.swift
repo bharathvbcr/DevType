@@ -372,6 +372,11 @@ public enum DiagnosticReport {
         public var hasIMEMarkedText: Bool?
         public var shouldBlockExpand: Bool
         public var blockReason: String
+        /// Focused `kAXRoleAttribute` when one was readable. The erase guard's policy branches on
+        /// it, so a report without it cannot tell "your text changed" apart from "this app's
+        /// AXValue was never the typed buffer" — the exact ambiguity that left the 2026-09-19
+        /// GitPulse role recovery unconfirmable from the 2026-09-20 field report.
+        public var focusedRole: String?
 
         public init(
             canUseAX: Bool,
@@ -380,7 +385,8 @@ public enum DiagnosticReport {
             isSecureField: Bool?,
             hasIMEMarkedText: Bool?,
             shouldBlockExpand: Bool,
-            blockReason: String
+            blockReason: String,
+            focusedRole: String? = nil
         ) {
             self.canUseAX = canUseAX
             self.axTrusted = axTrusted
@@ -389,6 +395,7 @@ public enum DiagnosticReport {
             self.hasIMEMarkedText = hasIMEMarkedText
             self.shouldBlockExpand = shouldBlockExpand
             self.blockReason = blockReason
+            self.focusedRole = focusedRole
         }
     }
 
@@ -1207,6 +1214,7 @@ public enum DiagnosticReport {
             "canUseAX: \(gate.canUseAX)",
             "AX trusted: \(gate.axTrusted)",
             "Focused element: \(gate.focusedAvailable ? "available" : "missing")",
+            "Focused role: \(boundedOptionalScalar(gate.focusedRole, label: "focusedRole", domain: "expand-gate-role", nilValue: "(unreadable)"))",
             "Secure field: \(optionalBool(gate.isSecureField))",
             "IME marked text: \(optionalBool(gate.hasIMEMarkedText))",
             "Should block expand: \(gate.shouldBlockExpand)",

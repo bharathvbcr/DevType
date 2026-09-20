@@ -166,6 +166,26 @@ public final class AXWriteCapabilityStore {
         return axWriteUnstableRoles.contains(role)
     }
 
+    /// Roles whose `AXValue` *is* the editable text buffer the user types into, so a disagreement
+    /// with the expected erase text is real evidence the field changed.
+    ///
+    /// The complement is not "unstable": a host can report a rendered projection (a terminal grid,
+    /// a padded label, a static row) under a role that is merely *not* a text field. Naming the
+    /// text roles positively lets the erase guard tell "AX says your text changed" apart from
+    /// "AX is describing something that was never the typed buffer" without a closed list of every
+    /// projection role that exists.
+    public static let textEntryRoles: Set<String> = [
+        "AXTextField",
+        "AXTextArea",
+        "AXSearchField",
+        "AXSecureTextField"
+    ]
+
+    public static func isTextEntryRole(_ role: String?) -> Bool {
+        guard let role, !role.isEmpty else { return false }
+        return textEntryRoles.contains(role)
+    }
+
     /// Known-bad seeds. Chromium/Electron shells and Messages report success without mutating.
     /// Kept deliberately small — it only saves the *first* wasted attempt; learning covers the rest.
     ///

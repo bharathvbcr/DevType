@@ -127,7 +127,54 @@ public enum ErasePreconditionResult: Equatable {
     }
 }
 
+/// Whether the focused element's `AXValue` may be believed to be the buffer the user typed into.
+///
+/// The erase guard refuses when the field window disagrees with the expected trigger. That is only
+/// sound if `AXValue` *is* the typed buffer. Hosts that report a rendered projection instead — a
+/// combo box's selected item, a terminal grid padded with NBSP, a static row — disagree on every
+/// expansion while the real insertion point still holds the trigger, and refusing there costs the
+/// user the expansion for nothing.
+public enum AXBufferAuthority: Equatable {
+    /// `AXValue` is the editable buffer. A disagreement is a real field change — refuse.
+    case authoritative
+    /// `AXValue` is a projection. Its content is no evidence about what sits left of the real
+    /// insertion point, so the erase degrades to best-effort HID instead of refusing.
+    case projection(String)
+    /// Not enough evidence either way. Callers keep the stricter pre-existing behaviour.
+    case undetermined
+}
+
 public enum ErasePreconditionChecker {
+    /// Classify the focused element's `AXValue` from role and settability.
+    ///
+    /// Deliberately conjunctive on the read-only path: a host must *both* fail to look like a text
+    /// field *and* refuse every text-mutation attribute before its value is dismissed. AX lies
+    /// freely about settability, and a one-signal rule would let a genuine "the user's text
+    /// changed" slip through to a blind erase in any quirky editor that under-reports. A real text
+    /// field always reports a text role, so the conjunction cannot misfire on one.
+    ///
+    /// - Parameters:
+    ///   - role: focused `kAXRoleAttribute`, or nil when unreadable.
+    ///   - acceptsTextMutation: whether the element advertises any settable text attribute.
+    ///     `nil` means AX could not answer — which is never turned into permission.
+    public static func classifyAXValue(
+        role: String?,
+        acceptsTextMutation: Bool?
+    ) -> AXBufferAuthority {
+        // Combo boxes, menus and lists report a selected item as AXValue and retarget their
+        // focused node while we erase. Role alone is enough for them — it always was.
+        if AXWriteCapabilityStore.isAXWriteUnstableRole(role) {
+            return .projection("unstableRole=\(role ?? "")")
+        }
+        if AXWriteCapabilityStore.isTextEntryRole(role) {
+            return .authoritative
+        }
+        if let role, !role.isEmpty, acceptsTextMutation == false {
+            return .projection("readOnlyRole=\(role)")
+        }
+        return .undetermined
+    }
+
     /// Escape hatch. The guard trades "expansion silently corrupts text" for "expansion refuses and
     /// says why"; if a host turns out to report text in a way the guard cannot model, a user can
     /// disable it without waiting for a build:
