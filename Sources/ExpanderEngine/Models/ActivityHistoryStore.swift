@@ -522,7 +522,14 @@ public final class ActivityHistoryStore {
 
     private func publishMutation(_ result: MutationResult, operation: MutationOperation) {
         if result == .persisted {
-            NotificationCenter.default.post(name: Self.didUpdateNotification, object: self)
+            let notify = {
+                NotificationCenter.default.post(name: Self.didUpdateNotification, object: self)
+            }
+            if Thread.isMainThread {
+                notify()
+            } else {
+                DispatchQueue.main.async(execute: notify)
+            }
         } else {
             DevTypeLog.store.error(
                 "[Activity] \(operation.rawValue, privacy: .public) failed outcome=\(result.diagnosticLabel, privacy: .public)"

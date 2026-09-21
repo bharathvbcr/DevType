@@ -67,8 +67,11 @@ struct ActivityDiagnosticCopyGate {
 /// Internal so the error-state accessibility contract can be exercised without mutating the
 /// process-wide ActivityHistoryStore used by the production controller.
 final class ActivityHistoryEmptyStateView: NSTableCellView {
+    private let titleLabel: NSTextField
+    private let detailsLabel: NSTextField
+    private let stack: NSStackView
+
     init(presentation: ActivityHistoryEmptyPresentation) {
-        super.init(frame: .zero)
         let title = DevTypeTheme.makeLabel(
             presentation.title,
             font: DevTypeTheme.font(12, .semibold),
@@ -77,22 +80,27 @@ final class ActivityHistoryEmptyStateView: NSTableCellView {
                 : DevTypeTheme.statusOrange
         )
         title.alignment = .center
-        let views: [NSView]
-        if let details = presentation.details {
-            let hint = NSTextField(wrappingLabelWithString: details)
-            hint.font = DevTypeTheme.font(10.5)
-            hint.textColor = DevTypeTheme.textSecondary
-            hint.alignment = .center
-            hint.preferredMaxLayoutWidth = 420
-            views = [title, hint]
-        } else {
-            views = [title]
-        }
-        let stack = NSStackView(views: views)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        self.titleLabel = title
+
+        let hint = NSTextField(wrappingLabelWithString: presentation.details ?? "")
+        hint.font = DevTypeTheme.font(10.5)
+        hint.textColor = DevTypeTheme.textSecondary
+        hint.alignment = .center
+        hint.preferredMaxLayoutWidth = 420
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        hint.isHidden = presentation.details == nil
+        self.detailsLabel = hint
+
+        let stack = NSStackView(views: [title, hint])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 5
         stack.translatesAutoresizingMaskIntoConstraints = false
+        self.stack = stack
+
+        super.init(frame: .zero)
+
         addSubview(stack)
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -102,6 +110,25 @@ final class ActivityHistoryEmptyStateView: NSTableCellView {
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
+        applyPresentation(presentation)
+    }
+
+    func update(presentation: ActivityHistoryEmptyPresentation) {
+        applyPresentation(presentation)
+    }
+
+    private func applyPresentation(_ presentation: ActivityHistoryEmptyPresentation) {
+        titleLabel.stringValue = presentation.title
+        titleLabel.textColor = presentation.details == nil
+            ? DevTypeTheme.textTertiary
+            : DevTypeTheme.statusOrange
+        if let details = presentation.details {
+            detailsLabel.stringValue = details
+            detailsLabel.isHidden = false
+        } else {
+            detailsLabel.stringValue = ""
+            detailsLabel.isHidden = true
+        }
         setAccessibilityLabel(presentation.title)
         setAccessibilityHelp(presentation.details)
     }
@@ -110,16 +137,48 @@ final class ActivityHistoryEmptyStateView: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
+/// An accessible, keyboard-responsive table view for recent activity.
+///
+/// Answers keyboard commands: Return/Enter activates the focused event's action,
+/// Delete/Backspace dismisses the selected event from history, and Escape closes the window.
+final class ActivityTableView: NSTableView {
+    var onReturn: () -> Void = {}
+    var onDelete: () -> Void = {}
+    var onEscape: () -> Void = {}
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76: // Return, numpad Enter
+            onReturn()
+        case 51, 117: // Delete, forward delete
+            onDelete()
+        case 53: // Escape
+            onEscape()
+        default:
+            super.keyDown(with: event)
+        }
+    }
+}
+
 /// §8: Notification & Recent Activity Center.
 ///
 /// Surfaces non-transient event history (failed expansions, secure input changes,
 /// sync issues, AI/dictation errors, hotkey conflicts) with actionable resolution paths.
-final class ActivityCenterViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class ActivityCenterViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     private static var windowController: NSWindowController?
     private var diagnosticCopyGate = ActivityDiagnosticCopyGate()
 
+    /// Active window reference, accessible for tests and window coordination.
+    static var activeWindow: NSWindow? {
+        windowController?.window
+    }
+
     public static func show() {
-        if let existing = windowController?.window {
+        if let existing = windowController?.window,
+           let vc = existing.contentViewController as? ActivityCenterViewController {
+            vc.attachObserversIfNeeded()
+            vc.refreshLocalization()
+            vc.reload()
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -128,12 +187,13 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
         let vc = ActivityCenterViewController()
         let window = NSWindow(contentViewController: vc)
         window.title = LocalizationManager.shared.s("activity.title")
-        window.styleMask = [.titled, .closable, .resizable]
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 540, height: 420))
         window.minSize = NSSize(width: 440, height: 320)
         DevTypeTheme.styleWindow(window, title: LocalizationManager.shared.s("activity.title"))
         window.dtRestoreFrame(named: "DevTypeActivityCenterWindow")
         window.isReleasedWhenClosed = false
+        window.delegate = vc
 
         let wc = NSWindowController(window: window)
         windowController = wc
@@ -143,7 +203,7 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
     }
 
     private let loc = LocalizationManager.shared
-    private let tableView = NSTableView()
+    private let tableView = ActivityTableView()
     private let headerLabel = DevTypeTheme.makeLabel(
         "",
         font: DevTypeTheme.font(16, .bold),
@@ -153,6 +213,12 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
     private var events: [ActivityHistoryStore.ActivityEvent] = []
     private var updateObserver: NSObjectProtocol?
     private var languageObserver: NSObjectProtocol?
+    private lazy var emptyStateView = ActivityHistoryEmptyStateView(
+        presentation: ActivityHistoryEmptyPresentation(
+            persistenceHealth: ActivityHistoryStore.shared.persistenceHealth,
+            localization: loc
+        )
+    )
 
     override func loadView() {
         let root = NSView()
@@ -170,6 +236,7 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
             action: #selector(clearTapped)
         )
         clearBtn.translatesAutoresizingMaskIntoConstraints = false
+        clearBtn.setContentCompressionResistancePriority(.required, for: .horizontal)
         clearButton = clearBtn
 
         let scroll = NSScrollView()
@@ -179,23 +246,46 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
 
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("eventCol"))
+        col.resizingMask = .autoresizingMask
+        col.width = 480
+        tableView.addTableColumn(col)
+        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         tableView.headerView = nil
         tableView.rowHeight = 64
         tableView.intercellSpacing = NSSize(width: 0, height: 6)
         tableView.backgroundColor = .clear
-        tableView.selectionHighlightStyle = .none
+        tableView.selectionHighlightStyle = .regular
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("eventCol")))
+        tableView.target = self
+        tableView.doubleAction = #selector(tableRowDoubleClicked)
+        tableView.setAccessibilityLabel(loc.s("activity.title"))
+
+        tableView.onReturn = { [weak self] in
+            self?.performSelectedAction()
+        }
+        tableView.onDelete = { [weak self] in
+            self?.deleteSelectedRow()
+        }
+        tableView.onEscape = { [weak self] in
+            self?.view.window?.performClose(nil)
+        }
+
         scroll.documentView = tableView
+
+        emptyStateView.translatesAutoresizingMaskIntoConstraints = false
+        emptyStateView.isHidden = true
 
         root.addSubview(headerLabel)
         root.addSubview(clearBtn)
         root.addSubview(scroll)
+        root.addSubview(emptyStateView)
 
         NSLayoutConstraint.activate([
             headerLabel.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
             headerLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            headerLabel.trailingAnchor.constraint(lessThanOrEqualTo: clearBtn.leadingAnchor, constant: -8),
 
             clearBtn.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
             clearBtn.centerYAnchor.constraint(equalTo: headerLabel.centerYAnchor),
@@ -203,7 +293,12 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
             scroll.topAnchor.constraint(equalTo: headerLabel.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14)
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+
+            emptyStateView.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+            emptyStateView.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
+            emptyStateView.leadingAnchor.constraint(greaterThanOrEqualTo: scroll.leadingAnchor, constant: 20),
+            emptyStateView.trailingAnchor.constraint(lessThanOrEqualTo: scroll.trailingAnchor, constant: -20)
         ])
 
         view = root
@@ -212,6 +307,20 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
     override func viewWillAppear() {
         super.viewWillAppear()
         refreshLocalization()
+        attachObserversIfNeeded()
+        reload()
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        detachObservers()
+    }
+
+    deinit {
+        detachObservers()
+    }
+
+    func attachObserversIfNeeded() {
         if updateObserver == nil {
             updateObserver = NotificationCenter.default.addObserver(
                 forName: ActivityHistoryStore.didUpdateNotification,
@@ -232,57 +341,117 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
         }
     }
 
-    override func viewWillDisappear() {
-        super.viewWillDisappear()
+    func detachObservers() {
         if let updateObserver { NotificationCenter.default.removeObserver(updateObserver) }
         if let languageObserver { NotificationCenter.default.removeObserver(languageObserver) }
         updateObserver = nil
         languageObserver = nil
     }
 
+    // MARK: - NSWindowDelegate
+
+    func windowWillClose(_ notification: Notification) {
+        detachObservers()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        attachObserversIfNeeded()
+        reload()
+    }
+
     func refreshLocalization() {
         headerLabel.stringValue = loc.s("activity.title")
         clearButton?.title = loc.s("activity.clear")
+        tableView.setAccessibilityLabel(loc.s("activity.title"))
         if let window = view.window {
             DevTypeTheme.styleWindow(window, title: loc.s("activity.title"))
         }
         reload()
     }
 
-    private func reload() {
+    func reload() {
         events = ActivityHistoryStore.shared.recentEvents()
+        let health = ActivityHistoryStore.shared.persistenceHealth
+        emptyStateView.update(
+            presentation: ActivityHistoryEmptyPresentation(
+                persistenceHealth: health,
+                localization: loc
+            )
+        )
+        emptyStateView.isHidden = !events.isEmpty
+        clearButton?.isEnabled = !events.isEmpty || !health.isHealthy
         tableView.reloadData()
     }
 
     @objc private func clearTapped() {
-        switch ActivityHistoryStore.shared.clear() {
-        case .persisted:
-            reload()
-        case .persistenceFailed:
-            DevTypeAlert.warn(
-                title: loc.s("activity.clear.failed.title"),
-                message: loc.s("activity.clear.failed.message"),
-                window: view.window
+        guard !events.isEmpty || !ActivityHistoryStore.shared.persistenceHealth.isHealthy else {
+            return
+        }
+
+        let doClear = { [weak self] in
+            guard let self else { return }
+            switch ActivityHistoryStore.shared.clear() {
+            case .persisted:
+                self.reload()
+            case .persistenceFailed:
+                let hostWindow = self.view.window?.isVisible == true ? self.view.window : nil
+                DevTypeAlert.warn(
+                    title: self.loc.s("activity.clear.failed.title"),
+                    message: self.loc.s("activity.clear.failed.message"),
+                    window: hostWindow
+                )
+            }
+        }
+
+        if !events.isEmpty {
+            let hostWindow = view.window?.isVisible == true ? view.window : nil
+            DevTypeAlert.confirm(
+                title: loc.s("activity.clear"),
+                message: loc.s("activity.clear.confirm.message"),
+                confirmTitle: loc.s("activity.clear"),
+                cancelTitle: loc.s("common.cancel"),
+                destructive: true,
+                window: hostWindow,
+                onConfirm: doClear
             )
+        } else {
+            doClear()
+        }
+    }
+
+    @objc private func tableRowDoubleClicked() {
+        performSelectedAction()
+    }
+
+    private func performSelectedAction() {
+        let row = tableView.selectedRow
+        guard row >= 0 && row < events.count else { return }
+        let event = events[row]
+        if event.action != .none {
+            handleAction(event)
+        }
+    }
+
+    private func deleteSelectedRow() {
+        let row = tableView.selectedRow
+        guard row >= 0 && row < events.count else { return }
+        let event = events[row]
+        _ = ActivityHistoryStore.shared.remove(id: event.id)
+        reload()
+        if !events.isEmpty {
+            let nextRow = min(row, events.count - 1)
+            tableView.selectRowIndexes(IndexSet(integer: nextRow), byExtendingSelection: false)
         }
     }
 
     // MARK: - Table View
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        events.isEmpty ? 1 : events.count
+        events.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if events.isEmpty {
-            return ActivityHistoryEmptyStateView(
-                presentation: ActivityHistoryEmptyPresentation(
-                    persistenceHealth: ActivityHistoryStore.shared.persistenceHealth,
-                    localization: loc
-                )
-            )
-        }
-
+        guard row >= 0 && row < events.count else { return nil }
         let event = events[row]
         let cell = ActivityEventRowView(event: event, localization: loc) { [weak self] selectedEvent in
             self?.handleAction(selectedEvent)
@@ -299,13 +468,29 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
         case .openSnippetManager:
             (NSApp.delegate as? AppDelegate)?.openSnippetManager(nil)
         case .openPreferences:
-            PreferencesWindowController.shared.show(tab: .general, hotkeyManager: nil)
+            if let appDelegate = NSApp.delegate as? AppDelegate {
+                appDelegate.openPreferences(nil, tab: .general)
+            } else {
+                PreferencesWindowController.shared.show(tab: .general, hotkeyManager: nil)
+            }
         case .openAIPreferences:
-            PreferencesWindowController.shared.show(tab: .ai, hotkeyManager: nil)
+            if let appDelegate = NSApp.delegate as? AppDelegate {
+                appDelegate.openPreferences(nil, tab: .ai)
+            } else {
+                PreferencesWindowController.shared.show(tab: .ai, hotkeyManager: nil)
+            }
         case .openVoicePreferences:
-            PreferencesWindowController.shared.show(tab: .voice, hotkeyManager: nil)
+            if let appDelegate = NSApp.delegate as? AppDelegate {
+                appDelegate.openPreferences(nil, tab: .voice)
+            } else {
+                PreferencesWindowController.shared.show(tab: .voice, hotkeyManager: nil)
+            }
         case .openHotkeyPreferences:
-            PreferencesWindowController.shared.show(tab: .hotkeys, hotkeyManager: nil)
+            if let appDelegate = NSApp.delegate as? AppDelegate {
+                appDelegate.openPreferences(nil, tab: .hotkeys)
+            } else {
+                PreferencesWindowController.shared.show(tab: .hotkeys, hotkeyManager: nil)
+            }
         case .openLab:
             TestExpansionLab.run(from: view.window)
         case .copyDiagnostics:
@@ -313,17 +498,18 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
                 ToastPanel.show(loc.s("diagnostics.logs.building"), symbol: "hourglass")
                 return
             }
-            DiagnosticReport.buildAsync { report in
+            DiagnosticReport.buildAsync { [weak self] report in
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.diagnosticCopyGate.finish()
                     if DiagnosticReport.copyToPasteboard(report) {
                         ToastPanel.show(self.loc.s("diagnostics.copied"), symbol: "doc.on.doc")
                     } else {
+                        let hostWindow = self.view.window?.isVisible == true ? self.view.window : nil
                         DevTypeAlert.warn(
                             title: self.loc.s("diagnostics.copy.failed.title"),
                             message: self.loc.s("diagnostics.copy.failed.message"),
-                            window: self.view.window
+                            window: hostWindow
                         )
                     }
                 }
@@ -375,23 +561,30 @@ final class ActivityEventRowView: NSTableCellView {
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.toolTip = presentation.title
         titleLabel.setAccessibilityLabel(presentation.accessibilityLabel)
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         let detailsLabel = DevTypeTheme.makeLabel(presentation.details, font: DevTypeTheme.font(10.5), color: DevTypeTheme.textSecondary)
         detailsLabel.lineBreakMode = .byTruncatingTail
         detailsLabel.toolTip = presentation.details
         detailsLabel.setAccessibilityLabel(presentation.details)
         detailsLabel.setAccessibilityValue(presentation.accessibilityValue)
+        detailsLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let timeLabel = DevTypeTheme.makeLabel(
             presentation.timestampText,
             font: DevTypeTheme.mono(10),
             color: DevTypeTheme.textTertiary
         )
+        timeLabel.translatesAutoresizingMaskIntoConstraints = false
+        timeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let textStack = NSStackView(views: [titleLabel, detailsLabel])
         textStack.orientation = .vertical
         textStack.alignment = .leading
         textStack.spacing = 2
         textStack.translatesAutoresizingMaskIntoConstraints = false
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         content.addSubview(icon)
         content.addSubview(textStack)
@@ -408,6 +601,8 @@ final class ActivityEventRowView: NSTableCellView {
             )
             actionBtn.controlSize = .small
             actionBtn.translatesAutoresizingMaskIntoConstraints = false
+            actionBtn.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+            actionBtn.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
             content.addSubview(actionBtn)
 
             NSLayoutConstraint.activate([
@@ -433,6 +628,10 @@ final class ActivityEventRowView: NSTableCellView {
             timeLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             timeLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor)
         ])
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.row)
+        setAccessibilityLabel("\(presentation.title), \(presentation.details), \(presentation.timestampText)")
     }
 
     @available(*, unavailable)
