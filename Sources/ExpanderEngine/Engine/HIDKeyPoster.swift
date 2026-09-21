@@ -84,6 +84,118 @@ public final class HIDKeyPoster: BackspacePosting {
         return true
     }
 
+    /// One unit of a typed insert. Newlines and tabs are characters, not the Return or Tab keys.
+    public enum UnicodeInsertEvent: Equatable {
+        case text(String)
+        case key(CGKeyCode)
+    }
+
+    /// `postKeyPairs` refuses a count above this and posts nothing. Bursts must stay at or under it.
+    static let maxKeyPairsPerBurst = 4096
+
+        /// Plans a typed insert. Returns nil when the text contains a control scalar that would
+        /// delete or otherwise act as a command if posted as a key (backspace, delete, NUL,
+        /// escape). Tab, CR, and LF are planned as the characters themselves — not as the Return
+        /// or Tab keys — so a multiline snippet cannot submit Cursor's composer. A CR+LF pair is
+        /// one newline.
+    public static func unicodeInsertEvents(for text: String) -> [UnicodeInsertEvent]? {
+        guard !text.isEmpty else { return [] }
+        var events: [UnicodeInsertEvent] = []
+        events.reserveCapacity(text.count)
+        let characters = Array(text)
+        var index = 0
+        while index < characters.count {
+            let values = characters[index].unicodeScalars.map(\.value)
+            // Swift joins CR+LF into one grapheme. A lone CR still peeks at a following LF.
+            // Both become a newline character, not the Return key: Cursor's composer sends
+            // the chat on Return, which would submit a half-typed snippet.
+            if values == [0x0D, 0x0A] || values == [0x0A] {
+                events.append(.text("\n"))
+            } else if values == [0x0D] {
+                if index + 1 < characters.count,
+                   characters[index + 1].unicodeScalars.map(\.value) == [0x0A] {
+                    index += 1
+                }
+                events.append(.text("\n"))
+            } else if values == [0x09] {
+                events.append(.text("\t"))
+            } else if values.contains(where: { $0 < 0x20 || $0 == 0x7F }) {
+                return nil
+            } else {
+                events.append(.text(String(characters[index])))
+            }
+            index += 1
+        }
+        return events
+    }
+
+    /// Posts `events` without sending them to another process. Each burst stays inside
+    /// `maxKeyPairsPerBurst`; a failed post or a false continuation stops the count where it is.
+    static func deliverUnicodeInsert(
+        events: [UnicodeInsertEvent],
+        shouldContinue: () -> Bool,
+        post: (UnicodeInsertEvent) -> Bool
+    ) -> Int {
+        guard !events.isEmpty else { return 0 }
+        var posted = 0
+        var index = 0
+        while index < events.count {
+            let burst = min(maxKeyPairsPerBurst, events.count - index)
+            let burstStart = index
+            let count = postKeyPairs(count: burst, shouldContinue: shouldContinue) { offset in
+                post(events[burstStart + offset])
+            }
+            posted += count
+            index += count
+            if count < burst { break }
+        }
+        return posted
+    }
+
+    /// Types `events` into the focused field. Returns how many events were posted.
+    @discardableResult
+    public func postUnicodeInsert(
+        _ events: [UnicodeInsertEvent],
+        shouldContinue: () -> Bool = { true }
+    ) -> Int {
+        guard !events.isEmpty, CGPreflightPostEventAccess() else { return 0 }
+        let source = makeTaggedEventSource()
+        return Self.deliverUnicodeInsert(events: events, shouldContinue: {
+            CGPreflightPostEventAccess() && shouldContinue()
+        }) { event in
+            Self.postInsertEvent(event, source: source)
+        }
+    }
+
+    private static func postInsertEvent(_ event: UnicodeInsertEvent, source: CGEventSource?) -> Bool {
+        let keyCode: CGKeyCode
+        let unicode: String
+        switch event {
+        case .text(let text):
+            keyCode = 0
+            unicode = text
+        case .key(let code):
+            keyCode = code
+            unicode = ""
+        }
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+            return false
+        }
+        if !unicode.isEmpty {
+            let utf16 = Array(unicode.utf16)
+            utf16.withUnsafeBufferPointer { buffer in
+                if let base = buffer.baseAddress {
+                    down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: base)
+                    up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: base)
+                }
+            }
+        }
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
+    }
+
     // MARK: - Trailing keys
 
     /// Posts `%key:` trailing keys after successful inject (enter/tab/…).
@@ -299,7 +411,7 @@ public final class HIDKeyPoster: BackspacePosting {
 
     /// Recheck authority before each pair; once key-down posts, key-up is cleanup.
     static func postKeyPairs(count: Int, shouldContinue: () -> Bool, postPair: (Int) -> Bool) -> Int {
-        guard count > 0, count <= 4096 else { return 0 }
+        guard count > 0, count <= maxKeyPairsPerBurst else { return 0 }
         var posted = 0
         for index in 0..<count {
             guard shouldContinue(), postPair(index) else { break }

@@ -166,6 +166,18 @@ public final class AXWriteCapabilityStore {
         return axWriteUnstableRoles.contains(role)
     }
 
+    /// Editors that bind ⌘V to `document.execCommand("paste")` and insert nothing when Electron
+    /// reports that command as failed. The trigger has already been erased, so a clipboard paste
+    /// lands as an empty field. Cursor's bundle is exact — other ToDesktop apps are not this
+    /// editor. VS Code, Insiders, and the OSS `com.visualstudio.code` prefix share the binding.
+    public static func swallowsSyntheticPaste(bundleID rawBundleID: String) -> Bool {
+        let lower = canonicalBundleID(rawBundleID).lowercased()
+        if lower == "com.todesktop.230313mzl4w4u92" { return true }
+        if lower.hasPrefix("com.microsoft.vscode") { return true }
+        if lower.hasPrefix("com.visualstudio.code") { return true }
+        return false
+    }
+
     /// Roles whose `AXValue` *is* the editable text buffer the user types into, so a disagreement
     /// with the expected erase text is real evidence the field changed.
     ///

@@ -273,6 +273,45 @@ public final class TextInjectionPipeline {
         )
     }
 
+    /// What to do with a rendered expansion before any erase.
+    /// An empty body with no caret marker must not delete the trigger. An empty body that exists
+    /// only to place the caret erases the trigger and must not follow that with an empty paste.
+    public enum EmptyExpansionDecision: Equatable {
+        case refuse
+        case eraseOnly
+        case insert
+    }
+
+    public static func emptyExpansionDecision(text: String, cursorOffset: Int?) -> EmptyExpansionDecision {
+        guard text.isEmpty else { return .insert }
+        if let cursorOffset, cursorOffset >= 0 { return .eraseOnly }
+        return .refuse
+    }
+
+    /// How to put `text` into the field once the trigger is gone.
+    public enum AfterEraseInsert: Equatable {
+        case nothing
+        case unicode
+        case clipboard
+    }
+
+    public static func insertAfterErase(
+        bundleID: String?,
+        text: String,
+        shellLike: Bool = false
+    ) -> AfterEraseInsert {
+        if text.isEmpty { return .nothing }
+        // A terminal accepts ⌘V. A typed newline is not the Return key, so it would not
+        // submit a command and may not break the line in the pty.
+        if shellLike { return .clipboard }
+        let id = bundleID ?? ""
+        if AXWriteCapabilityStore.swallowsSyntheticPaste(bundleID: id),
+           HIDKeyPoster.unicodeInsertEvents(for: text) != nil {
+            return .unicode
+        }
+        return .clipboard
+    }
+
     /// Apps whose AX `AXSelectedText` / range replace returns success without mutating the field,
     /// or whose AX focus/selection is too weak to trust. Prefer HID backspace + paste (axPlusHID).
     ///
@@ -1408,6 +1447,15 @@ public final class TextInjectionPipeline {
             cursorOffset = expanded.cursorOffset
             keysToPress = expanded.trailingKeys
         }
+        if Self.emptyExpansionDecision(text: textToInject, cursorOffset: cursorOffset) == .refuse {
+            refuseInject(
+                "Expansion resolved to empty text — leaving the trigger in place",
+                path: "emptyExpansion",
+                swallowed: swallowed,
+                completion: completion
+            )
+            return
+        }
         let totalUTF16 = textToInject.utf16.count
         let needsCursor = InjectionPlanner.needsCursorHID(
             cursorOffset: cursorOffset,
@@ -1673,6 +1721,59 @@ public final class TextInjectionPipeline {
                     completion: completion
                 )
                 return
+            }
+            switch Self.insertAfterErase(
+                bundleID: context.frontBundleID,
+                text: textToInject,
+                shellLike: shellLike
+            ) {
+            case .nothing:
+                self.finishSucceeded(
+                    outcome: .succeeded,
+                    path: "eraseOnly",
+                    context: context,
+                    injectedText: textToInject,
+                    undoable: Self.undoPointAllowed(
+                        trailingKeys: keysToPress,
+                        cursorOffset: cursorOffset,
+                        totalUTF16: totalUTF16
+                    ),
+                    completion: completion
+                )
+                return
+            case .unicode:
+                if let events = HIDKeyPoster.unicodeInsertEvents(for: textToInject) {
+                    let posted = self.hid.postUnicodeInsert(
+                        events,
+                        shouldContinue: canProceedAfterMutation
+                    )
+                    if posted > 0 {
+                        self.positionCursorIfNeeded(
+                            text: textToInject,
+                            cursorOffset: cursorOffset,
+                            totalUTF16Length: totalUTF16,
+                            allowHID: true,
+                            shouldContinue: canProceedAfterMutation
+                        ) {
+                            self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceedAfterMutation)
+                            self.finishSucceeded(
+                                outcome: .postedUnverified,
+                                path: posted == events.count ? "unicodeInsert" : "unicodeInsertPartial",
+                                context: context,
+                                injectedText: textToInject,
+                                undoable: Self.undoPointAllowed(
+                                    trailingKeys: keysToPress,
+                                    cursorOffset: cursorOffset,
+                                    totalUTF16: totalUTF16
+                                ),
+                                completion: completion
+                            )
+                        }
+                        return
+                    }
+                }
+            case .clipboard:
+                break
             }
             // Terminals and IDE shells take the clipboard path below unchanged — no AX direct set
             // (a terminal's AX mirror is a rendered screen, not an editable field), and no
