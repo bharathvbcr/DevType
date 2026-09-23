@@ -57,6 +57,16 @@ Click the **DevType icon** in your macOS menu bar and select **Snippet Manager�
 3. **Trigger / Abbreviation**: The keyword you type to activate the snippet (e.g. `;sig` or `:email`).
 4. **Snippet Content**: The replacement text.
 
+```mermaid
+flowchart LR
+    User[Type Trigger: e.g. ;sig] --> Tap[DevType Event Tap]
+    Tap --> Match{Abbreviation Matched?}
+    Match -- Yes --> Swallow[Swallow Trigger Keystrokes]
+    Swallow --> Render[Render Macros & Templates]
+    Render --> Insert[Inject Expanded Text into Active Field]
+    Match -- No --> PassThrough[Pass Through Unaltered]
+```
+
 ### Snippet Types
 - **Plain Text**: Standard text expansion.
 - **Dynamic Template**: Text containing Mustache (`{{...}}`) or TextExpander (`%...%`) macro tags.
@@ -118,6 +128,31 @@ For the full list of tags and modifiers, see the [Macro Reference Guide](MACRO_R
 
 DevType comes with private, on-device AI writing tools powered by Apple Foundation Models, alongside local offline text tools:
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant App as Active App (Mail/Notes/Editor)
+    participant DevType as DevType AI Palette (⌘⌥A)
+    participant FM as Apple Foundation Models (Local)
+    participant Diff as Diff Preview Panel
+
+    User->>App: Highlight text to transform
+    User->>DevType: Press ⌘⌥A
+    DevType->>App: Read selected text via AX
+    DevType->>User: Present Action Palette (Proofread, Rewrite, Code...)
+    User->>DevType: Select Action
+    DevType->>FM: Execute transformation locally
+    FM-->>DevType: Generated response
+    alt Direct Replace Mode (e.g. Proofread)
+        DevType->>App: Replace selection in place
+    else Preview Mode (e.g. Rewrite / Tone Shift)
+        DevType->>Diff: Display side-by-side Diff View
+        User->>Diff: Click "Replace" (or Copy / Retry)
+        Diff->>App: Insert approved text
+    end
+```
+
 1. **Highlight Text** in any application.
 2. Press **`⌘⌥A`** (Command + Option + A).
 3. Choose an Action:
@@ -151,6 +186,14 @@ Proofread and Remove Markdown replace in place by default; every other action st
 ## 6. Smart Voice Dictation (`⌘⌥V`)
 
 DevType includes local-first, privacy-respecting speech-to-text dictation with thought-revision processing inspired by Google Gemini Jot:
+
+```mermaid
+flowchart LR
+    HotKey["Press ⌘⌥V"] --> HUD["Floating Liquid Glass HUD<br/>(Live waveform & speech preview)"]
+    HUD --> Engine{"Speech Recognition Engine<br/>(Apple Speech / Local AI / Whisper / Gemini)"}
+    Engine --> Polish["Thought-Revision & Polish<br/>(Self-corrections · Filler removal · Tone style)"]
+    Polish --> Insert["Smart Insertion<br/>(Direct insert or diff reconciliation)"]
+```
 
 - **Push-to-Talk or Toggle**: Press or hold **`⌘⌥V`** to dictate into whatever application has focus.
 - **Selectable Recognizers** in **Preferences → Voice**:

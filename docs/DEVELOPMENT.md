@@ -19,6 +19,30 @@ This guide covers everything you need to know to build, test, debug, package, an
 
 All common workflows are automated via shell scripts in the `Scripts/` directory (`./ci:local` at the repo root is a shortcut for `Scripts/ci-local.sh`):
 
+```mermaid
+flowchart TD
+    subgraph Dev["1. Development & Code Intelligence"]
+        Code[Write / Refactor Code] --> DevMap["DevMap: Check Impact & Affected Tests"]
+    end
+    
+    subgraph Verify["2. Local Verification"]
+        DevMap --> UnitTests["Run Unit Tests<br/>(./Scripts/test.sh)"]
+        UnitTests --> Coverage["Coverage & LCOV<br/>(./Scripts/test.sh --coverage)"]
+        Coverage --> CI["Local CI Pipeline<br/>(./Scripts/ci-local.sh)"]
+    end
+    
+    subgraph Package["3. Packaging & Staging"]
+        CI --> Pack["Package Bundle<br/>(./Scripts/package-app.sh)"]
+        Pack --> Install["Local Install & Verification<br/>(./Scripts/install-app.sh)"]
+    end
+    
+    subgraph Release["4. Distribution Pipeline"]
+        Install --> Preflight["Release Preflight<br/>(./Scripts/release-preflight.sh)"]
+        Preflight --> Notarize["Sign, Notarize & Staple DMG<br/>(./Scripts/release.sh)"]
+        Notarize --> Publish["Publish Release<br/>(./Scripts/publish-release.sh)"]
+    end
+```
+
 | Script | Command | Purpose |
 |---|---|---|
 | **Signing Identity** | `./Scripts/signing-identity.sh` | Prints the identity builds will use: Developer ID → Apple Development → self-signed → ad-hoc. Read-only. |

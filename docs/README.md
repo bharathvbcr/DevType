@@ -2,6 +2,32 @@
 
 Use the guides below for the current application. Release notes describe particular versions; audits and design plans record their own scope and date.
 
+```mermaid
+flowchart TD
+    subgraph Use["User & Features"]
+        UG["User Guide<br/>(USER_GUIDE.md)"]
+        Perm["Permissions & TCC<br/>(PERMISSIONS_GUIDE.md)"]
+        Macro["Macro Reference<br/>(MACRO_REFERENCE.md)"]
+        Voice["Voice Dictation<br/>(VOICE_DICTATION.md)"]
+        Sec["Secrets Management<br/>(SECRETS.md)"]
+    end
+
+    subgraph Core["Architecture & Internals"]
+        Arch["Technical Architecture<br/>(ARCHITECTURE.md)"]
+        Targets["Subsystems & Targets:<br/>DevTypeApp · DevTypeAppCore · ExpanderEngine · DevTypeSafety"]
+        Arch --- Targets
+    end
+
+    subgraph Build["Build, Verification & Agent Governance"]
+        Dev["Developer Guide<br/>(DEVELOPMENT.md)"]
+        Agents["Agent Navigation (DevMap & GitPulse)<br/>(AGENTS.md)"]
+        Council["DevCouncil Verification & Task Governance"]
+    end
+
+    Use --> Core
+    Core --> Build
+```
+
 ## Use DevType
 
 | Guide | What it covers |

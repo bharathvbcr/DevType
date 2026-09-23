@@ -6,6 +6,27 @@ Press `⌘⌥V` to use push-to-talk or toggle dictation. Configure the shortcut 
 
 ## Choose an engine
 
+```mermaid
+flowchart TD
+    Mic[Microphone Input: 16kHz PCM] --> AudioPool[AudioBufferPool & Journal: capture.caf]
+    AudioPool --> EngineRouter{Selected Engine}
+    
+    EngineRouter -- Apple Speech --> AppleASR["Apple SpeechAnalyzer / SFSpeechRecognizer<br/>(On-device)"]
+    EngineRouter -- Local AI --> LocalAI["Apple Speech + Local Model Correction<br/>(Apple FM / Ollama)"]
+    EngineRouter -- Local Whisper --> Whisper["whisper.cpp Loopback Server<br/>http://127.0.0.1:8080"]
+    EngineRouter -- Gemini --> CloudGemini["Gemini Cloud Transcription<br/>(Opt-in API Key + Consent)"]
+    
+    AppleASR --> Correction["Correction Pipeline:<br/>Filler removal · Self-correction · Custom vocab · Styling"]
+    LocalAI --> Correction
+    Whisper --> Correction
+    CloudGemini --> Correction
+    
+    Correction --> DeliveryRouter{Delivery Mode}
+    DeliveryRouter --> Live["Type into document as I speak"]
+    DeliveryRouter --> Bubble["Show words in bubble, insert at end"]
+    DeliveryRouter --> Silent["Show nothing, insert at end"]
+```
+
 | Engine | Recognition and correction | Setup and data route |
 |---|---|---|
 | Apple Speech | On-device Apple recognition plus deterministic cleanup | Default. Needs microphone and Speech Recognition grants and a supported, ready locale |
@@ -20,6 +41,39 @@ Speech assets may need installation. **Preferences → Voice** offers readiness 
 The default Whisper endpoint is `http://127.0.0.1:8080/inference`. The default correction endpoint is `http://localhost:11434/v1/chat/completions`. DevType accepts loopback hosts only, rejects URL credentials and redirects, and bounds responses. Correction routing supports Ollama-native and OpenAI-compatible endpoints; a configured URL is not proof that a model is loaded.
 
 ## Decide when words arrive
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Coord as VoiceSessionCoordinator
+    participant HUD as Liquid Glass HUD Bubble
+    participant Diff as TranscriptDiffEngine
+    participant Pipe as TextInjectionPipeline
+    participant Target as Target Application
+
+    User->>Coord: Press ⌘⌥V (Start Speaking)
+    Coord->>HUD: Display Listening & Audio Waveform
+    loop Live Audio Stream
+        Coord->>HUD: Stream Interim Partial Transcripts
+        opt Mode: "Type into document as I speak"
+            Coord->>Pipe: Stream live typed words
+            Pipe->>Target: Insert live words
+        end
+    end
+    User->>Coord: Release ⌘⌥V (Stop Dictating)
+    Coord->>Coord: Finalize ASR & Run Correction Pipeline
+    alt Mode: "Show in bubble" or "Show nothing"
+        Coord->>Pipe: Direct insert finalized text
+        Pipe->>Target: Atomic text replacement
+    else Mode: "Type into document as I speak"
+        Coord->>Diff: Compare live typed vs corrected text (LCS)
+        Diff-->>Coord: Bounded reconciliation diff
+        Coord->>Pipe: Replace diff delta (Erase / Insert corrections)
+        Pipe->>Target: Reconciled text
+    end
+    Coord->>HUD: Animate Done / Dismiss
+```
 
 **Preferences → Voice → While you speak** controls delivery separately from the recognizer:
 

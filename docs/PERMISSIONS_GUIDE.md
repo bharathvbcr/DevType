@@ -10,6 +10,37 @@ This guide explains why each permission is needed, how to grant and maintain the
 
 ## 🔐 Permission Capability Matrix
 
+```mermaid
+flowchart TD
+    Launch([App Launch]) --> PreflightInput["Preflight Input Monitoring:<br/>CGPreflightListenEventAccess()"]
+    PreflightInput --> InputGranted{"Input Monitoring Granted?"}
+    
+    InputGranted -- No --> WizardInput["Show Permission Wizard:<br/>Privacy & Security -> Input Monitoring"]
+    WizardInput --> RestartNotice["Prompt 'Quit & Reopen' to activate Event Tap"]
+    
+    InputGranted -- Yes --> PreflightAX["Preflight Accessibility:<br/>AXIsProcessTrustedWithOptions()"]
+    PreflightAX --> AXGranted{"Accessibility Granted?"}
+    
+    AXGranted -- No --> WizardAX["Show Permission Wizard:<br/>Privacy & Security -> Accessibility"]
+    WizardAX --> PollAX["Wait for System Settings Toggle"]
+    PollAX --> AXGranted
+    
+    AXGranted -- Yes --> CoreReady([Core Text Expansion Ready])
+    
+    CoreReady -. "User Triggers Voice (⌘⌥V)" .-> PreflightMic["Check Microphone Grant:<br/>AVCaptureDevice.authorizationStatus(for: .audio)"]
+    PreflightMic --> MicGranted{"Microphone Granted?"}
+    MicGranted -- No --> PromptMic["macOS System Modal:<br/>'DevType would like to access the microphone'"]
+    PromptMic --> MicGranted
+    MicGranted -- Yes --> EngineCheck{"Selected Engine"}
+    
+    EngineCheck -- Apple Speech / Local AI --> PreflightSpeech["Check Speech Recognition:<br/>SFSpeechRecognizer.authorizationStatus()"]
+    PreflightSpeech --> SpeechGranted{"Speech Granted?"}
+    SpeechGranted -- No --> PromptSpeech["macOS Modal: Request Speech Grant"]
+    SpeechGranted -- Yes --> VoiceReady([Voice Dictation Active])
+    
+    EngineCheck -- Local Whisper / Gemini --> VoiceReady
+```
+
 | Permission | TCC Identifier | API Preflight Function | Why DevType Needs It |
 |---|---|---|---|
 | **Input Monitoring** | `kTCCServiceListenEvent` | `CGPreflightListenEventAccess()` | **Required** to intercept typed keystrokes and swallow trigger abbreviations before they render on screen. |

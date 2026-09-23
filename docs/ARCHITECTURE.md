@@ -101,6 +101,26 @@ sequenceDiagram
 
 Once a snippet match is triggered, `TextInjectionPipeline` coordinates text replacement. Its existing completion guard owns the operation lifetime. A new injection cancels its predecessor; engine stop, watchdog expiry, user input, target changes, and live permission/Secure Input changes invalidate later actions. The target includes the application, AX element and original selection, so moving between fields in one app matters too.
 
+```mermaid
+flowchart TD
+    Trigger[Snippet Triggered / AI Output / Voice Transcript] --> TargetCheck{Validate Target & Focus}
+    TargetCheck -- Focus / Target Invalid --> Abort[Refuse Injection Safely]
+    TargetCheck -- Valid --> AXCheck{AX Accessible & Writable?}
+    
+    AXCheck -- Yes (Primary) --> AXWrite[AXTextWriter: Atomic Range Replacement]
+    AXWrite --> CaretAX[Position Caret via AX Attribute]
+    CaretAX --> Done([Injection Complete])
+    
+    AXCheck -- No (Fallback) --> Erase[ErasePlan: Synthesize Backspaces via HID]
+    Erase --> PBBackup[PasteboardBroker: Snapshot User Clipboard]
+    PBBackup --> PBWrite[Set Expansion Payload on Clipboard]
+    PBWrite --> HIDPaste[HIDKeyPoster: Synthesize ⌘V]
+    HIDPaste --> Verify{Delivery Verified?}
+    Verify --> PBRestore[PasteboardBroker: Restore User Clipboard]
+    PBRestore --> CaretHID[Reposition Caret via Arrow Keys]
+    CaretHID --> Done
+```
+
 Callers can supply a session validity check to that same completion guard. Voice delivery uses it so a retired session cannot post from an earlier queued operation. Erase-plan consistency is checked before field reads and again before posting: known text must agree with both the UTF-16 range width and grapheme deletion count, while count-only plans must carry equal counts.
 
 AI replacement, palette insertion and search expansion restore their captured source process through `SourceAppDelivery`. It uses the engine's bounded focus policy (25 waits at 20 ms), refuses missing/terminated/self targets, stops when another app takes focus, and passes the original-process predicate through the existing injection completion guard. Search captures its source before fill-in/authentication work and obtains a fresh permission snapshot at final delivery. App activation alone never authorizes insertion.
@@ -128,6 +148,28 @@ The available write paths are:
 ### 3. Dynamic Template & Macro Engine
 
 Snippet bodies are rendered by two cooperating parsers — `MacroParser` (TextExpander `%...%` syntax) and `DynamicTemplateEngine` (Mustache `{{...}}` syntax) — sharing one pipeline:
+
+```mermaid
+flowchart LR
+    Raw[Raw Snippet Template] --> Tokenize[Tokenize: Mustache {{...}} & TextExpander %...%]
+    Tokenize --> Parser[AST & Token Parser]
+    Parser --> Resolvers{Resolve Dynamic Tokens}
+    
+    Resolvers --> DateCalc[Date/Time Formatter + Offsets]
+    Resolvers --> MathCalc[SafeMathParser: calc: arithmetic]
+    Resolvers --> GenCalc[UUID / Random / Counters]
+    Resolvers --> NestCalc[Nested Snippets: depth <= 10]
+    Resolvers --> ClipCalc[Literal Clipboard Ingestion]
+    
+    DateCalc --> Assembler[Output Assembler]
+    MathCalc --> Assembler
+    GenCalc --> Assembler
+    NestCalc --> Assembler
+    ClipCalc --> Assembler
+    
+    Assembler --> CaretExtract[Extract {{cursor}} Offset]
+    CaretExtract --> FinalText[Rendered Text + Caret Plan]
+```
 
 - **Mustache Syntax (`{{...}}`)**:
   - `{{date}}`, `{{date:yyyy-MM-dd}}`: Named presets (16, e.g. `us`, `iso`, `eu`, `full`) or raw Unicode patterns.
@@ -223,6 +265,20 @@ count into the existing pending-cleanup UI.
 Metadata migration never accesses stored values. Unreadable master keys and Keychain fallback
 values retain the explicit Preferences → Advanced → Repair Secret Storage recovery path.
 Since the §8.11 redesign, value storage is **file-first**:
+
+```mermaid
+flowchart TD
+    User([User Requests Secret / Expansion]) --> Biometric{Touch ID / Password Gate}
+    Biometric -- Auth Failed --> Refuse[Refuse Access]
+    Biometric -- Authenticated (30s cache) --> MasterKey[Retrieve Master Key from Keychain<br/>com.devtype.masterkey]
+    MasterKey --> FileLock[Acquire flock on secrets.enc.lock]
+    FileLock --> ReadArchive[Read Encrypted Archive: secrets.enc]
+    ReadArchive --> Decrypt[CryptoKit AES-GCM 256 Decryption]
+    Decrypt --> ReleaseLock[Release flock]
+    ReleaseLock --> Action{Action Type}
+    Action -- Copy to Clipboard --> DelibCopy[SecretClipboard: 90s Auto-Clear & Transient Marker]
+    Action -- Direct Inject --> DirectInject[TextInjectionPipeline: Atomic Range Write]
+```
 
 - **Archive**: Each value is sealed with **CryptoKit AES-GCM** (fresh random nonce per seal; nonce + ciphertext + tag as one base64 blob) into a versioned JSON archive (`~/Library/Application Support/DevType/secrets.enc`, `0600`, atomic writes). Bytes the current build cannot vouch for are quarantined aside, never overwritten.
 - **Master Key**: One 256-bit key generated with `SecRandomCopyBytes` lives in the login keychain under service `com.devtype.app.secret.v2`, account `com.devtype.masterkey`. A successful read is cached in memory. Per-item Keychain values remain when migration cannot safely complete; deletion requires verified encrypted publication, and unreadable keys retain the explicit repair path.

@@ -4,6 +4,31 @@
 
 DevType features a versatile dual template engine that natively parses both **Mustache** (`{{...}}`) and **TextExpander** (`%...%`) syntaxes. You can use either style or combine them within your snippets.
 
+```mermaid
+flowchart TD
+    Snippet["Snippet Body Template (Mustache and/or TextExpander)"] --> Tokenizer["Macro Tokenizer & Lexer"]
+    Tokenizer --> AST["Abstract Syntax Tree (AST)"]
+    AST --> Eval{"Token Evaluation & Resolution"}
+    
+    Eval --> Dates["Date & Time Presets & Math<br/>({{date:iso:+1d}}, %@+1D%)"]
+    Eval --> Math["Safe Math Calculation<br/>({{calc: (50-14)/4}})"]
+    Eval --> System["System Data<br/>({{clipboard}}, {{uuid}}, {{counter:name}})"]
+    Eval --> Nested["Nested Snippets (Depth &le; 10)<br/>({{snippet:trigger}}, %snippet:abbrev%)"]
+    Eval --> FillIn["Interactive Fill-ins<br/>(%filltext:name=X%, %fillpopup%)"]
+    
+    Dates --> Combine["String Assembler & Layout Preserver"]
+    Math --> Combine
+    System --> Combine
+    Nested --> Combine
+    FillIn --> Combine
+    
+    Combine --> CaretCheck{"Cursor Anchor Found?<br/>({{cursor}} or %|)"}
+    CaretCheck -- Yes --> CaretCalc["Calculate Final Caret Character Offset"]
+    CaretCheck -- No --> OutputReady["Prepared Text Payload"]
+    CaretCalc --> OutputReady
+    OutputReady --> Injection["TextInjectionPipeline (Target App)"]
+```
+
 ---
 
 ## 📑 Table of Contents
