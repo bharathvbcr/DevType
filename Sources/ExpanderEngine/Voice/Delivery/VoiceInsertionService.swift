@@ -293,8 +293,14 @@ public final class VoiceInsertionService {
         let startTime = Date()
         let currentSession = session
         func result(_ quality: DeliveryEvidenceQuality, length: Int = 0) -> DeliveryReceipt {
-            self.makeDeliveryReceipt(sessionID: sessionID, generation: generation, lease: targetLease,
-                    length: length, quality: quality, startTime: startTime)
+            VoiceInsertionService.makeDeliveryReceipt(
+                sessionID: sessionID,
+                generation: generation,
+                lease: targetLease,
+                length: length,
+                quality: quality,
+                startTime: startTime
+            )
         }
         if Self.shouldWithholdLiveSegment(
             leasePID: targetLease.processIdentifier,
@@ -437,7 +443,7 @@ public final class VoiceInsertionService {
         )
     }
 
-    private func makeDeliveryReceipt(
+    private static func makeDeliveryReceipt(
         sessionID: VoiceSessionID,
         generation: SessionGeneration,
         lease: TargetLease,

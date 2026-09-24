@@ -54,6 +54,27 @@ final class FillInBuilderTests: XCTestCase {
         XCTAssertEqual(no, "%fillpart:name=legalfooter:default=no%All rights reserved.%fillpartend%")
     }
 
+    func testFillPartDefaultFlagKeepsPlaceholdersAndStripsClauseMarkers() throws {
+        let token = try FillInBuilder.fillPart(
+            name: "⟦Section⟧",
+            defaultFlag: "⟦ye:s%⟧",
+            content: "\n⟦⟧\n"
+        )
+        XCTAssertEqual(token, "%fillpart:name=⟦Section⟧:default=⟦yes⟧%\n⟦⟧\n%fillpartend%")
+    }
+
+    func testFillPartDefaultFlagRejectsUnrepresentableContent() {
+        XCTAssertThrowsError(
+            try FillInBuilder.fillPart(
+                name: "nested",
+                defaultFlag: "yes",
+                content: "prefix %fillpartend% suffix"
+            )
+        ) { error in
+            XCTAssertEqual(error as? FillInBuilder.BuilderError, .contentNotRepresentable)
+        }
+    }
+
     func testFillPartRejectsUnrepresentableContent() {
         XCTAssertThrowsError(
             try FillInBuilder.fillPart(name: "nested", includeByDefault: true, content: "prefix %case:upper% suffix")

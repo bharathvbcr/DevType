@@ -254,7 +254,7 @@ final class HotkeyManager {
                     &hotKeyID
                 )
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
-                manager.fire(id: hotKeyID.id)
+                HotkeyManager.fire(manager)(id: hotKeyID.id)
                 return noErr
             },
             1,

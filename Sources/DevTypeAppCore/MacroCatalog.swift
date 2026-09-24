@@ -342,7 +342,7 @@ enum MacroCatalog {
                 category: .fillIns,
                 nameKey: "editor.macro.filltext",
                 detailKey: "macro.filltext.detail",
-                template: "%filltext:name=⟦Field⟧%",
+                template: FillInBuilder.fillText(name: "⟦Field⟧", defaultValue: ""),
                 keywords: "fill filltext input single line prompt",
                 example: { MacroCatalog.teExample($0) }
             ),
@@ -351,7 +351,7 @@ enum MacroCatalog {
                 category: .fillIns,
                 nameKey: "macro.filltextDefault",
                 detailKey: "macro.filltextDefault.detail",
-                template: "%filltext:name=⟦Field⟧:default=⟦Value⟧%",
+                template: FillInBuilder.fillText(name: "⟦Field⟧", defaultValue: "⟦Value⟧"),
                 keywords: "fill filltext default prefilled input",
                 example: { MacroCatalog.teExample($0) }
             ),
@@ -360,7 +360,7 @@ enum MacroCatalog {
                 category: .fillIns,
                 nameKey: "editor.macro.fillarea",
                 detailKey: "macro.fillarea.detail",
-                template: "%fillarea:name=⟦Details⟧%",
+                template: FillInBuilder.fillArea(name: "⟦Details⟧", defaultValue: ""),
                 keywords: "fill fillarea multiline textarea input",
                 example: { MacroCatalog.teExample($0) }
             ),
@@ -371,7 +371,11 @@ enum MacroCatalog {
                 detailKey: "macro.fillpopup.detail",
                 // Everything between `name=` and `default=` is an option, per
                 // `MacroParser.makeToken`.
-                template: "%fillpopup:name=⟦Choice⟧:⟦Option A⟧:⟦Option B⟧:default=⟦Option A⟧%",
+                template: FillInBuilder.fillPopup(
+                    name: "⟦Choice⟧",
+                    options: ["⟦Option A⟧", "⟦Option B⟧"],
+                    defaultValue: "⟦Option A⟧"
+                ),
                 keywords: "fill fillpopup menu choice options select",
                 example: { MacroCatalog.teExample($0) }
             ),
@@ -382,10 +386,24 @@ enum MacroCatalog {
                 detailKey: "macro.fillpart.detail",
                 // Paired token. The empty `⟦⟧` is a caret stop between the two
                 // markers, so Tab lands the user where the body actually goes.
-                template: "%fillpart:name=⟦Section⟧:default=⟦yes⟧%\n⟦⟧\n%fillpartend%",
+                template: fillPartToken(),
                 keywords: "fill fillpart optional section toggle fillpartend"
             )
         ]
+    }
+
+    /// Palette placeholder content has no structural markers, so this cannot throw
+    /// for the constant the catalogue passes. A throw means the constant drifted.
+    private static func fillPartToken() -> String {
+        do {
+            return try FillInBuilder.fillPart(
+                name: "⟦Section⟧",
+                defaultFlag: "⟦yes⟧",
+                content: "\n⟦⟧\n"
+            )
+        } catch {
+            preconditionFailure("palette fill-part content has no structural markers")
+        }
     }
 
     // MARK: Text transforms

@@ -21,6 +21,33 @@ final class MacroPaletteRankingTests: XCTestCase {
         sections.flatMap { $0.matches.map(\.descriptor) }
     }
 
+    /// The fill-in rows are built by `FillInBuilder`. `⟦ ⟧` marks editable spans;
+    /// `MacroDescriptor` strips those markers and keeps them as caret stops.
+    func testFillInPaletteTokensMatchTheBuilder() throws {
+        let rows = Dictionary(
+            uniqueKeysWithValues: MacroCatalog.descriptors(in: .fillIns).map { ($0.id, $0) }
+        )
+        let text = try XCTUnwrap(rows["fill.text"])
+        XCTAssertEqual(text.token, "%filltext:name=Field%")
+        XCTAssertEqual(text.placeholders.map(\.length), [5])
+
+        let textDefault = try XCTUnwrap(rows["fill.textDefault"])
+        XCTAssertEqual(textDefault.token, "%filltext:name=Field:default=Value%")
+        XCTAssertEqual(textDefault.placeholders.map(\.length), [5, 5])
+
+        let area = try XCTUnwrap(rows["fill.area"])
+        XCTAssertEqual(area.token, "%fillarea:name=Details%")
+        XCTAssertEqual(area.placeholders.map(\.length), [7])
+
+        let popup = try XCTUnwrap(rows["fill.popup"])
+        XCTAssertEqual(popup.token, "%fillpopup:name=Choice:Option A:Option B:default=Option A%")
+        XCTAssertEqual(popup.placeholders.map(\.length), [6, 8, 8, 8])
+
+        let part = try XCTUnwrap(rows["fill.part"])
+        XCTAssertEqual(part.token, "%fillpart:name=Section:default=yes%\n\n%fillpartend%")
+        XCTAssertEqual(part.placeholders.map(\.length), [7, 3, 0])
+    }
+
     /// A term matching a macro's own name or token must outrank one that only brushes the
     /// description or the category heading.
     func testNameAndTokenBeatDescriptionAndCategory() {

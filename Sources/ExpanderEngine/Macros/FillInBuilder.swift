@@ -88,11 +88,26 @@ public enum FillInBuilder {
         includeByDefault: Bool,
         content: String
     ) throws -> String {
+        try fillPart(
+            name: name,
+            defaultFlag: includeByDefault ? "yes" : "no",
+            content: content
+        )
+    }
+
+    /// `defaultFlag` is the literal `default=` clause. The palette passes a placeholder
+    /// (`⟦yes⟧`) here; the boolean overload passes `yes` or `no`. Colons and percent
+    /// signs are stripped because both are clause structure, same as a fill-in name.
+    public static func fillPart(
+        name: String,
+        defaultFlag: String,
+        content: String
+    ) throws -> String {
         guard contentIsRepresentable(content) else {
             throw BuilderError.contentNotRepresentable
         }
         let n = sanitizeToken(name)
-        let flag = includeByDefault ? "yes" : "no"
+        let flag = sanitizeToken(defaultFlag)
         return "%fillpart:name=\(n):default=\(flag)%\(content)%fillpartend%"
     }
 }

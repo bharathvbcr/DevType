@@ -130,17 +130,17 @@ public final class ActivityHistoryStore {
             self.category = category
             self.action = action
             self.deduplicationKey = deduplicationKey.map {
-                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
+                ActivityEvent.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
             }
             self.referenceID = referenceID.map {
-                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
+                ActivityEvent.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
             }
             self.typedSignal = nil
-            self.legacyTitle = Self.clampedToMaximum(
+            self.legacyTitle = ActivityEvent.clampedToMaximum(
                 title,
                 maximum: ActivityHistoryStore.maximumLegacyTitleCharacters
             )
-            self.legacyDetails = Self.clampedToMaximum(
+            self.legacyDetails = ActivityEvent.clampedToMaximum(
                 details,
                 maximum: ActivityHistoryStore.maximumLegacyDetailsCharacters
             )
@@ -205,17 +205,17 @@ public final class ActivityHistoryStore {
             self.category = category
             self.action = action
             self.deduplicationKey = deduplicationKey.map {
-                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
+                ActivityEvent.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
             }
             self.referenceID = referenceID.map {
-                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
+                ActivityEvent.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters)
             }
             self.typedSignal = typedSignal
             self.legacyTitle = legacyTitle.map {
-                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumLegacyTitleCharacters)
+                ActivityEvent.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumLegacyTitleCharacters)
             }
             self.legacyDetails = legacyDetails.map {
-                Self.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumLegacyDetailsCharacters)
+                ActivityEvent.clampedToMaximum($0, maximum: ActivityHistoryStore.maximumLegacyDetailsCharacters)
             }
         }
 
@@ -243,10 +243,10 @@ public final class ActivityHistoryStore {
                 forKey: .deduplicationKey
             )
             let decodedReferenceID = try container.decodeIfPresent(String.self, forKey: .referenceID)
-            guard Self.isWithinBound(
+            guard ActivityEvent.isWithinBound(
                 decodedDeduplicationKey,
                 maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters
-            ), Self.isWithinBound(
+            ), ActivityEvent.isWithinBound(
                 decodedReferenceID,
                 maximum: ActivityHistoryStore.maximumOpaqueIdentifierCharacters
             ) else {
@@ -268,10 +268,10 @@ public final class ActivityHistoryStore {
                 typedSignal = nil
                 let decodedTitle = try container.decodeIfPresent(String.self, forKey: .title)
                 let decodedDetails = try container.decodeIfPresent(String.self, forKey: .details)
-                guard Self.isWithinBound(
+                guard ActivityEvent.isWithinBound(
                     decodedTitle,
                     maximum: ActivityHistoryStore.maximumLegacyTitleCharacters
-                ), Self.isWithinBound(
+                ), ActivityEvent.isWithinBound(
                     decodedDetails,
                     maximum: ActivityHistoryStore.maximumLegacyDetailsCharacters
                 ) else {

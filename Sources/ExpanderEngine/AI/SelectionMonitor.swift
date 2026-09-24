@@ -702,5 +702,5 @@ private func selectionObserverCallback(
     guard let refcon else { return }
     let monitor = Unmanaged<SelectionMonitor>.fromOpaque(refcon).takeUnretainedValue()
     // AX callbacks arrive on the run-loop that owns the observer (main).
-    monitor.handleAXNotification()
+    SelectionMonitor.handleAXNotification(monitor)()
 }
