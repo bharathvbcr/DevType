@@ -32,7 +32,7 @@ flowchart TD
 
 | Guide | What it covers |
 |---|---|
-| [User guide](USER_GUIDE.md) | Installation, your first snippet, search, AI, voice, secrets, and everyday settings |
+| [User guide](USER_GUIDE.md) | Installation, your first snippet, search, AI, voice, secrets, Recent Activity, and everyday settings |
 | [Permissions](PERMISSIONS_GUIDE.md) | Accessibility, Input Monitoring, microphone, Speech Recognition, and recovery |
 | [Macro reference](MACRO_REFERENCE.md) | Mustache and TextExpander syntax, fill-ins, dates, counters, and nesting |
 | [Voice dictation](VOICE_DICTATION.md) | Recognizer choices, readiness, correction, delivery modes, and saved recordings |
@@ -52,7 +52,7 @@ flowchart TD
 ## Version history and engineering records
 
 - [Release notes](releases/) — version-specific changes; the [published releases](https://github.com/bharathvbcr/DevType/releases) determine availability.
-- [1.2.0 notes](releases/v1.2.0.md) — structured refusals, honest recovery, and voice remedies.
+- [1.2.0 notes](releases/v1.2.0.md) — structured refusals, honest recovery, voice remedies, a preview that answers, Recent Activity, Electron paste fallback, and on-device AI deferral handling.
 - [1.1.0 notes](releases/v1.1.0.md) — independent Secrets, Backspace undo, delivery, and diagnostics changes.
 - [Audits](audits/) — dated observations and remaining verification gates, not ongoing guarantees.
 - [Voice redesign plan](VOICE_ENGINE_REDESIGN_PLAN.md) — design history; consult current architecture and source for what ships.

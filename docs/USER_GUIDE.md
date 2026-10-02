@@ -181,6 +181,11 @@ sequenceDiagram
 ### Live Diff Preview
 Proofread and Remove Markdown replace in place by default; every other action streams into a preview panel showing the result (with diff view). Press `Enter` to accept, `Esc` to discard, or use Retry to re-roll the result. Per-action delivery can be switched between direct replace and preview under **Preferences → AI**, and **Undo last AI** at the top of the Command Palette reverts the most recent transform.
 
+**Changing your mind mid-generation.** While a preview is still generating you can change the tone, pick a different action, press Retry, or open a second preview. DevType stops the earlier request and runs the new one after it unwinds, so the preview never goes blank or reports that another transform is already running. A result that arrives for a request you have already replaced is ignored. If the generated text is blank, the preview shows it as a failure and leaves Replace unavailable, so a selection is never overwritten with nothing.
+
+### When macOS pauses the on-device model
+Under heavy load, usually low memory, macOS may defer an Apple Foundation Models request. DevType recognizes this and shows *“macOS paused on-device AI because this Mac is under heavy load, usually low memory. Quit apps you aren’t using, then try again.”* instead of a generic failure. The model and your prompt are fine; free memory and repeat the action. The same guidance appears in the dictation bubble when a spoken AI command is deferred. A deferral is recorded in AI diagnostics under its own label, separate from model failures, and a request you cancel by replacing it is not recorded as a failure at all.
+
 ---
 
 ## 6. Smart Voice Dictation (`⌘⌥V`)
@@ -282,6 +287,15 @@ Open **DevType Preferences** from the menu bar or press **`⌘,`**. The window f
 7. 🔧 **Advanced**: Engine options including dedicated event-tap thread toggle, memory logging, live diagnostic readout, and maintenance actions.
 
 Muted apps are also reachable straight from the menu bar (**Mute Frontmost App**, **Muted Apps…**).
+
+### Recent Activity
+
+Choose **Recent Activity…** from the menu bar to review warnings and events that DevType recorded, across expansion, Secure Input, library, import/export, AI, dictation, and hotkey categories, such as permission problems, a stopped typing monitor, and recordings kept for review. Each entry offers the action that fits it: **Fix Permissions**, **Open Manager**, **Open Settings**, **Open Test Lab**, **Copy Diagnostics**, **Review Dictation**, or the matching AI, Voice, or Hotkey settings pane.
+
+- **Keyboard:** Return or double-click runs the selected entry's action; Delete removes it from history; Escape closes the window. The window can be minimized with `⌘M`.
+- **Clear History** is disabled when there is nothing to clear and asks for confirmation otherwise. It removes diagnostic records and retained voice dictations listed there; it never touches snippets, secrets, or settings.
+- If the saved history cannot be read safely, the window says so and offers to clear it. Closing and reopening the window refreshes the list and its language.
+- Entries are typed signals (category plus a suggested action) that are localized when shown, so they follow the app language.
 
 ---
 

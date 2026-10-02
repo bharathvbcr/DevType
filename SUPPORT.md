@@ -32,6 +32,10 @@ Before submitting an issue, please check our documentation resources:
 ### 2. How do I trigger On-Device AI text transforms?
 Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A). You can also type assigned trigger abbreviations (e.g. `:fix`, `:rw`) when configured in **Preferences → AI**. Note that on-device Apple Foundation Models require macOS 26+, a compatible Mac, Apple Intelligence enabled, and an available system model, while **Remove Markdown** runs offline locally on all supported macOS versions (macOS 14+).
 
+**AI says macOS paused on-device AI.** The system deferred the model request because the Mac is under heavy load, usually low memory. Quit apps you are not using and run the action again. This is not a prompt or model-capability problem, and no setting needs changing. If it recurs with plenty of free memory, include the **On-device AI** section of **Diagnostics** (`⇧⌘D`) in a bug report; it lists failure labels and counts only, never your text.
+
+**The AI preview is blank or says another transform is running.** Use a build that includes the [1.2.0 fixes](docs/releases/v1.2.0.md). Earlier builds drew nothing in the preview or refused a replacement request while the previous one was still generating. Newer builds cancel the earlier request and run the new one.
+
 ### 3. How do I use Smart Voice Dictation?
 Press or hold **`⌘⌥V`** to activate push-to-talk or toggle dictation. You can configure your speech recognition engine (Apple Speech, Local AI, Local Whisper, or Gemini) and custom vocabulary under **Preferences → Voice**.
 

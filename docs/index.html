@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DevType — Less typing. More of your own words.</title>
-  <meta name="description" content="A native Mac app for reusable snippets, voice dictation, on-device writing tools, and independent secrets. Free, open source, and built with Swift and AppKit.">
+  <meta name="description" content="A native Mac menu bar app for reusable snippets and templates, voice dictation with local or cloud engines, on-device writing tools, and independent secrets. Imports TextExpander and Espanso. Free, open source, and built with Swift and AppKit.">
   <link rel="canonical" href="https://devtype.vbcr.dev/">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://devtype.vbcr.dev/">
@@ -21,7 +21,7 @@
   <link rel="stylesheet" href="assets/site.css">
   <script src="assets/site.js" defer></script>
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"DevType","operatingSystem":"macOS 14+","applicationCategory":"ProductivityApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"license":"https://github.com/bharathvbcr/DevType/blob/main/LICENSE","url":"https://devtype.vbcr.dev/","description":"Native macOS snippets, voice dictation, on-device writing tools, and independent secret management."}
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"DevType","operatingSystem":"macOS 14+","applicationCategory":"ProductivityApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"license":"https://github.com/bharathvbcr/DevType/blob/main/LICENSE","url":"https://devtype.vbcr.dev/","description":"Native macOS menu bar app for snippets and fill-in templates, voice dictation, on-device writing tools, and independent secret management. Imports TextExpander and Espanso libraries.","featureList":["Snippet and template expansion with dates, fill-in fields, and cursor markers","Command palette with structured library search and text tools","Voice dictation with Apple Speech, Local AI, Local Whisper, or optional Gemini","On-device writing actions with Apple Foundation Models","Independent Secrets manager with encrypted storage","TextExpander and Espanso import; JSON, YAML, and CSV export","Recent Activity review and permission recovery"]}
   </script>
 </head>
 <body>
@@ -69,7 +69,7 @@
 <div><span>Write less</span><span>Say more</span><span>Stay in flow</span>
 </div>
 </div>
-    <nav class="section-jumps wrap" aria-label="Explore DevType"><a href="#workflows">Workflows</a><a href="#tools">Palette</a><a href="#writing">Writing</a><a href="#voice">Voice</a><a href="#customize">Make it yours</a><a href="#secrets">Secrets</a><a href="#library">Your library</a><a href="#help">Get help</a></nav>
+    <nav class="section-jumps wrap" aria-label="Explore DevType"><a href="#workflows">Workflows</a><a href="#tools">Palette</a><a href="#writing">Writing</a><a href="#voice">Voice</a><a href="#customize">Make it yours</a><a href="#reliability">Reliability</a><a href="#secrets">Secrets</a><a href="#library">Your library</a><a href="#help">Get help</a></nav>
     <section class="section wrap" id="features" aria-labelledby="features-title">
       <div class="section-heading"><p class="eyebrow">Small actions. Less repetition.</p>
 <h2 id="features-title">A familiar place for<br>the things you repeat.</h2><p>Keep the words. Skip the retyping.</p>
@@ -77,7 +77,7 @@
       <div class="feature-grid">
         <article class="feature feature-snippets">
           <span class="feature-number">01 / SNIPPETS</span>
-<h3>A few keys.<br>The whole message.</h3><p>Turn a short trigger into a signature, a reply, an image, or a template with dates and fill-in fields. Bring your TextExpander or Espanso library with you.</p>
+<h3>A few keys.<br>The whole message.</h3><p>Turn a short trigger into a signature, a reply, an image, or a template with dates and fill-in fields. Organize snippets into groups and tags, get a warning when two triggers collide, and bring your TextExpander or Espanso library with you.</p>
           <div class="expansion-example" aria-label="Example: semicolon intro expands to a greeting"><code>;intro</code><span aria-hidden="true">→</span>
 <div>Hi there,<br>Lovely to meet you.</div>
 </div>
@@ -170,6 +170,8 @@ Keep the dates and owners unchanged.
 End with the next action.</code></pre><p>A custom instruction runs on your selection. Check the result for changes to meaning or facts.</p></div>
       </div>
       <div class="library-note"><h3>Choose how each action delivers.</h3><p>Preferences → AI lets you choose direct replacement or a diff preview for individual actions. Proofread and Remove Markdown default to direct replacement; the other writing actions default to preview. Use preview when you want to compare the result before replacing your text.</p></div>
+      <div class="library-note"><h3>Change your mind mid-draft.</h3><p>Switch the tone, pick another action, or press Retry while a preview is still generating. DevType stops the earlier request and runs the new one, so the preview does not go blank. A blank result is shown as a failure rather than offered as a replacement, so your selection is never overwritten with nothing.</p></div>
+      <div class="library-note"><h3>When macOS asks the model to wait.</h3><p>Under heavy load, usually low memory, the system can defer an on-device request. DevType says so plainly and suggests quitting apps you are not using before you try again. Nothing is wrong with your prompt or the model.</p></div>
       <p class="section-footnote">Model-based actions need macOS 26+, Apple Intelligence, and a ready model. Remove Markdown is a deterministic tool and works without an AI model on macOS 14+.</p>
     </section>
     <section class="voice-section" id="voice" aria-labelledby="voice-title">
@@ -223,6 +225,16 @@ End with the next action.</code></pre><p>A custom instruction runs on your selec
       <ol class="delivery-options"><li><strong>Stay in the intended field</strong><p>Let the expansion finish before switching apps or moving the cursor. A changed target can cancel pending work; return to the field before trying again.</p></li><li><strong>Respect a paused session</strong><p>Secure Input and muted apps pause expansion. If a trigger stays as ordinary text, check those states as well as the engine’s pause setting.</p></li><li><strong>Inspect an uncertain paste</strong><p>“Posted, unverified” means a paste was sent but its receipt was not confirmed. Check the document before retrying so you do not insert the same text twice.</p></li></ol>
       <a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/SUPPORT.md">Understand delivery status <span aria-hidden="true">↗</span></a>
     </section>
+    <section class="section wrap" id="reliability" aria-labelledby="reliability-title">
+      <div class="section-heading"><p class="eyebrow">When an app is stubborn</p><h2 id="reliability-title">Honest about<br>what happened.</h2><p>Editors and system services do not always cooperate. DevType checks first, adapts where it can do so safely, and names the cause instead of guessing.</p></div>
+      <div class="writing-catalog">
+        <article><span class="feature-number">ADAPTS</span><h3>Made for editors that bend the rules.</h3><p>Cursor and VS Code can swallow a synthetic paste. For those editors DevType types the expansion as Unicode keystrokes instead; terminals and other apps keep clipboard paste. Where an element only reports a rendered view of its text, a trigger DevType typed itself still erases on a best-effort basis; real text fields keep the strict check.</p></article>
+        <article><span class="feature-number">EXPLAINS</span><h3>A reason,<br>not a shrug.</h3><p>A refused expansion carries a specific cause, so Permission Recovery points at the real fix and does not blame Accessibility when it is already granted. “Restart Engine” appears only when a restart could change the outcome, and a safe refusal is never presented as a broken engine.</p></article>
+        <article><span class="feature-number">REMEMBERS</span><h3>A place for what<br>you missed.</h3><p>Recent Activity lists warnings and events from the menu bar, each with a suggested next step: fix permissions, open the manager, review a kept dictation, or copy diagnostics. Return runs the action, Delete removes an entry, and clearing history never touches snippets, secrets, or settings.</p></article>
+      </div>
+      <div class="library-note"><h3>Diagnostics that do not read over your shoulder.</h3><p>Reports describe triggers and selections by shape, such as length and counts, rather than quoting your text. Error logs record the chain of underlying causes, and fingerprint non-system domains so paths and request contents stay out. Include a diagnostic report when you ask for help.</p></div>
+      <a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/ARCHITECTURE.md">Read how it works <span aria-hidden="true">↗</span></a>
+    </section>
     <section class="section wrap secrets-section" id="secrets" aria-labelledby="secrets-title">
       <div class="secrets-layout">
         <div class="section-heading"><p class="eyebrow">A deliberate action for sensitive text</p><h2 id="secrets-title">Passwords belong<br>in their own place.</h2><p>Manage secrets separately from everyday snippets. They have names and values, with no typed trigger that could expand into the wrong conversation.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/SECRETS.md">Understand secret storage <span aria-hidden="true">↗</span></a></div>
@@ -245,6 +257,8 @@ End with the next action.</code></pre><p>A custom instruction runs on your selec
           <article><h3>It works in one editor only.</h3><p>Some editors expose less information to macOS accessibility. Look at Last inject in the diagnostic readout. A refusal to erase text is different from a missing permission; share the affected app and status when asking for help.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/SUPPORT.md">Troubleshoot expansion <span aria-hidden="true">↗</span></a></article>
           <article><h3>Dictation is not ready.</h3><p>Open Voice preferences and check the selected engine’s readiness. Confirm microphone and speech permissions for Apple recognition, server and model setup for local routes, or the API key and separate consent for Gemini.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/VOICE_DICTATION.md">Review voice setup <span aria-hidden="true">↗</span></a></article>
           <article><h3>A writing action is unavailable.</h3><p>Check the status in AI preferences: the macOS version, device eligibility, Apple Intelligence setting, and model readiness each matter. You can still use ordinary snippets and deterministic text tools while the model is unavailable.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/USER_GUIDE.md">Open the user guide <span aria-hidden="true">↗</span></a></article>
+          <article><h3>AI says macOS paused it.</h3><p>The system deferred the on-device model, usually because memory is low. Quit apps you are not using and run the action again. If it keeps happening with plenty of free memory, include the On-device AI section of the diagnostic report in a bug report.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/SUPPORT.md">Read the support guide <span aria-hidden="true">↗</span></a></article>
+          <article><h3>I missed a warning.</h3><p>Choose Recent Activity from the menu bar. Entries explain what happened and offer the matching action, such as Fix Permissions, Open Settings, Review Dictation, or Copy Diagnostics.</p><a class="text-link" href="https://github.com/bharathvbcr/DevType/blob/main/docs/USER_GUIDE.md#recent-activity">About Recent Activity <span aria-hidden="true">↗</span></a></article>
         </div>
       </div>
     </section>
@@ -294,6 +308,15 @@ End with the next action.</code></pre><p>A custom instruction runs on your selec
 </details>
 <details>
 <summary>What if dictation or a paste does not finish?</summary><p>Check the target document before retrying. A paste reported as “posted, unverified” may already have arrived. Voice recovery can retain a recording or transcript when a session is interrupted; a saved transcript alone does not prove it was inserted.</p>
+</details>
+<details>
+<summary>Does it work in VS Code and Cursor?</summary><p>Yes. Those editors can swallow a synthetic paste, so DevType types the expansion as Unicode keystrokes instead. Other Chromium and Electron apps use the normal paste route. If an expansion fails anywhere, Diagnostics names the refusal and Permission Recovery shows guidance that matches it.</p>
+</details>
+<details>
+<summary>What is Recent Activity?</summary><p>A menu bar window that lists recent warnings and events, such as permission problems or a kept dictation, with the action that fits each one. You can clear it at any time; that never removes snippets, secrets, or settings.</p>
+</details>
+<details>
+<summary>Why did an AI action say macOS paused it?</summary><p>On-device models can be deferred by the system under heavy load, usually low memory. Quit apps you are not using and try again. It is a system state, not a problem with your text.</p>
 </details>
 <details>
 <summary>Can I contribute or build it myself?</summary><p>Yes. DevType is built with Swift and AppKit and released under the MIT license. The <a href="https://github.com/bharathvbcr/DevType/blob/main/CONTRIBUTING.md">contributing guide</a> covers setup, tests, and the contribution workflow; the <a href="https://github.com/bharathvbcr/DevType/blob/main/docs/DEVELOPMENT.md">developer guide</a> explains packaging and signing.</p>

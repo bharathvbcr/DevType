@@ -22,7 +22,7 @@ Check desktop and narrow mobile widths, browser zoom, keyboard focus, anchor nav
 
 ## Page content
 
-The landing page covers the snippet demo, feature overview, everyday template workflows, native library and palette screenshots, writing actions and output choices, voice engines, customization, privacy, text-delivery behavior, independent Secrets, library import/export, troubleshooting, installation, documentation, and FAQs. Jump links connect the longer product sections. Keep examples aligned with the macro reference and voice guide.
+The landing page covers the snippet demo, feature overview, everyday template workflows, native library and palette screenshots, writing actions and output choices (including mid-generation replacement and system deferrals), voice engines, customization, privacy, text-delivery behavior, a Reliability section (editor-specific paste fallback, typed refusal guidance, Recent Activity, content-free diagnostics), independent Secrets, library import/export, troubleshooting, installation, documentation, and FAQs. Jump links connect the longer product sections. Keep examples aligned with the macro reference and voice guide.
 
 ## Content conventions
 
