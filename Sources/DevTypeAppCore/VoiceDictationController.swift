@@ -928,9 +928,9 @@ public final class VoiceDictationController: @unchecked Sendable {
                             message: LocalizationManager.shared.s("voice.ai.emptyOutput")
                         ))
                         self.restore(fallback, to: destination)
-                    case .failure:
+                    case .failure(let error):
                         VoiceHUDPanel.shared.updateState(
-                            .error(message: LocalizationManager.shared.s("voice.ai.failed"))
+                            .error(message: Self.aiFailureMessage(error))
                         )
                         self.restore(fallback, to: destination)
                     }
@@ -945,6 +945,21 @@ public final class VoiceDictationController: @unchecked Sendable {
             .error(message: LocalizationManager.shared.s("ai.availability.unsupportedOS"))
         )
         restore(fallback, to: destination)
+    }
+
+    /// The HUD keeps its short generic line for failures the speaker cannot act on. A system
+    /// deferral is the exception: the model is fine and only freeing memory helps, which
+    /// "The AI action failed" gives no hint of.
+    static func aiFailureMessage(
+        _ error: AITransformError,
+        loc: LocalizationManager = .shared
+    ) -> String {
+        switch error {
+        case .deferredBySystem:
+            return AITransformFlow.localizedError(error, loc: loc)
+        default:
+            return loc.s("voice.ai.failed")
+        }
     }
 
     /// Starts a new spoken-command transform and invalidates any older result before its provider

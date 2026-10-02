@@ -110,6 +110,23 @@ final class AppStringKeyCoverageTests: XCTestCase {
         XCTAssertEqual(seenKeys.count, allReasons.count)
     }
 
+    /// `AITransformError.localizationKey` is the single owner of each case's string; every key
+    /// it names must exist in every table. The switch there is exhaustive, so a new case
+    /// cannot ship without a key — this list is what checks the key has text behind it.
+    func testAITransformErrorKeysResolve() {
+        let errors: [AITransformError] = [
+            .unavailable(.unsupportedOS), .busy, .emptyInput, .missingInstructions,
+            .inputTooLarge(estimatedTokens: 1, contextSize: 1), .guardrailViolation,
+            .exceededContextWindowSize, .rateLimited, .unsupportedLanguageOrLocale,
+            .assetsUnavailable, .decodingFailure, .refusal, .concurrentRequests,
+            .unsupportedGuide, .languageDrift, .unexpectedRewrite, .promptEcho, .discarded,
+            .deferredBySystem, .unknown("x"),
+        ]
+        for error in errors {
+            assertResolves(error.localizationKey, origin: "AITransformError.\(error)")
+        }
+    }
+
     func testVoiceBuildLacksSpeechKeyResolves() {
         assertResolves(
             "prefs.voice.speechModels.status.buildLacksSpeech",

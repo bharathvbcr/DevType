@@ -69,10 +69,45 @@ public enum DevTypeLog {
     /// `String(describing:)` can contain provider response bodies, user-selected paths, prompts,
     /// or text. A concrete type plus numeric code keeps failures distinguishable without making
     /// any free-form payload public in OSLog or the mirrored support report.
+    ///
+    /// Wrapped causes are appended as `causes=domain:code,…`. Without them a framework failure
+    /// logs as its outermost wrapper only — `type=NSError code=-1` — which is how an on-device
+    /// model refusal under memory pressure left no trace of its cause. Domains follow the rule
+    /// above: only the framework domains in `publicErrorDomains` are written verbatim, every
+    /// other domain is a salted fingerprint.
     public static func errorMetadata(_ error: Error) -> String {
         let fullType = String(reflecting: type(of: error))
         let boundedType = String(fullType.prefix(96))
-        return "type=\(boundedType) code=\((error as NSError).code)"
+        let nsError = error as NSError
+        var line = "type=\(boundedType) code=\(nsError.code) domain=\(publicErrorDomain(nsError.domain))"
+        let walk = ErrorGraph.walk(error, maxDepth: 4, maxNodes: 9)
+        let causes = walk.nodes.dropFirst()
+        if !causes.isEmpty || walk.truncated {
+            var parts = causes.map { "\(publicErrorDomain($0.domain)):\($0.code)" }
+            if walk.truncated { parts.append("+more") }
+            line += " causes=" + parts.joined(separator: ",")
+        }
+        return line
+    }
+
+    /// Framework error domains that name a subsystem and never carry request content. Anything
+    /// else — a provider-defined domain, a Swift error's module-qualified type — is fingerprinted.
+    static let publicErrorDomains: Set<String> = [
+        NSCocoaErrorDomain,
+        NSPOSIXErrorDomain,
+        NSOSStatusErrorDomain,
+        NSMachErrorDomain,
+        NSURLErrorDomain,
+        // The on-device model's failure chain, as observed on macOS 27.0.1.
+        "FoundationModels.LanguageModelError",
+        "com.apple.SensitiveContentAnalysisML",
+        "SensitiveContentAnalysisML.CombinedTextSanitizerBackend.BackendError",
+        "ModelManagerServices.ModelManagerError",
+    ]
+
+    static func publicErrorDomain(_ domain: String) -> String {
+        if publicErrorDomains.contains(domain) { return domain }
+        return "domain#" + DiagnosticPrivacy.fingerprint(domain, domain: "public-error-domain")
     }
 
     /// Shape-only projection for an unavoidable free-form framework string (for example an

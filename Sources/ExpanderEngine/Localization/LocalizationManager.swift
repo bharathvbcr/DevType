@@ -1418,6 +1418,8 @@ public final class LocalizationManager: ObservableObject {
             "ai.error.unsupportedGuide": "The on-device model rejected this guided-generation request.",
             "ai.error.concurrent": "Concurrent AI requests are not supported.",
             "ai.error.discarded": "The result was discarded.",
+            "ai.error.deferredBySystem":
+                "macOS paused on-device AI because this Mac is under heavy load, usually low memory. Quit apps you aren’t using, then try again.",
             "ai.error.unknown": "AI transform failed: %@",
 
             // §4.2: shortcut recorder.
@@ -3406,6 +3408,8 @@ public final class LocalizationManager: ObservableObject {
             "ai.error.unsupportedGuide": "온디바이스 모델이 이 가이드 생성 요청을 거부했습니다.",
             "ai.error.concurrent": "동시 AI 요청은 지원되지 않습니다.",
             "ai.error.discarded": "결과가 폐기되었습니다.",
+            "ai.error.deferredBySystem":
+                "Mac의 부하가 높아(대개 메모리 부족) macOS가 온디바이스 AI를 일시 중지했습니다. 사용하지 않는 앱을 종료한 후 다시 시도하세요.",
             "ai.error.unknown": "AI 변환 실패: %@",
 
             "shortcut.record": "클릭하여 기록",
@@ -5381,6 +5385,8 @@ public final class LocalizationManager: ObservableObject {
             "ai.error.unsupportedGuide": "オンデバイスモデルがこのガイド付き生成リクエストを拒否しました。",
             "ai.error.concurrent": "同時の AI リクエストには対応していません。",
             "ai.error.discarded": "結果は破棄されました。",
+            "ai.error.deferredBySystem":
+                "Mac の負荷が高いため（多くはメモリ不足）、macOS がオンデバイス AI を一時停止しました。使っていないアプリを終了してから、もう一度お試しください。",
             "ai.error.unknown": "AI 変換に失敗しました: %@",
 
             "shortcut.record": "クリックして記録",

@@ -57,7 +57,30 @@ public enum AITransformError: Error, Equatable, Sendable {
     case promptEcho
     /// Caller discarded the result (Cancel). Generation may still finish; do not inject.
     case discarded
+    /// macOS's model service refused to run the request because of the current system state.
+    /// The model is installed and reports itself available; the refusal is transient and the
+    /// user's remedy is to free resources and retry. See `isSystemDeferral(_:)`.
+    case deferredBySystem
     case unknown(String)
+
+    /// `ModelManagerServices.ModelManagerError` 1013, anywhere in the error's wrapped causes.
+    ///
+    /// Observed 2026-10-01 on macOS 27.0.1 as the leaf of
+    /// `FoundationModels.LanguageModelError -1 → com.apple.SensitiveContentAnalysisML 15 →
+    /// CombinedTextSanitizerBackend.BackendError 1 → ModelManagerError 1013`, while
+    /// `modelmanagerd` logged `Not executed due to current system state ["CriticalMemoryPressure"],
+    /// try again later`. The wrappers depend on which stage hit the refusal (here the input
+    /// sanitizer; generation logs the same 1013 through TokenGenerator), so only the leaf is
+    /// matched. The state list lives in the daemon's log, not in the error, so this proves
+    /// "refused for system state" — memory was the state observed, not one the error names.
+    public static func isSystemDeferral(_ error: Error) -> Bool {
+        ErrorGraph.walk(error).nodes.contains {
+            $0.domain == modelManagerErrorDomain && $0.code == modelManagerSystemStateRefusal
+        }
+    }
+
+    static let modelManagerErrorDomain = "ModelManagerServices.ModelManagerError"
+    static let modelManagerSystemStateRefusal = 1013
 }
 
 /// Handle returned from a GCD-style transform. `discard()` drops the result *and* stops
@@ -1688,7 +1711,7 @@ public actor AITextTransformer {
         }
     }
 
-    private static func mapGenerationError(
+    static func mapGenerationError(
         _ error: Error,
         kind: AITransformKind,
         input: String
@@ -1699,6 +1722,20 @@ public actor AITextTransformer {
         // the tone mid-stream — turning an ordinary interaction into a reliability signal.
         if error is CancellationError {
             return .discarded
+        }
+        // Before the `GenerationError` cast: the service refusal arrives wrapped in whatever
+        // stage hit it, and "the system paused this, free memory and retry" is the actionable
+        // reading even if a future SDK wraps it in a `GenerationError` case.
+        if AITransformError.isSystemDeferral(error) {
+            DevTypeLog.store.error(
+                "[AI] transform failed kind=\(kind.rawValue, privacy: .public) error=deferredBySystem \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
+            AIDiagnosticsStore.shared.recordFailure(
+                kind: kind.rawValue,
+                error: "deferredBySystem",
+                detail: ""
+            )
+            return .deferredBySystem
         }
         guard let generation = error as? LanguageModelSession.GenerationError else {
             // The log line and the returned error must carry the same redaction: third-party

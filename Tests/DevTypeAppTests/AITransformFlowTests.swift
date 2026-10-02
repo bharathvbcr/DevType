@@ -130,6 +130,32 @@ final class AITransformFlowTests: XCTestCase {
             AITransformFlow.localizedError(.unknown(""), loc: loc),
             loc.s("ai.error.unknown", "—")
         )
+        XCTAssertEqual(
+            AITransformFlow.localizedError(.deferredBySystem, loc: loc),
+            loc.s("ai.error.deferredBySystem")
+        )
+    }
+
+    /// The memory-pressure refusal must read as itself, not as the framework's raw
+    /// "SensitiveContentAnalysisML error 15" through `.unknown`.
+    func testDeferredBySystemTellsTheUserWhatToDo() {
+        let message = AITransformFlow.localizedError(.deferredBySystem, loc: LocalizationManager.shared)
+        XCTAssertTrue(message.contains("memory"), message)
+        XCTAssertTrue(message.contains("try again"), message)
+        XCTAssertFalse(message.contains("ai.error."), "raw key rendered: \(message)")
+    }
+
+    /// The voice HUD shows the specific line only for a system deferral; everything else
+    /// keeps its short generic failure.
+    func testVoiceHUDNamesASystemDeferralAndKeepsTheGenericLineOtherwise() {
+        let loc = LocalizationManager.shared
+        XCTAssertEqual(
+            VoiceDictationController.aiFailureMessage(.deferredBySystem, loc: loc),
+            AITransformFlow.localizedError(.deferredBySystem, loc: loc)
+        )
+        for other: AITransformError in [.rateLimited, .guardrailViolation, .unknown("x"), .busy] {
+            XCTAssertEqual(VoiceDictationController.aiFailureMessage(other, loc: loc), loc.s("voice.ai.failed"))
+        }
     }
 
     func testRunUsesLocalTransformOnDirectMode() {

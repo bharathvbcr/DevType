@@ -253,47 +253,18 @@ enum AITransformFlow {
         )
     }
 
+    /// `AITransformError.localizationKey` owns which string each case shows; this only supplies
+    /// the format arguments. It used to restate the whole mapping, so a new case had to be
+    /// added in two places that nothing kept in step.
     static func localizedError(_ error: AITransformError, loc: LocalizationManager) -> String {
         switch error {
-        case .unavailable(let reason):
-            return localizedAvailability(reason, loc: loc)
-        case .busy:
-            return loc.s("ai.error.busy")
-        case .emptyInput:
-            return loc.s("ai.error.emptyInput")
-        case .missingInstructions:
-            return loc.s("ai.error.missingInstructions")
         case .inputTooLarge(let estimated, let context):
-            return loc.s("ai.error.inputTooLarge", estimated, context)
-        case .guardrailViolation:
-            return loc.s("ai.error.guardrail")
-        case .exceededContextWindowSize:
-            return loc.s("ai.error.contextWindow")
-        case .rateLimited:
-            return loc.s("ai.error.rateLimited")
-        case .unsupportedLanguageOrLocale:
-            return loc.s("ai.error.language")
-        case .assetsUnavailable:
-            return loc.s("ai.error.assets")
-        case .decodingFailure:
-            return loc.s("ai.error.decoding")
-        case .refusal:
-            return loc.s("ai.error.refusal")
-        case .concurrentRequests:
-            return loc.s("ai.error.busy")
-        case .unsupportedGuide:
-            return loc.s("ai.error.unsupportedGuide")
-        case .languageDrift:
-            return loc.s("ai.error.languageDrift")
-        case .unexpectedRewrite:
-            return loc.s("ai.error.unexpectedRewrite")
-        case .promptEcho:
-            return loc.s("ai.error.promptEcho")
-        case .discarded:
-            return loc.s("ai.error.discarded")
+            return loc.s(error.localizationKey, estimated, context)
         case .unknown(let message):
             let detail = message.isEmpty ? "—" : message
-            return loc.s("ai.error.unknown", detail)
+            return loc.s(error.localizationKey, detail)
+        default:
+            return loc.s(error.localizationKey)
         }
     }
 
@@ -301,18 +272,7 @@ enum AITransformFlow {
         _ reason: AIModelAvailability.Reason,
         loc: LocalizationManager
     ) -> String {
-        switch reason {
-        case .unsupportedOS:
-            return loc.s("ai.availability.unsupportedOS")
-        case .buildLacksFoundationModels:
-            return loc.s("ai.availability.buildLacksFoundationModels")
-        case .deviceNotEligible:
-            return loc.s("ai.availability.deviceNotEligible")
-        case .appleIntelligenceNotEnabled:
-            return loc.s("ai.availability.notEnabled")
-        case .modelNotReady:
-            return loc.s("ai.availability.modelNotReady")
-        }
+        loc.s(reason.localizationKey)
     }
 
     private static func softAlert(title: String, message: String, loc: LocalizationManager) {

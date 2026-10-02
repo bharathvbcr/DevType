@@ -34,23 +34,59 @@ final class MacroParserScanBoundTests: XCTestCase {
         XCTAssertLessThan(elapsed, 2.0, "preview must not stall the main thread: took \(elapsed)s")
     }
 
-    /// Absolute timings track whatever machine runs them; the defect was the growth curve.
-    /// Doubling the markers doubles linear work and quadruples quadratic work.
-    func testScanCostScalesSubQuadraticallyWithMarkerCount() {
-        func elapsed(markers: Int) -> TimeInterval {
-            let source = markerSoup(markers: markers, payload: 10_000)
-            _ = MacroParser.parse(source)  // warm
-            let started = Date()
-            _ = MacroParser.parse(source)
-            return Date().timeIntervalSince(started)
+    /// How much the scaled-up document costs relative to the base one.
+    ///
+    /// Absolute timings track whatever machine runs them; the defect was the growth curve. The
+    /// whole document is scaled — markers *and* payload — because the cost is markers × length:
+    /// scaling only the markers over a fixed payload grows that product linearly, so a quadratic
+    /// implementation passes. Scaled by four, linear work grows ×4 and quadratic ×16; the
+    /// threshold sits at the geometric midpoint, eight. The bounded paths measure nearer ×2.7,
+    /// because the fixed case budget and the allowance floor weigh the small document more.
+    ///
+    /// The clock is the thread's CPU time, not elapsed time: a full suite on a loaded machine
+    /// deschedules the test and pages it in from swap, and wall-clock charged that to whichever
+    /// size it landed on — once reading ×8 for work that was ×2.6. Each size is still measured
+    /// several times, interleaved, keeping the least, because CPU time alone does not even out
+    /// which core the thread ran on or what it was contending with.
+    private static let growthScale = 4
+    private static let growthThreshold = 8.0
+
+    private func growthRatio(
+        rounds: Int = 7,
+        document: (_ scale: Int) -> String,
+        _ run: (String) -> Void
+    ) -> (base: Double, scaled: Double) {
+        // Built up front so only `run` is timed.
+        let small = document(1)
+        let large = document(Self.growthScale)
+        func seconds(_ source: String) -> Double {
+            let started = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+            run(source)
+            return Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - started) / 1_000_000_000
         }
 
-        let single = max(elapsed(markers: 2_000), 0.0005)
-        let double = elapsed(markers: 4_000)
+        run(small)  // warm
+        run(large)
+        var base = Double.infinity
+        var scaled = Double.infinity
+        for _ in 0..<rounds {
+            base = min(base, seconds(small))
+            scaled = min(scaled, seconds(large))
+        }
+        // The minimum shrinks the base reading, so the floor keeps timer resolution from
+        // dominating the ratio on a fast machine.
+        return (max(base, 0.0005), scaled)
+    }
+
+    func testScanCostScalesSubQuadraticallyWithMarkerCount() {
+        let (base, scaled) = growthRatio(
+            document: { markerSoup(markers: 1_000 * $0, payload: 5_000 * $0) },
+            { _ = MacroParser.parse($0) }
+        )
 
         XCTAssertLessThan(
-            double / single, 3.0,
-            "doubling the markers must not quadruple the work — \(single)s → \(double)s"
+            scaled / base, Self.growthThreshold,
+            "×\(Self.growthScale) the document must not cost ×\(Self.growthScale * Self.growthScale) — \(base)s → \(scaled)s"
         )
     }
 
@@ -126,22 +162,19 @@ final class MacroParserScanBoundTests: XCTestCase {
         XCTAssertFalse(rendered.isEmpty, "the budget must never drop the snippet's text")
     }
 
+    /// Blocks × output, scaled together for the reason `growthRatio` gives. The scaled document is
+    /// 79,000 characters, inside the replacement cap.
     func testCaseBlockCostScalesSubQuadratically() {
-        func elapsed(blocks: Int) -> TimeInterval {
-            let opens = String(repeating: "%case:upper% ", count: blocks)
-            let source = opens + String(repeating: "a", count: 40_000)
-            _ = MacroPreview.render(source)  // warm
-            let started = Date()
-            _ = MacroPreview.render(source)
-            return Date().timeIntervalSince(started)
-        }
-
-        let single = max(elapsed(blocks: 1_500), 0.0005)
-        let double = elapsed(blocks: 3_000)
+        let (base, scaled) = growthRatio(
+            document: {
+                String(repeating: "%case:upper% ", count: 750 * $0) + String(repeating: "a", count: 10_000 * $0)
+            },
+            { _ = MacroPreview.render($0) }
+        )
 
         XCTAssertLessThan(
-            double / single, 3.0,
-            "doubling the case blocks must not quadruple the work — \(single)s → \(double)s"
+            scaled / base, Self.growthThreshold,
+            "×\(Self.growthScale) the document must not cost ×\(Self.growthScale * Self.growthScale) — \(base)s → \(scaled)s"
         )
     }
 

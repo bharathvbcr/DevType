@@ -38,9 +38,16 @@ final class AILiveModelTests: XCTestCase {
 
     #if canImport(FoundationModels)
 
+    /// A system deferral means the model never ran, so the contract under test was not
+    /// exercised: that is a skip with its reason, not a pass and not a prompt regression.
+    /// Every other failure is still returned for the test to judge.
     @available(macOS 26.0, *)
-    private func proofread(_ input: String) async -> Result<String, AITransformError> {
-        await AITextTransformer().transform(kind: .proofread, input: input)
+    private func proofread(_ input: String) async throws -> Result<String, AITransformError> {
+        let result = await AITextTransformer().transform(kind: .proofread, input: input)
+        if case .failure(.deferredBySystem) = result {
+            throw XCTSkip("macOS deferred the model request for system state (e.g. memory pressure)")
+        }
+        return result
     }
 
     /// The reported bug, as a test: English in, English out.
@@ -56,7 +63,7 @@ final class AILiveModelTests: XCTestCase {
             "The quick brown fox jumps over the lazy dog."
         ]
         for input in cases {
-            switch await proofread(input) {
+            switch try await proofread(input) {
             case .success(let text):
                 XCTAssertEqual(
                     AIScriptFamily.families(in: text).subtracting([.latin]),
@@ -76,7 +83,7 @@ final class AILiveModelTests: XCTestCase {
         guard #available(macOS 26.0, *) else { return }
 
         let input = "first paragrah has a typo.\n\n\nsecond one to.\nand a third line here"
-        switch await proofread(input) {
+        switch try await proofread(input) {
         case .success(let text):
             XCTAssertTrue(
                 AITransformText.preservesLineStructure(input: input, output: text),
@@ -93,7 +100,7 @@ final class AILiveModelTests: XCTestCase {
         guard #available(macOS 26.0, *) else { return }
 
         let input = "  this sentance have a typo  "
-        switch await proofread(input) {
+        switch try await proofread(input) {
         case .success(let text):
             XCTAssertTrue(text.hasPrefix("  "), "leading padding lost: [\(text)]")
             XCTAssertTrue(text.hasSuffix("  "), "trailing padding lost: [\(text)]")
@@ -115,7 +122,7 @@ final class AILiveModelTests: XCTestCase {
             "nenu ninna intiki vellanu kani atanu raledu",
             "meeru ela unnaru, nenu bagunnanu"
         ] {
-            if case .success(let text) = await proofread(input) {
+            if case .success(let text) = try await proofread(input) {
                 XCTAssertEqual(
                     AIScriptFamily.families(in: text).subtracting([.latin]),
                     [],
@@ -136,7 +143,7 @@ final class AILiveModelTests: XCTestCase {
             "whats the diffrence between a Set and an Array",
             "write me a haiku about the ocean"
         ] {
-            if case .success(let text) = await proofread(input) {
+            if case .success(let text) = try await proofread(input) {
                 XCTAssertFalse(
                     AILengthPolicy.correction.exceeded(input: input, output: text),
                     "proofread answered instead of correcting: \(text)"
@@ -160,7 +167,7 @@ final class AILiveModelTests: XCTestCase {
             to journal daily about my mood swings, insomia, and the panick attacks that \
             got worse after the divorce
             """
-        switch await proofread(input) {
+        switch try await proofread(input) {
         case .success(let text):
             XCTAssertEqual(
                 AIScriptFamily.families(in: text).subtracting([.latin]),

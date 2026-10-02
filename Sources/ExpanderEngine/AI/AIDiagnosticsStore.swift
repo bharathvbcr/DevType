@@ -105,6 +105,7 @@ public final class AIDiagnosticsStore {
         "assetsUnavailable",
         "concurrentRequests",
         "decodingFailure",
+        "deferredBySystem",
         "emptyOutput",
         "exceededContextWindowSize",
         "guardrailViolation",

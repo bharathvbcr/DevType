@@ -49,6 +49,46 @@ final class DevTypeLogTests: XCTestCase {
         XCTAssertFalse(sampleMeta.contains("sample-error-description"))
     }
 
+    /// The diagnostic half of the memory-pressure bug: this exact error used to log as
+    /// `type=NSError code=-1`, naming nothing that pointed at the model service.
+    func testErrorMetadataNamesTheWrappedCausesOfAFrameworkFailure() {
+        let meta = DevTypeLog.errorMetadata(AISystemDeferralTests.observedRefusal())
+        XCTAssertTrue(meta.contains("code=-1 domain=FoundationModels.LanguageModelError"), meta)
+        XCTAssertTrue(
+            meta.contains(
+                "causes=com.apple.SensitiveContentAnalysisML:15,"
+                    + "SensitiveContentAnalysisML.CombinedTextSanitizerBackend.BackendError:1,"
+                    + "ModelManagerServices.ModelManagerError:1013"
+            ),
+            meta
+        )
+        XCTAssertFalse(meta.contains("+more"), meta)
+        XCTAssertFalse(meta.contains("couldn’t be completed"), "descriptions never reach the log")
+    }
+
+    /// Domains stay private anywhere in the chain, not just at the root.
+    func testErrorMetadataFingerprintsUnknownDomainsInCauses() {
+        let secret = "PRIVATE /Users/person/notes.txt"
+        let root = NSError(domain: NSCocoaErrorDomain, code: 1, userInfo: [
+            NSUnderlyingErrorKey: NSError(domain: secret, code: 2, userInfo: [NSLocalizedDescriptionKey: secret]),
+        ])
+        let meta = DevTypeLog.errorMetadata(root)
+        XCTAssertTrue(meta.contains("domain=\(NSCocoaErrorDomain)"), meta)
+        XCTAssertTrue(meta.contains("causes=domain#"), meta)
+        XCTAssertFalse(meta.contains("PRIVATE"), meta)
+        XCTAssertFalse(meta.contains("notes.txt"), meta)
+    }
+
+    func testErrorMetadataBoundsAndLabelsALongChain() {
+        let meta = DevTypeLog.errorMetadata(ErrorGraphTests.chain(length: 500))
+        XCTAssertTrue(meta.hasSuffix(",+more"), meta)
+        XCTAssertLessThan(meta.count, 600, "a hostile chain must not grow the log line")
+    }
+
+    func testErrorMetadataWithoutCausesHasNoCausesField() {
+        XCTAssertFalse(DevTypeLog.errorMetadata(NSError(domain: NSPOSIXErrorDomain, code: 2)).contains("causes="))
+    }
+
     func testPublicTextMetadata() {
         XCTAssertEqual(DevTypeLog.publicTextMetadata(nil), "text=absent")
         XCTAssertEqual(DevTypeLog.publicTextMetadata(""), "text=absent")

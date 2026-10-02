@@ -147,6 +147,9 @@ final class AITransformDiscardTests: XCTestCase {
         ) { result.append($0) }
 
         await waitUntil({ !partials.values.isEmpty || result.count == 1 }, timeout: 90)
+        if case .failure(.deferredBySystem) = result.first {
+            throw XCTSkip("macOS deferred the model request for system state (e.g. memory pressure)")
+        }
         try XCTSkipIf(result.count == 1, "generation finished before it could be interrupted")
         return (handle, result)
     }

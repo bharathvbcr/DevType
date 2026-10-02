@@ -182,6 +182,8 @@ public extension AITransformError {
             return "ai.error.promptEcho"
         case .discarded:
             return "ai.error.discarded"
+        case .deferredBySystem:
+            return "ai.error.deferredBySystem"
         case .unknown:
             return "ai.error.unknown"
         }

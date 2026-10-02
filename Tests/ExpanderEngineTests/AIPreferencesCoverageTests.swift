@@ -67,7 +67,7 @@ final class AIPreferencesCoverageTests: XCTestCase {
             .guardrailViolation, .exceededContextWindowSize, .rateLimited,
             .unsupportedLanguageOrLocale, .assetsUnavailable, .decodingFailure,
             .refusal, .unsupportedGuide, .languageDrift, .unexpectedRewrite,
-            .promptEcho, .discarded, .unknown("err")
+            .promptEcho, .discarded, .deferredBySystem, .unknown("err")
         ]
         for err in errs {
             XCTAssertFalse(err.localizationKey.isEmpty)
