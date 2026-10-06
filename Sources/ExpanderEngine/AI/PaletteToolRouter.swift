@@ -34,12 +34,25 @@ public enum PaletteToolRouter {
     public struct Routed: Equatable, Sendable {
         public let query: String
         public let text: String
+        /// Set only by `LappiRouteAdmission`, and only from a `model_answered` reading. It
+        /// annotates the row's subtitle; it never changes `text` and never creates a row.
+        public let lappiNote: LappiNote?
 
-        public init(query: String, text: String) {
+        public init(query: String, text: String, lappiNote: LappiNote? = nil) {
             self.query = query
             self.text = text
+            self.lappiNote = lappiNote
         }
     }
+
+    /// Whether Lappi's answered route matches the tool routing actually ran.
+    public enum LappiNote: String, Equatable, Sendable {
+        case agrees
+        case differs
+    }
+
+    /// Reports a tool's name when the routing session calls it.
+    public typealias ToolCallObserver = @Sendable (String) -> Void
 
     public typealias RoutingEngine = @Sendable (String) async throws -> String
 
@@ -117,9 +130,14 @@ public enum PaletteToolRouter {
             public var format: String?
         }
 
-        public init() {}
+        public let onCall: ToolCallObserver?
+
+        public init(onCall: ToolCallObserver? = nil) {
+            self.onCall = onCall
+        }
 
         public func call(arguments: Arguments) async throws -> String {
+            onCall?(name)
             let phrase = arguments.phrase.trimmingCharacters(in: .whitespacesAndNewlines)
             let format = (arguments.format?.isEmpty == false ? arguments.format! : "medium")
             if let typed = CommandPaletteCatalog.parseTypedQuery(phrase) {
@@ -154,9 +172,14 @@ public enum PaletteToolRouter {
             public var text: String
         }
 
-        public init() {}
+        public let onCall: ToolCallObserver?
+
+        public init(onCall: ToolCallObserver? = nil) {
+            self.onCall = onCall
+        }
 
         public func call(arguments: Arguments) async throws -> String {
+            onCall?(name)
             let key = arguments.operation.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let op = PaletteTextOp(rawValue: key)
                     ?? PaletteTextOp(rawValue: key.lowercased()) else {
@@ -182,16 +205,20 @@ public enum PaletteToolRouter {
         /// cache can identify it without hashing every snippet. `nil` means "unknown", which
         /// falls back to the content fingerprint.
         public let revisionProvider: @Sendable () -> UInt64?
+        public let onCall: ToolCallObserver?
 
         public init(
             groupsProvider: @escaping @Sendable () -> [SnippetGroup] = { SnippetStore.shared.loadGroups() },
-            revisionProvider: @escaping @Sendable () -> UInt64? = { nil }
+            revisionProvider: @escaping @Sendable () -> UInt64? = { nil },
+            onCall: ToolCallObserver? = nil
         ) {
             self.groupsProvider = groupsProvider
             self.revisionProvider = revisionProvider
+            self.onCall = onCall
         }
 
         public func call(arguments: Arguments) async throws -> String {
+            onCall?(name)
             let hits = SnippetSearch.run(
                 query: arguments.query,
                 in: SnippetDocument(groups: groupsProvider()).groups,
@@ -208,9 +235,14 @@ public enum PaletteToolRouter {
     /// respect the AI transform single-flight latch before creating a session.
     @available(macOS 26.0, *)
     public static func makeTools(
-        groupsProvider: @escaping @Sendable () -> [SnippetGroup] = { SnippetStore.shared.loadGroups() }
+        groupsProvider: @escaping @Sendable () -> [SnippetGroup] = { SnippetStore.shared.loadGroups() },
+        onToolCalled: ToolCallObserver? = nil
     ) -> [any Tool] {
-        [ResolveDateTool(), RunMacroTool(), FindSnippetTool(groupsProvider: groupsProvider)]
+        [
+            ResolveDateTool(onCall: onToolCalled),
+            RunMacroTool(onCall: onToolCalled),
+            FindSnippetTool(groupsProvider: groupsProvider, onCall: onToolCalled),
+        ]
     }
 
     /// The production engine, or `nil` when this Mac cannot serve one.
@@ -220,7 +252,8 @@ public enum PaletteToolRouter {
     /// takes the identical path through `route`.
     @available(macOS 26.0, *)
     public static func foundationModelsEngine(
-        groupsProvider: @escaping @Sendable () -> [SnippetGroup] = { SnippetStore.shared.loadGroups() }
+        groupsProvider: @escaping @Sendable () -> [SnippetGroup] = { SnippetStore.shared.loadGroups() },
+        onToolCalled: ToolCallObserver? = nil
     ) -> RoutingEngine? {
         let probe = SystemLanguageModel(
             useCase: .general,
@@ -236,7 +269,7 @@ public enum PaletteToolRouter {
             )
             let session = LanguageModelSession(
                 model: model,
-                tools: makeTools(groupsProvider: groupsProvider),
+                tools: makeTools(groupsProvider: groupsProvider, onToolCalled: onToolCalled),
                 instructions: routingInstructions
             )
             // Greedy: routing is classification, so the same query must route the same way

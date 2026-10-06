@@ -1229,7 +1229,7 @@ public enum CommandPaletteCatalog {
             section: .commands,
             trigger: routed.query,
             titleKey: "palette.routed.title",
-            subtitleKey: "palette.routed.detail",
+            subtitleKey: routedSubtitleKey(routed.lappiNote),
             aliases: [],
             action: .insert,
             isEphemeral: true
@@ -1240,6 +1240,16 @@ public enum CommandPaletteCatalog {
             insertText: routed.text,
             preview: routed.text
         )
+    }
+
+    /// The routed row's subtitle. A Lappi note only changes this annotation (contract §3:
+    /// annotate, never insert or run); the row's text and its insert action are untouched.
+    static func routedSubtitleKey(_ note: PaletteToolRouter.LappiNote?) -> String {
+        switch note {
+        case .none: return "palette.routed.detail"
+        case .agrees?: return "palette.routed.detail.lappiAgrees"
+        case .differs?: return "palette.routed.detail.lappiDiffers"
+        }
     }
 
     /// Above any lexical match, because a routed row is a direct answer to the phrase on

@@ -481,6 +481,9 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     private var semanticBoostIDs: [String] = []
     private var routedResult: PaletteToolRouter.Routed?
     private var routingTask: Task<Void, Never>?
+    /// The Lappi caller for this palette: asks when enabled, records when enabled, and pairs
+    /// the routing decision with the row the user ends on. Admission only (contract §3).
+    private let lappi = LappiPaletteRouting(environment: .live())
     private var semanticWorkItem: DispatchWorkItem?
     private var aiDisabledReason: String?
 
@@ -700,6 +703,11 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
+        // Closed without a pick or a cancel (focus lost, hotkey toggled it shut): the user
+        // left the palette, which is a cancel for the pending routing decision.
+        if !didFinish {
+            lappi.recordOutcome(.cancel, query: CommandPaletteCatalog.boundedQuery(searchField.stringValue))
+        }
         didFinish = true
         semanticWorkItem?.cancel()
         // Same reason the semantic work item is cancelled here: a routing round trip
@@ -751,18 +759,36 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             )
             guard !Task.isCancelled else { return }
 
+            let tools = PaletteToolCallRecorder()
             var engine: PaletteToolRouter.RoutingEngine?
             #if canImport(FoundationModels)
             if #available(macOS 26.0, *) {
-                engine = PaletteToolRouter.foundationModelsEngine()
+                engine = PaletteToolRouter.foundationModelsEngine(onToolCalled: { tools.note($0) })
             }
             #endif
-            guard let routed = await PaletteToolRouter.route(query: query, engine: engine),
-                  !Task.isCancelled else { return }
+            // No engine is no routing attempt: nothing to ask Lappi about and nothing to record.
+            guard let engine, let lappi = self?.lappi else { return }
+            let bounded = CommandPaletteCatalog.boundedQuery(query)
+            async let asked = lappi.ask(query: bounded)
+            let routed = await PaletteToolRouter.route(query: query, engine: engine)
+            let attempt = await asked
+            guard !Task.isCancelled else { return }
+            if let attempt {
+                lappi.recordDecision(
+                    ticket: attempt.ticket,
+                    tool: tools.firstTool ?? "none",
+                    engine: LappiCallerRecord.engineFoundationModels,
+                    exchange: attempt.exchange
+                )
+            }
+            let admitted = attempt.map {
+                LappiRouteAdmission.admit(routed, reading: $0.exchange.reading, routedTool: tools.firstTool)
+            } ?? routed
+            guard let admitted else { return }
 
             DispatchQueue.main.async {
-                guard let self, self.searchField.stringValue == routed.query else { return }
-                self.routedResult = routed
+                guard let self, self.searchField.stringValue == admitted.query else { return }
+                self.routedResult = admitted
                 self.refreshHits()
             }
         }
@@ -987,13 +1013,26 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         // All mouse, Return, and jump-key paths finish this panel exactly once.
         guard !didFinish else { return }
         didFinish = true
+        lappi.recordOutcome(Self.lappiPicked(pick), query: CommandPaletteCatalog.boundedQuery(searchField.stringValue))
         onPick(pick)
     }
 
     @objc private func cancel() {
         guard !didFinish else { return }
         didFinish = true
+        lappi.recordOutcome(.cancel, query: CommandPaletteCatalog.boundedQuery(searchField.stringValue))
         onCancel()
+    }
+
+    /// Which row the user ended on, for the caller record: the routed row is the synthetic
+    /// command `CommandPaletteCatalog.routedHit` builds, recognisable by its id prefix.
+    private static func lappiPicked(_ pick: InlineSearchPanel.Pick) -> LappiCallerRecord.Picked {
+        switch pick {
+        case .snippet:
+            return .snippet
+        case .command(let command, _):
+            return command.id.hasPrefix("routed.") ? .routed : .command
+        }
     }
 
     // MARK: Table

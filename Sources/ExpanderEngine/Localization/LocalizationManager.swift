@@ -298,6 +298,14 @@ public final class LocalizationManager: ObservableObject {
             "palette.tool.count.empty": "Nothing to count — select text or copy first",
             "palette.routed.title": "Best guess",
             "palette.routed.detail": "Resolved on device from what you typed",
+            "palette.routed.detail.lappiAgrees": "Resolved on device; Lappi suggested the same tool",
+            "palette.routed.detail.lappiDiffers": "Resolved on device; Lappi suggested a different tool",
+            "prefs.ai.lappiAsk": "Also ask Lappi which tool fits",
+            "prefs.ai.lappiAsk.hint":
+                "When on-device palette routing runs, also sends the phrase to the local Lappi agent over its socket on this Mac and waits at most 300 ms. Lappi is not trained for palette routing yet; requests are refused. An answer could only annotate the routed row — it never inserts text or runs anything. Nothing is sent while secure input is on. Off by default.",
+            "prefs.ai.lappiRecord": "Keep local routing records for Lappi",
+            "prefs.ai.lappiRecord.hint":
+                "Writes which tool routing chose and which row you picked to Application Support/Lappi/heldout on this Mac — the phrase's length and shape, never its text. Records stay on this Mac and are never used for training. Nothing is written while secure input is on, and LAPPI_COLLECT=0 turns this off. Off by default.",
             "palette.math.title": "Calculate",
             "palette.math.detail": "Evaluate an expression",
             "palette.math.invalid": "Invalid expression",
@@ -2329,6 +2337,14 @@ public final class LocalizationManager: ObservableObject {
             "palette.tool.count.empty": "셀 내용이 없습니다 — 텍스트를 선택하거나 복사하세요",
             "palette.routed.title": "추천 결과",
             "palette.routed.detail": "입력한 내용을 기기에서 해석한 결과",
+            "palette.routed.detail.lappiAgrees": "기기에서 해석함 · Lappi도 같은 도구를 제안",
+            "palette.routed.detail.lappiDiffers": "기기에서 해석함 · Lappi는 다른 도구를 제안",
+            "prefs.ai.lappiAsk": "Lappi에게도 맞는 도구 묻기",
+            "prefs.ai.lappiAsk.hint":
+                "온디바이스 팔레트 라우팅이 실행될 때 이 Mac의 로컬 Lappi 에이전트에 소켓으로 문구를 보내고 최대 300ms까지 기다립니다. Lappi는 아직 팔레트 라우팅을 학습하지 않았으므로 요청은 거부됩니다. 답변은 라우팅된 행에 주석만 달 수 있으며 텍스트를 입력하거나 무언가를 실행하지 않습니다. 보안 입력이 켜져 있으면 아무것도 보내지 않습니다. 기본값은 꺼짐입니다.",
+            "prefs.ai.lappiRecord": "Lappi용 로컬 라우팅 기록 보관",
+            "prefs.ai.lappiRecord.hint":
+                "라우팅이 선택한 도구와 사용자가 고른 행을 이 Mac의 Application Support/Lappi/heldout에 기록합니다. 문구의 길이와 형태만 기록하며 내용은 기록하지 않습니다. 기록은 이 Mac에만 남으며 학습에 사용되지 않습니다. 보안 입력이 켜져 있으면 기록하지 않으며 LAPPI_COLLECT=0이면 꺼집니다. 기본값은 꺼짐입니다.",
             "palette.math.title": "계산",
             "palette.math.detail": "수식 계산",
             "palette.math.invalid": "잘못된 수식",
@@ -4302,6 +4318,14 @@ public final class LocalizationManager: ObservableObject {
             "palette.tool.count.empty": "カウント対象がありません — 選択するかコピーしてください",
             "palette.routed.title": "推定結果",
             "palette.routed.detail": "入力内容からデバイス上で解決",
+            "palette.routed.detail.lappiAgrees": "デバイス上で解決 · Lappi も同じツールを提案",
+            "palette.routed.detail.lappiDiffers": "デバイス上で解決 · Lappi は別のツールを提案",
+            "prefs.ai.lappiAsk": "Lappi にも適したツールを尋ねる",
+            "prefs.ai.lappiAsk.hint":
+                "オンデバイスのパレットルーティングが動くとき、この Mac のローカル Lappi エージェントにソケット経由で語句を送り、最大 300 ms 待ちます。Lappi はまだパレットルーティング用に学習されていないため、リクエストは拒否されます。回答はルーティングされた行に注釈を付けるだけで、テキストを挿入したり何かを実行したりしません。セキュア入力中は何も送信しません。既定ではオフです。",
+            "prefs.ai.lappiRecord": "Lappi 用のローカルルーティング記録を保存",
+            "prefs.ai.lappiRecord.hint":
+                "ルーティングが選んだツールと選択した行を、この Mac の Application Support/Lappi/heldout に書き込みます。語句の長さと形だけを記録し、本文は記録しません。記録はこの Mac から出ず、学習には使われません。セキュア入力中は書き込まず、LAPPI_COLLECT=0 でオフになります。既定ではオフです。",
             "palette.math.title": "計算",
             "palette.math.detail": "式を評価",
             "palette.math.invalid": "無効な式",

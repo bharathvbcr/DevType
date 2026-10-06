@@ -1166,6 +1166,8 @@ final class PreferencesViewController: NSViewController,
     private let aiRemoveMarkdownSwitch = NSSwitch()
     private let aiTagSuggestionsSwitch = NSSwitch()
     private let aiSemanticRoutingSwitch = NSSwitch()
+    private let lappiAskSwitch = NSSwitch()
+    private let lappiRecordSwitch = NSSwitch()
     private let repetitionSwitch = NSSwitch()
     private let requireBiometrySwitch = NSSwitch()
     private let aiAvailabilityLabel = DevTypeTheme.makeLabel(
@@ -4233,6 +4235,30 @@ final class PreferencesViewController: NSViewController,
             wrapping: true
         )
         routingHint.translatesAutoresizingMaskIntoConstraints = false
+        let lappiAskRow = makeToggleRow(
+            title: loc.s("prefs.ai.lappiAsk"),
+            toggle: lappiAskSwitch,
+            action: #selector(lappiAskChanged)
+        )
+        let lappiAskHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.lappiAsk.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        lappiAskHint.translatesAutoresizingMaskIntoConstraints = false
+        let lappiRecordRow = makeToggleRow(
+            title: loc.s("prefs.ai.lappiRecord"),
+            toggle: lappiRecordSwitch,
+            action: #selector(lappiRecordChanged)
+        )
+        let lappiRecordHint = DevTypeTheme.makeLabel(
+            loc.s("prefs.ai.lappiRecord.hint"),
+            font: DevTypeTheme.font(10.5),
+            color: DevTypeTheme.textTertiary,
+            wrapping: true
+        )
+        lappiRecordHint.translatesAutoresizingMaskIntoConstraints = false
         let tagRow = makeToggleRow(
             title: loc.s("prefs.ai.tagSuggestions"),
             toggle: aiTagSuggestionsSwitch,
@@ -4265,7 +4291,8 @@ final class PreferencesViewController: NSViewController,
         forgetButton.translatesAutoresizingMaskIntoConstraints = false
         forgetButton.bezelStyle = .rounded
         var modeRows: [NSView] = [
-            modesHint, markdownRow, markdownHint, routingRow, routingHint, tagRow, tagHint,
+            modesHint, markdownRow, markdownHint, routingRow, routingHint,
+            lappiAskRow, lappiAskHint, lappiRecordRow, lappiRecordHint, tagRow, tagHint,
             repetitionRow, repetitionHint, forgetButton,
         ]
         aiOutputModePopups.removeAll()
@@ -4380,6 +4407,8 @@ final class PreferencesViewController: NSViewController,
         aiRemoveMarkdownSwitch.state = AIPreferences.removesMarkdown ? .on : .off
         aiTagSuggestionsSwitch.state = SnippetTagSuggester.isEnabled ? .on : .off
         aiSemanticRoutingSwitch.state = AIPreferences.isSemanticRoutingEnabled ? .on : .off
+        lappiAskSwitch.state = LappiPreferences.isAskEnabled ? .on : .off
+        lappiRecordSwitch.state = LappiPreferences.isRecordEnabled ? .on : .off
         repetitionSwitch.state = TypedRepetitionPreferences.isActive ? .on : .off
         aiAvailabilityLabel.stringValue = loc.s(
             "prefs.ai.availability",
@@ -4421,6 +4450,14 @@ final class PreferencesViewController: NSViewController,
 
     @objc private func aiSemanticRoutingChanged() {
         AIPreferences.isSemanticRoutingEnabled = aiSemanticRoutingSwitch.state == .on
+    }
+
+    @objc private func lappiAskChanged() {
+        LappiPreferences.isAskEnabled = lappiAskSwitch.state == .on
+    }
+
+    @objc private func lappiRecordChanged() {
+        LappiPreferences.isRecordEnabled = lappiRecordSwitch.state == .on
     }
 
     /// Turning this on is a consent decision, not a preference toggle, so the switch does not

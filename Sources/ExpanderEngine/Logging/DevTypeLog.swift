@@ -52,6 +52,11 @@ public enum DevTypeLog {
     /// user data, and nothing about the machine is written here either.
     public static let updates = Logger(subsystem: subsystem, category: "Updates")
 
+    /// The Lappi caller: socket exchanges and local caller-record writes.
+    ///
+    /// Logs outcomes, errno values and counts — never the palette query or a record's content.
+    public static let lappi = Logger(subsystem: subsystem, category: "Lappi")
+
     /// Boolean TCC-style result for CG/AX preflights (macOS has no notDetermined here).
     public static func grantLabel(_ granted: Bool) -> String {
         granted ? "granted" : "denied"
