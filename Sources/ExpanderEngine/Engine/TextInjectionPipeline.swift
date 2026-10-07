@@ -917,90 +917,11 @@ public final class TextInjectionPipeline {
             self.canContinue(context, phase: .afterMutation)
         }
 
-        // Image snippets bypass all text/AX paths: erase the trigger with HID
-        // backspaces, then paste the image through the clipboard.
         if context.snippet.isImageSnippet {
-            guard CGPreflightPostEventAccess() else {
-                refuseInject(
-                    "Image expansion requires Post Events (clipboard paste)",
-                    path: "imagePaste",
-                    swallowed: swallowed,
-                    completion: completion
-                )
-                return
-            }
-            guard let image = ImageAttachmentStore.shared.loadImage(path: context.snippet.imagePath) else {
-                refuseInject(
-                    "Image attachment missing or unreadable",
-                    path: "imagePaste",
-                    swallowed: swallowed,
-                    completion: completion
-                )
-                return
-            }
-            eraser.performGuardedErase(
-                plan: erasePlan,
-                focus: focus,
-                canProceed: canProceed,
-                postingContinue: canProceedAfterMutation
-            ) { erased in
-                guard erased else {
-                    self.refuseInject(
-                        "Trigger erase did not complete — field may hold a partial trigger",
-                        path: "eraseIncomplete",
-                        swallowed: swallowed,
-                        allowKeyReplay: canProceedAfterMutation(),
-                        refuseContext: .capture(
-                            reason: "Trigger erase did not complete",
-                            decision: context.gateDecision
-                        ),
-                        completion: completion
-                    )
-                    return
-                }
-                guard canProceedAfterMutation() else {
-                    self.refuseInject(
-                        "Expansion cancelled — input or target application changed before insertion",
-                        path: "eraseContextChanged",
-                        swallowed: swallowed,
-                        allowKeyReplay: false,
-                        refuseContext: .capture(
-                            reason: "Input or target application changed before insertion",
-                            decision: context.gateDecision
-                        ),
-                        completion: completion
-                    )
-                    return
-                }
-                self.clipboard.pasteImageViaClipboard(
-                    image: image,
-                    bundleID: context.frontBundleID,
-                    focus: focus,
-                    shouldContinue: canProceedAfterMutation
-                ) { result in
-                    guard canProceedAfterMutation() else {
-                        self.finishAbandonedPaste(result: result, path: "imagePasteAbandoned", completion: completion)
-                        return
-                    }
-                    // §3.4: the image path now reports what it actually observed instead of
-                    // "posted, therefore succeeded".
-                    let outcome: PermissionCoordinator.InjectOutcome
-                    switch result {
-                    case .delivered:
-                        outcome = .succeeded
-                    case .unavailable:
-                        outcome = .postedUnverified
-                    case .notPosted, .failed:
-                        outcome = .failedSilent
-                    }
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        outcome,
-                        refuseContext: nil,
-                        path: "imagePaste"
-                    )
-                    completion(outcome)
-                }
-            }
+            performImageInject(
+                context: context, focus: focus, beforeMutation: canProceed,
+                afterMutation: canProceedAfterMutation, completion: completion
+            )
             return
         }
 
@@ -1461,6 +1382,99 @@ public final class TextInjectionPipeline {
                     trailingKeys: keysToPress,
                     completion: completion
                 )
+            }
+        }
+    }
+
+    /// Image snippets bypass all text/AX paths: erase the trigger with HID backspaces, then
+    /// paste the image through the clipboard.
+    private func performImageInject(
+        context: InjectContext,
+        focus: FocusedElementSource,
+        beforeMutation canProceed: @escaping () -> Bool,
+        afterMutation canProceedAfterMutation: @escaping () -> Bool,
+        completion: @escaping InjectionCompletion
+    ) {
+        let swallowed = context.swallowed
+        guard CGPreflightPostEventAccess() else {
+            refuseInject(
+                "Image expansion requires Post Events (clipboard paste)",
+                path: "imagePaste",
+                swallowed: swallowed,
+                completion: completion
+            )
+            return
+        }
+        guard let image = ImageAttachmentStore.shared.loadImage(path: context.snippet.imagePath) else {
+            refuseInject(
+                "Image attachment missing or unreadable",
+                path: "imagePaste",
+                swallowed: swallowed,
+                completion: completion
+            )
+            return
+        }
+        eraser.performGuardedErase(
+            plan: context.erasePlan,
+            focus: focus,
+            canProceed: canProceed,
+            postingContinue: canProceedAfterMutation
+        ) { erased in
+            guard erased else {
+                self.refuseInject(
+                    "Trigger erase did not complete — field may hold a partial trigger",
+                    path: "eraseIncomplete",
+                    swallowed: swallowed,
+                    allowKeyReplay: canProceedAfterMutation(),
+                    refuseContext: .capture(
+                        reason: "Trigger erase did not complete",
+                        decision: context.gateDecision
+                    ),
+                    completion: completion
+                )
+                return
+            }
+            guard canProceedAfterMutation() else {
+                self.refuseInject(
+                    "Expansion cancelled — input or target application changed before insertion",
+                    path: "eraseContextChanged",
+                    swallowed: swallowed,
+                    allowKeyReplay: false,
+                    refuseContext: .capture(
+                        reason: "Input or target application changed before insertion",
+                        decision: context.gateDecision
+                    ),
+                    completion: completion
+                )
+                return
+            }
+            self.clipboard.pasteImageViaClipboard(
+                image: image,
+                bundleID: context.frontBundleID,
+                focus: focus,
+                shouldContinue: canProceedAfterMutation
+            ) { result in
+                guard canProceedAfterMutation() else {
+                    self.finishAbandonedPaste(result: result, path: "imagePasteAbandoned", completion: completion)
+                    return
+                }
+                // §3.4: the image path now reports what it actually observed instead of
+                // "posted, therefore succeeded".
+                let outcome: PermissionCoordinator.InjectOutcome
+                switch result {
+                case .delivered:
+                    outcome = .succeeded
+                case .unavailable:
+                    outcome = .postedUnverified
+                case .notPosted, .failed:
+                    outcome = .failedSilent
+                }
+                PermissionCoordinator.shared.recordInjectOutcome(
+                    outcome,
+                    refuseContext: nil,
+                    path: "imagePaste"
+                )
+                completion(outcome)
             }
         }
     }
