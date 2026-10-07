@@ -494,7 +494,7 @@ public final class PasteboardBroker {
         /// The target identity every later re-check compares against. `focus` lets an expansion
         /// that already resolved its element hand it over instead of paying another query.
         static func capture(
-            focus: FocusedElementSource = .live,
+            focus: FocusedElementSource,
             baseline: DeliveryVerifier.FocusedTextObservation? = nil
         ) -> Self {
             let element = baseline?.target ?? focus.element
@@ -745,7 +745,7 @@ public final class PasteboardBroker {
     // MARK: - Text paste
 
     public func pasteViaClipboard(text: String, completion: ((Bool) -> Void)? = nil) {
-        pasteViaClipboard(text: text, expectedText: nil, baseline: nil) { result in
+        pasteViaClipboard(text: text, expectedText: nil, baseline: nil, focus: .live) { result in
             completion?(result != .notPosted)
         }
     }
@@ -771,6 +771,7 @@ public final class PasteboardBroker {
         text: String,
         expectedText: String?,
         baseline: DeliveryVerifier.FocusedTextObservation?,
+        focus: FocusedElementSource,
         bundleID: String? = nil,
         focusedRole: String? = nil,
         staleProbe: String? = nil,
@@ -790,7 +791,7 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        let target = PasteTarget.capture(baseline: baseline)
+        let target = PasteTarget.capture(focus: focus, baseline: baseline)
         // HID erase (or a no-AX secure paste) has already happened; AX selectedRange is settling.
         let verifySelection = Self.verifySelectionRange(
             bundleID: bundleID, role: focusedRole, phase: .afterMutation
@@ -1025,7 +1026,7 @@ public final class PasteboardBroker {
     public func pasteImageViaClipboard(
         image: NSImage,
         bundleID: String? = nil,
-        focus: FocusedElementSource = .live,
+        focus: FocusedElementSource,
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {

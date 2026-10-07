@@ -50,6 +50,7 @@ final class ErasePlanIntegrityTests: XCTestCase {
         var completions: [Bool] = []
         EraseExecutor(hid: Poster()).performGuardedErase(
             plan: ErasePlan(expectedText: "abc", utf16Count: 3, backspaceCount: 0),
+            focus: .live,
             completion: { completions.append($0) }
         )
         XCTAssertEqual(completions, [false])

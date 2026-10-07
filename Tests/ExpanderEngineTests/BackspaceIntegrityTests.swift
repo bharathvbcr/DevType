@@ -158,7 +158,7 @@ final class BackspaceIntegrityTests: XCTestCase {
         let executor = EraseExecutor(hid: poster)
 
         let done = expectation(description: "completed")
-        executor.performGuardedErase(plan: makePlan("")) { erased in
+        executor.performGuardedErase(plan: makePlan(""), focus: .live) { erased in
             XCTAssertTrue(erased)
             done.fulfill()
         }

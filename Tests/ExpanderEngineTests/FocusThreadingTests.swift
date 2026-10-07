@@ -78,8 +78,28 @@ final class FocusThreadingTests: XCTestCase {
             XCTAssertFalse(AXTextWriter.shared.attemptAXDirectInjection(text: "x", focus: none))
             XCTAssertNil(DeliveryVerifier().captureFocusedTextObservation(focus: none))
             XCTAssertNil(PasteboardBroker.PasteTarget.capture(focus: none).element)
+            XCTAssertFalse(AXContextChecker.shared.focusedElementLooksLikeTerminal(focus: none))
         }
         XCTAssertEqual(queries, 0)
+    }
+
+    /// The two collaborators that used to query behind the threaded element through a default
+    /// argument: the IDE shell-like probe at the top of `performInject`, and the clipboard paste's
+    /// target capture when it has no baseline (secure paste, trigger restore).
+    func testTheShellProbeAndTheClipboardCaptureUseTheHandedElement() {
+        var result: PasteboardBroker.PasteDeliveryResult?
+        let queries = FocusQueryProbe.counting {
+            _ = AXContextChecker.shared.isFrontmostShellLikeContext(focus: .resolved(element))
+            _ = AXContextChecker.shared.isFrontmostShellLikeContext(focus: .resolved(nil))
+            // `shouldContinue: false` stops it right after the capture, before any live re-check
+            // or pasteboard write.
+            PasteboardBroker.shared.pasteViaClipboard(
+                text: "x", expectedText: nil, baseline: nil, focus: .resolved(nil),
+                shouldContinue: { false }
+            ) { result = $0 }
+        }
+        XCTAssertEqual(queries, 0)
+        XCTAssertEqual(result, .notPosted)
     }
 
     func testTheGuardedEraseUsesTheThreadedElement() {
@@ -117,7 +137,10 @@ final class FocusThreadingTests: XCTestCase {
 
         XCTAssertEqual(inject.components(separatedBy: "queryFocusedElement").count - 1, 1,
                        "One resolution per inject — the entry re-check's answer is the threaded element")
-        for untracked in ["focusedElement()", "focusedElementRole()", "captureFocusedTextObservation()"] {
+        for untracked in [
+            "focusedElement()", "focusedElementRole()", "captureFocusedTextObservation()",
+            "isFrontmostShellLikeContext()", "PasteTarget.capture()"
+        ] {
             XCTAssertFalse(inject.contains(untracked), "\(untracked) re-resolves focus behind the threaded element")
         }
         XCTAssertFalse(inject.contains("focus: .live"), "A collaborator inside the inject must be handed the element")

@@ -571,9 +571,10 @@ public final class TextInjectionPipeline {
             }
         }
 
-        // AX-only hosts: insert the swallowed character at the caret (no Post Events).
+        // AX-only hosts: insert the swallowed character at the caret (no Post Events). Live on
+        // purpose: a refused key goes back wherever the user now is, which is what typing it would do.
         if !swallowed.unicode.isEmpty {
-            return ax.attemptAXDirectInjection(text: swallowed.unicode)
+            return ax.attemptAXDirectInjection(text: swallowed.unicode, focus: .live)
         }
         return false
     }
@@ -1176,6 +1177,7 @@ public final class TextInjectionPipeline {
                 preResolvedText: request.preResolvedText,
                 trailingKeys: request.trailingKeys,
                 snippetLookup: request.snippetLookup,
+                focus: .resolved(element),
                 shouldContinue: { self.operationIsCurrent(operation, revision: revision, target: target, allowSecureInput: true) },
                 completion: completion
             )
@@ -1424,7 +1426,7 @@ public final class TextInjectionPipeline {
             return
         }
 
-        let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext()
+        let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext(focus: focus)
         // Snapshot clipboard before any paste mutate when macros need it.
         let clipboardArg = context.clipboardOverride
         let cursorOffset: Int?
@@ -1851,6 +1853,7 @@ public final class TextInjectionPipeline {
                 text: textToInject,
                 expectedText: textToInject,
                 baseline: hidPasteBaseline,
+                focus: focus,
                 bundleID: context.frontBundleID,
                 focusedRole: focusedRole,
                 staleProbe: erasePlan.expectedText,
@@ -1893,6 +1896,7 @@ public final class TextInjectionPipeline {
         preResolvedText: String?,
         trailingKeys: [String],
         snippetLookup: ((String) -> String?)?,
+        focus: FocusedElementSource,
         shouldContinue: @escaping () -> Bool,
         completion: @escaping InjectionCompletion
     ) {
@@ -1965,6 +1969,7 @@ public final class TextInjectionPipeline {
             text: textToInject,
             expectedText: nil,
             baseline: nil,
+            focus: focus,
             bundleID: frontBundleID,
             leaveClipboardOnFailure: underSecureInput,
             holdTimeoutOverride: underSecureInput ? TextInjectionPipeline.secureClipboardPasteHoldTimeout : nil,
@@ -2172,7 +2177,7 @@ public final class TextInjectionPipeline {
                 return
             }
             // AX cannot restore — clipboard paste the trigger, then reinject the swallowed key.
-            clipboard.pasteViaClipboard(text: text, expectedText: nil, baseline: nil, bundleID: bundleID, shouldContinue: shouldContinue) { _ in
+            clipboard.pasteViaClipboard(text: text, expectedText: nil, baseline: nil, focus: focus, bundleID: bundleID, shouldContinue: shouldContinue) { _ in
                 if shouldContinue(), swallowed.mustReinjectOnRefuse {
                     _ = self.reinjectSwallowedKey(swallowed)
                 }
@@ -2394,7 +2399,7 @@ public final class TextInjectionPipeline {
             triggerText: typed,
             bundleID: context.frontBundleID
         )
-        recordUndoExpansion(record, target: PasteboardBroker.PasteTarget.capture())
+        recordUndoExpansion(record, target: PasteboardBroker.PasteTarget.capture(focus: .resolved(context.focusedElement)))
     }
 
     func recordUndoExpansion(_ record: LastExpansion, target: PasteboardBroker.PasteTarget) {
@@ -2494,7 +2499,7 @@ public final class TextInjectionPipeline {
     /// Moves selection start left by `utf16OffsetFromEnd` using AX selected-text range.
     @discardableResult
     public func attemptAXCaretPosition(utf16OffsetFromEnd: Int) -> Bool {
-        ax.attemptAXCaretPosition(utf16OffsetFromEnd: utf16OffsetFromEnd)
+        ax.attemptAXCaretPosition(utf16OffsetFromEnd: utf16OffsetFromEnd, focus: .live)
     }
 
     /// Transactional AX replace. See `AXTextWriter` for the no-side-effect contract.
@@ -2503,11 +2508,11 @@ public final class TextInjectionPipeline {
         eraseCount: Int,
         bundleID: String?
     ) -> AXReplaceOutcome {
-        ax.performAXRangeReplace(text: text, eraseCount: eraseCount, bundleID: bundleID)
+        ax.performAXRangeReplace(text: text, eraseCount: eraseCount, bundleID: bundleID, focus: .live)
     }
 
     public func attemptAXDirectInjection(text: String, bundleID: String? = nil) -> Bool {
-        ax.attemptAXDirectInjection(text: text, bundleID: bundleID)
+        ax.attemptAXDirectInjection(text: text, bundleID: bundleID, focus: .live)
     }
 
     @discardableResult
@@ -2532,6 +2537,7 @@ public final class TextInjectionPipeline {
             text: text,
             expectedText: expectedText,
             baseline: baseline,
+            focus: .live,
             bundleID: nil,
             leaveClipboardOnFailure: leaveClipboardOnFailure,
             holdTimeoutOverride: holdTimeoutOverride,
@@ -2541,7 +2547,7 @@ public final class TextInjectionPipeline {
     }
 
     public func pasteImageViaClipboard(image: NSImage, completion: ((Bool) -> Void)? = nil) {
-        clipboard.pasteImageViaClipboard(image: image, bundleID: nil) { result in
+        clipboard.pasteImageViaClipboard(image: image, bundleID: nil, focus: .live) { result in
             completion?(result != .notPosted)
         }
     }
@@ -2556,7 +2562,7 @@ public final class TextInjectionPipeline {
     }
 
     public func captureFocusedTextObservation() -> FocusedTextObservation? {
-        verifier.captureFocusedTextObservation()
+        verifier.captureFocusedTextObservation(focus: .live)
     }
 
     public func verifyFocusedTextDelivery(

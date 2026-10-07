@@ -56,7 +56,7 @@ public final class DeliveryVerifier {
 
     // MARK: - Observation
 
-    public func captureFocusedTextObservation(focus: FocusedElementSource = .live) -> FocusedTextObservation? {
+    public func captureFocusedTextObservation(focus: FocusedElementSource) -> FocusedTextObservation? {
         guard let axElement = focus.element else { return nil }
         return focusedTextObservation(for: axElement)
     }

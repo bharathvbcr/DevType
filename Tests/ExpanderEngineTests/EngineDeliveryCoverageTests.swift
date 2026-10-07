@@ -268,7 +268,7 @@ final class EngineDeliveryCoverageTests: XCTestCase {
         let obs = verifier.focusedTextObservation(for: sys)
         XCTAssertEqual(obs.target, sys)
 
-        _ = verifier.captureFocusedTextObservation()
+        _ = verifier.captureFocusedTextObservation(focus: .live)
         _ = DeliveryVerifier.selectedRange(for: sys)
         _ = verifier.verifyFocusedTextDelivery(expectedText: "test", baseline: nil)
         _ = verifier.verifyFocusedTextDelivery(expectedText: "test", baseline: obs)
@@ -285,12 +285,12 @@ final class EngineDeliveryCoverageTests: XCTestCase {
         let plan = ErasePlan(text: ";short")
 
         let exp1 = expectation(description: "guarded erase allowed")
-        executor.performGuardedErase(plan: plan, afterPossibleWrite: false, canProceed: { true }) { _ in
+        executor.performGuardedErase(plan: plan, focus: .live, afterPossibleWrite: false, canProceed: { true }) { _ in
             exp1.fulfill()
         }
 
         let exp2 = expectation(description: "guarded erase blocked")
-        executor.performGuardedErase(plan: plan, afterPossibleWrite: false, canProceed: { false }) { success in
+        executor.performGuardedErase(plan: plan, focus: .live, afterPossibleWrite: false, canProceed: { false }) { success in
             XCTAssertFalse(success)
             exp2.fulfill()
         }

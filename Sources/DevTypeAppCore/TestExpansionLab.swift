@@ -24,7 +24,7 @@ enum TestExpansionLab {
             return
         }
         let snapshot = PermissionProbe().snapshot()
-        let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext()
+        let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext(focus: .live)
         let plan = InjectionPlanner().plan(
             snapshot: snapshot,
             isTerminal: shellLike,

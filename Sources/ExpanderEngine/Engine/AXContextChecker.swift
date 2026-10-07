@@ -1013,11 +1013,14 @@ public final class AXContextChecker {
     }
 
     /// True when frontmost is a terminal app, or an IDE with a terminal-like focused AX element.
-    public func isFrontmostShellLikeContext(element: AXUIElement? = nil) -> Bool {
+    ///
+    /// §2.2: `focus` is required — an IDE's terminal check reads the focused element, and an
+    /// inject must hand over the one it resolved rather than have this query behind it.
+    public func isFrontmostShellLikeContext(focus: FocusedElementSource) -> Bool {
         if isFrontmostAppTerminal() { return true }
         guard let bundleID = frontmostApplicationBundleIdentifier() else { return false }
         guard isIDEBundleID(bundleID) else { return false }
-        return focusedElementLooksLikeTerminal(element: element)
+        return focusedElementLooksLikeTerminal(focus: focus)
     }
 
     public func isIDEBundleID(_ bundleID: String) -> Bool {
@@ -1089,11 +1092,13 @@ public final class AXContextChecker {
     /// escape sequences in a source file; since the payload no longer varies by verdict, it now
     /// only costs the file its AX write path. It requires **both** a terminal-ish AX role and a
     /// terminal-shaped title token.
-    public func focusedElementLooksLikeTerminal(element: AXUIElement? = nil) -> Bool {
+    public func focusedElementLooksLikeTerminal(focus: FocusedElementSource) -> Bool {
         let axElement: AXUIElement
-        if let element {
+        switch focus {
+        case .resolved(let element):
+            guard let element else { return false }
             axElement = element
-        } else {
+        case .live:
             guard isProcessTrusted(), let fetched = focusedElement() else { return false }
             axElement = fetched
         }

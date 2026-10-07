@@ -194,7 +194,7 @@ public final class EraseExecutor {
     ///     path passes false so a mismatch surfaces instead of degrading to best-effort.
     public func evaluateErasePrecondition(
         plan: ErasePlan,
-        focus: FocusedElementSource = .live,
+        focus: FocusedElementSource,
         retryOnMismatch: Bool = true,
         insertionPointFollowsExpectedText: Bool = true,
         intent: Intent = .expansion,
@@ -223,7 +223,7 @@ public final class EraseExecutor {
     /// behaviour that starves the event tap.
     public func evaluateErasePrecondition(
         plan: ErasePlan,
-        focus: FocusedElementSource = .live,
+        focus: FocusedElementSource,
         retryOnMismatch: Bool = true,
         insertionPointFollowsExpectedText: Bool = true,
         intent: Intent = .expansion
@@ -373,7 +373,7 @@ public final class EraseExecutor {
     ///   PID moved, but must not rewrite a completed post as failure. Defaults to `canProceed`.
     public func performGuardedErase(
         plan: ErasePlan,
-        focus: FocusedElementSource = .live,
+        focus: FocusedElementSource,
         afterPossibleWrite: Bool = false,
         insertionPointFollowsExpectedText: Bool = true,
         intent: Intent = .expansion,

@@ -88,7 +88,7 @@ public final class AXTextWriter {
     /// AX ranges are UTF-16 code units, so this path is unit-correct by construction — unlike the
     /// HID arrow fallback, which had to be taught the difference in §1.6.
     @discardableResult
-    public func attemptAXCaretPosition(utf16OffsetFromEnd: Int, focus: FocusedElementSource = .live) -> Bool {
+    public func attemptAXCaretPosition(utf16OffsetFromEnd: Int, focus: FocusedElementSource) -> Bool {
         guard utf16OffsetFromEnd > 0 else { return true }
         guard let axElement = focus.element else { return false }
 
@@ -123,7 +123,7 @@ public final class AXTextWriter {
         text: String,
         eraseCount: Int,
         bundleID: String?,
-        focus: FocusedElementSource = .live
+        focus: FocusedElementSource
     ) -> AXReplaceOutcome {
         guard let axElement = focus.element else {
             // #region agent log
@@ -388,7 +388,7 @@ public final class AXTextWriter {
     public func attemptAXDirectInjection(
         text: String,
         bundleID: String? = nil,
-        focus: FocusedElementSource = .live
+        focus: FocusedElementSource
     ) -> Bool {
         guard let axElement = focus.element else { return false }
 

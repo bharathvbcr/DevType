@@ -53,7 +53,7 @@ final class ClipboardMonotonicTests: XCTestCase {
         let broker = PasteboardBroker()
         for hold in [Double.nan, .infinity, -.infinity, -1, 9, Double.greatestFiniteMagnitude] {
             var result: PasteboardBroker.PasteDeliveryResult?
-            broker.pasteViaClipboard(text: "must not publish", expectedText: nil, baseline: nil,
+            broker.pasteViaClipboard(text: "must not publish", expectedText: nil, baseline: nil, focus: .live,
                                      bundleID: nil, holdTimeoutOverride: hold) { result = $0 }
             XCTAssertEqual(result, .notPosted)
         }

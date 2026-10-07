@@ -2611,7 +2611,7 @@ public final class EventTapEngine {
                     return
                 }
                 let snapshot = PermissionCoordinator.shared.cachedSnapshot
-                let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext()
+                let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext(focus: .live)
                 let plan = InjectionPlanner().plan(
                     snapshot: snapshot,
                     isTerminal: shellLike,
@@ -2687,7 +2687,9 @@ public final class EventTapEngine {
 
         let mainProbe = Self.runOnMainSync { () -> (currentPID: pid_t?, shellLike: Bool) in
             let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext()
+            let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext(
+                focus: gateFocus.map { .resolved($0) } ?? .live
+            )
             return (currentPID, shellLike)
         }
 
