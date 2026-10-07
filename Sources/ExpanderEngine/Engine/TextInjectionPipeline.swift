@@ -84,30 +84,17 @@ public final class TextInjectionPipeline {
     private let eraser: EraseExecutor
     private let timing: InjectTimingStore
 
-    /// §2.4: `os_unfair_lock`, taken from both the inject queue and main.
-    private let lastExpansionLock = UnfairLock()
-    private var _lastExpansion: LastExpansion?
-    private var lastExpansionTarget: PasteboardBroker.PasteTarget?
-    private var undoGeneration: UInt64 = 0
-    private let defaults: UserDefaults
+    /// §2.4 + §3.1: the undo record, the input revision and the current operation. One owner,
+    /// one lock — the pipeline holds none of that state itself.
+    private let ledger: ExpansionLedger
 
     public static let expansionUndoEnabledDefaultsKey = "DevTypeExpansionUndoEnabled"
 
     /// Enabled by default for existing installations. Disabling consumes every outstanding
     /// record and invalidates queued undo, including when the switch is re-enabled immediately.
     public var expansionUndoEnabled: Bool {
-        get { lastExpansionLock.withLock { undoEnabledLocked } }
-        set {
-            lastExpansionLock.withLock {
-                defaults.set(newValue, forKey: Self.expansionUndoEnabledDefaultsKey)
-                invalidateUndoLocked()
-            }
-        }
-    }
-
-    private var undoEnabledLocked: Bool {
-        defaults.object(forKey: Self.expansionUndoEnabledDefaultsKey) == nil
-            || defaults.bool(forKey: Self.expansionUndoEnabledDefaultsKey)
+        get { ledger.undoEnabled }
+        set { ledger.undoEnabled = newValue }
     }
 
     struct UndoAttempt {
@@ -137,29 +124,17 @@ public final class TextInjectionPipeline {
             case .undo(let attempt): return .undo(inputEventsSinceExpansion: attempt.inputEvents)
             }
         }
+
+        /// A new expansion replaces the undo point; an undo's own inject must not consume the
+        /// record it is undoing.
+        var consumesUndo: Bool {
+            if case .expansion = self { return true }
+            return false
+        }
     }
-    /// §3.1: input events (real keystrokes and type-ahead replays) that landed after the recorded
-    /// expansion. When the field is AX-opaque, this is the only evidence about whether the caret
-    /// still sits right after `injectedText` — a blind undo is permitted only at zero. Guarded by
-    /// `lastExpansionLock`; reset when a record is stored.
-    private var _inputEventsSinceExpansion = 0
-    /// §3.1d: real input the tap observed *while an expansion was being delivered* — keys whose
-    /// ordering relative to the paste could not be honoured and therefore passed straight through
-    /// (`TypeAheadBuffer` flushes rather than queues them), and clicks, which bypass key events
-    /// entirely. Such input reaches the field at an unknowable point around the paste, so the
-    /// "caret sits right after `injectedText`" premise the new record would rest on is already
-    /// broken when the record is written. The counter opens with `beginDeliveryWindow()` and is
-    /// drained into `_inputEventsSinceExpansion` by `rememberExpansion`, which used to reset that
-    /// count to zero and silently forgive exactly these keys — the shape behind "backspace after
-    /// an expansion mis-erases in AX-opaque apps": backspace #1 passes through mid-delivery and
-    /// deletes one character of the arriving expansion, backspace #2 then triggers a blind erase
-    /// computed from a caret that sits one unit left of where the record believes it does.
-    private var _deliveryInputUnits = 0
-    private var inputRevision: UInt64 = 0
-    private var activeOperation: InjectCompletionGuard?
 
     public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+        ledger = ExpansionLedger(defaults: defaults)
         hid = HIDKeyPoster.shared
         ax = AXTextWriter.shared
         verifier = DeliveryVerifier.shared
@@ -295,12 +270,7 @@ public final class TextInjectionPipeline {
         completion: InjectionCompletion? = nil
     ) {
         let operation = InjectCompletionGuard(shouldContinue: shouldContinue)
-        let revision = lastExpansionLock.withLock { () -> UInt64 in
-            if case .expansion = purpose { invalidateUndoLocked() }
-            activeOperation?.cancel()
-            activeOperation = operation
-            return inputRevision
-        }
+        let revision = ledger.claim(operation, consumingUndo: purpose.consumesUndo)
         let target: PasteboardBroker.PasteTarget
         switch purpose {
         case .expansion: target = PasteboardBroker.PasteTarget.capture(focus: targetFocus)
@@ -416,15 +386,11 @@ public final class TextInjectionPipeline {
 
     /// The last delivered expansion, if any. Consumed when undo is claimed or invalidated.
     public var lastExpansion: LastExpansion? {
-        lastExpansionLock.withLock { _lastExpansion }
+        ledger.record
     }
 
     public func canUndoLastExpansion(now: Date = Date()) -> Bool {
-        let front = EventTapEngine.shared.frontmostContext
-        return lastExpansionLock.withLock {
-            undoEnabledLocked && _lastExpansion?.isFresh(now: now) == true
-                && lastExpansionTarget?.pid == front.processID && front.processID != nil
-        }
+        ledger.canUndo(now: now, frontmostPID: EventTapEngine.shared.frontmostContext.processID)
     }
 
     /// Claims one fresh record on the tap thread; no AX or AppKit calls occur here.
@@ -442,46 +408,20 @@ public final class TextInjectionPipeline {
     }
 
     func takeUndoAttempt(now: Date, frontmostPID: pid_t?) -> UndoAttempt? {
-        lastExpansionLock.withLock {
-            guard undoEnabledLocked, let record = _lastExpansion, record.isFresh(now: now),
-                  let target = lastExpansionTarget, let pid = target.pid, pid > 0,
-                  pid == frontmostPID else {
-                invalidateUndoLocked()
-                return nil
-            }
-            let attempt = UndoAttempt(record: record, target: target,
-                                      inputEvents: _inputEventsSinceExpansion,
-                                      inputRevision: inputRevision, generation: undoGeneration)
-            _lastExpansion = nil
-            lastExpansionTarget = nil
-            _inputEventsSinceExpansion = 0
-            return attempt
-        }
+        ledger.takeUndoAttempt(now: now, frontmostPID: frontmostPID)
     }
 
     func undoAttemptIsCurrent(_ attempt: UndoAttempt) -> Bool {
-        lastExpansionLock.withLock {
-            undoEnabledLocked && undoGeneration == attempt.generation
-                && inputRevision == attempt.inputRevision
-        }
-    }
-
-    private func invalidateUndoLocked() {
-        _lastExpansion = nil
-        lastExpansionTarget = nil
-        _inputEventsSinceExpansion = 0
-        undoGeneration &+= 1
+        ledger.undoAttemptIsCurrent(attempt)
     }
 
     /// Caret changes also revoke an undo already dispatched to main.
     public func clearLastExpansion() {
-        lastExpansionLock.withLock { invalidateUndoLocked() }
+        ledger.invalidateUndo()
     }
 
     public func clearLastExpansion(ifInjectedTextIs text: String) {
-        lastExpansionLock.withLock {
-            if _lastExpansion?.injectedText == text { invalidateUndoLocked() }
-        }
+        ledger.invalidateUndo(ifInjectedTextIs: text)
     }
 
     /// §3.1: input landed in the field after the recorded expansion — a real keystroke observed by
@@ -494,13 +434,7 @@ public final class TextInjectionPipeline {
     /// geometry is unknowable without AX and the undo must refuse instead of guessing — guessing
     /// is the "Sch`slm" corruption in hosts where no precondition read can catch it.
     public func noteInputAfterExpansion(units: Int = 1) {
-        guard units > 0 else { return }
-        lastExpansionLock.lock()
-        inputRevision &+= 1
-        if _lastExpansion != nil {
-            _inputEventsSinceExpansion = Saturating.adding(_inputEventsSinceExpansion, units)
-        }
-        lastExpansionLock.unlock()
+        ledger.noteInputAfterExpansion(units: units)
     }
 
     // MARK: - §3.1d Delivery input window
@@ -511,28 +445,19 @@ public final class TextInjectionPipeline {
     /// Increments outside a delivery are discarded by the next `beginDeliveryWindow()`.
     /// During delivery, the counter guards both erases and the eventual undo record.
     public func beginDeliveryWindow() {
-        lastExpansionLock.lock()
-        _deliveryInputUnits = 0
-        lastExpansionLock.unlock()
+        ledger.beginDeliveryWindow()
     }
 
     /// One real, field-touching event was observed while an expansion is being delivered.
-    /// See `_deliveryInputUnits` for why this must poison the record's blind-undo premise.
+    /// See `ExpansionLedger`'s delivery count for why this must poison the record's blind-undo
+    /// premise.
     public func noteDeliveryInput(units: Int = 1) {
-        guard units > 0 else { return }
-        lastExpansionLock.lock()
-        _deliveryInputUnits = Saturating.adding(_deliveryInputUnits, units)
-        inputRevision &+= 1
-        lastExpansionLock.unlock()
+        ledger.noteDeliveryInput(units: units)
     }
 
     /// Invalidates queued work as well as callbacks already scheduled on main.
     public func cancelCurrentInjection() {
-        lastExpansionLock.withLock {
-            invalidateUndoLocked()
-            activeOperation?.cancel()
-            activeOperation = nil
-        }
+        ledger.cancelCurrent()
     }
 
     /// The operation half of `operationIsCurrent` — superseded, cancelled, timed out, the caller's
@@ -542,10 +467,8 @@ public final class TextInjectionPipeline {
         _ operation: InjectCompletionGuard, revision: UInt64,
         allowSecureInput: Bool = false, observationOnly: Bool = false
     ) -> Bool {
-        let current = lastExpansionLock.withLock {
-            activeOperation === operation && inputRevision == revision
-        }
-        return current && operation.allowsContinuation(observationOnly: observationOnly)
+        ledger.isCurrent(operation, revision: revision)
+            && operation.allowsContinuation(observationOnly: observationOnly)
             && (allowSecureInput || (AXContextChecker.shared.isProcessTrusted()
                 && !AXContextChecker.isSecureEventInputEnabledLive()))
     }
@@ -577,7 +500,7 @@ public final class TextInjectionPipeline {
 
     /// Internal test reader for the delivery-window counter. Not public API.
     var deliveryInputUnitsForTesting: Int {
-        lastExpansionLock.withLock { _deliveryInputUnits }
+        ledger.currentDeliveryInputUnits
     }
 
     /// Re-check after asynchronous AX retries and immediately before erase. Clicks and
@@ -589,7 +512,7 @@ public final class TextInjectionPipeline {
     ) -> Bool {
         guard let targetPID,
               frontmostPID == targetPID else { return false }
-        return lastExpansionLock.withLock { _deliveryInputUnits == inputUnits }
+        return ledger.deliveryInputUnits(equal: inputUnits)
     }
 
     /// Reads AXValue + caret + selection length in one snapshot for the undo path. Returns all
@@ -863,7 +786,7 @@ public final class TextInjectionPipeline {
             canPostEvents: snapshot.canPostEvents,
             focus: focus
         )
-        let deliveryInputUnits = lastExpansionLock.withLock { _deliveryInputUnits }
+        let deliveryInputUnits = ledger.currentDeliveryInputUnits
         let frontBundle = frontBundleID ?? "nil"
         let erasePlan = request.erasePlan
         // #region agent log
@@ -1888,9 +1811,7 @@ public final class TextInjectionPipeline {
         swallowed: SwallowedKey,
         completion: @escaping InjectionCompletion
     ) {
-        let revisionCurrent = lastExpansionLock.withLock {
-            activeOperation === operation && inputRevision == revision
-        }
+        let revisionCurrent = ledger.isCurrent(operation, revision: revision)
         let refusal = EntryGateRefusal.classify(
             revisionCurrent: revisionCurrent,
             continuationBlock: operation.continuationBlock(),
@@ -1979,15 +1900,7 @@ public final class TextInjectionPipeline {
     }
 
     func recordUndoExpansion(_ record: LastExpansion, target: PasteboardBroker.PasteTarget) {
-        lastExpansionLock.withLock {
-            invalidateUndoLocked()
-            guard undoEnabledLocked, let pid = target.pid, pid > 0,
-                  !record.injectedText.isEmpty, !record.triggerText.isEmpty else { return }
-            _lastExpansion = record
-            lastExpansionTarget = target
-            _inputEventsSinceExpansion = max(0, _deliveryInputUnits)
-            _deliveryInputUnits = 0
-        }
+        ledger.record(record, target: target)
     }
 
     // MARK: - Cursor placement
