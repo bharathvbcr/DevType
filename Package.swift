@@ -3,6 +3,8 @@ import PackageDescription
 
 let package = Package(
     name: "DevType",
+    // Required by SwiftPM once a target carries .lproj resources (ExpanderEngine's string tables).
+    defaultLocalization: "en",
     platforms: [
         .macOS(.v14)
     ],
@@ -27,6 +29,11 @@ let package = Package(
                 // Only for the legacy-keychain trampolines: Swift cannot suppress a
                 // per-call deprecation warning and ObjC can. See DevTypeSafety.h.
                 "DevTypeSafety"
+            ],
+            // UI string tables, one .strings file per table under <lang>.lproj. Loaded explicitly per
+            // language by LocalizationTables; Scripts/package-app.sh ships the resulting bundle.
+            resources: [
+                .process("Localization/Resources")
             ],
             linkerSettings: [
                 .linkedFramework("CoreGraphics"),

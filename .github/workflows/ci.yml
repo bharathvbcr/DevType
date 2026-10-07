@@ -193,3 +193,4 @@ jobs:
         run: |
           swift build
           grep -c 'case ko' Sources/ExpanderEngine/Localization/LocalizationManager.swift >/dev/null
+          for f in Sources/ExpanderEngine/Localization/Resources/*.lproj/*.strings; do plutil -lint "$f"; done

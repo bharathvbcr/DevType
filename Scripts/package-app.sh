@@ -279,6 +279,16 @@ if [[ -z "${BINARY}" || ! -x "${BINARY}" ]]; then
   exit 1
 fi
 
+# The UI string tables are ExpanderEngine's SwiftPM resource bundle, built next to the binary.
+# LocalizationTables loads it from Contents/Resources; without it every label is a raw key.
+ENGINE_RESOURCES_NAME="DevType_ExpanderEngine.bundle"
+ENGINE_RESOURCES_SRC="$(dirname "${BINARY}")/${ENGINE_RESOURCES_NAME}"
+ENGINE_RESOURCES_DST="${RESOURCES_DIR}/${ENGINE_RESOURCES_NAME}"
+if [[ ! -d "${ENGINE_RESOURCES_SRC}" ]]; then
+  echo "error: built ${ENGINE_RESOURCES_NAME} not found next to ${BINARY}" >&2
+  exit 1
+fi
+
 # Assert Info.plist identity before packaging.
 if ! grep -q "<string>${BUNDLE_ID}</string>" "${PLIST_SRC}"; then
   echo "error: ${PLIST_SRC} missing CFBundleIdentifier ${BUNDLE_ID}" >&2
@@ -366,7 +376,18 @@ localized_info_resources_match() {
     -path '*.lproj/InfoPlist.strings' -print 2>/dev/null | sort)
 }
 
+# The string tables are not cosmetic either: a strings-only edit leaves the binary unchanged, and
+# skipping the resign would ship the previous tables indefinitely. SwiftPM signs the bundle it
+# builds, so compare the payload and leave the nested signature out of the comparison.
+engine_resources_match() {
+  [[ -d "${ENGINE_RESOURCES_DST}" ]] || return 1
+  diff -rq -x _CodeSignature "${ENGINE_RESOURCES_SRC}" "${ENGINE_RESOURCES_DST}" >/dev/null 2>&1
+}
+
 IDENTITY_SUPPORT_UNCHANGED=1
+if ! engine_resources_match; then
+  IDENTITY_SUPPORT_UNCHANGED=0
+fi
 if ! identity_plist_unchanged; then
   IDENTITY_SUPPORT_UNCHANGED=0
 fi
@@ -454,6 +475,10 @@ else
     done
   fi
 
+  # Replace, not merge: a table removed from the source must not survive in the bundle.
+  rm -rf "${ENGINE_RESOURCES_DST}"
+  cp -R "${ENGINE_RESOURCES_SRC}" "${ENGINE_RESOURCES_DST}"
+
   # PkgInfo marks this as an application bundle (APPL / ???? creator).
   printf 'APPL????' > "${CONTENTS}/PkgInfo"
 
@@ -515,6 +540,20 @@ for SOURCE_LOCALIZED_INFO in "${ROOT}"/Resources/*.lproj/InfoPlist.strings; do
 done
 if [[ "${LOCALIZED_INFO_COUNT}" -eq 0 ]]; then
   echo "error: no localized InfoPlist.strings permission resources found" >&2
+  exit 1
+fi
+# Same reasoning for the in-app string tables: verify what the sealed bundle carries.
+if ! engine_resources_match; then
+  echo "error: packaged ${ENGINE_RESOURCES_NAME} does not match the built one" >&2
+  exit 1
+fi
+ENGINE_TABLE_COUNT=0
+while IFS= read -r PACKAGED_TABLE; do
+  ENGINE_TABLE_COUNT=$((ENGINE_TABLE_COUNT + 1))
+  plutil -lint "${PACKAGED_TABLE}" >/dev/null
+done < <(find "${ENGINE_RESOURCES_DST}" -path '*.lproj/*.strings' -type f | sort)
+if [[ "${ENGINE_TABLE_COUNT}" -eq 0 ]]; then
+  echo "error: ${ENGINE_RESOURCES_NAME} carries no .lproj string tables" >&2
   exit 1
 fi
 PACKAGED_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${CONTENTS}/Info.plist")"

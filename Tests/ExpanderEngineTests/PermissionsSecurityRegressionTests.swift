@@ -311,7 +311,10 @@ final class PermissionsSecurityRegressionTests: XCTestCase {
     func testPermissionPrivacyAndPackagingSourceContracts() throws {
         let info = try source("Resources/Info.plist")
         let copy = try source("Sources/ExpanderEngine/Permissions/PermissionCopy.swift")
-        let localization = try source("Sources/ExpanderEngine/Localization/LocalizationManager.swift")
+        // The strings are resource tables now; check what actually ships, in every language.
+        let localization = AppLanguage.concreteCases
+            .flatMap { LocalizationManager.stringTable(for: $0).values }
+            .joined(separator: "\n")
         let entitlements = try source("Resources/DevType.entitlements")
         let reset = try source("Scripts/reset-tcc.sh")
         let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")

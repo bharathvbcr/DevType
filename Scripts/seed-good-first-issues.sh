@@ -10,7 +10,7 @@
 #   - Importers exist for TextExpander and Espanso only  (SnippetImporter.SourceKind)
 #   - Exporters exist for DevType JSON, Espanso YAML, CSV (SnippetExporter.Format)
 #   - Macro transforms cover case/random/uuid/counter      (MacroTransforms.swift)
-#   - UI strings ship in en / ko / ja                      (LocalizationManager.swift)
+#   - UI strings ship in en / ko / ja                      (Localization/Resources/*.lproj)
 #
 # Usage:
 #   ./Scripts/seed-good-first-issues.sh              # dry run — prints, creates nothing
@@ -244,9 +244,9 @@ seed_issue "Add a new UI language to the string tables" \
 "good first issue,help wanted,localization" \
 '## Background
 
-DevType ships English, Korean, and Japanese UI strings, all in
-`Sources/ExpanderEngine/Localization/LocalizationManager.swift` as in-code tables (no `.lproj`
-bundles — the SPM executable cannot rely on `Bundle.module`).
+DevType ships English, Korean, and Japanese UI strings as `.strings` resource tables under
+`Sources/ExpanderEngine/Localization/Resources/<lang>.lproj/`, loaded at runtime by
+`LocalizationTables`.
 
 `Tests/ExpanderEngineTests/LocalizationParityTests.swift` enforces that every language covers
 every English key **and** that format specifiers match, because handing an `Int` to a `%@` is a
@@ -260,7 +260,7 @@ welcome. Pick one and say so in the issue so two people do not duplicate work.
 ## Steps
 
 1. Add a case to `AppLanguage` with its endonym
-2. Add the table, following the shape of the existing `ko` / `ja` ones
+2. Add a `<code>.lproj` directory with the same table files as `ko.lproj` / `ja.lproj`
 3. Add the language code to `CFBundleLocalizations` in `Resources/Info.plist`
 4. Run `./Scripts/test.sh` — the parity test tells you exactly which keys you missed
 
