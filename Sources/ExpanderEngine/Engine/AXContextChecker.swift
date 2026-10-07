@@ -8,8 +8,9 @@ public final class AXContextChecker {
     /// Short AX IPC timeout so hung target apps cannot stall gates/inject (~default is multi-second).
     public static let messagingTimeoutSeconds: Float = 0.05
 
-    /// Delay before a single focus-query retry after `.cannotComplete` (main thread only).
-    public static let focusQueryRetryDelaySeconds: TimeInterval = 0.03
+    /// Delay before a single focus-query retry after `.cannotComplete`. §8.3: the shared settle —
+    /// the erase guard uses the same constant through the same policy.
+    public static let focusQueryRetryDelaySeconds: TimeInterval = AXSettleRetry.settleDelay
 
     /// Budget for the *retry* attempt. Repeating a 50 ms probe that just expired asks the same
     /// question of the same busy app and mostly gets the same answer — the retry was spent
@@ -39,6 +40,12 @@ public final class AXContextChecker {
         case missing
         case axFailure(AXError)
         case untrusted
+
+        /// The focused element when one was available.
+        public var element: AXUIElement? {
+            if case .available(let element) = self { return element }
+            return nil
+        }
     }
 
     /// Single expand-gate decision used by deferred expand, inject, and diagnostics.
@@ -93,7 +100,21 @@ public final class AXContextChecker {
         "com.rstudio."
     ]
 
-    public init() {}
+    /// §8.3: the settle-and-retry policy, shared with `EraseExecutor`.
+    private let settle: AXSettleRetry
+    /// One focus-query attempt at a given AX messaging budget. Injected in tests so the retry
+    /// policy can be exercised without a live AX tree; production is `copyFocusedElementOnce`.
+    private let focusAttempt: ((Float) -> FocusQueryResult)?
+
+    public init() {
+        settle = .live
+        focusAttempt = nil
+    }
+
+    init(settle: AXSettleRetry, focusAttempt: @escaping (Float) -> FocusQueryResult) {
+        self.settle = settle
+        self.focusAttempt = focusAttempt
+    }
 
     /// Whether this process is trusted for Accessibility (no prompt).
     public func isProcessTrusted() -> Bool {
@@ -217,17 +238,40 @@ public final class AXContextChecker {
         IsSecureEventInputEnabled()
     }
 
-    /// Focused AX element query with typed errors. Retries once on `.cannotComplete` when on the main thread.
+    /// Pure policy over a whole result: only a first-attempt `.cannotComplete` earns the retry.
+    public static func shouldRetryFocusQuery(_ result: FocusQueryResult) -> Bool {
+        guard case .axFailure(let error) = result else { return false }
+        return shouldRetryFocusQuery(error: error, attemptIndex: 0)
+    }
+
+    /// One focus-query attempt, no retry, at the budget for `attemptIndex` (the retry escalates).
+    /// For callers that own the retry themselves — see `AXSettleRetry`.
+    public func queryFocusedElement(attempt attemptIndex: Int) -> FocusQueryResult {
+        let timeout = Self.focusQueryTimeout(attemptIndex: attemptIndex)
+        FocusQueryProbe.record()
+        if let focusAttempt { return focusAttempt(timeout) }
+        return copyFocusedElementOnce(timeoutSeconds: timeout)
+    }
+
+    /// Focused AX element query with typed errors.
+    ///
+    /// §8.3: retries once on `.cannotComplete` **off main only**, after the shared settle. This
+    /// used to be the inverse — the retry ran only on main, by sleeping there while the event tap
+    /// could not run, and off-main callers never got it. A main-thread caller that needs the
+    /// retry uses `queryFocusedElement(completion:)`, which schedules it instead of blocking.
     public func queryFocusedElement(allowTimeoutRetry: Bool = true) -> FocusQueryResult {
-        let first = copyFocusedElementOnce(timeoutSeconds: Self.focusQueryTimeout(attemptIndex: 0))
-        guard allowTimeoutRetry,
-              case .axFailure(let error) = first,
-              Self.shouldRetryFocusQuery(error: error, attemptIndex: 0),
-              Thread.isMainThread else {
-            return first
-        }
-        Thread.sleep(forTimeInterval: Self.focusQueryRetryDelaySeconds)
-        return copyFocusedElementOnce(timeoutSeconds: Self.focusQueryTimeout(attemptIndex: 1))
+        guard allowTimeoutRetry else { return queryFocusedElement(attempt: 0) }
+        return settle.run({ queryFocusedElement(attempt: $0) }, retryIf: Self.shouldRetryFocusQuery)
+    }
+
+    /// Asynchronous form: the retry is available on main too, scheduled rather than slept.
+    /// `completion` runs synchronously when the first attempt decides, otherwise on main.
+    public func queryFocusedElement(completion: @escaping (FocusQueryResult) -> Void) {
+        settle.run(
+            { self.queryFocusedElement(attempt: $0) },
+            retryIf: Self.shouldRetryFocusQuery,
+            completion: completion
+        )
     }
 
     /// Focused AX element, if available (errors collapse to `nil` for legacy callers).
@@ -784,7 +828,15 @@ public final class AXContextChecker {
     }
 
     /// Sole expand-gate policy implementation (fail-closed). Prefer this over duplicated branching.
-    public func evaluateExpandGate(canUseAX: Bool, canPostEvents: Bool = false) -> ExpandGateDecision {
+    ///
+    /// - Parameter focus: a focus result the caller already resolved — and whose retry it owns —
+    ///   so the gate does not issue a second query. `nil` queries here (synchronous form: the
+    ///   retry runs only off main).
+    public func evaluateExpandGate(
+        canUseAX: Bool,
+        canPostEvents: Bool = false,
+        focus resolvedFocus: FocusQueryResult? = nil
+    ) -> ExpandGateDecision {
         if !canUseAX {
             let snapshot = DiagnosticReport.ExpandGateSnapshot(
                 canUseAX: false,
@@ -822,7 +874,7 @@ public final class AXContextChecker {
             )
         }
 
-        let focus = queryFocusedElement()
+        let focus = resolvedFocus ?? queryFocusedElement()
         switch focus {
         case .available(let element):
             let secure = isFocusedElementSecure(element: element)
@@ -1330,4 +1382,51 @@ public final class AXContextChecker {
         )
     }
     // #endregion
+}
+
+/// §2.2: where an AX collaborator gets the element it reads or writes.
+///
+/// An optional element cannot say this: `nil` would mean both "the caller holds none, query
+/// now" and "the inject resolved focus and there was none". The second must not re-query —
+/// whatever a fresh query found would not be the target the inject's gates approved.
+public enum FocusedElementSource {
+    /// Resolve focus now. For callers outside an expansion, which hold no element.
+    case live
+    /// The element an expansion resolved once and threads through; `nil` when focus was missing
+    /// or unreadable at that resolution.
+    case resolved(AXUIElement?)
+
+    public var element: AXUIElement? {
+        switch self {
+        case .live: return AXContextChecker.shared.focusedElement()
+        case .resolved(let element): return element
+        }
+    }
+}
+
+/// §2.2: counting seam at the one choke point every focus query passes through
+/// (`AXContextChecker.queryFocusedElement(attempt:)`).
+///
+/// An expansion is meant to resolve focus once and thread that element through; the remaining
+/// queries are deliberate same-element re-checks (`PasteTarget.liveMismatch`,
+/// `DeliveryVerifier.verifyFocusedTextDelivery`). Counting here is how a test holds an expansion
+/// to that budget without a live AX tree. Production pays one lock and a nil check per query,
+/// which is noise beside the AX round trip it precedes.
+enum FocusQueryProbe {
+    private static let lock = UnfairLock()
+    private static var count: Int?
+
+    static func record() {
+        lock.withLock {
+            if let current = count { count = current + 1 }
+        }
+    }
+
+    /// Counts the focus queries `body` issues, on any thread, until it returns.
+    static func counting(_ body: () throws -> Void) rethrows -> Int {
+        lock.withLock { count = 0 }
+        defer { lock.withLock { count = nil } }
+        try body()
+        return lock.withLock { count ?? 0 }
+    }
 }

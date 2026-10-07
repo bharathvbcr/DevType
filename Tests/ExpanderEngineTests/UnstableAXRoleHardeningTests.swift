@@ -235,7 +235,7 @@ final class UnstableAXRoleHardeningTests: XCTestCase {
         ))
         let result = executor.evaluateErasePrecondition(
             plan: ErasePlan(text: trigger),
-            element: AXUIElementCreateApplication(1234),
+            focus: .resolved(AXUIElementCreateApplication(1234)),
             retryOnMismatch: false
         )
         XCTAssertFalse(result.blocksErase, "\(result)")
@@ -373,7 +373,7 @@ final class UnstableAXRoleStressTests: XCTestCase {
                 ))
                 let result = executor.evaluateErasePrecondition(
                     plan: ErasePlan(text: trigger),
-                    element: AXUIElementCreateApplication(1234),
+                    focus: .resolved(AXUIElementCreateApplication(1234)),
                     retryOnMismatch: false
                 )
                 XCTAssertFalse(result.blocksErase, "seed \(seed) role \(role) trigger \(trigger)")
@@ -396,7 +396,7 @@ final class UnstableAXRoleStressTests: XCTestCase {
             XCTAssertTrue(
                 executor.evaluateErasePrecondition(
                     plan: ErasePlan(text: "`x"),
-                    element: AXUIElementCreateApplication(1234),
+                    focus: .resolved(AXUIElementCreateApplication(1234)),
                     retryOnMismatch: false
                 ).blocksErase,
                 "\(role ?? "nil") must still refuse a genuine missing trigger"

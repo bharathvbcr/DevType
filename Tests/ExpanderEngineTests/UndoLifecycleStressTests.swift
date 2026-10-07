@@ -173,7 +173,7 @@ final class UndoLifecycleStressTests: XCTestCase {
                 value: { _ in value }, selectedRange: { _ in range }, stringForRange: { _, _ in "expanded" }
             ))
             XCTAssertTrue(executor.evaluateErasePrecondition(
-                plan: ErasePlan(text: "expanded"), element: AXUIElementCreateApplication(1234),
+                plan: ErasePlan(text: "expanded"), focus: .resolved(AXUIElementCreateApplication(1234)),
                 retryOnMismatch: false, insertionPointFollowsExpectedText: true,
                 intent: .undo(inputEventsSinceExpansion: 0)
             ).blocksErase)
@@ -193,7 +193,7 @@ final class UndoLifecycleStressTests: XCTestCase {
             stringForRange: { _, _ in nil }
         ))
         XCTAssertTrue(executor.evaluateErasePrecondition(
-            plan: ErasePlan(text: "expanded"), element: AXUIElementCreateApplication(1234),
+            plan: ErasePlan(text: "expanded"), focus: .resolved(AXUIElementCreateApplication(1234)),
             retryOnMismatch: false, intent: .undo(inputEventsSinceExpansion: 0)
         ).blocksErase)
     }

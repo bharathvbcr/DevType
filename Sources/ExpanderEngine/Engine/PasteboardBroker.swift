@@ -491,8 +491,13 @@ public final class PasteboardBroker {
         let element: AXUIElement?
         let range: NSRange?
 
-        static func capture(baseline: DeliveryVerifier.FocusedTextObservation? = nil) -> Self {
-            let element = baseline?.target ?? AXContextChecker.shared.focusedElement()
+        /// The target identity every later re-check compares against. `focus` lets an expansion
+        /// that already resolved its element hand it over instead of paying another query.
+        static func capture(
+            focus: FocusedElementSource = .live,
+            baseline: DeliveryVerifier.FocusedTextObservation? = nil
+        ) -> Self {
+            let element = baseline?.target ?? focus.element
             return Self(pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
                         element: element,
                         range: baseline?.selectedRange ?? element.flatMap { DeliveryVerifier.selectedRange(for: $0) })
@@ -558,13 +563,30 @@ public final class PasteboardBroker {
         /// One read answers both questions on purpose. The refuse path used to re-read focus to
         /// explain a decision a *previous* read had already made, so the label it printed could
         /// describe a different instant from the refusal it was labelling.
+        ///
+        /// §2.2: a documented re-check. It exists to catch the user moving between the capture
+        /// and a mutation, so it must read focus live — never a threaded element.
         func liveMismatch(checkRange: Bool, checkElement: Bool = true) -> Mismatch? {
-            let current = AXContextChecker.shared.focusedElement()
-            return mismatch(pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
-                            element: current,
-                            range: checkRange ? current.flatMap { DeliveryVerifier.selectedRange(for: $0) } : nil,
-                            checkRange: checkRange,
-                            checkElement: checkElement)
+            mismatch(observing: AXContextChecker.shared.focusedElement(),
+                     pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                     checkRange: checkRange,
+                     checkElement: checkElement)
+        }
+
+        /// Compare against a focus reading the caller just took, reading the range through it.
+        /// For the one caller whose fresh reading *is* the inject's focus resolution — the entry
+        /// gate — so the comparison and the element the inject then uses are the same instant.
+        func mismatch(
+            observing current: AXUIElement?,
+            pid currentPID: pid_t?,
+            checkRange: Bool,
+            checkElement: Bool = true
+        ) -> Mismatch? {
+            mismatch(pid: currentPID,
+                     element: current,
+                     range: checkRange ? current.flatMap { DeliveryVerifier.selectedRange(for: $0) } : nil,
+                     checkRange: checkRange,
+                     checkElement: checkElement)
         }
 
         func isCurrent(checkRange: Bool, checkElement: Bool = true) -> Bool {
@@ -1003,11 +1025,12 @@ public final class PasteboardBroker {
     public func pasteImageViaClipboard(
         image: NSImage,
         bundleID: String? = nil,
+        focus: FocusedElementSource = .live,
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
-        let target = PasteTarget.capture()
-        let imageRole = AXContextChecker.shared.focusedElementRole()
+        let target = PasteTarget.capture(focus: focus)
+        let imageRole = target.element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) }
         let verifySelection = Self.verifySelectionRange(
             bundleID: bundleID, role: imageRole, phase: .afterMutation
         )
@@ -1066,7 +1089,8 @@ public final class PasteboardBroker {
         let targetPID = target.pid
 
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.prePasteSettleDelay) {
-            let baseline = self.verifier.captureFocusedTextObservation()
+            // The target's own element: the pre-⌘V check below re-verifies it is still focused.
+            let baseline = self.verifier.captureFocusedTextObservation(focus: .resolved(target.element))
             self.hid.postCmdVKeyEventsAsync(shouldContinue: {
                 self.pasteContinuation(ticket: ticket, target: target, checkRange: verifySelection,
                                        checkElement: checkElement,

@@ -287,8 +287,7 @@ final class EraseSafetyTests: XCTestCase {
         let plan = ErasePlan.forMatch(
             matchedTrigger: "addr",
             terminator: " ",
-            swallowedFinalKey: true,
-            swallowedUnicode: " "
+            swallowed: SwallowedKey(didSwallow: true, unicode: " ")
         )
         XCTAssertEqual(plan.expectedText, "addr")
         XCTAssertEqual(plan.utf16Count, 4)
@@ -300,8 +299,7 @@ final class EraseSafetyTests: XCTestCase {
         let plan = ErasePlan.forMatch(
             matchedTrigger: ";sig",
             terminator: "",
-            swallowedFinalKey: true,
-            swallowedUnicode: "g"
+            swallowed: SwallowedKey(didSwallow: true, unicode: "g")
         )
         XCTAssertEqual(plan.expectedText, ";si")
         XCTAssertEqual(plan.utf16Count, 3)
@@ -311,8 +309,7 @@ final class EraseSafetyTests: XCTestCase {
         let plan = ErasePlan.forMatch(
             matchedTrigger: "x",
             terminator: "",
-            swallowedFinalKey: true,
-            swallowedUnicode: "x"
+            swallowed: SwallowedKey(didSwallow: true, unicode: "x")
         )
         XCTAssertTrue(plan.isEmpty)
     }
@@ -321,8 +318,7 @@ final class EraseSafetyTests: XCTestCase {
         let plan = ErasePlan.forMatch(
             matchedTrigger: "ab👍",
             terminator: "",
-            swallowedFinalKey: true,
-            swallowedUnicode: "👍"
+            swallowed: SwallowedKey(didSwallow: true, unicode: "👍")
         )
         XCTAssertEqual(plan.expectedText, "ab")
         XCTAssertEqual(plan.utf16Count, 2)

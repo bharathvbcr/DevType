@@ -88,9 +88,9 @@ public final class AXTextWriter {
     /// AX ranges are UTF-16 code units, so this path is unit-correct by construction — unlike the
     /// HID arrow fallback, which had to be taught the difference in §1.6.
     @discardableResult
-    public func attemptAXCaretPosition(utf16OffsetFromEnd: Int) -> Bool {
+    public func attemptAXCaretPosition(utf16OffsetFromEnd: Int, focus: FocusedElementSource = .live) -> Bool {
         guard utf16OffsetFromEnd > 0 else { return true }
-        guard let axElement = AXContextChecker.shared.focusedElement() else { return false }
+        guard let axElement = focus.element else { return false }
 
         var rangeRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
@@ -122,9 +122,10 @@ public final class AXTextWriter {
     public func performAXRangeReplace(
         text: String,
         eraseCount: Int,
-        bundleID: String?
+        bundleID: String?,
+        focus: FocusedElementSource = .live
     ) -> AXReplaceOutcome {
-        guard let axElement = AXContextChecker.shared.focusedElement() else {
+        guard let axElement = focus.element else {
             // #region agent log
             TextInjectionPipeline.debugLogInject(
                 hypothesisId: "M3",
@@ -384,8 +385,12 @@ public final class AXTextWriter {
 
     // MARK: - Direct insert
 
-    public func attemptAXDirectInjection(text: String, bundleID: String? = nil) -> Bool {
-        guard let axElement = AXContextChecker.shared.focusedElement() else { return false }
+    public func attemptAXDirectInjection(
+        text: String,
+        bundleID: String? = nil,
+        focus: FocusedElementSource = .live
+    ) -> Bool {
+        guard let axElement = focus.element else { return false }
 
         var roleRef: CFTypeRef?
         let role: String? =

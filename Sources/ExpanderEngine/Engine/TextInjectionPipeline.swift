@@ -6,11 +6,13 @@ import Foundation
 
 /// §8.2: the four values that describe "the key the event tap ate on our behalf".
 ///
-/// `swallowedFinalKey` / `swallowedUnicode` / `swallowedKeyCode` / `swallowedFlags` used to travel
-/// as four separate parameters through nine signatures — `inject`, `injectOnMain`,
-/// `injectSecureClipboardPasteOnMain`, `refuseInjectKeepingSwallow`, `finishPasteDelivery`,
-/// `restoreTriggerAfterFailedPaste`, and their mirrors in `EventTapEngine`. Thirty-six parameters
-/// carrying nine pieces of information.
+/// These used to travel as four separate parameters through nine signatures — `inject`,
+/// `injectOnMain`, `injectSecureClipboardPasteOnMain`, the refuse path, `finishPasteDelivery`,
+/// `restoreTriggerAfterFailedPaste`, and their mirrors in `EventTapEngine`
+/// (`performDeferredExpand`, `finishDeferredInject`, `refuseAfterSwallow`). Every one of them now
+/// takes this value, and `ErasePlan.forMatch` reads the two fields it needs from it. The pure
+/// unit-count helpers (`eraseCount(…swallowedFinalKey:)`) keep their single Bool: they count, they
+/// do not carry the key.
 ///
 /// This also folds in `EventTapEngine.mustReinjectOnRefuse(didSwallow:)`, which is the single rule
 /// that makes the swallow contract safe: the tap only returns `nil` for the trigger key after the
@@ -370,12 +372,12 @@ public final class TextInjectionPipeline {
     /// asynchronous form, which retries without blocking anything.
     public func evaluateErasePrecondition(
         plan: ErasePlan,
-        element: AXUIElement? = nil,
+        focus: FocusedElementSource = .live,
         retryOnMismatch: Bool = true
     ) -> ErasePreconditionResult {
         eraser.evaluateErasePrecondition(
             plan: plan,
-            element: element,
+            focus: focus,
             retryOnMismatch: retryOnMismatch
         )
     }
@@ -402,53 +404,8 @@ public final class TextInjectionPipeline {
     /// clipboard restore settles (or immediately when no pasteboard path was used). Never blocks
     /// the event-tap run loop.
     ///
-    /// §8.2: this is the legacy parameter list, kept verbatim because `EventTapEngine`,
-    /// `AppDelegate` and `TestExpansionLab` call it. It forwards to the `SwallowedKey` form.
-    public func inject(
-        snippet: SnippetModel,
-        triggerLength: Int,
-        clipboardOverride: String? = nil,
-        swallowedFinalKey: Bool = false,
-        lastEventCharacterCount: Int = 1,
-        plan: InjectionPlan? = nil,
-        swallowedUnicode: String = "",
-        swallowedKeyCode: Int64 = 0,
-        swallowedFlags: CGEventFlags = [],
-        terminator: String = "",
-        eraseCountOverride: Int? = nil,
-        erasePlan: ErasePlan? = nil,
-        preResolvedText: String? = nil,
-        preResolvedCursorOffset: Int? = nil,
-        trailingKeys: [String] = [],
-        snippetLookup: ((String) -> String?)? = nil,
-        secureClipboardPaste: Bool = false,
-        completion: InjectionCompletion? = nil
-    ) {
-        inject(
-            snippet: snippet,
-            triggerLength: triggerLength,
-            swallowed: SwallowedKey(
-                didSwallow: swallowedFinalKey,
-                unicode: swallowedUnicode,
-                keyCode: swallowedKeyCode,
-                flags: swallowedFlags
-            ),
-            clipboardOverride: clipboardOverride,
-            lastEventCharacterCount: lastEventCharacterCount,
-            plan: plan,
-            terminator: terminator,
-            eraseCountOverride: eraseCountOverride,
-            erasePlan: erasePlan,
-            preResolvedText: preResolvedText,
-            preResolvedCursorOffset: preResolvedCursorOffset,
-            trailingKeys: trailingKeys,
-            snippetLookup: snippetLookup,
-            secureClipboardPaste: secureClipboardPaste,
-            completion: completion
-        )
-    }
-
-    /// §8.2: the collapsed form. Identical semantics; `swallowed` replaces four parameters.
+    /// §8.2: `swallowed` is the one description of the key the event tap ate on this inject's
+    /// behalf; the four-parameter legacy list it replaced is gone.
     public func inject(
         snippet: SnippetModel,
         triggerLength: Int,
@@ -466,6 +423,9 @@ public final class TextInjectionPipeline {
         secureClipboardPaste: Bool = false,
         eraseCaretVouched: Bool = true,
         shouldContinue: @escaping @Sendable () -> Bool = { true },
+        /// §2.2: where the target identity comes from. A typed expansion hands over the element its
+        /// expand gate already resolved; explicit inserts resolve it here.
+        targetFocus: FocusedElementSource = .live,
         completion: InjectionCompletion? = nil
     ) {
         enqueueInjection(
@@ -475,7 +435,8 @@ public final class TextInjectionPipeline {
             erasePlan: erasePlan, preResolvedText: preResolvedText,
             preResolvedCursorOffset: preResolvedCursorOffset, trailingKeys: trailingKeys,
             snippetLookup: snippetLookup, secureClipboardPaste: secureClipboardPaste,
-            eraseCaretVouched: eraseCaretVouched, shouldContinue: shouldContinue, completion: completion
+            eraseCaretVouched: eraseCaretVouched, shouldContinue: shouldContinue, targetFocus: targetFocus,
+            completion: completion
         )
     }
 
@@ -496,6 +457,7 @@ public final class TextInjectionPipeline {
         secureClipboardPaste: Bool = false,
         eraseCaretVouched: Bool = true,
         shouldContinue: @escaping @Sendable () -> Bool = { true },
+        targetFocus: FocusedElementSource = .live,
         purpose: InjectionPurpose = .expansion,
         completion: InjectionCompletion? = nil
     ) {
@@ -508,7 +470,7 @@ public final class TextInjectionPipeline {
         }
         let target: PasteboardBroker.PasteTarget
         switch purpose {
-        case .expansion: target = PasteboardBroker.PasteTarget.capture()
+        case .expansion: target = PasteboardBroker.PasteTarget.capture(focus: targetFocus)
         case .undo(let attempt): target = attempt.target
         }
         injectQueue.async {
@@ -540,21 +502,22 @@ public final class TextInjectionPipeline {
             let completionGuard = operation
             group.enter()
 
+            let request = InjectRequest(
+                snippet: snippet,
+                erasePlan: resolvedPlan,
+                clipboardOverride: clipboardOverride,
+                plan: plan,
+                swallowed: swallowed,
+                preResolvedText: preResolvedText,
+                preResolvedCursorOffset: preResolvedCursorOffset,
+                trailingKeys: trailingKeys,
+                snippetLookup: snippetLookup,
+                secureClipboardPaste: secureClipboardPaste,
+                eraseCaretVouched: eraseCaretVouched,
+                operation: operation, inputRevision: revision, target: target, purpose: purpose
+            )
             DispatchQueue.main.async {
-                self.injectOnMain(
-                    snippet: snippet,
-                    erasePlan: resolvedPlan,
-                    clipboardOverride: clipboardOverride,
-                    plan: plan,
-                    swallowed: swallowed,
-                    preResolvedText: preResolvedText,
-                    preResolvedCursorOffset: preResolvedCursorOffset,
-                    trailingKeys: trailingKeys,
-                    snippetLookup: snippetLookup,
-                    secureClipboardPaste: secureClipboardPaste,
-                    eraseCaretVouched: eraseCaretVouched,
-                    operation: operation, inputRevision: revision, target: target, purpose: purpose
-                ) { outcome in
+                self.injectOnMain(request) { outcome in
                     let invocation = completionGuard.markCompleted(outcome)
                     if invocation == 1 {
                         group.leave()
@@ -594,18 +557,6 @@ public final class TextInjectionPipeline {
 
     /// Restores a swallowed trigger key after refuse. Prefers HID post; falls back to AX insert.
     /// Call while `EventTapEngine.isExpanding` so the tap does not rematch the reinjected key.
-    @discardableResult
-    public func reinjectSwallowedKey(
-        unicode: String,
-        keyCode: Int64,
-        flags: CGEventFlags
-    ) -> Bool {
-        reinjectSwallowedKey(
-            SwallowedKey(didSwallow: true, unicode: unicode, keyCode: keyCode, flags: flags)
-        )
-    }
-
-    /// §8.2: `SwallowedKey` form of the above.
     @discardableResult
     public func reinjectSwallowedKey(_ swallowed: SwallowedKey) -> Bool {
         guard swallowed.hasPayload else { return false }
@@ -750,10 +701,12 @@ public final class TextInjectionPipeline {
         }
     }
 
-    private func operationIsCurrent(
-        _ operation: InjectCompletionGuard, revision: UInt64, target: PasteboardBroker.PasteTarget,
-        allowSecureInput: Bool = false, observationOnly: Bool = false,
-        checkElement: Bool = true
+    /// The operation half of `operationIsCurrent` — superseded, cancelled, timed out, the caller's
+    /// own predicate, and (unless allowed) trust and Secure Input. Issues no focus query, so a
+    /// caller that already holds a fresh focus reading compares the target against that instead.
+    private func operationStateIsCurrent(
+        _ operation: InjectCompletionGuard, revision: UInt64,
+        allowSecureInput: Bool = false, observationOnly: Bool = false
     ) -> Bool {
         let current = lastExpansionLock.withLock {
             activeOperation === operation && inputRevision == revision
@@ -761,18 +714,30 @@ public final class TextInjectionPipeline {
         return current && operation.allowsContinuation(observationOnly: observationOnly)
             && (allowSecureInput || (AXContextChecker.shared.isProcessTrusted()
                 && !AXContextChecker.isSecureEventInputEnabledLive()))
-            && target.isCurrent(checkRange: false, checkElement: checkElement)
+    }
+
+    /// §2.2: a documented re-check — the target half is a live `PasteTarget.liveMismatch`.
+    private func operationIsCurrent(
+        _ operation: InjectCompletionGuard, revision: UInt64, target: PasteboardBroker.PasteTarget,
+        allowSecureInput: Bool = false, observationOnly: Bool = false,
+        checkElement: Bool = true, checkRange: Bool = false
+    ) -> Bool {
+        operationStateIsCurrent(operation, revision: revision, allowSecureInput: allowSecureInput,
+                                observationOnly: observationOnly)
+            && target.isCurrent(checkRange: checkRange, checkElement: checkElement)
     }
 
     private func canContinue(
         _ context: InjectContext,
         observationOnly: Bool = false,
-        phase: PasteboardBroker.SelectionRangeGate = .beforeMutation
+        phase: PasteboardBroker.SelectionRangeGate = .beforeMutation,
+        checkRange: Bool = false
     ) -> Bool {
         operationIsCurrent(
             context.operation, revision: context.inputRevision, target: context.target,
             observationOnly: observationOnly,
-            checkElement: PasteboardBroker.verifyFocusedElement(role: context.focusedRole, phase: phase)
+            checkElement: PasteboardBroker.verifyFocusedElement(role: context.focusedRole, phase: phase),
+            checkRange: checkRange
         )
     }
 
@@ -1051,9 +1016,9 @@ public final class TextInjectionPipeline {
 
     // MARK: - Inject (main thread)
 
-    /// Everything the main-thread inject needs after the gates have passed. §8.2: bundling these
-    /// keeps the post-precondition continuation to one parameter instead of eleven.
-    private struct InjectContext {
+    /// What one inject was asked to do, fixed at enqueue time. §8.2: one value through
+    /// `injectOnMain` and its focus continuation instead of fifteen parameters.
+    private struct InjectRequest {
         let snippet: SnippetModel
         let erasePlan: ErasePlan
         let clipboardOverride: String?
@@ -1063,60 +1028,104 @@ public final class TextInjectionPipeline {
         let preResolvedCursorOffset: Int?
         let trailingKeys: [String]
         let snippetLookup: ((String) -> String?)?
+        let secureClipboardPaste: Bool
+        /// False when the caller cannot promise the caret still sits immediately after
+        /// `erasePlan.expectedText`. The expand path can (the tap just watched the trigger keys
+        /// land); voice dictation cannot — segments arrive seconds apart and the user is free to
+        /// click elsewhere in between. See `ErasePreconditionChecker.evaluate`.
+        let eraseCaretVouched: Bool
+        let operation: InjectCompletionGuard
+        let inputRevision: UInt64
+        let target: PasteboardBroker.PasteTarget
+        let purpose: InjectionPurpose
+    }
+
+    /// Everything the main-thread inject needs after the gates have passed. §8.2: bundling these
+    /// keeps the post-precondition continuation to one parameter instead of eleven.
+    private struct InjectContext {
+        let request: InjectRequest
         let snapshot: PermissionSnapshot
         /// Keep the optional: a bundle-less frontmost app must not be learned under the literal
         /// key "nil", which would then disable AX writes for every other bundle-less app.
         let frontBundleID: String?
         let frontPID: pid_t?
         let deliveryInputUnits: Int
-        let operation: InjectCompletionGuard
-        let inputRevision: UInt64
-        let target: PasteboardBroker.PasteTarget
-        let purpose: InjectionPurpose
-        /// False when the caller cannot promise the caret still sits immediately after
-        /// `erasePlan.expectedText` — see `injectOnMain`.
-        let eraseCaretVouched: Bool
+        /// §2.2: the focused element resolved once at inject time and threaded through every AX
+        /// read and write of this inject. `nil` when focus was missing or unreadable — the
+        /// HID-only path, where nothing below may query AX for a substitute.
+        let focusedElement: AXUIElement?
         let focusedRole: String?
         let gateDecision: AXContextChecker.ExpandGateDecision
 
+        var snippet: SnippetModel { request.snippet }
+        var erasePlan: ErasePlan { request.erasePlan }
+        var clipboardOverride: String? { request.clipboardOverride }
+        var plan: InjectionPlan? { request.plan }
+        var swallowed: SwallowedKey { request.swallowed }
+        var preResolvedText: String? { request.preResolvedText }
+        var preResolvedCursorOffset: Int? { request.preResolvedCursorOffset }
+        var trailingKeys: [String] { request.trailingKeys }
+        var snippetLookup: ((String) -> String?)? { request.snippetLookup }
+        var eraseCaretVouched: Bool { request.eraseCaretVouched }
+        var operation: InjectCompletionGuard { request.operation }
+        var inputRevision: UInt64 { request.inputRevision }
+        var target: PasteboardBroker.PasteTarget { request.target }
+        var purpose: InjectionPurpose { request.purpose }
         var frontBundle: String { frontBundleID ?? "nil" }
     }
 
-    private func injectOnMain(
-        snippet: SnippetModel,
-        erasePlan: ErasePlan,
-        clipboardOverride: String?,
-        plan: InjectionPlan?,
-        swallowed: SwallowedKey,
-        preResolvedText: String?,
-        preResolvedCursorOffset: Int?,
-        trailingKeys: [String],
-        snippetLookup: ((String) -> String?)?,
-        secureClipboardPaste: Bool,
-        /// False when the caller cannot promise the caret still sits immediately after
-        /// `erasePlan.expectedText`. The expand path can (the tap just watched the trigger keys
-        /// land); voice dictation cannot — segments arrive seconds apart and the user is free to
-        /// click elsewhere in between. See `ErasePreconditionChecker.evaluate`.
-        eraseCaretVouched: Bool = true,
-        operation: InjectCompletionGuard, inputRevision: UInt64, target: PasteboardBroker.PasteTarget,
-        purpose: InjectionPurpose,
+    /// Resolves focus once for the whole inject, then continues in `injectWithFocus`.
+    ///
+    /// §8.3: the asynchronous query keeps the `.cannotComplete` retry available here on main by
+    /// scheduling it; it used to be a 30 ms `Thread.sleep` inside the query, stalling the tap.
+    ///
+    /// §2.2 — the focus-query budget of one inject:
+    /// * **this resolution**, the only query whose answer the inject uses as its element. The
+    ///   entry gate, IME probe, expand gate, erase guard, AX writes, delivery baseline and caret
+    ///   placement all receive it instead of asking again;
+    /// * **documented re-checks**, which compare the live focus against the captured target and
+    ///   must stay live because they exist to catch the user moving: `PasteTarget.liveMismatch`
+    ///   (every `canContinue` before a mutation, and `PasteboardBroker`'s pre-⌘V and
+    ///   continuation checks) and `DeliveryVerifier.verifyFocusedTextDelivery` (each paste-hold
+    ///   tick and the deferred re-verify);
+    /// * **the erase guard's settle retry**, which re-resolves on purpose after a mismatch,
+    ///   because the element held before the settle may be the stale one.
+    private func injectOnMain(_ request: InjectRequest, completion: @escaping InjectionCompletion) {
+        AXContextChecker.shared.queryFocusedElement { focus in
+            self.injectWithFocus(request, focus: focus, completion: completion)
+        }
+    }
+
+    private func injectWithFocus(
+        _ request: InjectRequest,
+        focus: AXContextChecker.FocusQueryResult,
         completion: @escaping InjectionCompletion
     ) {
+        let element = focus.element
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let frontBundleID = frontApp?.bundleIdentifier
+        let focusedRole = element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) }
+        let swallowed = request.swallowed
         // One reading of the target, shared by the decision below and by the label the refusal
         // reports. These used to be two readings taken at different moments under different
         // rules: the guard resolved the range gate inline, and `refuseEntryGate` — which could
         // not see it — took its own reading with the range gate off. So in an app whose AX
         // range is trusted (Notes, Xcode), a refusal *caused* by the caret moving re-checked
         // clean and was reported as `.unreproduced`, sending whoever read the report after a
-        // condition that never fired. One reading cannot disagree with itself.
+        // condition that never fired. One reading cannot disagree with itself — and it is the
+        // focus resolved above, so the gate does not pay a query of its own.
         let checkRange = PasteboardBroker.verifySelectionRange(
-            bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-            role: AXContextChecker.shared.focusedElementRole(),
+            bundleID: frontBundleID,
+            role: focusedRole,
             phase: .beforeMutation
         )
-        let targetMismatch = target.liveMismatch(checkRange: checkRange)
-        guard operationIsCurrent(operation, revision: inputRevision, target: target,
-                                 allowSecureInput: secureClipboardPaste),
+        let targetMismatch = request.target.mismatch(
+            observing: element,
+            pid: frontApp?.processIdentifier,
+            checkRange: checkRange
+        )
+        guard operationStateIsCurrent(request.operation, revision: request.inputRevision,
+                                      allowSecureInput: request.secureClipboardPaste),
               targetMismatch == nil else {
             // Never a bare `completion(.refused(…))`: this gate drops a payload that is already
             // generated — an AI transform the model has finished, a voice segment already
@@ -1128,10 +1137,10 @@ public final class TextInjectionPipeline {
             // target moved, so posting the swallowed key would type it into whatever is frontmost
             // now rather than into the field that was matched.
             refuseEntryGate(
-                operation: operation,
-                revision: inputRevision,
+                operation: request.operation,
+                revision: request.inputRevision,
                 targetMismatch: targetMismatch,
-                allowSecureInput: secureClipboardPaste,
+                allowSecureInput: request.secureClipboardPaste,
                 swallowed: swallowed,
                 completion: completion
             )
@@ -1145,26 +1154,29 @@ public final class TextInjectionPipeline {
         var hasIME = false
         if snapshot.canUseAX,
            AXContextChecker.shared.isProcessTrusted(),
-           case .available(let element) = AXContextChecker.shared.queryFocusedElement() {
+           let element {
             hasIME = AXContextChecker.shared.hasActiveIMEMarkedText(element: element)
         }
 
         let allowSecureClipboard = AXContextChecker.mayAllowSecureClipboardPaste(
-            intent: secureClipboardPaste,
+            intent: request.secureClipboardPaste,
             canPostEvents: snapshot.canPostEvents,
-            eraseEmpty: erasePlan.isEmpty,
+            eraseEmpty: request.erasePlan.isEmpty,
             hasIME: hasIME
         )
 
         if allowSecureClipboard {
+            let operation = request.operation
+            let revision = request.inputRevision
+            let target = request.target
             injectSecureClipboardPasteOnMain(
-                snippet: snippet,
-                clipboardOverride: clipboardOverride,
+                snippet: request.snippet,
+                clipboardOverride: request.clipboardOverride,
                 swallowed: swallowed,
-                preResolvedText: preResolvedText,
-                trailingKeys: trailingKeys,
-                snippetLookup: snippetLookup,
-                shouldContinue: { self.operationIsCurrent(operation, revision: inputRevision, target: target, allowSecureInput: true) },
+                preResolvedText: request.preResolvedText,
+                trailingKeys: request.trailingKeys,
+                snippetLookup: request.snippetLookup,
+                shouldContinue: { self.operationIsCurrent(operation, revision: revision, target: target, allowSecureInput: true) },
                 completion: completion
             )
             return
@@ -1173,7 +1185,8 @@ public final class TextInjectionPipeline {
         if AXContextChecker.isSecureEventInputEnabledLive() {
             let decision = AXContextChecker.shared.evaluateExpandGate(
                 canUseAX: snapshot.canUseAX,
-                canPostEvents: snapshot.canPostEvents
+                canPostEvents: snapshot.canPostEvents,
+                focus: focus
             )
             refuseInject(
                 AXContextChecker.secureInputActiveReason,
@@ -1190,12 +1203,12 @@ public final class TextInjectionPipeline {
 
         let decision = AXContextChecker.shared.evaluateExpandGate(
             canUseAX: snapshot.canUseAX,
-            canPostEvents: snapshot.canPostEvents
+            canPostEvents: snapshot.canPostEvents,
+            focus: focus
         )
-        let frontApp = NSWorkspace.shared.frontmostApplication
-        let frontBundleID = frontApp?.bundleIdentifier
         let deliveryInputUnits = lastExpansionLock.withLock { _deliveryInputUnits }
         let frontBundle = frontBundleID ?? "nil"
+        let erasePlan = request.erasePlan
         // #region agent log
         TextInjectionPipeline.debugLogInject(
             hypothesisId: "M1",
@@ -1209,8 +1222,8 @@ public final class TextInjectionPipeline {
                 "hasIME": decision.snapshot.hasIMEMarkedText.map { $0 ? "true" : "false" } ?? "nil",
                 "eraseUTF16": erasePlan.utf16Count,
                 "eraseBackspaces": erasePlan.backspaceCount,
-                "triggerLen": snippet.triggerKeyword.utf16.count,
-                "textLen": (preResolvedText ?? snippet.replacementText).utf16.count
+                "triggerLen": request.snippet.triggerKeyword.utf16.count,
+                "textLen": (request.preResolvedText ?? request.snippet.replacementText).utf16.count
             ]
         )
         // #endregion
@@ -1226,22 +1239,13 @@ public final class TextInjectionPipeline {
         }
 
         let context = InjectContext(
-            snippet: snippet,
-            erasePlan: erasePlan,
-            clipboardOverride: clipboardOverride,
-            plan: plan,
-            swallowed: swallowed,
-            preResolvedText: preResolvedText,
-            preResolvedCursorOffset: preResolvedCursorOffset,
-            trailingKeys: trailingKeys,
-            snippetLookup: snippetLookup,
+            request: request,
             snapshot: snapshot,
             frontBundleID: frontBundleID,
             frontPID: frontApp?.processIdentifier,
             deliveryInputUnits: deliveryInputUnits,
-            operation: operation, inputRevision: inputRevision, target: target, purpose: purpose,
-            eraseCaretVouched: eraseCaretVouched,
-            focusedRole: AXContextChecker.shared.focusedElementRole(),
+            focusedElement: element,
+            focusedRole: focusedRole,
             gateDecision: decision
         )
 
@@ -1251,15 +1255,19 @@ public final class TextInjectionPipeline {
         //
         // §8.3: asynchronous, so the one-shot retry is available here (on main) without a 30 ms
         // `Thread.sleep` that would stall the event tap.
-        eraser.evaluateErasePrecondition(plan: erasePlan, insertionPointFollowsExpectedText: eraseCaretVouched,
+        let eraseCaretVouched = request.eraseCaretVouched
+        let purpose = request.purpose
+        eraser.evaluateErasePrecondition(plan: erasePlan, focus: .resolved(element),
+                                          insertionPointFollowsExpectedText: eraseCaretVouched,
                                           intent: purpose.eraseIntent) { eraseCheck in
-            guard self.canContinue(context), context.target.isCurrent(
-                checkRange: PasteboardBroker.verifySelectionRange(
-                    bundleID: context.frontBundleID,
-                    role: AXContextChecker.shared.focusedElementRole(),
-                    phase: .beforeMutation
-                )
-            ) else {
+            // One live re-check answers both questions two separate reads used to ask: the
+            // operation is still current, and the target — with this host's range gate — has
+            // not moved while the precondition may have waited out its settle.
+            guard self.canContinue(context, checkRange: PasteboardBroker.verifySelectionRange(
+                bundleID: context.frontBundleID,
+                role: context.focusedRole,
+                phase: .beforeMutation
+            )) else {
                 let reason = "Expansion cancelled — input or target application changed before erase"
                 self.refuseInject(
                     reason, path: "eraseContextChanged", swallowed: swallowed,
@@ -1288,7 +1296,7 @@ public final class TextInjectionPipeline {
                 )
             }
             // #endregion
-            if case .undo(let attempt) = purpose,
+            if case .undo(let attempt) = request.purpose,
                let reason = Self.undoEraseRefusalReason(result: eraseCheck, inputEventsSinceExpansion: attempt.inputEvents) {
                 let path: String
                 if case .unavailable = eraseCheck { path = "undoUnverifiable" } else { path = "undo" }
@@ -1317,6 +1325,8 @@ public final class TextInjectionPipeline {
         eraseCheck: ErasePreconditionResult,
         completion: @escaping InjectionCompletion
     ) {
+        // §2.2: every AX read and write below uses the element `injectWithFocus` resolved.
+        let focus = FocusedElementSource.resolved(context.focusedElement)
         let swallowed = context.swallowed
         let erasePlan = context.erasePlan
         let frontBundle = context.frontBundle
@@ -1350,6 +1360,7 @@ public final class TextInjectionPipeline {
             }
             eraser.performGuardedErase(
                 plan: erasePlan,
+                focus: focus,
                 canProceed: canProceed,
                 postingContinue: canProceedAfterMutation
             ) { erased in
@@ -1384,6 +1395,7 @@ public final class TextInjectionPipeline {
                 self.clipboard.pasteImageViaClipboard(
                     image: image,
                     bundleID: context.frontBundleID,
+                    focus: focus,
                     shouldContinue: canProceedAfterMutation
                 ) { result in
                     guard canProceedAfterMutation() else {
@@ -1551,7 +1563,8 @@ public final class TextInjectionPipeline {
                 : ax.performAXRangeReplace(
                     text: textToInject,
                     eraseCount: erasePlan.utf16Count,
-                    bundleID: context.frontBundleID
+                    bundleID: context.frontBundleID,
+                    focus: focus
                 )
             if axOnlyOutcome == .replaced {
                 // #region agent log
@@ -1566,6 +1579,7 @@ public final class TextInjectionPipeline {
                     cursorOffset: cursorOffset,
                     totalUTF16Length: totalUTF16,
                     allowHID: false,
+                    focus: focus,
                     shouldContinue: canProceed
                 ) {
                     self.finishSucceeded(
@@ -1607,7 +1621,8 @@ public final class TextInjectionPipeline {
             let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
                 eraseCount: erasePlan.utf16Count,
-                bundleID: context.frontBundleID
+                bundleID: context.frontBundleID,
+                focus: focus
             )
             attemptedAXWrite = axOutcome.fieldMayHaveMutated
             if axOutcome == .replaced {
@@ -1623,6 +1638,7 @@ public final class TextInjectionPipeline {
                     cursorOffset: cursorOffset,
                     totalUTF16Length: totalUTF16,
                     allowHID: true,
+                    focus: focus,
                     shouldContinue: canProceed
                 ) {
                     self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceed)
@@ -1660,6 +1676,7 @@ public final class TextInjectionPipeline {
         // the remaining backspaces loose on the user's text.
         eraser.performGuardedErase(
             plan: erasePlan,
+            focus: focus,
             afterPossibleWrite: attemptedAXWrite,
             insertionPointFollowsExpectedText: context.eraseCaretVouched,
             intent: context.purpose.eraseIntent,
@@ -1753,6 +1770,7 @@ public final class TextInjectionPipeline {
                             cursorOffset: cursorOffset,
                             totalUTF16Length: totalUTF16,
                             allowHID: true,
+                            focus: focus,
                             shouldContinue: canProceedAfterMutation
                         ) {
                             self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceedAfterMutation)
@@ -1793,7 +1811,8 @@ public final class TextInjectionPipeline {
             if TextInjectionPipeline.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID),
                self.ax.attemptAXDirectInjection(
                    text: textToInject,
-                   bundleID: context.frontBundleID
+                   bundleID: context.frontBundleID,
+                   focus: focus
                ) {
                 // #region agent log
                 TextInjectionPipeline.debugLogInject(
@@ -1807,6 +1826,7 @@ public final class TextInjectionPipeline {
                     cursorOffset: cursorOffset,
                     totalUTF16Length: totalUTF16,
                     allowHID: true,
+                    focus: focus,
                     shouldContinue: canProceedAfterMutation
                 ) {
                     self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceedAfterMutation)
@@ -1826,7 +1846,7 @@ public final class TextInjectionPipeline {
                 return
             }
 
-            let hidPasteBaseline = self.verifier.captureFocusedTextObservation()
+            let hidPasteBaseline = self.verifier.captureFocusedTextObservation(focus: focus)
             self.clipboard.pasteViaClipboard(
                 text: textToInject,
                 expectedText: textToInject,
@@ -2011,6 +2031,7 @@ public final class TextInjectionPipeline {
         trailingKeys: [String] = [],
         completion: @escaping InjectionCompletion
     ) {
+        let focus = FocusedElementSource.resolved(context.focusedElement)
         guard canContinue(context) else {
             finishAbandonedPaste(result: result, path: "clipboardAbandoned", completion: completion)
             return
@@ -2029,6 +2050,7 @@ public final class TextInjectionPipeline {
                 cursorOffset: cursorOffset,
                 totalUTF16Length: totalUTF16Length,
                 allowHID: true,
+                focus: focus,
                 shouldContinue: { self.canContinue(context) }
             ) {
                 self.hid.postTrailingKeys(trailingKeys, shouldContinue: { self.canContinue(context) })
@@ -2104,6 +2126,7 @@ public final class TextInjectionPipeline {
             restoreTriggerAfterFailedPaste(
                 erasePlan: context.erasePlan,
                 swallowed: context.swallowed,
+                focus: focus,
                 bundleID: context.frontBundleID,
                 countsAsDuplicateRisk: result != .notPosted,
                 shouldContinue: { self.canContinue(context) }
@@ -2123,6 +2146,7 @@ public final class TextInjectionPipeline {
     private func restoreTriggerAfterFailedPaste(
         erasePlan: ErasePlan,
         swallowed: SwallowedKey,
+        focus: FocusedElementSource,
         bundleID: String? = nil,
         countsAsDuplicateRisk: Bool = true,
         shouldContinue: @escaping () -> Bool,
@@ -2140,7 +2164,7 @@ public final class TextInjectionPipeline {
             // Pass the real bundle so the write goes through the capability store like every
             // other AX site — in a learned false-success app this restore must not claim
             // success against a field it could not actually mutate.
-            if ax.attemptAXDirectInjection(text: text, bundleID: bundleID) {
+            if ax.attemptAXDirectInjection(text: text, bundleID: bundleID, focus: focus) {
                 if shouldContinue(), swallowed.mustReinjectOnRefuse {
                     _ = reinjectSwallowedKey(swallowed)
                 }
@@ -2392,6 +2416,7 @@ public final class TextInjectionPipeline {
         cursorOffset: Int?,
         totalUTF16Length: Int,
         allowHID: Bool,
+        focus: FocusedElementSource,
         shouldContinue: @escaping () -> Bool,
         completion: @escaping () -> Void
     ) {
@@ -2407,7 +2432,7 @@ public final class TextInjectionPipeline {
         // Prefer AX caret (works for AX-only Finish-without-Post); HID arrows only when allowed.
         // The AX path is unit-correct: AX ranges and `utf16FromEnd` are both UTF-16 code units.
         if shouldContinue(), AXContextChecker.shared.isProcessTrusted(),
-           ax.attemptAXCaretPosition(utf16OffsetFromEnd: utf16FromEnd) {
+           ax.attemptAXCaretPosition(utf16OffsetFromEnd: utf16FromEnd, focus: focus) {
             completion()
             return
         }

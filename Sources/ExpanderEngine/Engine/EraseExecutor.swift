@@ -52,6 +52,8 @@ public final class EraseExecutor {
     private let hid: any BackspacePosting
     private let ax: AXTextWriter
     private let textAccess: TextAccess
+    /// §8.3: the settle-and-retry policy, shared with `AXContextChecker.queryFocusedElement`.
+    private let settle: AXSettleRetry
 
     /// Read-only AX boundary, injectable so stale values and mid-read caret changes can
     /// be reproduced without posting keys into another application.
@@ -112,11 +114,13 @@ public final class EraseExecutor {
     init(
         hid: any BackspacePosting = HIDKeyPoster.shared,
         ax: AXTextWriter = AXTextWriter.shared,
-        textAccess: TextAccess
+        textAccess: TextAccess,
+        settle: AXSettleRetry = .live
     ) {
         self.hid = hid
         self.ax = ax
         self.textAccess = textAccess
+        self.settle = settle
     }
 
     // MARK: - Counting
@@ -180,8 +184,8 @@ public final class EraseExecutor {
     /// case, and the case on the keystroke path), and on main after the settle when it is.
     ///
     /// - Parameters:
-    ///   - element: pre-resolved focused element. Pass one when the caller already holds it;
-    ///     `AXContextChecker.focusedElement()` is not free and this runs on the keystroke path.
+    ///   - focus: where the field is read. Pass `.resolved` when the caller already holds the
+    ///     element — `AXContextChecker.focusedElement()` is not free and this is the keystroke path.
     ///   - retryOnMismatch: re-probe once, with a freshly resolved element, after a short settle.
     ///     The first read can catch the AX tree mid-transition — notably right after the fill-in
     ///     panel closes and focus returns to the target app — and a transient disagreement must
@@ -190,28 +194,25 @@ public final class EraseExecutor {
     ///     path passes false so a mismatch surfaces instead of degrading to best-effort.
     public func evaluateErasePrecondition(
         plan: ErasePlan,
-        element: AXUIElement? = nil,
+        focus: FocusedElementSource = .live,
         retryOnMismatch: Bool = true,
         insertionPointFollowsExpectedText: Bool = true,
         intent: Intent = .expansion,
         completion: @escaping (ErasePreconditionResult) -> Void
     ) {
-        let first = evaluateErasePreconditionOnce(
-            plan: plan,
-            element: element,
-            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
+        settle.run(
+            { attempt in
+                self.evaluateErasePreconditionOnce(
+                    plan: plan,
+                    // The retry re-resolves focus: the settle exists because the tree was
+                    // mid-transition, so the element held before it may be the stale one.
+                    focus: attempt == 0 ? focus : .live,
+                    insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
+                )
+            },
+            retryIf: { retryOnMismatch && $0.blocksErase },
+            completion: completion
         )
-        guard retryOnMismatch, first.blocksErase else {
-            completion(first)
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.erasePreconditionRetryDelay) {
-            completion(self.evaluateErasePreconditionOnce(
-                plan: plan,
-                element: nil,
-                insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
-            ))
-        }
     }
 
     /// Synchronous form, kept for callers that cannot take a continuation.
@@ -222,28 +223,26 @@ public final class EraseExecutor {
     /// behaviour that starves the event tap.
     public func evaluateErasePrecondition(
         plan: ErasePlan,
-        element: AXUIElement? = nil,
+        focus: FocusedElementSource = .live,
         retryOnMismatch: Bool = true,
         insertionPointFollowsExpectedText: Bool = true,
         intent: Intent = .expansion
     ) -> ErasePreconditionResult {
-        let first = evaluateErasePreconditionOnce(
-            plan: plan,
-            element: element,
-            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
-        )
-        guard retryOnMismatch, first.blocksErase, !Thread.isMainThread else { return first }
-        Thread.sleep(forTimeInterval: InjectTiming.erasePreconditionRetryDelay)
-        return evaluateErasePreconditionOnce(
-            plan: plan,
-            element: nil,
-            insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
+        settle.run(
+            { attempt in
+                evaluateErasePreconditionOnce(
+                    plan: plan,
+                    focus: attempt == 0 ? focus : .live,
+                    insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
+                )
+            },
+            retryIf: { retryOnMismatch && $0.blocksErase }
         )
     }
 
     private func evaluateErasePreconditionOnce(
         plan: ErasePlan,
-        element: AXUIElement?,
+        focus: FocusedElementSource,
         insertionPointFollowsExpectedText: Bool = true,
         intent: Intent = .expansion
     ) -> ErasePreconditionResult {
@@ -252,7 +251,7 @@ public final class EraseExecutor {
         guard ErasePreconditionChecker.isEnabled || intent.isUndo else {
             return .unavailable("erase precondition disabled by user default")
         }
-        guard let axElement = element ?? AXContextChecker.shared.focusedElement() else {
+        guard let axElement = focus.element else {
             return .unavailable("no focused element")
         }
 
@@ -374,6 +373,7 @@ public final class EraseExecutor {
     ///   PID moved, but must not rewrite a completed post as failure. Defaults to `canProceed`.
     public func performGuardedErase(
         plan: ErasePlan,
+        focus: FocusedElementSource = .live,
         afterPossibleWrite: Bool = false,
         insertionPointFollowsExpectedText: Bool = true,
         intent: Intent = .expansion,
@@ -396,14 +396,14 @@ public final class EraseExecutor {
             completion(false)
             return
         }
-        // Resolve focus once and share it: `AXContextChecker.focusedElement()` is a multi-step AX
-        // round trip and this sits on the keystroke path. Attribute reads through the handle stay
-        // live, so the precondition still sees the post-collapse selection.
-        let element = AXContextChecker.shared.focusedElement()
-        if !intent.isUndo { ax.collapseSelectionToCaret(element: element) }
+        // Resolve focus once (or take the inject's) and share it: `focusedElement()` is a
+        // multi-step AX round trip and this sits on the keystroke path. Attribute reads through
+        // the handle stay live, so the precondition still sees the post-collapse selection.
+        let element = focus.element
+        if !intent.isUndo, let element { ax.collapseSelectionToCaret(element: element) }
         evaluateErasePrecondition(
             plan: plan,
-            element: element,
+            focus: .resolved(element),
             insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
         ) { result in
             if afterPossibleWrite, case .unavailable = result {
@@ -411,12 +411,10 @@ public final class EraseExecutor {
                 // not on the first read. The AX tree is routinely mid-transition right after an
                 // edit (the write itself can trigger a re-render), so give it one settle before
                 // concluding the field cannot be verified at all.
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + InjectTiming.erasePreconditionRetryDelay
-                ) {
+                self.settle.afterSettle {
                     let second = self.evaluateErasePrecondition(
                         plan: plan,
-                        element: nil,
+                        focus: .live,
                         retryOnMismatch: false,
                         insertionPointFollowsExpectedText: insertionPointFollowsExpectedText, intent: intent
                     )

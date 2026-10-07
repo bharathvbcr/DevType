@@ -1286,7 +1286,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             TextInjectionPipeline.shared.inject(
                 snippet: SnippetModel(title: "Hotkey", triggerKeyword: "", replacementText: text),
                 triggerLength: 0,
-                swallowedFinalKey: false,
+                swallowed: .notSwallowed,
                 eraseCountOverride: 0,
                 preResolvedText: text,
                 secureClipboardPaste: true,

@@ -115,7 +115,7 @@ final class UndoAuditRegressionTests: XCTestCase {
             stringForRange: { _, _ in "👩" }
         ))
         XCTAssertTrue(executor.evaluateErasePrecondition(
-            plan: ErasePlan(text: "👩"), element: AXUIElementCreateApplication(1234),
+            plan: ErasePlan(text: "👩"), focus: .resolved(AXUIElementCreateApplication(1234)),
             retryOnMismatch: false, insertionPointFollowsExpectedText: true
         ).blocksErase)
     }

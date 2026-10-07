@@ -113,7 +113,8 @@ public enum InjectTiming {
 
     /// Settle delay before re-checking a failed erase precondition. Focus and AX state lag behind
     /// AppKit after a panel closes or an app activates, and a stale read must not cost an expand.
-    public static let erasePreconditionRetryDelay: TimeInterval = 0.03
+    /// §8.3: the shared settle — `AXSettleRetry` owns it for the erase guard and the focus query.
+    public static let erasePreconditionRetryDelay: TimeInterval = AXSettleRetry.settleDelay
     /// §1.3: hard upper bound on one inject. Generous — the secure-clipboard path legitimately
     /// holds for `secureClipboardPasteHoldTimeout` (8 s) before restoring.
     public static let injectCompletionTimeout: TimeInterval = 10.0

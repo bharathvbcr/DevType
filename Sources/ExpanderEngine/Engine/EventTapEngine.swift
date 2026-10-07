@@ -1339,9 +1339,7 @@ public final class EventTapEngine {
         resetBuffer()
         let utf16Trigger = match.eraseCount
         let charCount = lastUTF16Count
-        let swallowedUnicode = unicodeStr
-        let swallowedKeyCode = keyCode
-        let swallowedFlags = flags
+        let swallowed = SwallowedKey(didSwallow: true, unicode: unicodeStr, keyCode: keyCode, flags: flags)
         let terminator = match.terminator
         let eraseOverride = match.source == .physical ? match.eraseCount : nil
         // Exact text expected left of the caret. Carries both unit systems (UTF-16 for AX
@@ -1351,8 +1349,7 @@ public final class EventTapEngine {
             erasePlan = ErasePlan.forMatch(
                 matchedTrigger: fieldText,
                 terminator: terminator,
-                swallowedFinalKey: true,
-                swallowedUnicode: swallowedUnicode,
+                swallowed: swallowed,
                 caseInsensitive: !match.snippet.isCaseSensitive
             )
         } else {
@@ -1364,9 +1361,7 @@ public final class EventTapEngine {
                 snippet: matchedSnippet,
                 triggerUTF16Length: utf16Trigger,
                 lastEventUTF16Count: charCount,
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags,
+                swallowed: swallowed,
                 terminator: terminator,
                 eraseCountOverride: eraseOverride,
                 erasePlan: erasePlan,
@@ -1982,14 +1977,11 @@ public final class EventTapEngine {
                 snippet: snippet,
                 triggerUTF16Length: eraseText.utf16.count,
                 lastEventUTF16Count: 0,
-                swallowedUnicode: "",
-                swallowedKeyCode: 0,
-                swallowedFlags: [],
+                swallowed: .notSwallowed,
                 terminator: "",
                 eraseCountOverride: nil,
                 erasePlan: erasePlan,
                 armedFocusPID: focusPID,
-                swallowedFinalKey: false,
                 textSuffix: suffix
             )
         }
@@ -2250,17 +2242,11 @@ public final class EventTapEngine {
         snippet: SnippetModel,
         triggerUTF16Length: Int,
         lastEventUTF16Count: Int,
-        swallowedUnicode: String,
-        swallowedKeyCode: Int64,
-        swallowedFlags: CGEventFlags,
+        swallowed: SwallowedKey,
         terminator: String,
         eraseCountOverride: Int?,
         erasePlan: ErasePlan,
         armedFocusPID: pid_t?,
-        /// False when the trigger's final key was let through instead of swallowed — the
-        /// prefix-debounce path never swallows, because at match time we do not yet know
-        /// whether a longer trigger will win.
-        swallowedFinalKey: Bool = true,
         /// Characters typed after the trigger while the match was held. They are inside
         /// `erasePlan`, so they must be re-appended to the injected text or they vanish.
         textSuffix: String = ""
@@ -2268,7 +2254,9 @@ public final class EventTapEngine {
         let quiescence = inputClock.arm()
 
         // AX / AppKit / Secure Input must run on main (avoid off-main IPC flake + nested main.sync).
-        let mainProbe = Self.runOnMainSync { () -> (
+        // §8.3: this caller is off main, so it owns the focus-query retry — each attempt hops to
+        // main, and the settle between them sleeps here on `processingQueue`, never on main.
+        let mainProbe = AXSettleRetry.live.run({ attempt in Self.runOnMainSync { () -> (
             decision: AXContextChecker.ExpandGateDecision,
             secureInput: Bool,
             clipboard: String?,
@@ -2278,7 +2266,8 @@ public final class EventTapEngine {
             let snapshot = PermissionCoordinator.shared.cachedSnapshot
             let decision = AXContextChecker.shared.evaluateExpandGate(
                 canUseAX: snapshot.canUseAX,
-                canPostEvents: snapshot.canPostEvents
+                canPostEvents: snapshot.canPostEvents,
+                focus: AXContextChecker.shared.queryFocusedElement(attempt: attempt)
             )
             let secureInput = AXContextChecker.isSecureEventInputEnabledLive()
             let clipboard = NSPasteboard.general.string(forType: .string)
@@ -2295,14 +2284,12 @@ public final class EventTapEngine {
                 refuseContext = nil
             }
             return (decision, secureInput, clipboard, currentPID, refuseContext)
-        }
+        } }, retryIf: { AXContextChecker.shouldRetryFocusQuery($0.decision.focus) })
 
         if mainProbe.secureInput {
             refuseAfterSwallow(
                 reason: AXContextChecker.secureInputActiveReason,
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags,
+                swallowed: swallowed,
                 refuseContext: mainProbe.refuseContext
             )
             return
@@ -2311,9 +2298,7 @@ public final class EventTapEngine {
         if mainProbe.decision.shouldBlock {
             refuseAfterSwallow(
                 reason: mainProbe.decision.reason,
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags,
+                swallowed: swallowed,
                 refuseContext: mainProbe.refuseContext
             )
             return
@@ -2322,9 +2307,7 @@ public final class EventTapEngine {
         if let armedFocusPID, mainProbe.currentPID != armedFocusPID {
             refuseAfterSwallow(
                 reason: "Focus moved — expand aborted",
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags
+                swallowed: swallowed
             )
             return
         }
@@ -2332,9 +2315,7 @@ public final class EventTapEngine {
         if case .abort = inputClock.decide(quiescence) {
             refuseAfterSwallow(
                 reason: "User input after arm — expand aborted",
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags
+                swallowed: swallowed
             )
             return
         }
@@ -2345,9 +2326,7 @@ public final class EventTapEngine {
             handleTypedAITransformExpand(
                 snippet: snippet,
                 erasePlan: erasePlan,
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags,
+                swallowed: swallowed,
                 quiescence: quiescence,
                 armedFocusPID: armedFocusPID
             )
@@ -2374,9 +2353,7 @@ public final class EventTapEngine {
                 guard let presenter else {
                     self.refuseAfterSwallow(
                         reason: "Fill-in required but no presenter wired",
-                        swallowedUnicode: swallowedUnicode,
-                        swallowedKeyCode: swallowedKeyCode,
-                        swallowedFlags: swallowedFlags
+                        swallowed: swallowed
                     )
                     return
                 }
@@ -2385,9 +2362,7 @@ public final class EventTapEngine {
                         guard let values else {
                             self.refuseAfterSwallow(
                                 reason: "Fill-in cancelled",
-                                swallowedUnicode: swallowedUnicode,
-                                swallowedKeyCode: swallowedKeyCode,
-                                swallowedFlags: swallowedFlags
+                                swallowed: swallowed
                             )
                             return
                         }
@@ -2404,9 +2379,7 @@ public final class EventTapEngine {
                             snippet: snippet,
                             triggerUTF16Length: triggerUTF16Length,
                             lastEventUTF16Count: lastEventUTF16Count,
-                            swallowedUnicode: swallowedUnicode,
-                            swallowedKeyCode: swallowedKeyCode,
-                            swallowedFlags: swallowedFlags,
+                            swallowed: swallowed,
                             terminator: terminator,
                             eraseCountOverride: eraseCountOverride,
                             erasePlan: erasePlan,
@@ -2414,7 +2387,6 @@ public final class EventTapEngine {
                             clipboardSnapshot: clipboardSnapshot,
                             quiescence: postPanel,
                             armedFocusPID: armedFocusPID,
-                            swallowedFinalKey: swallowedFinalKey,
                             textSuffix: textSuffix
                         )
                     }
@@ -2427,9 +2399,7 @@ public final class EventTapEngine {
             snippet: snippet,
             triggerUTF16Length: triggerUTF16Length,
             lastEventUTF16Count: lastEventUTF16Count,
-            swallowedUnicode: swallowedUnicode,
-            swallowedKeyCode: swallowedKeyCode,
-            swallowedFlags: swallowedFlags,
+            swallowed: swallowed,
             terminator: terminator,
             eraseCountOverride: eraseCountOverride,
             erasePlan: erasePlan,
@@ -2437,8 +2407,10 @@ public final class EventTapEngine {
             clipboardSnapshot: clipboardSnapshot,
             quiescence: quiescence,
             armedFocusPID: armedFocusPID,
-            swallowedFinalKey: swallowedFinalKey,
-            textSuffix: textSuffix
+            textSuffix: textSuffix,
+            // §2.2: no panel came between the gate and the inject, so the element the gate
+            // approved is the target. The fill-in path above re-resolves: focus left for the panel.
+            gateFocus: mainProbe.decision.focus.element
         )
     }
 
@@ -2447,18 +2419,14 @@ public final class EventTapEngine {
     private func handleTypedAITransformExpand(
         snippet: SnippetModel,
         erasePlan: ErasePlan,
-        swallowedUnicode: String,
-        swallowedKeyCode: Int64,
-        swallowedFlags: CGEventFlags,
+        swallowed: SwallowedKey,
         quiescence: InputQuiescenceGuard,
         armedFocusPID: pid_t?
     ) {
         guard let kind = AITransformKind.named(snippet.aiTransform) else {
             refuseAfterSwallow(
                 reason: "Unknown AI transform kind",
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags
+                swallowed: swallowed
             )
             return
         }
@@ -2474,9 +2442,7 @@ public final class EventTapEngine {
         if kind == .custom, customInstructions == nil {
             refuseAfterSwallow(
                 reason: "Custom AI transform has no instructions",
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags
+                swallowed: swallowed
             )
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -2491,113 +2457,107 @@ public final class EventTapEngine {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
 
-            if case .abort = self.inputClock.decide(quiescence) {
-                self.refuseAfterSwallow(
-                    reason: "User input after arm — expand aborted",
-                    swallowedUnicode: swallowedUnicode,
-                    swallowedKeyCode: swallowedKeyCode,
-                    swallowedFlags: swallowedFlags
-                )
-                return
-            }
-
-            // Re-check gates live — SecureInputMonitor's 350ms poll is stale; passwords must
-            // never reach the model.
-            let snapshot = PermissionCoordinator.shared.cachedSnapshot
-            let decision = AXContextChecker.shared.evaluateExpandGate(
-                canUseAX: snapshot.canUseAX,
-                canPostEvents: snapshot.canPostEvents
-            )
-            let secureInput = AXContextChecker.isSecureEventInputEnabledLive()
-            let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-
-            if secureInput {
-                self.refuseAfterSwallow(
-                    reason: AXContextChecker.secureInputActiveReason,
-                    swallowedUnicode: swallowedUnicode,
-                    swallowedKeyCode: swallowedKeyCode,
-                    swallowedFlags: swallowedFlags,
-                    refuseContext: .capture(
-                        reason: AXContextChecker.secureInputActiveReason,
-                        decision: decision
-                    )
-                )
-                return
-            }
-            if decision.shouldBlock {
-                self.refuseAfterSwallow(
-                    reason: decision.reason,
-                    swallowedUnicode: swallowedUnicode,
-                    swallowedKeyCode: swallowedKeyCode,
-                    swallowedFlags: swallowedFlags,
-                    refuseContext: .capture(reason: decision.reason, decision: decision)
-                )
-                return
-            }
-            if let armedFocusPID, currentPID != armedFocusPID {
-                self.refuseAfterSwallow(
-                    reason: "Focus moved — expand aborted",
-                    swallowedUnicode: swallowedUnicode,
-                    swallowedKeyCode: swallowedKeyCode,
-                    swallowedFlags: swallowedFlags
-                )
-                return
-            }
-
-            // Consume is single-use so a second trigger cannot reuse the same stale text.
-            // Same-element check (CFEqual) makes the longer TTL safe.
-            let weakAXBlocked = SelectionMonitor.shared.hasWeakAXBlockedSelection()
-            guard let selection = SelectionMonitor.shared.consumeSelection() else {
-                self.refuseAfterSwallow(
-                    reason: weakAXBlocked ? "AI selection weak-AX" : "AI selection unavailable",
-                    swallowedUnicode: swallowedUnicode,
-                    swallowedKeyCode: swallowedKeyCode,
-                    swallowedFlags: swallowedFlags
-                )
-                let hintKey = weakAXBlocked
-                    ? Self.aiWeakAXHintKey
-                    : Self.aiSelectionUnavailableHintKey
-                self.presentAITransformHint?(Self.aiSelectionHintTitleKey, hintKey)
-                return
-            }
-
-            guard self.presentAITransform != nil else {
-                self.refuseAfterSwallow(
-                    reason: "AI transform required but no presenter wired",
-                    swallowedUnicode: swallowedUnicode,
-                    swallowedKeyCode: swallowedKeyCode,
-                    swallowedFlags: swallowedFlags
-                )
-                return
-            }
-
-            let restoreOnCancel: String? = {
-                guard let expected = erasePlan.expectedText, !expected.isEmpty else { return nil }
-                return expected
-            }()
-
-            EraseExecutor.shared.performGuardedErase(plan: erasePlan) { [weak self] erased in
-                guard let self else { return }
-                if !erased {
+            // §8.3: the asynchronous focus query keeps the `.cannotComplete` retry on this main-
+            // thread path by scheduling it; the gate and the guarded erase then share that one
+            // resolution (§2.2) instead of each asking AX again. Everything after it — the
+            // quiescence check included — runs once focus is known, so a scheduled retry cannot
+            // let input typed during the settle slip past the gate.
+            AXContextChecker.shared.queryFocusedElement { focus in
+                if case .abort = self.inputClock.decide(quiescence) {
                     self.refuseAfterSwallow(
-                        reason: "AI trigger erase failed",
-                        swallowedUnicode: swallowedUnicode,
-                        swallowedKeyCode: swallowedKeyCode,
-                        swallowedFlags: swallowedFlags
+                        reason: "User input after arm — expand aborted",
+                        swallowed: swallowed
                     )
                     return
                 }
-                // Expansion ends here — panel owns the rest. Do not hold `_isExpanding`.
-                self.endExpansion()
-                let sourceApp = NSWorkspace.shared.frontmostApplication
-                let selectedText = selection.text
-                guard let presenter = self.presentAITransform else {
-                    DevTypeLog.eventTap.error(
-                        "[EventTap] AI transform presenter cleared after erase — trigger already removed"
+
+                // Re-check gates live — SecureInputMonitor's 350ms poll is stale; passwords must
+                // never reach the model.
+                let snapshot = PermissionCoordinator.shared.cachedSnapshot
+                let decision = AXContextChecker.shared.evaluateExpandGate(
+                    canUseAX: snapshot.canUseAX,
+                    canPostEvents: snapshot.canPostEvents,
+                    focus: focus
+                )
+                let secureInput = AXContextChecker.isSecureEventInputEnabledLive()
+                let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+
+                if secureInput {
+                    self.refuseAfterSwallow(
+                        reason: AXContextChecker.secureInputActiveReason,
+                        swallowed: swallowed,
+                        refuseContext: .capture(
+                            reason: AXContextChecker.secureInputActiveReason,
+                            decision: decision
+                        )
                     )
                     return
                 }
-                presenter(selectedText, kind, sourceApp, customInstructions, restoreOnCancel)
+                if decision.shouldBlock {
+                    self.refuseAfterSwallow(
+                        reason: decision.reason,
+                        swallowed: swallowed,
+                        refuseContext: .capture(reason: decision.reason, decision: decision)
+                    )
+                    return
+                }
+                if let armedFocusPID, currentPID != armedFocusPID {
+                    self.refuseAfterSwallow(
+                        reason: "Focus moved — expand aborted",
+                        swallowed: swallowed
+                    )
+                    return
+                }
+
+                // Consume is single-use so a second trigger cannot reuse the same stale text.
+                // Same-element check (CFEqual) makes the longer TTL safe.
+                let weakAXBlocked = SelectionMonitor.shared.hasWeakAXBlockedSelection()
+                guard let selection = SelectionMonitor.shared.consumeSelection() else {
+                    self.refuseAfterSwallow(
+                        reason: weakAXBlocked ? "AI selection weak-AX" : "AI selection unavailable",
+                        swallowed: swallowed
+                    )
+                    let hintKey = weakAXBlocked
+                        ? Self.aiWeakAXHintKey
+                        : Self.aiSelectionUnavailableHintKey
+                    self.presentAITransformHint?(Self.aiSelectionHintTitleKey, hintKey)
+                    return
+                }
+
+                guard self.presentAITransform != nil else {
+                    self.refuseAfterSwallow(
+                        reason: "AI transform required but no presenter wired",
+                        swallowed: swallowed
+                    )
+                    return
+                }
+
+                let restoreOnCancel: String? = {
+                    guard let expected = erasePlan.expectedText, !expected.isEmpty else { return nil }
+                    return expected
+                }()
+
+                EraseExecutor.shared.performGuardedErase(plan: erasePlan, focus: .resolved(focus.element)) { [weak self] erased in
+                    guard let self else { return }
+                    if !erased {
+                        self.refuseAfterSwallow(
+                            reason: "AI trigger erase failed",
+                            swallowed: swallowed
+                        )
+                        return
+                    }
+                    // Expansion ends here — panel owns the rest. Do not hold `_isExpanding`.
+                    self.endExpansion()
+                    let sourceApp = NSWorkspace.shared.frontmostApplication
+                    let selectedText = selection.text
+                    guard let presenter = self.presentAITransform else {
+                        DevTypeLog.eventTap.error(
+                            "[EventTap] AI transform presenter cleared after erase — trigger already removed"
+                        )
+                        return
+                    }
+                    presenter(selectedText, kind, sourceApp, customInstructions, restoreOnCancel)
+                }
             }
         }
     }
@@ -2673,7 +2633,7 @@ public final class EventTapEngine {
                 TextInjectionPipeline.shared.inject(
                     snippet: carrier,
                     triggerLength: 0,
-                    swallowedFinalKey: false,
+                    swallowed: .notSwallowed,
                     plan: plan,
                     erasePlan: .empty,
                     preResolvedText: text,
@@ -2696,9 +2656,7 @@ public final class EventTapEngine {
         snippet: SnippetModel,
         triggerUTF16Length: Int,
         lastEventUTF16Count: Int,
-        swallowedUnicode: String,
-        swallowedKeyCode: Int64,
-        swallowedFlags: CGEventFlags,
+        swallowed: SwallowedKey,
         terminator: String,
         eraseCountOverride: Int?,
         erasePlan: ErasePlan,
@@ -2706,20 +2664,17 @@ public final class EventTapEngine {
         clipboardSnapshot: String?,
         quiescence: InputQuiescenceGuard,
         armedFocusPID: pid_t?,
-        swallowedFinalKey: Bool = true,
-        textSuffix: String = ""
+        textSuffix: String = "",
+        gateFocus: AXUIElement? = nil
     ) {
         if let failure = resolved.failure {
-            refuseAfterSwallow(reason: failure.message, swallowedUnicode: swallowedUnicode,
-                               swallowedKeyCode: swallowedKeyCode, swallowedFlags: swallowedFlags)
+            refuseAfterSwallow(reason: failure.message, swallowed: swallowed)
             return
         }
         if case .abort = inputClock.decide(quiescence) {
             refuseAfterSwallow(
                 reason: "User input after arm — expand aborted",
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags
+                swallowed: swallowed
             )
             return
         }
@@ -2733,9 +2688,7 @@ public final class EventTapEngine {
         if let armedFocusPID, mainProbe.currentPID != armedFocusPID {
             refuseAfterSwallow(
                 reason: "Focus moved — expand aborted",
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags
+                swallowed: swallowed
             )
             return
         }
@@ -2755,9 +2708,7 @@ public final class EventTapEngine {
         if case .refuse(let reason) = plan {
             refuseAfterSwallow(
                 reason: reason,
-                swallowedUnicode: swallowedUnicode,
-                swallowedKeyCode: swallowedKeyCode,
-                swallowedFlags: swallowedFlags
+                swallowed: swallowed
             )
             return
         }
@@ -2767,20 +2718,18 @@ public final class EventTapEngine {
         TextInjectionPipeline.shared.inject(
             snippet: snippet,
             triggerLength: triggerUTF16Length,
+            swallowed: swallowed,
             clipboardOverride: clipboardSnapshot,
-            swallowedFinalKey: swallowedFinalKey,
             lastEventCharacterCount: lastEventUTF16Count,
             plan: plan,
-            swallowedUnicode: swallowedUnicode,
-            swallowedKeyCode: swallowedKeyCode,
-            swallowedFlags: swallowedFlags,
             terminator: terminator,
             eraseCountOverride: eraseCountOverride,
             erasePlan: erasePlan,
             preResolvedText: resolved.text + textSuffix,
             preResolvedCursorOffset: resolved.cursorOffset,
             trailingKeys: resolved.trailingKeys,
-            snippetLookup: lookup
+            snippetLookup: lookup,
+            targetFocus: gateFocus.map { .resolved($0) } ?? .live
         ) { [weak self] outcome in
             if outcome.isConfirmedSuccess {
                 DispatchQueue.main.async {
@@ -2794,17 +2743,14 @@ public final class EventTapEngine {
     /// Records refuse and reinjects the swallowed key while `isExpanding` still suppresses rematch.
     private func refuseAfterSwallow(
         reason: String,
-        swallowedUnicode: String,
-        swallowedKeyCode: Int64,
-        swallowedFlags: CGEventFlags,
+        swallowed: SwallowedKey,
         refuseContext: PermissionCoordinator.InjectRefuseProvenance? = nil
     ) {
-        if Self.mustReinjectOnRefuse(didSwallow: true) {
-            _ = TextInjectionPipeline.shared.reinjectSwallowedKey(
-                unicode: swallowedUnicode,
-                keyCode: swallowedKeyCode,
-                flags: swallowedFlags
-            )
+        // §8.2: the key's own `didSwallow` decides. This was a hard-coded `didSwallow: true`, and
+        // the prefix-debounce fire — which swallows nothing — avoided a replay only because its
+        // empty payload happened to fail `hasPayload` inside `reinjectSwallowedKey`.
+        if swallowed.mustReinjectOnRefuse {
+            _ = TextInjectionPipeline.shared.reinjectSwallowedKey(swallowed)
         }
         DispatchQueue.main.async {
             PermissionCoordinator.shared.recordInjectOutcome(

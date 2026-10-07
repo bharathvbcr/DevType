@@ -82,7 +82,7 @@ final class EraseRangeEvidenceTests: XCTestCase {
     ) -> ErasePreconditionResult {
         // Only the injected reader sees this handle. No AX request or key post is made.
         field.executor().evaluateErasePrecondition(
-            plan: plan, element: AXUIElementCreateApplication(1234), retryOnMismatch: false,
+            plan: plan, focus: .resolved(AXUIElementCreateApplication(1234)), retryOnMismatch: false,
             insertionPointFollowsExpectedText: vouched
         )
     }
@@ -225,7 +225,7 @@ final class EraseRangeEvidenceTests: XCTestCase {
         XCTAssertTrue(evaluate(field, plan: plan, vouched: false).blocksErase)
         XCTAssertTrue(field.requestedRanges.isEmpty)
         let undo = field.executor().evaluateErasePrecondition(
-            plan: plan, element: AXUIElementCreateApplication(1234), retryOnMismatch: false,
+            plan: plan, focus: .resolved(AXUIElementCreateApplication(1234)), retryOnMismatch: false,
             insertionPointFollowsExpectedText: true,
             intent: .undo(inputEventsSinceExpansion: 0)
         )
@@ -360,7 +360,7 @@ final class EraseRangeEvidenceTests: XCTestCase {
 
         let (undoField, undoPlan) = Field.gitPulseTerminalRefuse()
         let undo = undoField.executor().evaluateErasePrecondition(
-            plan: undoPlan, element: AXUIElementCreateApplication(1234), retryOnMismatch: false,
+            plan: undoPlan, focus: .resolved(AXUIElementCreateApplication(1234)), retryOnMismatch: false,
             insertionPointFollowsExpectedText: true,
             intent: .undo(inputEventsSinceExpansion: 0)
         )

@@ -245,7 +245,7 @@ final class EngineDeliveryCoverageTests: XCTestCase {
 
         let resultSync = executor.evaluateErasePrecondition(
             plan: plan,
-            element: axApp,
+            focus: .resolved(axApp),
             retryOnMismatch: false
         )
         XCTAssertEqual(resultSync, .ok)
@@ -253,7 +253,7 @@ final class EngineDeliveryCoverageTests: XCTestCase {
         let exp = expectation(description: "async evaluate")
         executor.evaluateErasePrecondition(
             plan: plan,
-            element: axApp,
+            focus: .resolved(axApp),
             retryOnMismatch: false
         ) { result in
             XCTAssertEqual(result, .ok)

@@ -40,7 +40,7 @@ final class AXValueProjectionStressTests: XCTestCase {
         ) -> ErasePreconditionResult {
             executor().evaluateErasePrecondition(
                 plan: plan,
-                element: AXUIElementCreateApplication(1234),
+                focus: .resolved(AXUIElementCreateApplication(1234)),
                 retryOnMismatch: false,
                 insertionPointFollowsExpectedText: vouched,
                 intent: intent

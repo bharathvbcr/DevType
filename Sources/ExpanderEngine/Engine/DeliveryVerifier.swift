@@ -56,8 +56,8 @@ public final class DeliveryVerifier {
 
     // MARK: - Observation
 
-    public func captureFocusedTextObservation() -> FocusedTextObservation? {
-        guard let axElement = AXContextChecker.shared.focusedElement() else { return nil }
+    public func captureFocusedTextObservation(focus: FocusedElementSource = .live) -> FocusedTextObservation? {
+        guard let axElement = focus.element else { return nil }
         return focusedTextObservation(for: axElement)
     }
 
@@ -105,6 +105,9 @@ public final class DeliveryVerifier {
 
     // MARK: - Verification
 
+    /// §2.2: a documented re-check. The live focus is compared (`CFEqual`) against the baseline's
+    /// target on every call — this runs on each paste-hold tick precisely to notice the user
+    /// moving, so it must never be handed a threaded element.
     public func verifyFocusedTextDelivery(
         expectedText: String,
         baseline: FocusedTextObservation?,

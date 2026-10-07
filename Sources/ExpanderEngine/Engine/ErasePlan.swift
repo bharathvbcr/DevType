@@ -80,20 +80,19 @@ public struct ErasePlan: Equatable {
     public static func forMatch(
         matchedTrigger: String,
         terminator: String,
-        swallowedFinalKey: Bool,
-        swallowedUnicode: String,
+        swallowed: SwallowedKey,
         caseInsensitive: Bool = false
     ) -> ErasePlan {
         guard !matchedTrigger.isEmpty else { return .empty }
         if !terminator.isEmpty {
             return ErasePlan(text: matchedTrigger, caseInsensitive: caseInsensitive)
         }
-        guard swallowedFinalKey else {
+        guard swallowed.didSwallow else {
             return ErasePlan(text: matchedTrigger, caseInsensitive: caseInsensitive)
         }
         // Drop the swallowed key from the tail. Trim by UTF-16 length so surrogate pairs and
         // multi-unit IME commits are removed whole.
-        let swallowedUTF16 = max(1, swallowedUnicode.utf16.count)
+        let swallowedUTF16 = max(1, swallowed.unicode.utf16.count)
         let units = Array(matchedTrigger.utf16)
         guard units.count > swallowedUTF16 else { return .empty }
         let keptUnits = Array(units.prefix(units.count - swallowedUTF16))

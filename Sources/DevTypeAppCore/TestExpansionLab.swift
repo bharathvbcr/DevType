@@ -288,8 +288,8 @@ private final class LabSession: NSObject {
                 TextInjectionPipeline.shared.inject(
                     snippet: self.snippet,
                     triggerLength: 0,
+                    swallowed: .notSwallowed,
                     clipboardOverride: nil,
-                    swallowedFinalKey: false,
                     lastEventCharacterCount: 0,
                     plan: self.plan,
                     preResolvedText: self.prepared.text,
