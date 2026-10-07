@@ -116,6 +116,24 @@ Continuous integration (`.github/workflows/ci.yml`) runs `swift build` + `swift 
 
 ---
 
+## 🌐 UI Strings & Pseudolocalization
+
+UI strings are resource tables, not Swift code: `Sources/ExpanderEngine/Localization/Resources/<lang>.lproj/<Table>.strings`, one table per area (`Preferences`, `Voice`, `Library`, …, with `Localizable` for the rest). `LocalizationTables` loads every table of every language at launch and merges each language into one key space; `LocalizationManager` only resolves the language, picks plural variants and formats. SwiftPM builds the tables into `DevType_ExpanderEngine.bundle`, which `Scripts/package-app.sh` copies into `Contents/Resources` and treats like `InfoPlist.strings`: a strings-only change re-signs the app.
+
+- **Add or change a string**: edit the key in all three `.lproj` directories. `LocalizationParityTests` (key sets, format specifiers), `LocalizationResourceTablesTests` (same tables per language, no duplicate keys, bundle matches the source tree) and `AppStringKeyCoverageTests` (every key the UI names exists) are the gate.
+- **Add a table**: add `<Table>.strings` to every `.lproj`; no code change is needed.
+- **Layout checks**: launch with pseudolocalization to see truncation, clipping and hard-coded English. Every string becomes accented, bracketed and about 40% longer, with format specifiers untouched:
+
+```bash
+DEVTYPE_PSEUDOLOCALE=1 swift run DevType
+```
+
+```bash
+open .build/DevType.app --args -devtype.debug.pseudolocale YES
+```
+
+---
+
 ## 🐞 Debugging & Logging
 
 ### Console.app & Unified Logging
