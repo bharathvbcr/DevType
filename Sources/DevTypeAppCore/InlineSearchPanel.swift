@@ -73,6 +73,12 @@ enum InlineSearchPanel {
     private static var suspension: EventTapEngine.MatchingSuspension?
     private static let dismissWatchers = PanelDismissWatchers()
 
+    /// The open whose selection read is in flight. `open` reads off main and builds the panel when
+    /// the read lands, so between the two there is no panel and `isOpen` is false. Only the open
+    /// holding the current generation may build; `close` advances it, cancelling a pending open.
+    private static var openGeneration: UInt64 = 0
+    private static var isOpening = false
+
     static var isOpen: Bool { panel?.isVisible == true }
 
     static func toggle(
@@ -81,10 +87,18 @@ enum InlineSearchPanel {
         mode: Mode = .insert,
         onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Outcome) -> Void
     ) {
-        if isOpen { close() } else { open(store: store, loc: loc, mode: mode, onPick: onPick) }
+        // A second press while the first is still reading is "never mind", exactly as it is once
+        // the panel is up — not a second palette queued behind the first.
+        if isOpen || isOpening {
+            close()
+        } else {
+            open(store: store, loc: loc, mode: mode, onPick: onPick)
+        }
     }
 
     static func close() {
+        openGeneration &+= 1
+        isOpening = false
         removeDismissWatchers()
         panel?.close()
         panel = nil
@@ -122,14 +136,41 @@ enum InlineSearchPanel {
         // Release the previous panel's matching suspension and dismissal observers first.
         close()
         let sourceApp = NSWorkspace.shared.frontmostApplication
-        // Read the selection HERE, before `NSApp.activate(ignoringOtherApps:)` below makes
+        // Read the selection HERE, before `NSApp.activate(ignoringOtherApps:)` in `present` makes
         // DevType frontmost. `SelectionReader` resolves the *system-wide* focused element,
         // so once our own panel is key it reads the search field — never the user's text.
         // Any later read from a palette command is therefore guaranteed to return nil.
         //
+        // The read runs off main, so the panel is built in its completion and nowhere else:
+        // activating before the read lands would have it read our own search field.
+        //
         // The whole `Outcome` is carried, not just the text: the failure reason is what the
         // command handlers need to tell the user why, and it can only be captured here.
-        let sourceSelection = SelectionReader.readSelection()
+        openGeneration &+= 1
+        let generation = openGeneration
+        isOpening = true
+        SelectionReader.readSelection { sourceSelection in
+            guard generation == openGeneration else { return }
+            isOpening = false
+            present(
+                store: store,
+                loc: loc,
+                mode: mode,
+                sourceApp: sourceApp,
+                sourceSelection: sourceSelection,
+                onPick: onPick
+            )
+        }
+    }
+
+    private static func present(
+        store: SnippetStore,
+        loc: LocalizationManager,
+        mode: Mode,
+        sourceApp: NSRunningApplication?,
+        sourceSelection: SelectionReader.Outcome,
+        onPick: @escaping (Pick, NSRunningApplication?, SelectionReader.Outcome) -> Void
+    ) {
         suspension = EventTapEngine.shared.suspendMatching(reason: "InlineSearchPanel")
 
         let panel = KeyablePanel(

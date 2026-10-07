@@ -388,7 +388,7 @@ final class SourceContractTests: XCTestCase {
     func testInlineSearchPanelReadsSelectionBeforeActivatingDevType() throws {
         let text = try source("Sources/DevTypeAppCore/InlineSearchPanel.swift")
 
-        guard let readOffset = offset(of: "SelectionReader.readSelection()", in: text) else {
+        guard let readOffset = offset(of: "SelectionReader.readSelection {", in: text) else {
             return XCTFail(
                 "InlineSearchPanel must capture the selection at panel-open time. "
                     + "Without it, palette commands have no selection to act on."
@@ -405,6 +405,27 @@ final class SourceContractTests: XCTestCase {
                 + "After activation the system-wide focused element is DevType's own search "
                 + "field, so the read returns nil and every palette AI/text command fails."
         )
+
+        // The read completes off main, so textual order is not enough: an activation placed
+        // after the call in `open` would run before the read lands. It must live in `present`,
+        // which `open` reaches only from the read's completion.
+        guard let openStart = offset(of: "static func open(", in: text),
+              let presentStart = offset(of: "private static func present(", in: text),
+              openStart < presentStart else {
+            return XCTFail("Could not locate open/present in InlineSearchPanel.")
+        }
+        let openBody = String(
+            text[text.index(text.startIndex, offsetBy: openStart)..<text.index(text.startIndex, offsetBy: presentStart)]
+        )
+        XCTAssertFalse(
+            openBody.contains("NSApp.activate("),
+            "open must not activate DevType; only the read's completion may build and show the panel."
+        )
+        guard let completionOffset = offset(of: "SelectionReader.readSelection {", in: openBody),
+              let presentCall = offset(of: "present(", in: openBody) else {
+            return XCTFail("open must hand the read's outcome to present from the completion.")
+        }
+        XCTAssertLessThan(completionOffset, presentCall)
     }
 
     /// The initial palette dispatcher must consume the captured selection, never re-read while
@@ -473,7 +494,7 @@ final class SourceContractTests: XCTestCase {
         )
         guard let activateOffset = offset(of: "sourceApp.activate()", in: region),
               let fallbackOffset = offset(
-                  of: "SelectionReader.readSelectionForExplicitAIAction()",
+                  of: "SelectionReader.readSelectionForExplicitAIAction {",
                   in: region
               ) else {
             return XCTFail(
@@ -542,7 +563,7 @@ final class SourceContractTests: XCTestCase {
         ] {
             let text = try source(path)
             XCTAssertTrue(
-                text.contains("SelectionReader.readSelectionForExplicitAIAction("),
+                text.contains("SelectionReader.readSelectionForExplicitAIAction {"),
                 "\(path) is an authorized explicit-AI path and must use the named entry point."
             )
             XCTAssertFalse(
@@ -559,7 +580,7 @@ final class SourceContractTests: XCTestCase {
             "Sources/DevTypeAppCore/VoiceDictationController.swift",
             "Sources/DevTypeAppCore/AppDelegate.swift",
         ]
-        let actual = Set(try sourceFilesContaining("readSelectionForExplicitAIAction("))
+        let actual = Set(try sourceFilesContaining("readSelectionForExplicitAIAction"))
         XCTAssertEqual(
             actual,
             authorized,
@@ -709,7 +730,7 @@ final class SourceContractTests: XCTestCase {
             text[text.index(text.startIndex, offsetBy: start)..<text.index(text.startIndex, offsetBy: end)]
         )
         XCTAssertTrue(
-            region.contains("SelectionReader.readSelectionForExplicitAIAction()"),
+            region.contains("SelectionReader.readSelectionForExplicitAIAction {"),
             "presentFromHotkey must use the explicit-AI reader so the alert can name the real cause, "
                 + "and it is the one path that opts into the brokered ⌘C fallback — the captured "
                 + "text is shown in the action panel before anything is written back."

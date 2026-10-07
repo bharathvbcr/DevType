@@ -483,13 +483,16 @@ final class ClipboardFallbackTests: XCTestCase {
     /// palette-open path reads selections too and must never post keys.
     func testReaderDefaultsToNoClipboardFallback() {
         var captureRan = false
-        _ = SelectionReader.readSelection(
+        let delivered = expectation(description: "read delivered")
+        SelectionReader.readSelection(
             diagnostics: nil,
             clipboardCapture: {
                 captureRan = true
                 return .boardUnchanged
-            }
+            },
+            completion: { _ in delivered.fulfill() }
         )
+        wait(for: [delivered], timeout: SelectionReader.readBudgetSeconds + 5)
         XCTAssertFalse(
             captureRan,
             "The ordinary reader is AX-only; only the named explicit-AI entry point may copy."

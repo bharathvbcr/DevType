@@ -218,17 +218,146 @@ final class AXSettleRetryTests: XCTestCase {
                     .appendingPathComponent(path),
                 encoding: .utf8
             ))
-            // The one other sleep in AXContextChecker is the Chromium manual-accessibility rescue:
-            // a bounded multi-poll on explicit gestures only, a different mechanism from this
-            // single retry. Every *other* sleep is a hand-written copy of the policy.
+            // No exemptions. The Chromium manual-accessibility rescue used to be one: a raw
+            // `Thread.sleep` poll that every selection read ran on main, sleeping it for up to
+            // `manualAccessibilitySettleSeconds`. It now waits through `AXSettleRetry.poll`, which
+            // shares the "never on main" rule. Any sleep here is a hand-written copy of the policy.
             let sleeps = source.components(separatedBy: "Thread.sleep(").count - 1
-            let rescuePolls = source.components(
-                separatedBy: "Thread.sleep(forTimeInterval: Self.manualAccessibilityPollSeconds)"
-            ).count - 1
-            XCTAssertEqual(sleeps, rescuePolls, "\(path) must retry through AXSettleRetry")
+                + source.components(separatedBy: "usleep(").count - 1
+            XCTAssertEqual(sleeps, 0, "\(path) must wait through AXSettleRetry")
             XCTAssertFalse(source.contains("Thread.isMainThread else"),
                            "\(path) must not decide the retry by thread itself")
             XCTAssertTrue(source.contains("settle.run("), "\(path) must use the shared policy")
         }
+    }
+
+    // MARK: - Bounded poll (Chromium manual-accessibility rescue)
+
+    func testPollOnTheMainThreadNeverSleepsAndSaysSo() {
+        let recorder = Recorder()
+        var attempts = 0
+        let outcome = recorder.policy(mainThread: { true }).poll(
+            from: "first",
+            every: 0.03,
+            maxPolls: 10,
+            until: .distantFuture,
+            { attempts += 1; return "later" },
+            stopWhen: { $0 == "later" }
+        )
+        XCTAssertEqual(outcome.last, "first")
+        XCTAssertEqual(outcome.polls, 0)
+        XCTAssertTrue(outcome.skippedOnMain, "A skipped poll must not read as one that ran out of time")
+        XCTAssertEqual(attempts, 0)
+        XCTAssertEqual(recorder.sleeps, [])
+        XCTAssertEqual(recorder.scheduled, [])
+    }
+
+    /// The old loop was bounded only by wall clock. With a clock that does not move — a stalled
+    /// or injected one — it would spin forever; the count bound ends it.
+    func testPollOffMainIsCountBoundedEvenWhenTheClockStands() {
+        let recorder = Recorder()
+        let start = Date()
+        let outcome = recorder.policy(mainThread: { false }).poll(
+            from: 0,
+            every: 0.03,
+            maxPolls: 4,
+            until: start.addingTimeInterval(1),
+            now: { start },
+            { 0 },
+            stopWhen: { $0 > 0 }
+        )
+        XCTAssertEqual(outcome.polls, 4)
+        XCTAssertFalse(outcome.skippedOnMain)
+        XCTAssertEqual(recorder.sleeps, [0.03, 0.03, 0.03, 0.03])
+    }
+
+    func testPollStopsAtTheFirstAcceptedAnswerAndAtTheDeadline() {
+        let recorder = Recorder()
+        var answers = [0, 0, 7, 9]
+        let found = recorder.policy(mainThread: { false }).poll(
+            from: 0, every: 0.03, maxPolls: 10, until: .distantFuture,
+            { answers.removeFirst() }, stopWhen: { $0 > 0 }
+        )
+        XCTAssertEqual(found.last, 7)
+        XCTAssertEqual(found.polls, 3)
+
+        let expired = recorder.policy(mainThread: { false }).poll(
+            from: 0, every: 0.03, maxPolls: 10, until: .distantPast,
+            { 1 }, stopWhen: { $0 > 0 }
+        )
+        XCTAssertEqual(expired.polls, 0)
+        XCTAssertFalse(expired.skippedOnMain)
+    }
+
+    private func rescueChecker(
+        _ recorder: Recorder,
+        mainThread: @escaping () -> Bool,
+        treeAppearsOnProbe: Int?,
+        probes: @escaping () -> Void = {}
+    ) -> AXContextChecker {
+        var probeCount = 0
+        let element = AXUIElementCreateApplication(4_242)
+        return AXContextChecker(
+            settle: recorder.policy(mainThread: mainThread),
+            focusProbes: { _ in
+                probes()
+                probeCount += 1
+                guard let treeAppearsOnProbe, probeCount >= treeAppearsOnProbe else {
+                    return .init(candidates: [], summary: "systemWide:noValue")
+                }
+                return .init(candidates: [element], summary: "systemWide:available")
+            },
+            manualAccessibilityWrite: { _ in .success }
+        )
+    }
+
+    /// The regression: every selection read reached the rescue on main and slept there for the
+    /// whole settle window (`manualAX:activatedNow polls:10`, ~300 ms of beachball).
+    func testChromiumRescueOnTheMainThreadDoesNotPoll() {
+        let recorder = Recorder()
+        var probes = 0
+        let subject = rescueChecker(
+            recorder, mainThread: { true }, treeAppearsOnProbe: nil, probes: { probes += 1 }
+        )
+
+        let started = Date()
+        let result = subject.probeFocusedElements(
+            activateManualAccessibilityIfEmpty: true, frontmostPID: 4_242
+        )
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.1, "The rescue slept on main")
+        XCTAssertEqual(probes, 1, "Only the first probe may run on main")
+        XCTAssertEqual(recorder.sleeps, [])
+        XCTAssertEqual(result.manualAccessibility, .activatedNow)
+        XCTAssertTrue(result.summary.hasSuffix("manualAX:activatedNow polls:skippedOnMain"),
+                      result.summary)
+    }
+
+    func testChromiumRescueOffMainPollsUntilTheTreeAppears() {
+        let recorder = Recorder()
+        let subject = rescueChecker(recorder, mainThread: { false }, treeAppearsOnProbe: 3)
+
+        let result = subject.probeFocusedElements(
+            activateManualAccessibilityIfEmpty: true, frontmostPID: 4_242
+        )
+
+        XCTAssertEqual(result.candidates.count, 1)
+        XCTAssertEqual(recorder.sleeps, [AXContextChecker.manualAccessibilityPollSeconds,
+                                         AXContextChecker.manualAccessibilityPollSeconds])
+        XCTAssertTrue(result.summary.hasSuffix("polls:2"), result.summary)
+    }
+
+    func testChromiumRescueOffMainGivesUpAfterTheBoundedPolls() {
+        let recorder = Recorder()
+        let subject = rescueChecker(recorder, mainThread: { false }, treeAppearsOnProbe: nil)
+
+        let result = subject.probeFocusedElements(
+            activateManualAccessibilityIfEmpty: true, frontmostPID: 4_242
+        )
+
+        XCTAssertEqual(AXContextChecker.manualAccessibilityMaxPolls, 10)
+        XCTAssertEqual(recorder.sleeps.count, AXContextChecker.manualAccessibilityMaxPolls)
+        XCTAssertTrue(result.candidates.isEmpty)
+        XCTAssertTrue(result.summary.hasSuffix("polls:10"), result.summary)
     }
 }

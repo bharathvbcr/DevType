@@ -11,7 +11,9 @@ import Foundation
 /// * one retry, after `delay`, only when the caller says the first answer is retryable;
 /// * the **synchronous** form sleeps for the settle only off main. On main it returns the first
 ///   answer — blocking main is exactly what starves the tap;
-/// * the **asynchronous** form gives main-thread callers the retry by scheduling it instead.
+/// * the **asynchronous** form gives main-thread callers the retry by scheduling it instead;
+/// * the **bounded poll** (`poll`) is the multi-attempt wait for the Chromium rescue, under the
+///   same rule: it sleeps only off main, and on main returns the first answer unpolled.
 ///
 /// The attempt closure receives its 0-based index so a caller can escalate its own budget on the
 /// retry (the focus query does), and decides for itself which thread it runs on.
@@ -80,5 +82,42 @@ public struct AXSettleRetry {
     /// continuation ran (the erase guard's re-read after a possible write).
     public func afterSettle(_ work: @escaping () -> Void) {
         scheduleOnMain(delay, work)
+    }
+
+    /// What a `poll` did. `skippedOnMain` keeps "never polled because the caller was on main"
+    /// distinguishable from "polled and the deadline had already passed" — both are zero polls.
+    public struct PollOutcome<T> {
+        public let last: T
+        public let polls: Int
+        public let skippedOnMain: Bool
+    }
+
+    /// Bounded poll for state that appears some time after a trigger — the Chromium tree after
+    /// `AXManualAccessibility` is switched on. Same rule as the synchronous `run`: it settles
+    /// only off main. On main it returns `first` untouched, because the poll *is* the main-thread
+    /// stall this type exists to forbid; a caller that needs the poll runs off main.
+    ///
+    /// Bounded twice: by `maxPolls`, so a stalled or injected clock cannot spin it, and by
+    /// `deadline`. Stops at the first answer `isDone` accepts.
+    public func poll<T>(
+        from first: T,
+        every interval: TimeInterval,
+        maxPolls: Int,
+        until deadline: Date,
+        now: () -> Date = Date.init,
+        _ attempt: () -> T,
+        stopWhen isDone: (T) -> Bool
+    ) -> PollOutcome<T> {
+        guard !isMainThread() else {
+            return PollOutcome(last: first, polls: 0, skippedOnMain: true)
+        }
+        var last = first
+        var polls = 0
+        while polls < maxPolls, !isDone(last), now() < deadline {
+            sleep(interval)
+            polls += 1
+            last = attempt()
+        }
+        return PollOutcome(last: last, polls: polls, skippedOnMain: false)
     }
 }

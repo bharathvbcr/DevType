@@ -105,15 +105,35 @@ public final class AXContextChecker {
     /// One focus-query attempt at a given AX messaging budget. Injected in tests so the retry
     /// policy can be exercised without a live AX tree; production is `copyFocusedElementOnce`.
     private let focusAttempt: ((Float) -> FocusQueryResult)?
+    /// One round of `probeFocusedElements`' probes, and the `AXManualAccessibility` write. Injected
+    /// in tests so the Chromium rescue can be driven without a live AX tree or a real target app;
+    /// production is `runLiveFocusProbes` and `AXUIElementSetAttributeValue`.
+    private let focusProbes: ((pid_t?) -> FocusProbeRun)?
+    private let manualAccessibilityWrite: ((pid_t) -> AXError)?
 
     public init() {
         settle = .live
         focusAttempt = nil
+        focusProbes = nil
+        manualAccessibilityWrite = nil
     }
 
     init(settle: AXSettleRetry, focusAttempt: @escaping (Float) -> FocusQueryResult) {
         self.settle = settle
         self.focusAttempt = focusAttempt
+        focusProbes = nil
+        manualAccessibilityWrite = nil
+    }
+
+    init(
+        settle: AXSettleRetry,
+        focusProbes: @escaping (pid_t?) -> FocusProbeRun,
+        manualAccessibilityWrite: @escaping (pid_t) -> AXError
+    ) {
+        self.settle = settle
+        focusAttempt = nil
+        self.focusProbes = focusProbes
+        self.manualAccessibilityWrite = manualAccessibilityWrite
     }
 
     /// Whether this process is trusted for Accessibility (no prompt).
@@ -340,7 +360,7 @@ public final class AXContextChecker {
 
         // §8.8: never run the rescue against ourselves. The wake-up is Chromium's opt-in switch and
         // DevType is not Chromium — it answers `attributeUnsupported` — and the settle poll then
-        // sleeps the main thread for the whole budget waiting for a tree that already exists and
+        // spends the whole settle window waiting for a tree that already exists and
         // has no focused element in it. Field report: `manualAX:unsupported polls:10`, 332 ms, for
         // a `noFocus` that was decided before the first poll. When we are frontmost the answer the
         // explicit paths want comes from `SelectionMonitor`'s cache, not from our own UI: an
@@ -365,30 +385,38 @@ public final class AXContextChecker {
 
         // Chromium builds the tree asynchronously after the switch is flipped, so the very next
         // read still answers nothing. Poll briefly rather than making the user press the hotkey
-        // twice. Bounded, and only ever reached on an explicit gesture in an app that had no
-        // focus at all.
-        let settleDeadline = Self.settlePollDeadline(now: Date(), budget: deadline)
-        var last = first
-        var polls = 0
-        while Date() < settleDeadline {
-            Thread.sleep(forTimeInterval: Self.manualAccessibilityPollSeconds)
-            polls += 1
-            last = runFocusProbes(frontmostPID: pid)
-            if !last.candidates.isEmpty { break }
-        }
+        // twice. Bounded, and only ever reached in an app that had no focus at all.
+        //
+        // The poll waits only off main (`AXSettleRetry.poll`); `SelectionReader` runs its reads on
+        // its own queue for exactly this reason. A main-thread caller gets the first answer, and
+        // the summary says the poll was skipped rather than passing that off as `polls:0`.
+        let settled = settle.poll(
+            from: first,
+            every: Self.manualAccessibilityPollSeconds,
+            maxPolls: Self.manualAccessibilityMaxPolls,
+            until: Self.settlePollDeadline(now: Date(), budget: deadline),
+            { runFocusProbes(frontmostPID: pid) },
+            stopWhen: { !$0.candidates.isEmpty }
+        )
+        let pollLabel = settled.skippedOnMain ? "polls:skippedOnMain" : "polls:\(settled.polls)"
         return FocusProbeResult(
-            candidates: last.candidates,
-            summary: last.summary + " manualAX:\(state.rawValue) polls:\(polls)",
+            candidates: settled.last.candidates,
+            summary: settled.last.summary + " manualAX:\(state.rawValue) \(pollLabel)",
             manualAccessibility: state
         )
     }
 
-    private struct FocusProbeRun {
+    struct FocusProbeRun {
         var candidates: [AXUIElement]
         var summary: String
     }
 
     private func runFocusProbes(frontmostPID: pid_t?) -> FocusProbeRun {
+        if let focusProbes { return focusProbes(frontmostPID) }
+        return runLiveFocusProbes(frontmostPID: frontmostPID)
+    }
+
+    private func runLiveFocusProbes(frontmostPID: pid_t?) -> FocusProbeRun {
         var candidates: [AXUIElement] = []
         var parts: [String] = []
 
@@ -441,6 +469,9 @@ public final class AXContextChecker {
     /// How long to wait for the tree after switching it on, and the poll step.
     public static let manualAccessibilitySettleSeconds: TimeInterval = 0.30
     public static let manualAccessibilityPollSeconds: TimeInterval = 0.03
+    /// Count bound on the settle poll, so it ends even when the clock it reads does not advance.
+    public static let manualAccessibilityMaxPolls =
+        Int((manualAccessibilitySettleSeconds / manualAccessibilityPollSeconds).rounded(.up))
 
     /// What asking an app to publish its accessibility tree actually achieved.
     ///
@@ -538,7 +569,7 @@ public final class AXContextChecker {
     ///
     /// Our own process never is. The rescue exists to wake another app's accessibility tree and
     /// wait for it; against ourselves it is a guaranteed `unsupported` round-trip followed by up to
-    /// `manualAccessibilitySettleSeconds` of main-thread sleep on a gesture the user is waiting on.
+    /// `manualAccessibilitySettleSeconds` of polling on a gesture the user is waiting on.
     public static func mayRescueFocus(
         pid: pid_t,
         ownPID: pid_t = ProcessInfo.processInfo.processIdentifier
@@ -560,6 +591,7 @@ public final class AXContextChecker {
     @discardableResult
     public func ensureManualAccessibility(pid: pid_t) -> ManualAccessibilityState {
         ensureManualAccessibility(pid: pid, now: { ProcessInfo.processInfo.systemUptime }) { targetPID in
+            if let manualAccessibilityWrite { return manualAccessibilityWrite(targetPID) }
             let appElement = AXUIElementCreateApplication(targetPID)
             Self.applyMessagingTimeout(to: appElement)
             return AXUIElementSetAttributeValue(

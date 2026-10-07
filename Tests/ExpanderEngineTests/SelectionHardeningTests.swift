@@ -147,13 +147,13 @@ final class SelectionHardeningTests: XCTestCase {
         XCTAssertLessThan(expired, now, "An exhausted budget must not buy a fresh poll window.")
     }
 
-    /// The whole explicit read has to stay inside a human-scale wait: the ladder runs on the
-    /// main thread before any panel can appear.
+    /// The whole explicit read has to stay inside a human-scale wait: the ladder runs before
+    /// any panel can appear, and the user is waiting on it.
     func testReadBudgetIsBoundedAndCoversTheSettlePoll() {
         XCTAssertGreaterThan(SelectionReader.readBudgetSeconds, 0)
         XCTAssertLessThanOrEqual(
             SelectionReader.readBudgetSeconds, 2.0,
-            "Past a couple of seconds on the main thread this reads as a hang, not a read."
+            "Past a couple of seconds before the panel appears this reads as a hang, not a read."
         )
         XCTAssertGreaterThan(
             SelectionReader.readBudgetSeconds,
@@ -165,6 +165,48 @@ final class SelectionHardeningTests: XCTestCase {
             SelectionReader.maxAncestorHops, 8,
             "The widening pass is a bounded look outward, not a tree crawl."
         )
+    }
+
+    // MARK: - The read runs off main
+
+    /// Every caller is a gesture on main, and the read is up to `readBudgetSeconds` of AX IPC
+    /// plus the Chromium settle poll — which only polls off main. Run it on main and it either
+    /// beachballs for the whole of it or loses the rescue. So both entry points must do the
+    /// read on `readQueue`, finish it without main's help, and deliver the outcome on main.
+    func testBothEntryPointsReadOffMainAndDeliverOnMain() {
+        typealias Entry = (AIDiagnosticsStore, @escaping (SelectionReader.Outcome) -> Void) -> Void
+        let entries: [(String, Entry)] = [
+            ("readSelection", { store, done in
+                SelectionReader.readSelection(diagnostics: store, completion: done)
+            }),
+            ("readSelectionForExplicitAIAction", { store, done in
+                SelectionReader.readSelectionForExplicitAIAction(
+                    diagnostics: store,
+                    clipboardCapture: { .boardUnchanged },
+                    completion: done
+                )
+            }),
+        ]
+        for (name, entry) in entries {
+            XCTAssertTrue(Thread.isMainThread)
+            let store = AIDiagnosticsStore()
+            var deliveredOnMain: Bool?
+            let delivered = expectation(description: name)
+            entry(store) { _ in
+                deliveredOnMain = Thread.isMainThread
+                delivered.fulfill()
+            }
+
+            // Main has not spun since the call. Draining the read queue from here can only see
+            // a finished read if the read never needed main to run.
+            SelectionReader.readQueue.sync {}
+            XCTAssertEqual(store.recentSelectionReads().count, 1,
+                           "\(name) must complete on its own queue, without the main thread")
+            XCTAssertNil(deliveredOnMain, "\(name) must not deliver synchronously")
+
+            wait(for: [delivered], timeout: 5)
+            XCTAssertEqual(deliveredOnMain, true, "\(name) must deliver its outcome on main")
+        }
     }
 
     // MARK: - Ancestor walk

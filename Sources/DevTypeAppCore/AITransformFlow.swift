@@ -68,39 +68,51 @@ enum AITransformFlow {
         // Clipboard fallback on: this is the one explicit-gesture path where a brokered ⌘C as a
         // last resort is right — the captured text is shown in the action panel before anything
         // is written back, so a bad capture is visible and cancellable.
-        let selection: SelectionReader.Result
-        switch SelectionReader.readSelectionForExplicitAIAction() {
-        case .selection(let resolved):
-            selection = resolved
-        case .failure(let failure):
-            softAlert(
-                title: failure.title(loc: loc),
-                message: failure.message(loc: loc),
-                loc: loc
-            )
-            return
-        }
+        //
+        // The read runs off main and can take its whole budget. Blocking main used to serialize
+        // presses for free; now only the latest press may act on its result, so a second press
+        // during the read cannot stack a second picker (or a stale alert) behind the first.
+        hotkeyReadGeneration &+= 1
+        let generation = hotkeyReadGeneration
+        SelectionReader.readSelectionForExplicitAIAction { outcome in
+            guard generation == hotkeyReadGeneration else { return }
+            let selection: SelectionReader.Result
+            switch outcome {
+            case .selection(let resolved):
+                selection = resolved
+            case .failure(let failure):
+                softAlert(
+                    title: failure.title(loc: loc),
+                    message: failure.message(loc: loc),
+                    loc: loc
+                )
+                return
+            }
 
-        AIActionPanel.present(
-            input: selection.text,
-            source: selection.source,
-            loc: loc,
-            modelUnavailable: modelUnavailable
-        ) { picked, sourceApp in
-            // `picked.customInstructions` is the whole contract of a `.custom` pick — the kind's
-            // own prompt is a wrapper with no direction in it. Dropping it here (this argument
-            // was hard-coded `nil`) ran the model on nothing.
-            run(
+            AIActionPanel.present(
                 input: selection.text,
-                kind: picked.kind,
-                sourceApp: sourceApp,
-                customInstructions: picked.customInstructions,
-                forcePreview: picked.requiresPreview,
+                source: selection.source,
                 loc: loc,
-                onInject: onInject
-            )
+                modelUnavailable: modelUnavailable
+            ) { picked, sourceApp in
+                // `picked.customInstructions` is the whole contract of a `.custom` pick — the
+                // kind's own prompt is a wrapper with no direction in it. Dropping it here (this
+                // argument was hard-coded `nil`) ran the model on nothing.
+                run(
+                    input: selection.text,
+                    kind: picked.kind,
+                    sourceApp: sourceApp,
+                    customInstructions: picked.customInstructions,
+                    forcePreview: picked.requiresPreview,
+                    loc: loc,
+                    onInject: onInject
+                )
+            }
         }
     }
+
+    /// The hotkey press whose selection read may still act. Main-thread only.
+    private static var hotkeyReadGeneration: UInt64 = 0
 
     /// Typed / engine path: always preview in phase 1 (no headless direct-replace).
     /// `restoreOnCancel` is the erased trigger text — re-injected via `erasePlan: .empty` if

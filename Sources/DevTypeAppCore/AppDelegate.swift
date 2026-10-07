@@ -36,6 +36,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recentSnippetIDs: [UUID] = []
     private var lastTapStartFailed = false
     private var lastLoggedDisplayStatus: EngineDisplayStatus?
+    /// The palette AI action whose focus wait / selection read may still act. Main-thread only.
+    private var paletteAIGeneration: UInt64 = 0
     /// Single-flight: launch + CDHash callback must not open Setup twice.
     private var onboardingPresentationInFlight = false
     /// Set when the user dismisses Setup without completing it (Skip, or closing the window).
@@ -1483,6 +1485,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         sourceApp: NSRunningApplication?,
         selection: SelectionReader.Outcome
     ) {
+        // Supersedes any earlier palette AI action still waiting on focus or on its selection read.
+        paletteAIGeneration &+= 1
         guard AIPreferences.isEnabled else {
             DevTypeAlert.info(
                 title: loc.s("ai.alert.disabled.title"),
@@ -1546,6 +1550,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         sourceApp: NSRunningApplication,
         remainingPolls: Int = SelectionReader.sourceFocusMaxPolls
     ) {
+        // Neither the focus wait nor the off-main read blocks main, so the user can start another
+        // palette AI action in the meantime. Only the latest may read — the read can post ⌘C — and
+        // only the latest may act on what it read.
+        let generation = paletteAIGeneration
         switch SelectionReader.sourceFocusRetryDecision(
             sourcePID: sourceApp.processIdentifier,
             frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
@@ -1556,7 +1564,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + SelectionReader.sourceFocusPollInterval
             ) { [weak self] in
-                self?.retryPaletteAISelectionAfterFocus(
+                guard let self, self.paletteAIGeneration == generation else { return }
+                self.retryPaletteAISelectionAfterFocus(
                     kind: kind,
                     customInstructions: customInstructions,
                     sourceApp: sourceApp,
@@ -1565,16 +1574,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
         case .read:
-            switch SelectionReader.readSelectionForExplicitAIAction() {
-            case .selection(let resolved):
-                startPaletteAITransform(
-                    resolved,
-                    kind: kind,
-                    customInstructions: customInstructions,
-                    sourceApp: sourceApp
-                )
-            case .failure(let failure):
-                presentPaletteSelectionFailure(failure, sourceApp: sourceApp)
+            SelectionReader.readSelectionForExplicitAIAction { [weak self] outcome in
+                guard let self, self.paletteAIGeneration == generation else { return }
+                switch outcome {
+                case .selection(let resolved):
+                    self.startPaletteAITransform(
+                        resolved,
+                        kind: kind,
+                        customInstructions: customInstructions,
+                        sourceApp: sourceApp
+                    )
+                case .failure(let failure):
+                    self.presentPaletteSelectionFailure(failure, sourceApp: sourceApp)
+                }
             }
 
         case .fail:

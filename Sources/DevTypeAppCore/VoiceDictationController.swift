@@ -819,7 +819,7 @@ public final class VoiceDictationController: @unchecked Sendable {
             return false
         }
 
-        return await MainActor.run {
+        let rolledBack: (spokenText: String, erasedFromDocument: String)? = await MainActor.run {
             // Whatever progressive typing put on screen was the spoken command, not content
             // the user wants kept — except when the command acts on it, which is captured
             // before the rollback.
@@ -837,30 +837,42 @@ public final class VoiceDictationController: @unchecked Sendable {
                 VoiceHUDPanel.shared.updateState(
                     .error(message: LocalizationManager.shared.s("ai.availability.unsupportedOS"))
                 )
+                return nil
+            }
+            return (spokenText, erasedFromDocument)
+        }
+        guard let rolledBack else { return true }
+        let erasedFromDocument = rolledBack.erasedFromDocument
+
+        let input: String
+        switch command.target {
+        case .spoken(let text):
+            input = text
+
+        case .lastInsertion:
+            // "proofread final insertion" — the text this session just typed. It is not
+            // selected, and asking the user to select it first would defeat the point of
+            // asking by voice.
+            input = rolledBack.spokenText
+
+        case .selection:
+            // Awaited, not read inside `MainActor.run`: the read runs off main and can spend its
+            // whole budget on AX IPC and the Chromium settle poll.
+            let outcome = await withCheckedContinuation { continuation in
+                SelectionReader.readSelectionForExplicitAIAction { continuation.resume(returning: $0) }
+            }
+            switch outcome {
+            case .selection(let resolved):
+                input = resolved.text
+            case .failure(let failure):
+                await MainActor.run {
+                    VoiceHUDPanel.shared.updateState(.error(message: failure.message(loc: .shared)))
+                }
                 return true
             }
+        }
 
-            let input: String
-            switch command.target {
-            case .spoken(let text):
-                input = text
-
-            case .lastInsertion:
-                // "proofread final insertion" — the text this session just typed. It is not
-                // selected, and asking the user to select it first would defeat the point of
-                // asking by voice.
-                input = spokenText
-
-            case .selection:
-                switch SelectionReader.readSelectionForExplicitAIAction() {
-                case .selection(let resolved):
-                    input = resolved.text
-                case .failure(let failure):
-                    VoiceHUDPanel.shared.updateState(.error(message: failure.message(loc: .shared)))
-                    return true
-                }
-            }
-
+        return await MainActor.run {
             guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 VoiceHUDPanel.shared.updateState(
                     .error(message: self.emptyTargetMessage(for: command))

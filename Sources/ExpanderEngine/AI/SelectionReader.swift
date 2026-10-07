@@ -2,7 +2,7 @@ import ApplicationServices
 import Cocoa
 import Foundation
 
-/// Synchronous AX read of the current selection for the AI hotkey / palette paths.
+/// AX read of the current selection for the AI hotkey / palette paths, off the main thread.
 ///
 /// Reads AX attributes only — no synthetic ⌘C. Clipboard ownership belongs to
 /// `PasteboardBroker`; an unmanaged copy would corrupt `changeCount` and abandon restore.
@@ -41,7 +41,7 @@ public enum SelectionReader {
 
     /// Total wall-clock budget for one explicit selection read, across every probe and rung.
     ///
-    /// The ladder is long on purpose and runs on the main thread before a panel can appear.
+    /// The ladder is long on purpose and runs before a panel can appear (on `readQueue`).
     /// Unbounded worst case is three focused candidates × four ancestors × six attribute rungs,
     /// each able to burn the AX messaging timeout against one hung app — seconds of beachball.
     /// The budget turns that into "tried until it stopped being reasonable", and records how
@@ -102,25 +102,49 @@ public enum SelectionReader {
         }
     }
 
+    /// The one queue every selection read runs on.
+    ///
+    /// Every caller is a user gesture on main (hotkey, palette, voice command), and the read is up
+    /// to `readBudgetSeconds` of synchronous AX IPC, plus the Chromium settle poll and the
+    /// brokered copy's wait for the target app to write. On main that was a beachball for the
+    /// whole of it. Serial, so two quick presses read one after the other rather than racing the
+    /// same app's AX tree and the same clipboard snapshot.
+    static let readQueue = DispatchQueue(label: "com.devtype.selection-read", qos: .userInitiated)
+
+    /// Run one read on `readQueue` and hand its outcome back on main. There is no synchronous
+    /// form: one would let a caller put the whole ladder back on the main thread.
+    private static func readOffMain(
+        _ read: @escaping () -> Outcome,
+        completion: @escaping (Outcome) -> Void
+    ) {
+        readQueue.async {
+            let outcome = read()
+            DispatchQueue.main.async { completion(outcome) }
+        }
+    }
+
     /// Read the current selection through Accessibility, with a typed reason when there is none.
-    /// This ordinary entry point can never synthesize keyboard input.
+    /// This ordinary entry point can never synthesize keyboard input. `completion` runs on main.
     public static func readSelection(
         checker: AXContextChecker = .shared,
         muteStore: AppMuteStore = .shared,
         monitor: SelectionMonitor = .shared,
         now: Date = Date(),
         diagnostics: AIDiagnosticsStore? = .shared,
-        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)? = nil
-    ) -> Outcome {
-        readSelectionImpl(
-            checker: checker,
-            muteStore: muteStore,
-            monitor: monitor,
-            now: now,
-            diagnostics: diagnostics,
-            clipboardFallbackPolicy: .disabled,
-            clipboardCapture: clipboardCapture
-        )
+        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)? = nil,
+        completion: @escaping (Outcome) -> Void
+    ) {
+        readOffMain({
+            readSelectionImpl(
+                checker: checker,
+                muteStore: muteStore,
+                monitor: monitor,
+                now: now,
+                diagnostics: diagnostics,
+                clipboardFallbackPolicy: .disabled,
+                clipboardCapture: clipboardCapture
+            )
+        }, completion: completion)
     }
 
     /// Read for a user-invoked AI action, permitting the brokered ⌘C tier only when AX exposes
@@ -130,23 +154,27 @@ public enum SelectionReader {
     /// A copy answer remains semantically ambiguous in AX-invisible editors: it may be selected
     /// text or the editor's copy-current-line behavior. The `.clipboard` result source preserves
     /// that provenance for diagnostics and UI; callers must not relabel it as AX-verified.
+    /// `completion` runs on main.
     public static func readSelectionForExplicitAIAction(
         checker: AXContextChecker = .shared,
         muteStore: AppMuteStore = .shared,
         monitor: SelectionMonitor = .shared,
         now: Date = Date(),
         diagnostics: AIDiagnosticsStore? = .shared,
-        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)? = nil
-    ) -> Outcome {
-        readSelectionImpl(
-            checker: checker,
-            muteStore: muteStore,
-            monitor: monitor,
-            now: now,
-            diagnostics: diagnostics,
-            clipboardFallbackPolicy: .explicitAIAction,
-            clipboardCapture: clipboardCapture
-        )
+        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)? = nil,
+        completion: @escaping (Outcome) -> Void
+    ) {
+        readOffMain({
+            readSelectionImpl(
+                checker: checker,
+                muteStore: muteStore,
+                monitor: monitor,
+                now: now,
+                diagnostics: diagnostics,
+                clipboardFallbackPolicy: .explicitAIAction,
+                clipboardCapture: clipboardCapture
+            )
+        }, completion: completion)
     }
 
     /// Canonical implementation for both public capabilities. Never returns a blank-but-non-empty
@@ -336,18 +364,6 @@ public enum SelectionReader {
             DevTypeLog.selection.info("\(logLine, privacy: .public)")
         }
         return outcome
-    }
-
-    /// Back-compat wrapper: selection or nothing, with the reason discarded.
-    ///
-    /// Prefer `readSelection()` — a caller that shows the user a message needs the reason, and
-    /// this overload is exactly how every path came to say "no text selected" for a revoked
-    /// Accessibility grant.
-    public static func readSelectedText(
-        checker: AXContextChecker = .shared,
-        muteStore: AppMuteStore = .shared
-    ) -> Result? {
-        readSelection(checker: checker, muteStore: muteStore).result
     }
 
     /// Apps seeded as AX false-success (Chrome, Slack, Electron, …) — treat selection

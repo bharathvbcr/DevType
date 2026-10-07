@@ -37,7 +37,17 @@ final class SecretSearchWindowTests: XCTestCase {
         [view] + view.subviews.flatMap { descendants(of: $0) }
     }
 
+    /// `InlineSearchPanel.open` reads the selection off main and builds the panel when the read
+    /// lands, so the panel exists only after main has spun. Bounded by the read's own budget.
+    private func waitForPaletteToOpen() {
+        let deadline = Date().addingTimeInterval(SelectionReader.readBudgetSeconds + 2)
+        while !InlineSearchPanel.isOpen, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+    }
+
     private func searchPanel(placeholder: String) throws -> NSPanel {
+        waitForPaletteToOpen()
         // Let AppKit finish the 160 ms opening animation and activate the window
         // before converting row coordinates into native mouse events.
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
@@ -290,6 +300,33 @@ final class SecretSearchWindowTests: XCTestCase {
         }
     }
 
+    /// The open reads off main, so a second press can arrive before the panel exists. It must
+    /// cancel that open — as it closes a visible panel — not leave it to appear later. The reads
+    /// are serial and delivered in order, so once a later open's panel is up, the cancelled
+    /// open's completion has already run and had its chance to misbehave.
+    func testTogglePressedWhileTheSelectionIsStillReadingCancelsTheOpen() throws {
+        let fixture = try secretFixture()
+        defer { InlineSearchPanel.close() }
+        let baselineOwners = EventTapEngine.shared.matchingSuspensionOwners().count
+        let loc = LocalizationManager.shared
+
+        InlineSearchPanel.toggle(store: fixture.store, mode: .copy) { _, _, _ in XCTFail("Cancelled open fired") }
+        XCTAssertFalse(InlineSearchPanel.isOpen, "The panel waits for the selection read")
+        InlineSearchPanel.toggle(store: fixture.store, mode: .copy) { _, _, _ in XCTFail("Second press opened") }
+        XCTAssertFalse(InlineSearchPanel.isOpen)
+
+        InlineSearchPanel.open(store: fixture.store, mode: .copySecrets) { _, _, _ in }
+        _ = try searchPanel(placeholder: loc.s("menu.searchSecrets.placeholder"))
+        let copyPanels = NSApp.windows.compactMap { $0 as? NSPanel }.filter { panel in
+            guard panel.isVisible, let content = panel.contentView else { return false }
+            return descendants(of: content).compactMap { $0 as? NSTextField }
+                .contains { $0.placeholderString == loc.s("menu.copySnippet") }
+        }
+        XCTAssertEqual(copyPanels.count, 0, "The cancelled open must never build its panel")
+        XCTAssertEqual(EventTapEngine.shared.matchingSuspensionOwners().count, baselineOwners + 1,
+                       "Only the live panel may hold a matching suspension")
+    }
+
     func testExplicitSecretSearchReplacesPaletteAndReleasesSuspension() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -318,6 +355,11 @@ final class SecretSearchWindowTests: XCTestCase {
                 guard case .snippet(let snippet) = pick else { return XCTFail("Secret search returned a command") }
                 selected = snippet.id
             }
+            // While the new open's selection read is in flight the old panel is already gone and
+            // its suspension released — nothing from it may outlive the replacement request.
+            XCTAssertFalse(oldPanel.isVisible)
+            XCTAssertEqual(EventTapEngine.shared.matchingSuspensionOwners().count, baselineOwners)
+            waitForPaletteToOpen()
             XCTAssertTrue(InlineSearchPanel.isOpen)
             XCTAssertFalse(oldPanel.isVisible)
             XCTAssertEqual(EventTapEngine.shared.matchingSuspensionOwners().count, baselineOwners + 1)
