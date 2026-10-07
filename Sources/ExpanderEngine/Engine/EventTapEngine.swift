@@ -1365,7 +1365,8 @@ public final class EventTapEngine {
                 terminator: terminator,
                 eraseCountOverride: eraseOverride,
                 erasePlan: erasePlan,
-                armedFocusPID: focusPID
+                armedFocusPID: focusPID,
+                caseShape: match.caseShape
             )
         }
         return nil // Swallow only after sync-safe planner allow
@@ -1982,7 +1983,8 @@ public final class EventTapEngine {
                 eraseCountOverride: nil,
                 erasePlan: erasePlan,
                 armedFocusPID: focusPID,
-                textSuffix: suffix
+                textSuffix: suffix,
+                caseShape: TriggerCaseShape.forExpansion(of: snippet, typedTrigger: trigger)
             )
         }
     }
@@ -2249,7 +2251,9 @@ public final class EventTapEngine {
         armedFocusPID: pid_t?,
         /// Characters typed after the trigger while the match was held. They are inside
         /// `erasePlan`, so they must be re-appended to the injected text or they vanish.
-        textSuffix: String = ""
+        textSuffix: String = "",
+        /// Enhancement plan 1.4: the case of the trigger as typed, for both render passes.
+        caseShape: TriggerCaseShape = .asWritten
     ) {
         let quiescence = inputClock.arm()
 
@@ -2342,7 +2346,8 @@ public final class EventTapEngine {
             fillValues: [:],
             lookup: lookup,
             clipboardText: clipboardSnapshot,
-            context: renderContext
+            context: renderContext,
+            caseShape: caseShape
         )
 
         if firstPass.needsFillIn {
@@ -2373,7 +2378,8 @@ public final class EventTapEngine {
                             fillValues: values,
                             lookup: lookup,
                             clipboardText: clipboardSnapshot,
-                            context: renderContext
+                            context: renderContext,
+                            caseShape: caseShape
                         )
                         self.finishDeferredInject(
                             snippet: snippet,

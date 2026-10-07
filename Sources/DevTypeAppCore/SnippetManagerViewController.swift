@@ -619,6 +619,7 @@ struct SnippetDuplicationPlanner {
             triggerKeyword: trigger,
             replacementText: isSecretDraft ? "" : source.replacementText,
             isCaseSensitive: source.isCaseSensitive,
+            propagateCase: source.propagateCase,
             requireWordBoundary: source.requireWordBoundary,
             isPlainText: source.isPlainText,
             enabled: isSecretDraft ? false : source.enabled,

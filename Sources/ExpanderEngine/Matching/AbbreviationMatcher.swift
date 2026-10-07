@@ -417,3 +417,39 @@ public struct AbbreviationMatcher {
         match(characters: Array(buffer), bundleID: bundleID)
     }
 }
+
+// MARK: - Case propagation
+
+/// Enhancement plan 1.4: the case a typed trigger asks the expansion to take (`sig` / `Sig` /
+/// `SIG` → as written / first letter upper / all upper).
+///
+/// The rule is Espanso's `calculate_casing_style` (espanso/src/cli/worker/engine/process/
+/// middleware/render/mod.rs), so an imported `propagate_case: true` match behaves as it did there:
+/// only the first two letters of the trigger as typed are read, and anything that is not a letter
+/// (the `:` of `:sig`, digits) is skipped.
+///
+/// * first two letters upper → `.allUpper`;
+/// * first letter upper, second lower → `.firstUpper`;
+/// * exactly one letter, upper → `.allUpper` (Espanso's default `uppercase_style`);
+/// * first letter lower — including mixed triggers such as `sIG` — or no letter at all →
+///   `.asWritten`.
+public enum TriggerCaseShape: Equatable {
+    case asWritten
+    case firstUpper
+    case allUpper
+
+    public static func of(typedTrigger: String) -> TriggerCaseShape {
+        var letters = typedTrigger.lazy.filter(\.isLetter).makeIterator()
+        guard let first = letters.next(), first.isUppercase else { return .asWritten }
+        guard let second = letters.next() else { return .allUpper }
+        return second.isUppercase ? .allUpper : .firstUpper
+    }
+
+    /// The shape an expansion takes. Only a case-insensitive snippet that opted in propagates: a
+    /// case-sensitive trigger matches one spelling, so its case carries no request. A match whose
+    /// trigger cannot be reconstructed (physical Hangul) keeps the text as written.
+    public static func forExpansion(of snippet: SnippetModel, typedTrigger: String?) -> TriggerCaseShape {
+        guard snippet.propagateCase, !snippet.isCaseSensitive, let typedTrigger else { return .asWritten }
+        return of(typedTrigger: typedTrigger)
+    }
+}

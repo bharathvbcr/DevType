@@ -87,7 +87,7 @@ public enum SnippetImporter {
         case imageMatchSkipped(Int)
         case markdownImportedLiterally(Int)
         case appScopePreserved(Int)
-        case propagateCaseNotAdapted(Int)
+        case uppercaseStyleNotAdapted(Int)
         case unsupportedMatchSkipped(Int)
     }
 
@@ -530,8 +530,8 @@ public enum SnippetImporter {
             if result.appScopedCount > 0 {
                 notes.append(.appScopePreserved(result.appScopedCount))
             }
-            if result.propagateCaseCount > 0 {
-                notes.append(.propagateCaseNotAdapted(result.propagateCaseCount))
+            if result.uppercaseStyleNotAdaptedCount > 0 {
+                notes.append(.uppercaseStyleNotAdapted(result.uppercaseStyleNotAdaptedCount))
             }
             let nonImageSkipped = result.skippedVars + result.skippedForm + result.skippedHtml
                 + result.skippedMarkdown + result.skippedRegex + result.skippedEmptyTrigger

@@ -612,6 +612,9 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
     private var enabledChip: ToggleChip!
     private var caseChip: ToggleChip!
     private var boundaryChip: ToggleChip!
+    /// Enhancement plan 1.4. Shown only while Case Sensitive is off: a case-sensitive trigger
+    /// matches one spelling, so how it was typed carries no request for the output.
+    private var propagateCaseChip: ToggleChip!
     private var plainChip: ToggleChip!
     /// The replacement text view's scroller, hidden while the secure field has the slot.
     private weak var replacementScroll: NSScrollView?
@@ -867,6 +870,13 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             help: loc.s("editor.caseSensitive.help"),
             target: self, action: #selector(chipTapped(_:))
         )
+        propagateCaseChip = ToggleChip(
+            title: loc.s("editor.propagateCase"), symbol: "textformat.size",
+            isOn: seed?.propagateCase ?? false,
+            help: loc.s("editor.propagateCase.help"),
+            target: self, action: #selector(chipTapped(_:))
+        )
+        propagateCaseChip.isHidden = caseChip.isOn
         boundaryChip = ToggleChip(
             title: loc.s("editor.wordBoundary"), symbol: "paragraphsign",
             isOn: seed?.requireWordBoundary ?? true,
@@ -881,7 +891,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             help: loc.s("editor.plainText.help"),
             target: self, action: #selector(chipTapped(_:))
         )
-        let chipsRow = NSStackView(views: [enabledChip, caseChip, boundaryChip, plainChip])
+        let chipsRow = NSStackView(views: [enabledChip, caseChip, propagateCaseChip, boundaryChip, plainChip])
         // Suggestion chips are appended to this same row rather than given a row of their own:
         // the panel is a fixed 690pt and this one already scrolls horizontally when it overflows.
         self.chipsRow = chipsRow
@@ -1169,7 +1179,8 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         aiTransformPopup.nextKeyView = replacementView
         replacementView.nextKeyView = enabledChip
         enabledChip.nextKeyView = caseChip
-        caseChip.nextKeyView = boundaryChip
+        caseChip.nextKeyView = propagateCaseChip
+        propagateCaseChip.nextKeyView = boundaryChip
         boundaryChip.nextKeyView = plainChip
         plainChip.nextKeyView = cancelButton
         cancelButton.nextKeyView = saveButton
@@ -2118,6 +2129,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
     @objc private func chipTapped(_ sender: ToggleChip) {
         sender.isOn.toggle()
+        if sender === caseChip { propagateCaseChip.isHidden = caseChip.isOn }
         // Case sensitivity changes what counts as a conflict, and Word Boundary
         // changes the firing rule the guide explains — both re-run live.
         if sender === caseChip || sender === boundaryChip || sender === enabledChip {
@@ -2224,6 +2236,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         }
 
         snippet.isCaseSensitive = caseSensitive
+        snippet.propagateCase = !caseSensitive && propagateCaseChip.isOn
         snippet.requireWordBoundary = boundaryChip.isOn
         snippet.isPlainText = plainChip.isOn
         snippet.enabled = enabledChip.isOn

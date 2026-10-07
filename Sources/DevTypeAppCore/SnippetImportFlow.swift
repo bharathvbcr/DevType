@@ -452,8 +452,8 @@ enum SnippetImportFlow {
             return loc.p("alert.import.note.markdown", count: count, count)
         case .appScopePreserved(let count):
             return loc.p("alert.import.note.appScope", count: count, count)
-        case .propagateCaseNotAdapted(let count):
-            return loc.p("alert.import.note.propagateCase", count: count, count)
+        case .uppercaseStyleNotAdapted(let count):
+            return loc.p("alert.import.note.uppercaseStyle", count: count, count)
         case .unsupportedMatchSkipped(let count):
             return loc.p("alert.import.note.unsupported", count: count, count)
         }

@@ -8,6 +8,10 @@ public struct SnippetModel: Codable, Identifiable, Hashable {
     public var triggerKeyword: String
     public var replacementText: String
     public var isCaseSensitive: Bool
+    /// Enhancement plan 1.4: the expansion takes the case the trigger was typed in (`sig` / `Sig` /
+    /// `SIG`). Only honoured while `isCaseSensitive` is false — see `TriggerCaseShape`. Applies to
+    /// the template text alone, never to fill-in values, clipboard contents or generated values.
+    public var propagateCase: Bool
     public var requireWordBoundary: Bool
     public var isPlainText: Bool
     public var enabled: Bool
@@ -72,6 +76,7 @@ public struct SnippetModel: Codable, Identifiable, Hashable {
         triggerKeyword: String,
         replacementText: String,
         isCaseSensitive: Bool = false,
+        propagateCase: Bool = false,
         requireWordBoundary: Bool = true,
         isPlainText: Bool = true,
         enabled: Bool = true,
@@ -91,6 +96,7 @@ public struct SnippetModel: Codable, Identifiable, Hashable {
         self.triggerKeyword = triggerKeyword
         self.replacementText = replacementText
         self.isCaseSensitive = isCaseSensitive
+        self.propagateCase = propagateCase
         self.requireWordBoundary = requireWordBoundary
         self.isPlainText = isPlainText
         self.enabled = enabled
@@ -126,6 +132,8 @@ public struct SnippetModel: Codable, Identifiable, Hashable {
     private enum CodingKeys: String, CodingKey {
         case id, title, label, triggerKeyword, replacementText
         case isCaseSensitive, requireWordBoundary, isPlainText, enabled
+        // Enhancement plan 1.4 — absent in every library written before it.
+        case propagateCase
         case imagePath, createdAt, updatedAt, usageCount
         // §4.4: added in schema v2.1 — always decoded with `decodeIfPresent`.
         case tags, includeApps, excludeApps
@@ -149,6 +157,7 @@ public struct SnippetModel: Codable, Identifiable, Hashable {
         try c.encode(triggerKeyword, forKey: .triggerKeyword)
         try c.encode(isSecret ? "" : replacementText, forKey: .replacementText)
         try c.encode(isCaseSensitive, forKey: .isCaseSensitive)
+        try c.encode(propagateCase, forKey: .propagateCase)
         try c.encode(requireWordBoundary, forKey: .requireWordBoundary)
         try c.encode(isPlainText, forKey: .isPlainText)
         try c.encode(enabled, forKey: .enabled)
@@ -174,6 +183,7 @@ public struct SnippetModel: Codable, Identifiable, Hashable {
         triggerKeyword = try c.decode(String.self, forKey: .triggerKeyword)
         replacementText = try c.decode(String.self, forKey: .replacementText)
         isCaseSensitive = try c.decodeIfPresent(Bool.self, forKey: .isCaseSensitive) ?? false
+        propagateCase = try c.decodeIfPresent(Bool.self, forKey: .propagateCase) ?? false
         requireWordBoundary = try c.decodeIfPresent(Bool.self, forKey: .requireWordBoundary) ?? true
         isPlainText = try c.decodeIfPresent(Bool.self, forKey: .isPlainText) ?? true
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
@@ -231,6 +241,11 @@ public struct SnippetMatch: Equatable {
         self.source = source
         self.eraseCount = eraseCount ?? triggerLength
         self.fieldText = fieldText
+    }
+
+    /// The case this expansion takes, read from the trigger as typed (`fieldText`).
+    public var caseShape: TriggerCaseShape {
+        TriggerCaseShape.forExpansion(of: snippet, typedTrigger: fieldText)
     }
 }
 

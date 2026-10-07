@@ -1368,6 +1368,7 @@ public final class SnippetStore {
                 triggerKeyword: localSnippet.triggerKeyword,
                 replacementText: candidate.replacementText,
                 isCaseSensitive: candidate.isCaseSensitive,
+                propagateCase: candidate.propagateCase,
                 requireWordBoundary: candidate.requireWordBoundary,
                 isPlainText: candidate.isPlainText,
                 enabled: localSnippet.enabled,
@@ -1384,6 +1385,7 @@ public final class SnippetStore {
                 && localSnippet.label == merged.label
                 && localSnippet.replacementText == merged.replacementText
                 && localSnippet.isCaseSensitive == merged.isCaseSensitive
+                && localSnippet.propagateCase == merged.propagateCase
                 && localSnippet.requireWordBoundary == merged.requireWordBoundary
                 && localSnippet.isPlainText == merged.isPlainText
                 && localSnippet.imagePath == merged.imagePath

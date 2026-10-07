@@ -648,6 +648,7 @@ public final class LocalizationManager: ObservableObject {
             "editor.replacement": "Replacement",
             "editor.enabled": "Enabled",
             "editor.caseSensitive": "Case Sensitive",
+            "editor.propagateCase": "Match Trigger Case",
             "editor.wordBoundary": "Word Boundary",
             "editor.wordBoundary.inert":
                 "Not used for this trigger — it starts with “%@”, so it fires the moment you type it. The prefix already acts as the boundary.",
@@ -806,6 +807,7 @@ public final class LocalizationManager: ObservableObject {
             "editor.tags.suggested.help": "Suggested by the on-device model. Switch it on to add this tag when you save; nothing is added unless you do.",
             "editor.group.suggested.help": "Suggested by the on-device model. Switch it on to move this snippet to that group; switch it off to go back to the group you had.",
             "editor.caseSensitive.help": "When on, the trigger must be typed with exactly this capitalisation.",
+            "editor.propagateCase.help": "When on, typing the trigger Capitalized or in ALL CAPS shapes the expansion the same way. Fill-in values and clipboard text keep their own case.",
             "editor.wordBoundary.help":
                 "When on, a bare-word trigger only fires after a space, punctuation, Return or Tab. Turn it off to expand the moment the last character is typed. Punctuation-leading triggers always fire instantly.",
             "editor.plainText.help": "Strips styling so the snippet is inserted as plain text.",
@@ -1024,8 +1026,8 @@ public final class LocalizationManager: ObservableObject {
             "alert.import.note.markdown.other": "%d Markdown matches were imported as literal Markdown text.",
             "alert.import.note.appScope.one": "%d match kept its app inclusion or exclusion scope.",
             "alert.import.note.appScope.other": "%d matches kept their app inclusion or exclusion scope.",
-            "alert.import.note.propagateCase.one": "%d propagate_case match kept case-insensitive matching, but output case adaptation is unavailable.",
-            "alert.import.note.propagateCase.other": "%d propagate_case matches kept case-insensitive matching, but output case adaptation is unavailable.",
+            "alert.import.note.uppercaseStyle.one": "%d propagate_case match uses uppercase_style capitalize or capitalize_words; it was imported with the default case shapes.",
+            "alert.import.note.uppercaseStyle.other": "%d propagate_case matches use uppercase_style capitalize or capitalize_words; they were imported with the default case shapes.",
             "alert.import.note.unsupported.one": "%d unsupported or incomplete match was skipped.",
             "alert.import.note.unsupported.other": "%d unsupported or incomplete matches were skipped.",
             "alert.import.saveFailed.title": "Import Was Not Saved",
@@ -2682,6 +2684,7 @@ public final class LocalizationManager: ObservableObject {
             "editor.replacement": "대체 텍스트",
             "editor.enabled": "활성화",
             "editor.caseSensitive": "대소문자 구분",
+            "editor.propagateCase": "트리거 대소문자 따르기",
             "editor.wordBoundary": "단어 경계",
             "editor.wordBoundary.inert":
                 "이 트리거에는 적용되지 않습니다 — “%@”(으)로 시작하므로 입력하는 즉시 실행됩니다. 접두사가 이미 경계 역할을 합니다.",
@@ -2834,6 +2837,7 @@ public final class LocalizationManager: ObservableObject {
             "editor.tags.suggested.help": "온디바이스 모델이 제안했습니다. 켜면 저장할 때 이 태그가 추가되며, 켜지 않으면 아무것도 추가되지 않습니다.",
             "editor.group.suggested.help": "온디바이스 모델이 제안했습니다. 켜면 이 스니펫을 해당 그룹으로 옮기고, 끄면 원래 그룹으로 돌아갑니다.",
             "editor.caseSensitive.help": "켜면 트리거를 정확히 이 대소문자 그대로 입력해야 합니다.",
+            "editor.propagateCase.help": "켜면 트리거를 첫 글자만 대문자로 또는 모두 대문자로 입력할 때 확장 결과도 같은 형태가 됩니다. 채우기 값과 클립보드 텍스트는 원래 대소문자를 유지합니다.",
             "editor.wordBoundary.help":
                 "켜면 일반 단어 트리거는 공백, 문장 부호, Return, Tab 뒤에만 실행됩니다. 끄면 마지막 글자를 입력하는 즉시 확장됩니다. 문장 부호로 시작하는 트리거는 항상 즉시 실행됩니다.",
             "editor.plainText.help": "서식을 제거하고 일반 텍스트로 삽입합니다.",
@@ -3032,7 +3036,7 @@ public final class LocalizationManager: ObservableObject {
             "alert.import.note.imageSkipped.other": "이미지가 없거나 읽을 수 없거나 지원되지 않아 이미지 매치 %d개를 건너뛰었습니다.",
             "alert.import.note.markdown.other": "Markdown 매치 %d개를 리터럴 Markdown 텍스트로 가져왔습니다.",
             "alert.import.note.appScope.other": "매치 %d개의 앱 포함 또는 제외 범위를 유지했습니다.",
-            "alert.import.note.propagateCase.other": "propagate_case 매치 %d개는 대소문자 무시 일치를 유지하지만 출력 대소문자 조정은 사용할 수 없습니다.",
+            "alert.import.note.uppercaseStyle.other": "uppercase_style이 capitalize 또는 capitalize_words인 propagate_case 매치 %d개는 기본 대소문자 형태로 가져왔습니다.",
             "alert.import.note.unsupported.other": "지원되지 않거나 불완전한 매치 %d개를 건너뛰었습니다.",
             "alert.import.saveFailed.title": "가져오기가 저장되지 않음",
             "alert.import.saveFailed.remote":
@@ -4667,6 +4671,7 @@ public final class LocalizationManager: ObservableObject {
             "editor.replacement": "置換テキスト",
             "editor.enabled": "有効",
             "editor.caseSensitive": "大文字小文字を区別",
+            "editor.propagateCase": "トリガーの大文字小文字に合わせる",
             "editor.wordBoundary": "単語境界",
             "editor.wordBoundary.inert":
                 "このトリガーでは使用されません — 「%@」で始まるため、入力した瞬間に実行されます。接頭辞がすでに境界として機能します。",
@@ -4819,6 +4824,7 @@ public final class LocalizationManager: ObservableObject {
             "editor.tags.suggested.help": "オンデバイスモデルによる提案です。オンにすると保存時にこのタグが追加されます。オンにしなければ何も追加されません。",
             "editor.group.suggested.help": "オンデバイスモデルによる提案です。オンにするとこのスニペットをそのグループへ移動し、オフにすると元のグループに戻ります。",
             "editor.caseSensitive.help": "オンにすると、この大文字小文字のとおりに入力する必要があります。",
+            "editor.propagateCase.help": "オンにすると、トリガーを先頭だけ大文字、またはすべて大文字で入力したとき、展開結果も同じ形になります。入力欄の値とクリップボードのテキストは元の大文字小文字のままです。",
             "editor.wordBoundary.help":
                 "オンにすると、通常の単語トリガーはスペース・記号・Return・Tab の後だけで動作します。オフにすると最後の文字を入力した瞬間に展開されます。記号で始まるトリガーは常に即座に展開されます。",
             "editor.plainText.help": "書式を取り除き、プレーンテキストとして挿入します。",
@@ -5016,7 +5022,7 @@ public final class LocalizationManager: ObservableObject {
             "alert.import.note.imageSkipped.other": "画像が見つからない、読み込めない、または非対応のため %d 件の画像マッチをスキップしました。",
             "alert.import.note.markdown.other": "%d 件の Markdown マッチをリテラル Markdown テキストとしてインポートしました。",
             "alert.import.note.appScope.other": "%d 件のマッチでアプリの包含または除外範囲を保持しました。",
-            "alert.import.note.propagateCase.other": "%d 件の propagate_case マッチは大文字小文字を区別しない一致を保持しますが、出力の大文字小文字調整は利用できません。",
+            "alert.import.note.uppercaseStyle.other": "%d 件の propagate_case マッチは uppercase_style が capitalize または capitalize_words のため、既定の大文字小文字の形で読み込みました。",
             "alert.import.note.unsupported.other": "%d 件の非対応または不完全なマッチをスキップしました。",
             "alert.import.saveFailed.title": "インポートは保存されませんでした",
             "alert.import.saveFailed.remote":

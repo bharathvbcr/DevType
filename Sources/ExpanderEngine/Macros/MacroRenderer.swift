@@ -87,6 +87,8 @@ public enum MacroRenderer {
     ///   - lookup: Resolves nested snippet triggers to replacement text.
     ///   - clipboardText: Pre-snapshot clipboard; when nil, reads pasteboard once at call time.
     ///   - now: Date used for `%date:` and mustache date tags.
+    ///   - caseShape: the typed trigger's case (enhancement plan 1.4), applied to template text
+    ///     only — see `MacroDocument.propagatingCase`.
   public static func expand(
         content: String,
         fillValues: [Int: String] = [:],
@@ -94,7 +96,8 @@ public enum MacroRenderer {
         clipboardText: String? = nil,
         now: Date = Date(),
         templateEngine: DynamicTemplateEngine = .shared,
-        context: MacroRenderContext? = nil
+        context: MacroRenderContext? = nil,
+        caseShape: TriggerCaseShape = .asWritten
     ) -> MacroExpansionResult {
         expand(
             content: content,
@@ -104,7 +107,8 @@ public enum MacroRenderer {
             now: now,
             templateEngine: templateEngine,
             environment: .default,
-            context: context
+            context: context,
+            caseShape: caseShape
         )
     }
 
@@ -118,7 +122,8 @@ public enum MacroRenderer {
         now: Date = Date(),
         templateEngine: DynamicTemplateEngine = .shared,
         environment: MacroEnvironment,
-        context: MacroRenderContext? = nil
+        context: MacroRenderContext? = nil,
+        caseShape: TriggerCaseShape = .asWritten
     ) -> MacroExpansionResult {
         guard content.utf16.prefix(MacroDocument.maximumUTF16 + 1).count <= MacroDocument.maximumUTF16 else {
             return MacroExpansionResult(text: "", cursorOffset: nil, trailingKeys: [], fillFields: [], needsFillIn: false, failure: .sizeLimit)
@@ -155,6 +160,7 @@ public enum MacroRenderer {
         )
         let document = templateEngine.render(teResult.document, currentDate: now, clipboardText: clipboardSnapshot,
                                               environment: environment)
+            .propagatingCase(caseShape, locale: environment.locale)
         let mustacheResult = templateEngine.result(document)
 
         return MacroExpansionResult(

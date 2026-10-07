@@ -369,7 +369,7 @@ final class LocalizationParityTests: XCTestCase {
             "alert.import.note.imageSkipped.other",
             "alert.import.note.markdown.other",
             "alert.import.note.appScope.other",
-            "alert.import.note.propagateCase.other",
+            "alert.import.note.uppercaseStyle.other",
             "alert.import.note.unsupported.other",
             "alert.import.saveFailed.title",
             "alert.import.saveFailed.remote",

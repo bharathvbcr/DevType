@@ -99,6 +99,59 @@ struct MacroDocument {
         return result
     }
 
+    /// Enhancement plan 1.4: the typed trigger's case, applied to template-authored text only.
+    ///
+    /// Literal ranges keep their case — fill-in values, the clipboard, dates and every generated
+    /// value, plus spans an explicit `{{upper:…}}`-style transform already shaped. `.firstUpper`
+    /// follows Espanso and touches only the output's first character, and only when that
+    /// character is template text. Cursor anchors are remapped: uppercasing can change UTF-16
+    /// length (ß → SS).
+    func propagatingCase(_ shape: TriggerCaseShape, locale: Locale) -> MacroDocument {
+        guard failure == nil, shape != .asWritten, length > 0 else { return self }
+        var segments: [(range: NSRange, literal: Bool)] = []
+        var position = 0
+        for literal in literals.sorted(by: { $0.location < $1.location }) where literal.length > 0 {
+            if literal.location > position {
+                segments.append((NSRange(location: position, length: literal.location - position), false))
+            }
+            segments.append((literal, true))
+            position = literal.location + literal.length
+        }
+        if position < length { segments.append((NSRange(location: position, length: length - position), false)) }
+
+        let source = text as NSString
+        let shaping: (String, Int) -> String = { piece, location in
+            switch shape {
+            case .asWritten:
+                return piece
+            case .allUpper:
+                return TextCaseTransform.upper.apply(to: piece, locale: locale)
+            case .firstUpper:
+                guard location == 0, let first = piece.first else { return piece }
+                return TextCaseTransform.upper.apply(to: String(first), locale: locale) + piece.dropFirst()
+            }
+        }
+        var result = MacroDocument()
+        var mapped = Array(repeating: 0, count: cursors.count)
+        var pendingCursors = Set(cursors.indices)
+        for segment in segments {
+            let piece = source.substring(with: segment.range)
+            let end = segment.range.location + segment.range.length
+            for index in pendingCursors where cursors[index] >= segment.range.location && cursors[index] < end {
+                let prefix = source.substring(
+                    with: NSRange(location: segment.range.location, length: cursors[index] - segment.range.location)
+                )
+                let shapedPrefix = segment.literal ? prefix : shaping(prefix, segment.range.location)
+                mapped[index] = result.length + shapedPrefix.utf16.count
+                pendingCursors.remove(index)
+            }
+            result.append(segment.literal ? piece : shaping(piece, segment.range.location), literal: segment.literal)
+        }
+        for index in pendingCursors { mapped[index] = result.length }
+        result.cursors = mapped
+        return result
+    }
+
     func transformed(_ transform: TextCaseTransform, locale: Locale) -> MacroDocument {
         var result = MacroDocument(transform.apply(to: text, locale: locale), literal: true)
         result.cursors = transform.transformedCursorOffsets(in: text, offsets: cursors, locale: locale)

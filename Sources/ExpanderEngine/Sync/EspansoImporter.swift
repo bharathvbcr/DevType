@@ -20,9 +20,9 @@ public enum EspansoImporter {
         public var sourcePath: String
         /// §3.8: `markdown:` matches imported as their literal Markdown source.
         public var markdownAsPlainCount: Int = 0
-        /// §3.8: matches carrying `propagate_case` (case-insensitive matching preserved; the
-        /// output-case adaptation itself has no DevType equivalent).
-        public var propagateCaseCount: Int = 0
+        /// Enhancement plan 1.4: `propagate_case` matches whose `uppercase_style` is `capitalize`
+        /// or `capitalize_words` — imported with the default (`uppercase`) shapes instead.
+        public var uppercaseStyleNotAdaptedCount: Int = 0
         /// §3.8: matches scoped with `apps:` / `exclude_apps:` mapped onto
         /// `SnippetModel.includeApps` / `excludeApps`.
         public var appScopedCount: Int = 0
@@ -415,11 +415,16 @@ public enum EspansoImporter {
         let leftWord = boolValue(match["left_word"])
         let rightWord = boolValue(match["right_word"])
         let requireWordBoundary = word || leftWord || rightWord
-        // §3.8: `propagate_case` implies case-insensitive matching. DevType has no equivalent for
-        // the output-case adaptation itself, so it is counted and reported rather than dropped
-        // silently.
+        // §3.8 / enhancement plan 1.4: `propagate_case` implies case-insensitive matching and maps
+        // onto `SnippetModel.propagateCase`, whose shapes are Espanso's under its default
+        // `uppercase_style: uppercase`. The two other styles change how a one-letter or Capitalized
+        // trigger shapes the output (`capitalize`, `capitalize_words`); DevType has no equivalent,
+        // so those are counted and reported rather than adapted silently.
         let propagateCase = boolValue(match["propagate_case"])
-        if propagateCase { counters.propagateCaseCount += 1 }
+        if propagateCase, let style = match["uppercase_style"] as? String,
+           Self.unadaptedUppercaseStyles.contains(style) {
+            counters.uppercaseStyleNotAdaptedCount += 1
+        }
         // §3.8: `apps:` / `exclude_apps:` → SnippetModel.includeApps / excludeApps (§4.4).
         let includeApps = stringList(match["apps"])
         let excludeApps = stringList(match["exclude_apps"])
@@ -448,6 +453,7 @@ public enum EspansoImporter {
                 triggerKeyword: trimmed,
                 replacementText: replacement,
                 isCaseSensitive: false,
+                propagateCase: propagateCase,
                 requireWordBoundary: requireWordBoundary,
                 isPlainText: true,
                 enabled: true,
@@ -481,6 +487,9 @@ public enum EspansoImporter {
     }
 
     /// Tags DevType's own template engine resolves (`DynamicTemplateEngine` / `MacroRenderer`).
+    /// Espanso `uppercase_style` values with no DevType shape (its default `uppercase` maps exactly).
+    private static let unadaptedUppercaseStyles: Set<String> = ["capitalize", "capitalize_words"]
+
     private static let devTypeResolvableTags: Set<String> = [
         "cursor", "clipboard", "date", "time", "calc", "snippet",
         "uuid", "random", "counter", "upper", "lower", "title", "sentence",
@@ -778,7 +787,7 @@ public enum EspansoImporter {
         var skippedEmptyTrigger = 0
         // §3.8
         var markdownAsPlainCount = 0
-        var propagateCaseCount = 0
+        var uppercaseStyleNotAdaptedCount = 0
         var appScopedCount = 0
         var skippedOversized = 0
         // §hardening
@@ -814,7 +823,7 @@ public enum EspansoImporter {
                 skippedEmptyTrigger: skippedEmptyTrigger,
                 sourcePath: sourcePath,
                 markdownAsPlainCount: markdownAsPlainCount,
-                propagateCaseCount: propagateCaseCount,
+                uppercaseStyleNotAdaptedCount: uppercaseStyleNotAdaptedCount,
                 appScopedCount: appScopedCount,
                 skippedOversized: skippedOversized,
                 skippedUnsafeImports: skippedUnsafeImports,
