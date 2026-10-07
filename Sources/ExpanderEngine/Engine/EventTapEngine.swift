@@ -2997,7 +2997,7 @@ public final class EventTapEngine {
         // one outcome this design must never produce. A posted key can be dropped by the system,
         // but it is never a lie.
         for character in text {
-            _ = TextInjectionPipeline.shared.postUnicodeKeyEvent(
+            _ = HIDKeyPoster.shared.postUnicodeKeyEvent(
                 unicode: String(character),
                 keyCode: 0,
                 flags: []

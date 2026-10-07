@@ -291,7 +291,7 @@ final class EraseCountMatchTests: XCTestCase {
 
     func testTerminatorSwallowedErasesFullTrigger() {
         XCTAssertEqual(
-            TextInjectionPipeline.eraseCountForMatch(
+            EraseExecutor.eraseCountForMatch(
                 triggerUTF16Length: 3,
                 terminator: " ",
                 swallowedFinalKey: true,
@@ -303,7 +303,7 @@ final class EraseCountMatchTests: XCTestCase {
 
     func testPunctInstantUsesSwallowedMath() {
         XCTAssertEqual(
-            TextInjectionPipeline.eraseCountForMatch(
+            EraseExecutor.eraseCountForMatch(
                 triggerUTF16Length: 4,
                 terminator: "",
                 swallowedFinalKey: true,

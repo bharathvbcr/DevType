@@ -12,7 +12,7 @@ final class SwallowedPasteDeliveryTests: XCTestCase {
     func testCursorExpansionIsTypedInsteadOfPasted() {
         XCTAssertTrue(AXWriteCapabilityStore.swallowsSyntheticPaste(bundleID: cursor))
         XCTAssertEqual(
-            TextInjectionPipeline.insertAfterErase(bundleID: cursor, text: "hello"),
+            InjectionPlanner.insertAfterErase(bundleID: cursor, text: "hello"),
             .unicode
         )
     }
@@ -31,7 +31,7 @@ final class SwallowedPasteDeliveryTests: XCTestCase {
                 bundle
             )
             XCTAssertEqual(
-                TextInjectionPipeline.insertAfterErase(bundleID: bundle, text: "fn()"),
+                InjectionPlanner.insertAfterErase(bundleID: bundle, text: "fn()"),
                 .unicode,
                 bundle
             )
@@ -54,44 +54,44 @@ final class SwallowedPasteDeliveryTests: XCTestCase {
                 bundle
             )
             XCTAssertEqual(
-                TextInjectionPipeline.insertAfterErase(bundleID: bundle, text: "hello"),
+                InjectionPlanner.insertAfterErase(bundleID: bundle, text: "hello"),
                 .clipboard,
                 bundle
             )
         }
         XCTAssertEqual(
-            TextInjectionPipeline.insertAfterErase(bundleID: nil, text: "hello"),
+            InjectionPlanner.insertAfterErase(bundleID: nil, text: "hello"),
             .clipboard
         )
         XCTAssertEqual(
-            TextInjectionPipeline.insertAfterErase(bundleID: cursor, text: "ls\n", shellLike: true),
+            InjectionPlanner.insertAfterErase(bundleID: cursor, text: "ls\n", shellLike: true),
             .clipboard
         )
     }
 
     func testEmptyExpansionDoesNotPasteAnEmptyClipboard() {
         XCTAssertEqual(
-            TextInjectionPipeline.emptyExpansionDecision(text: "", cursorOffset: nil),
+            InjectionPlanner.emptyExpansionDecision(text: "", cursorOffset: nil),
             .refuse
         )
         XCTAssertEqual(
-            TextInjectionPipeline.emptyExpansionDecision(text: "", cursorOffset: -1),
+            InjectionPlanner.emptyExpansionDecision(text: "", cursorOffset: -1),
             .refuse
         )
         XCTAssertEqual(
-            TextInjectionPipeline.emptyExpansionDecision(text: "", cursorOffset: 0),
+            InjectionPlanner.emptyExpansionDecision(text: "", cursorOffset: 0),
             .eraseOnly
         )
         XCTAssertEqual(
-            TextInjectionPipeline.emptyExpansionDecision(text: " ", cursorOffset: nil),
+            InjectionPlanner.emptyExpansionDecision(text: " ", cursorOffset: nil),
             .insert
         )
         XCTAssertEqual(
-            TextInjectionPipeline.emptyExpansionDecision(text: "body", cursorOffset: 1),
+            InjectionPlanner.emptyExpansionDecision(text: "body", cursorOffset: 1),
             .insert
         )
         XCTAssertEqual(
-            TextInjectionPipeline.insertAfterErase(bundleID: cursor, text: ""),
+            InjectionPlanner.insertAfterErase(bundleID: cursor, text: ""),
             .nothing
         )
     }
@@ -102,7 +102,7 @@ final class SwallowedPasteDeliveryTests: XCTestCase {
         XCTAssertNil(HIDKeyPoster.unicodeInsertEvents(for: "\u{0000}text"))
         XCTAssertNil(HIDKeyPoster.unicodeInsertEvents(for: "esc\u{001B}"))
         XCTAssertEqual(
-            TextInjectionPipeline.insertAfterErase(bundleID: cursor, text: "a\u{0008}"),
+            InjectionPlanner.insertAfterErase(bundleID: cursor, text: "a\u{0008}"),
             .clipboard
         )
     }

@@ -372,12 +372,12 @@ final class SourceFocusGateStressTests: XCTestCase {
             nil, .noCapturedProcess, .processChanged, .focusLost, .focusArrived,
             .elementChanged, .rangeChanged,
         ]
-        let everyRefusal: [TextInjectionPipeline.EntryGateRefusal] = [
+        let everyRefusal: [EntryGateRefusal] = [
             .superseded, .continuation, .secureInput, .accessibility, .targetChanged, .unreproduced,
         ]
         for refusal in everyRefusal {
             for mismatch in everyMismatch {
-                let recorded = TextInjectionPipeline.recordedTargetMismatch(
+                let recorded = EntryGateRefusal.recordedTargetMismatch(
                     refusal: refusal, mismatch: mismatch
                 )
                 if refusal == .targetChanged {
@@ -395,13 +395,13 @@ final class SourceFocusGateStressTests: XCTestCase {
     func testEntryGateRefusalLabelsArePreciseAcrossTheWholeSpace() {
         let blocks: [InjectCompletionGuard.ContinuationBlock?] =
             [nil, .cancelled, .timedOut, .alreadyCompleted, .callerStopped]
-        var seen = Set<TextInjectionPipeline.EntryGateRefusal>()
+        var seen = Set<EntryGateRefusal>()
         for revisionCurrent in [true, false] {
             for block in blocks {
                 for secureInput in [true, false] {
                     for axUntrusted in [true, false] {
                         for targetCurrent in [true, false] {
-                            let refusal = TextInjectionPipeline.entryGateRefusal(
+                            let refusal = EntryGateRefusal.classify(
                                 revisionCurrent: revisionCurrent,
                                 continuationBlock: block,
                                 secureInputBlocked: secureInput,
@@ -409,7 +409,7 @@ final class SourceFocusGateStressTests: XCTestCase {
                                 targetCurrent: targetCurrent
                             )
                             seen.insert(refusal)
-                            let expected: TextInjectionPipeline.EntryGateRefusal
+                            let expected: EntryGateRefusal
                             if !revisionCurrent {
                                 expected = .superseded
                             } else if let block {

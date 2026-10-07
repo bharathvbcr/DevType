@@ -33,7 +33,7 @@ final class MicrosoftOfficeAXCapabilityTests: XCTestCase {
                 "\(bundleID) must be recognized as a weak-AX app by SelectionReader"
             )
             XCTAssertTrue(
-                TextInjectionPipeline.shouldSkipAXSelectedText(bundleID: bundleID, role: "AXTextArea"),
+                AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID, role: "AXTextArea"),
                 "\(bundleID) must skip AX selected-text writes in TextInjectionPipeline"
             )
             XCTAssertTrue(
@@ -121,7 +121,7 @@ final class MicrosoftOfficeAXCapabilityTests: XCTestCase {
         let preferHID = store.shouldSkipAXSelectedText(bundleID: wordBundle, role: "AXTextArea")
         XCTAssertTrue(preferHID, "Microsoft Word must prefer HID paste")
         XCTAssertFalse(
-            TextInjectionPipeline.mayWriteViaAX(shellLike: false, preferHID: preferHID),
+            InjectionPlanner.mayWriteViaAX(shellLike: false, preferHID: preferHID),
             "mayWriteViaAX must be false for Microsoft Word"
         )
     }

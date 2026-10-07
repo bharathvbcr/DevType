@@ -15,7 +15,7 @@ final class InjectSilentAbortTests: XCTestCase {
     func testEntryGateNamesTheFirstFailingConditionInGateOrder() {
         // Superseded wins over everything else it is tested before.
         XCTAssertEqual(
-            TextInjectionPipeline.entryGateRefusal(
+            EntryGateRefusal.classify(
                 revisionCurrent: false,
                 continuationBlock: .callerStopped,
                 secureInputBlocked: true,
@@ -25,7 +25,7 @@ final class InjectSilentAbortTests: XCTestCase {
             .superseded
         )
         XCTAssertEqual(
-            TextInjectionPipeline.entryGateRefusal(
+            EntryGateRefusal.classify(
                 revisionCurrent: true,
                 continuationBlock: .callerStopped,
                 secureInputBlocked: true,
@@ -35,7 +35,7 @@ final class InjectSilentAbortTests: XCTestCase {
             .continuation
         )
         XCTAssertEqual(
-            TextInjectionPipeline.entryGateRefusal(
+            EntryGateRefusal.classify(
                 revisionCurrent: true,
                 continuationBlock: nil,
                 secureInputBlocked: true,
@@ -45,7 +45,7 @@ final class InjectSilentAbortTests: XCTestCase {
             .secureInput
         )
         XCTAssertEqual(
-            TextInjectionPipeline.entryGateRefusal(
+            EntryGateRefusal.classify(
                 revisionCurrent: true,
                 continuationBlock: nil,
                 secureInputBlocked: false,
@@ -55,7 +55,7 @@ final class InjectSilentAbortTests: XCTestCase {
             .accessibility
         )
         XCTAssertEqual(
-            TextInjectionPipeline.entryGateRefusal(
+            EntryGateRefusal.classify(
                 revisionCurrent: true,
                 continuationBlock: nil,
                 secureInputBlocked: false,
@@ -71,7 +71,7 @@ final class InjectSilentAbortTests: XCTestCase {
     /// implies. Every other block reason is the operation being replaced or already finished.
     func testCallerStoppedIsDistinguishedFromEveryOtherContinuationBlock() {
         XCTAssertEqual(
-            TextInjectionPipeline.entryGateRefusal(
+            EntryGateRefusal.classify(
                 revisionCurrent: true,
                 continuationBlock: .callerStopped,
                 secureInputBlocked: false,
@@ -82,7 +82,7 @@ final class InjectSilentAbortTests: XCTestCase {
         )
         for block: InjectCompletionGuard.ContinuationBlock in [.cancelled, .timedOut, .alreadyCompleted] {
             XCTAssertEqual(
-                TextInjectionPipeline.entryGateRefusal(
+                EntryGateRefusal.classify(
                     revisionCurrent: true,
                     continuationBlock: block,
                     secureInputBlocked: false,
@@ -100,7 +100,7 @@ final class InjectSilentAbortTests: XCTestCase {
     /// here would send whoever reads the report after the wrong condition.
     func testUnreproducedIsNamedRatherThanGuessed() {
         XCTAssertEqual(
-            TextInjectionPipeline.entryGateRefusal(
+            EntryGateRefusal.classify(
                 revisionCurrent: true,
                 continuationBlock: nil,
                 secureInputBlocked: false,
@@ -115,7 +115,7 @@ final class InjectSilentAbortTests: XCTestCase {
     /// paths did not exist, so they all fell through to the generic "Injection refused" and the
     /// report was no more useful than the silent `return` it replaced.
     func testEveryEntryGateRefusalSurvivesSanitizationDistinctly() {
-        let cases: [TextInjectionPipeline.EntryGateRefusal] = [
+        let cases: [EntryGateRefusal] = [
             .superseded, .continuation, .secureInput, .accessibility, .targetChanged, .unreproduced
         ]
         var seen: [String: String] = [:]
@@ -135,7 +135,7 @@ final class InjectSilentAbortTests: XCTestCase {
     /// `.superseded` and `.unreproduced` are allowed to differ from the erase-path wording, but
     /// the entry-gate paths must never collide with the pre-existing vocabulary by accident.
     func testEntryGatePathsAreNamespaced() {
-        for refusal in [TextInjectionPipeline.EntryGateRefusal.superseded, .targetChanged] {
+        for refusal in [EntryGateRefusal.superseded, .targetChanged] {
             XCTAssertTrue(refusal.path.hasPrefix("entryGate_"), refusal.path)
         }
     }

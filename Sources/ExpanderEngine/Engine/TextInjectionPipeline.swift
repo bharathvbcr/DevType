@@ -181,9 +181,6 @@ public final class TextInjectionPipeline {
 
     /// Settle between Cmd+V and the first AX delivery check (while our text is still on the board).
     public static let pasteDeliverySettleDelay: TimeInterval = InjectTiming.pasteDeliverySettleDelay
-    /// Longer hold for password-field secure clipboard paste so the user can press ⌘V if
-    /// synthetic paste is dropped under Secure Input.
-    public static let secureClipboardPasteHoldTimeout: TimeInterval = InjectTiming.secureClipboardPasteHoldTimeout
     /// First Cmd+V + one retry when AX proves the field did not change.
     public static let pasteDeliveryMaxAttempts = InjectTiming.pasteDeliveryMaxAttempts
     /// Settle delay for the deferred AX re-verification pass after unverified HID paste.
@@ -216,65 +213,6 @@ public final class TextInjectionPipeline {
         )
     }
 
-    /// What to do with a rendered expansion before any erase.
-    /// An empty body with no caret marker must not delete the trigger. An empty body that exists
-    /// only to place the caret erases the trigger and must not follow that with an empty paste.
-    public enum EmptyExpansionDecision: Equatable {
-        case refuse
-        case eraseOnly
-        case insert
-    }
-
-    public static func emptyExpansionDecision(text: String, cursorOffset: Int?) -> EmptyExpansionDecision {
-        guard text.isEmpty else { return .insert }
-        if let cursorOffset, cursorOffset >= 0 { return .eraseOnly }
-        return .refuse
-    }
-
-    /// How to put `text` into the field once the trigger is gone.
-    public enum AfterEraseInsert: Equatable {
-        case nothing
-        case unicode
-        case clipboard
-    }
-
-    public static func insertAfterErase(
-        bundleID: String?,
-        text: String,
-        shellLike: Bool = false
-    ) -> AfterEraseInsert {
-        if text.isEmpty { return .nothing }
-        // A terminal accepts ⌘V. A typed newline is not the Return key, so it would not
-        // submit a command and may not break the line in the pty.
-        if shellLike { return .clipboard }
-        let id = bundleID ?? ""
-        if AXWriteCapabilityStore.swallowsSyntheticPaste(bundleID: id),
-           HIDKeyPoster.unicodeInsertEvents(for: text) != nil {
-            return .unicode
-        }
-        return .clipboard
-    }
-
-    /// Apps whose AX `AXSelectedText` / range replace returns success without mutating the field,
-    /// or whose AX focus/selection is too weak to trust. Prefer HID backspace + paste (axPlusHID).
-    ///
-    /// This is only the *seed* list. The live decision goes through `AXWriteCapabilityStore`, which
-    /// also learns unknown apps at runtime — see `shouldSkipAXSelectedText(bundleID:)`.
-    public static func prefersHIDPasteOverAXSelectedText(bundleID: String) -> Bool {
-        AXWriteCapabilityStore.seedVerdict(bundleID: bundleID) == .falseSuccess
-    }
-
-    /// Live decision: seeded priors plus anything learned this session or persisted from earlier ones.
-    public static func shouldSkipAXSelectedText(bundleID: String) -> Bool {
-        AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID)
-    }
-
-    /// §3.3: role-aware skip so a condemned `AXTextArea` does not force HID on the same app's
-    /// native fields — and so a role learned mid-inject is honoured for the AX-direct step.
-    public static func shouldSkipAXSelectedText(bundleID: String, role: String?) -> Bool {
-        AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(bundleID: bundleID, role: role)
-    }
-
     /// Next restore generation token. Pure helper for tests; production uses `beginRestoreGeneration()`.
     public static func nextRestoreGeneration(current: UInt64) -> UInt64 {
         PasteboardBroker.nextRestoreGeneration(current: current)
@@ -291,37 +229,6 @@ public final class TextInjectionPipeline {
             swallowedFinalKey: swallowedFinalKey,
             lastEventCharacterCount: lastEventCharacterCount
         )
-    }
-
-    /// Erase planning for AbbreviationMatcher results under DevType swallow.
-    public static func eraseCountForMatch(
-        triggerUTF16Length: Int,
-        terminator: String,
-        swallowedFinalKey: Bool,
-        lastEventCharacterCount: Int = 1
-    ) -> Int {
-        EraseExecutor.eraseCountForMatch(
-            triggerUTF16Length: triggerUTF16Length,
-            terminator: terminator,
-            swallowedFinalKey: swallowedFinalKey,
-            lastEventCharacterCount: lastEventCharacterCount
-        )
-    }
-
-    /// Whether this inject may touch the field through AX (range replace, then direct set) before
-    /// falling back to the clipboard.
-    ///
-    /// Two exclusions, and they are the same for both AX write sites — which is why this is one
-    /// function rather than a repeated `!a && !b` that can drift apart:
-    ///
-    /// - `shellLike`: a terminal's AX mirror is a rendered screen, not an editable field. A write
-    ///   against it either fails or "succeeds" without reaching the pty.
-    /// - `preferHID`: this `(bundle, role)` has been condemned as a false-success AX host.
-    ///
-    /// Terminals reaching the clipboard path is load-bearing beyond AX: the pasteboard payload is
-    /// the snippet text byte for byte, because the terminal — not DevType — owns bracketed paste.
-    public static func mayWriteViaAX(shellLike: Bool, preferHID: Bool) -> Bool {
-        !shellLike && !preferHID
     }
 
     // MARK: - Entry points
@@ -410,7 +317,7 @@ public final class TextInjectionPipeline {
                 resolvedPlan = .counted(eraseCountOverride)
             } else {
                 resolvedPlan = .counted(
-                    TextInjectionPipeline.eraseCountForMatch(
+                    EraseExecutor.eraseCountForMatch(
                         triggerUTF16Length: triggerLength,
                         terminator: terminator,
                         swallowedFinalKey: swallowed.didSwallow,
@@ -1387,7 +1294,7 @@ public final class TextInjectionPipeline {
             cursorOffset = expanded.cursorOffset
             keysToPress = expanded.trailingKeys
         }
-        if Self.emptyExpansionDecision(text: textToInject, cursorOffset: cursorOffset) == .refuse {
+        if InjectionPlanner.emptyExpansionDecision(text: textToInject, cursorOffset: cursorOffset) == .refuse {
             refuseInject(
                 "Expansion resolved to empty text — leaving the trigger in place",
                 path: "emptyExpansion",
@@ -1445,7 +1352,7 @@ public final class TextInjectionPipeline {
         // An unverifiable precondition cannot license writing through those same AX coordinates.
         // Also skip apps/roles known to report successful writes without mutating.
         let focusedRole = context.focusedRole
-        var preferHID = eraseCheck.requiresHID || TextInjectionPipeline.shouldSkipAXSelectedText(
+        var preferHID = eraseCheck.requiresHID || AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(
             bundleID: frontBundle,
             role: focusedRole
         )
@@ -1545,7 +1452,7 @@ public final class TextInjectionPipeline {
         // as "may have mutated" refused every expand in AX-opaque hosts — a Chrome PWA cannot
         // verify the field either, so the guard tripped on a write that never happened.
         var attemptedAXWrite = false
-        if TextInjectionPipeline.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID) {
+        if InjectionPlanner.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID) {
             let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
                 eraseCount: erasePlan.utf16Count,
@@ -1590,7 +1497,7 @@ public final class TextInjectionPipeline {
             // report succeeded after deleting the trigger when verification is unverifiable.
             if case .falseSuccess = axOutcome {
                 preferHID = true
-            } else if TextInjectionPipeline.shouldSkipAXSelectedText(
+            } else if AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(
                 bundleID: frontBundle,
                 role: focusedRole
             ) {
@@ -1667,7 +1574,7 @@ public final class TextInjectionPipeline {
                 )
                 return
             }
-            switch Self.insertAfterErase(
+            switch InjectionPlanner.insertAfterErase(
                 bundleID: context.frontBundleID,
                 text: textToInject,
                 shellLike: shellLike
@@ -1736,7 +1643,7 @@ public final class TextInjectionPipeline {
 
             // Weak-AX apps and shells: skip direct AX set (same false-success class as range
             // replace, and the same predicate).
-            if TextInjectionPipeline.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID),
+            if InjectionPlanner.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID),
                self.ax.attemptAXDirectInjection(
                    text: textToInject,
                    bundleID: context.frontBundleID,
@@ -1898,7 +1805,7 @@ public final class TextInjectionPipeline {
             focus: focus,
             bundleID: frontBundleID,
             leaveClipboardOnFailure: underSecureInput,
-            holdTimeoutOverride: underSecureInput ? TextInjectionPipeline.secureClipboardPasteHoldTimeout : nil,
+            holdTimeoutOverride: underSecureInput ? InjectTiming.secureClipboardPasteHoldTimeout : nil,
             completeBeforeRestore: true,
             allowSecureInput: true,
             shouldContinue: shouldContinue
@@ -2141,70 +2048,6 @@ public final class TextInjectionPipeline {
         completion(outcome)
     }
 
-    /// Which entry-gate condition refused an inject. Each case is its own line in the
-    /// diagnostic report, because each is a different bug: `.continuation` on a panel-driven
-    /// inject means the source app never came back to the front, while `.targetChanged` means
-    /// it did and then the focused element moved under us.
-    enum EntryGateRefusal: String {
-        case superseded
-        case continuation
-        case secureInput
-        case accessibility
-        case targetChanged
-        /// The gate refused, but no condition still reported false when the reason was
-        /// classified. Named rather than guessed — a label invented here would send whoever
-        /// reads the report after the wrong condition.
-        case unreproduced
-
-        var path: String { "entryGate_\(rawValue)" }
-
-        var reason: String {
-            switch self {
-            case .superseded: return "A newer insertion replaced this one"
-            case .continuation: return "Target application changed before insertion"
-            case .secureInput: return AXContextChecker.secureInputActiveReason
-            case .accessibility: return "Accessibility unavailable at insertion time"
-            case .targetChanged: return "Target element or selection changed before insertion"
-            case .unreproduced: return "Insertion context changed before insertion"
-            }
-        }
-    }
-
-    /// Pure: names the entry-gate refusal from what each half reported, in the order
-    /// `operationIsCurrent` tests them. Pure so every branch is reachable in tests without a
-    /// window server, an AX connection, or a focused app.
-    static func entryGateRefusal(
-        revisionCurrent: Bool,
-        continuationBlock: InjectCompletionGuard.ContinuationBlock?,
-        secureInputBlocked: Bool,
-        axUntrusted: Bool,
-        targetCurrent: Bool
-    ) -> EntryGateRefusal {
-        if !revisionCurrent { return .superseded }
-        if let continuationBlock {
-            return continuationBlock == .callerStopped ? .continuation : .superseded
-        }
-        if secureInputBlocked { return .secureInput }
-        if axUntrusted { return .accessibility }
-        if !targetCurrent { return .targetChanged }
-        return .unreproduced
-    }
-
-    /// Which target mismatch a refusal records, if any.
-    ///
-    /// Only a `.targetChanged` refusal may carry one. The gate reads the target before it knows
-    /// which condition will win, so a supersession or a Secure Input block can easily coincide
-    /// with a target that also happens to have moved — and a report that prints
-    /// `Refuse reason: superseded` beside `Target mismatch: elementChanged` sends the reader
-    /// after a focus bug that had nothing to do with the refusal. The mismatch is evidence for
-    /// exactly one label, so it is attached to exactly that one.
-    static func recordedTargetMismatch(
-        refusal: EntryGateRefusal,
-        mismatch: PasteboardBroker.PasteTarget.Mismatch?
-    ) -> String? {
-        refusal == .targetChanged ? mismatch?.rawValue : nil
-    }
-
     /// Records and completes an entry-gate refusal. Re-reads the *live* conditions to label it;
     /// the gate above already made the decision, so a condition that flipped back in between
     /// costs an `.unreproduced` label, never a changed outcome.
@@ -2226,7 +2069,7 @@ public final class TextInjectionPipeline {
         let revisionCurrent = lastExpansionLock.withLock {
             activeOperation === operation && inputRevision == revision
         }
-        let refusal = Self.entryGateRefusal(
+        let refusal = EntryGateRefusal.classify(
             revisionCurrent: revisionCurrent,
             continuationBlock: operation.continuationBlock(),
             secureInputBlocked: !allowSecureInput && AXContextChecker.isSecureEventInputEnabledLive(),
@@ -2240,7 +2083,7 @@ public final class TextInjectionPipeline {
             allowKeyReplay: false,
             refuseContext: PermissionCoordinator.InjectRefuseProvenance.capture(
                 reason: refusal.reason,
-                targetMismatch: Self.recordedTargetMismatch(
+                targetMismatch: EntryGateRefusal.recordedTargetMismatch(
                     refusal: refusal, mismatch: targetMismatch
                 )
             ),
@@ -2398,12 +2241,6 @@ public final class TextInjectionPipeline {
     }
 
     // MARK: - Delegating surface (unchanged signatures; mechanics live in the collaborators)
-
-    /// Posts a keyDown/keyUp carrying `unicode` (best-effort delivery; post ≠ guaranteed delivery).
-    @discardableResult
-    public func postUnicodeKeyEvent(unicode: String, keyCode: CGKeyCode, flags: CGEventFlags) -> Bool {
-        hid.postUnicodeKeyEvent(unicode: unicode, keyCode: keyCode, flags: flags)
-    }
 
     public static func verifyTextDelivery(
         expectedText: String,

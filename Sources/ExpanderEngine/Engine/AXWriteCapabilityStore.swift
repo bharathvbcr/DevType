@@ -392,6 +392,15 @@ public final class AXWriteCapabilityStore {
     }
 
     /// True when the AX selected-text write should be skipped entirely for this app.
+    /// Apps whose AX `AXSelectedText` / range replace returns success without mutating the field,
+    /// or whose AX focus/selection is too weak to trust. Prefer HID backspace + paste (axPlusHID).
+    ///
+    /// This is only the *seed* list. The live decision is `shouldSkipAXSelectedText(bundleID:)`,
+    /// which also learns unknown apps at runtime.
+    public static func seedPrefersHIDPaste(bundleID: String) -> Bool {
+        seedVerdict(bundleID: bundleID) == .falseSuccess
+    }
+
     public func shouldSkipAXSelectedText(bundleID: String) -> Bool {
         shouldSkipAXSelectedText(bundleID: bundleID, role: nil)
     }

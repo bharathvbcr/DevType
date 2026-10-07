@@ -136,16 +136,16 @@ final class ShellPastePayloadTests: XCTestCase {
     /// share this predicate; before, the rule lived twice as a bare `!a && !b` in control flow
     /// where it could drift.
     func testTerminalsNeverTakeAnAXWritePath() {
-        XCTAssertFalse(TextInjectionPipeline.mayWriteViaAX(shellLike: true, preferHID: false))
-        XCTAssertFalse(TextInjectionPipeline.mayWriteViaAX(shellLike: true, preferHID: true))
+        XCTAssertFalse(InjectionPlanner.mayWriteViaAX(shellLike: true, preferHID: false))
+        XCTAssertFalse(InjectionPlanner.mayWriteViaAX(shellLike: true, preferHID: true))
     }
 
     func testCondemnedHostsNeverTakeAnAXWritePath() {
-        XCTAssertFalse(TextInjectionPipeline.mayWriteViaAX(shellLike: false, preferHID: true))
+        XCTAssertFalse(InjectionPlanner.mayWriteViaAX(shellLike: false, preferHID: true))
     }
 
     func testHealthyNonShellHostKeepsTheAXWritePath() {
-        XCTAssertTrue(TextInjectionPipeline.mayWriteViaAX(shellLike: false, preferHID: false))
+        XCTAssertTrue(InjectionPlanner.mayWriteViaAX(shellLike: false, preferHID: false))
     }
 
     /// Every terminal DevType knows about must resolve as shell-like, or it silently regains the

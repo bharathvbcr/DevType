@@ -68,3 +68,62 @@ public struct InjectionPlanner: Sendable {
         needsCursorHID(cursorOffset: cursorOffset, totalUTF16Length: totalLength)
     }
 }
+
+// MARK: - Write-route policy (pure; formerly on TextInjectionPipeline)
+
+extension InjectionPlanner {
+    /// What to do with a rendered expansion before any erase.
+    /// An empty body with no caret marker must not delete the trigger. An empty body that exists
+    /// only to place the caret erases the trigger and must not follow that with an empty paste.
+    public enum EmptyExpansionDecision: Equatable {
+        case refuse
+        case eraseOnly
+        case insert
+    }
+
+    public static func emptyExpansionDecision(text: String, cursorOffset: Int?) -> EmptyExpansionDecision {
+        guard text.isEmpty else { return .insert }
+        if let cursorOffset, cursorOffset >= 0 { return .eraseOnly }
+        return .refuse
+    }
+
+    /// How to put `text` into the field once the trigger is gone.
+    public enum AfterEraseInsert: Equatable {
+        case nothing
+        case unicode
+        case clipboard
+    }
+
+    public static func insertAfterErase(
+        bundleID: String?,
+        text: String,
+        shellLike: Bool = false
+    ) -> AfterEraseInsert {
+        if text.isEmpty { return .nothing }
+        // A terminal accepts ⌘V. A typed newline is not the Return key, so it would not
+        // submit a command and may not break the line in the pty.
+        if shellLike { return .clipboard }
+        let id = bundleID ?? ""
+        if AXWriteCapabilityStore.swallowsSyntheticPaste(bundleID: id),
+           HIDKeyPoster.unicodeInsertEvents(for: text) != nil {
+            return .unicode
+        }
+        return .clipboard
+    }
+
+    /// Whether this inject may touch the field through AX (range replace, then direct set) before
+    /// falling back to the clipboard.
+    ///
+    /// Two exclusions, and they are the same for both AX write sites — which is why this is one
+    /// function rather than a repeated `!a && !b` that can drift apart:
+    ///
+    /// - `shellLike`: a terminal's AX mirror is a rendered screen, not an editable field. A write
+    ///   against it either fails or "succeeds" without reaching the pty.
+    /// - `preferHID`: this `(bundle, role)` has been condemned as a false-success AX host.
+    ///
+    /// Terminals reaching the clipboard path is load-bearing beyond AX: the pasteboard payload is
+    /// the snippet text byte for byte, because the terminal — not DevType — owns bracketed paste.
+    public static func mayWriteViaAX(shellLike: Bool, preferHID: Bool) -> Bool {
+        !shellLike && !preferHID
+    }
+}

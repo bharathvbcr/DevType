@@ -195,28 +195,28 @@ final class ExpandGateDecisionTests: XCTestCase {
 
     func testWeakAXAppsPreferHIDPaste() {
         XCTAssertTrue(
-            TextInjectionPipeline.prefersHIDPasteOverAXSelectedText(bundleID: "com.apple.MobileSMS")
+            AXWriteCapabilityStore.seedPrefersHIDPaste(bundleID: "com.apple.MobileSMS")
         )
         XCTAssertTrue(
-            TextInjectionPipeline.prefersHIDPasteOverAXSelectedText(bundleID: "com.google.Chrome")
+            AXWriteCapabilityStore.seedPrefersHIDPaste(bundleID: "com.google.Chrome")
         )
         XCTAssertTrue(
-            TextInjectionPipeline.prefersHIDPasteOverAXSelectedText(bundleID: "com.tinyspeck.slackmacgap")
+            AXWriteCapabilityStore.seedPrefersHIDPaste(bundleID: "com.tinyspeck.slackmacgap")
         )
         XCTAssertTrue(
-            TextInjectionPipeline.prefersHIDPasteOverAXSelectedText(
+            AXWriteCapabilityStore.seedPrefersHIDPaste(
                 bundleID: "com.todesktop.230313mzl4w4u92"
             )
         )
         // GitHub Desktop reports setSelectedText success without mutating the field.
         XCTAssertTrue(
-            TextInjectionPipeline.prefersHIDPasteOverAXSelectedText(bundleID: "com.github.githubapp")
+            AXWriteCapabilityStore.seedPrefersHIDPaste(bundleID: "com.github.githubapp")
         )
         XCTAssertFalse(
-            TextInjectionPipeline.prefersHIDPasteOverAXSelectedText(bundleID: "com.apple.Notes")
+            AXWriteCapabilityStore.seedPrefersHIDPaste(bundleID: "com.apple.Notes")
         )
         XCTAssertFalse(
-            TextInjectionPipeline.prefersHIDPasteOverAXSelectedText(bundleID: "com.apple.TextEdit")
+            AXWriteCapabilityStore.seedPrefersHIDPaste(bundleID: "com.apple.TextEdit")
         )
     }
 }
