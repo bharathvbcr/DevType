@@ -17,9 +17,9 @@ final class UndoWidenTests: XCTestCase {
         trigger: String,
         value: String,
         caret: Int,
-        maxTypedAfter: Int = TextInjectionPipeline.undoMaxTypedAfter
+        maxTypedAfter: Int = ExpansionUndoPolicy.undoMaxTypedAfter
     ) -> (plan: ErasePlan, restore: String)? {
-        TextInjectionPipeline.widenedUndo(
+        ExpansionUndoPolicy.widenedUndo(
             injectedText: injected,
             triggerText: trigger,
             value: value,
@@ -97,7 +97,7 @@ final class UndoWidenTests: XCTestCase {
     }
 
     func testWideningIsBounded() {
-        let tail = String(repeating: "x", count: TextInjectionPipeline.undoMaxTypedAfter + 5)
+        let tail = String(repeating: "x", count: ExpansionUndoPolicy.undoMaxTypedAfter + 5)
         XCTAssertNil(
             widen(
                 injected: "ScholarLM",
@@ -110,7 +110,7 @@ final class UndoWidenTests: XCTestCase {
     }
 
     func testExactlyAtTheBoundStillWidens() {
-        let tail = String(repeating: "x", count: TextInjectionPipeline.undoMaxTypedAfter)
+        let tail = String(repeating: "x", count: ExpansionUndoPolicy.undoMaxTypedAfter)
         let result = widen(
             injected: "ScholarLM",
             trigger: "`slm",
@@ -122,14 +122,14 @@ final class UndoWidenTests: XCTestCase {
 
     func testUnreadableFieldYieldsNil() {
         XCTAssertNil(
-            TextInjectionPipeline.widenedUndo(
+            ExpansionUndoPolicy.widenedUndo(
                 injectedText: "ScholarLM", triggerText: "`slm",
                 value: nil, caretLocation: 10
             ),
             "An unreadable AXValue must not be treated as a match."
         )
         XCTAssertNil(
-            TextInjectionPipeline.widenedUndo(
+            ExpansionUndoPolicy.widenedUndo(
                 injectedText: "ScholarLM", triggerText: "`slm",
                 value: "ScholarLMl", caretLocation: nil
             ),

@@ -17,19 +17,19 @@ final class UndoBackspaceReinjectTests: XCTestCase {
     // MARK: - Which pass-through keys poison a blind undo
 
     func testNavigationKeysContaminate() {
-        XCTAssertTrue(TextInjectionPipeline.deliveryPassThroughContaminatesBlindUndo(
+        XCTAssertTrue(ExpansionUndoPolicy.deliveryPassThroughContaminatesBlindUndo(
             resetsCaret: true, isDelete: false, unicodeCount: 0
         ))
     }
 
     func testDeleteKeysContaminate() {
-        XCTAssertTrue(TextInjectionPipeline.deliveryPassThroughContaminatesBlindUndo(
+        XCTAssertTrue(ExpansionUndoPolicy.deliveryPassThroughContaminatesBlindUndo(
             resetsCaret: false, isDelete: true, unicodeCount: 0
         ))
     }
 
     func testTypedCharactersContaminate() {
-        XCTAssertTrue(TextInjectionPipeline.deliveryPassThroughContaminatesBlindUndo(
+        XCTAssertTrue(ExpansionUndoPolicy.deliveryPassThroughContaminatesBlindUndo(
             resetsCaret: false, isDelete: false, unicodeCount: 1
         ))
     }
@@ -37,7 +37,7 @@ final class UndoBackspaceReinjectTests: XCTestCase {
     /// Lone F-keys / dead modifier chords produce no characters and move no caret — they must
     /// not cost the user their undo in AX-opaque hosts.
     func testInertKeysDoNotContaminate() {
-        XCTAssertFalse(TextInjectionPipeline.deliveryPassThroughContaminatesBlindUndo(
+        XCTAssertFalse(ExpansionUndoPolicy.deliveryPassThroughContaminatesBlindUndo(
             resetsCaret: false, isDelete: false, unicodeCount: 0
         ))
     }
@@ -52,7 +52,7 @@ final class UndoBackspaceReinjectTests: XCTestCase {
             let unicode = Int(rng.next() % 4)   // includes 0
             let expected = resets || delete || unicode > 0
             XCTAssertEqual(
-                TextInjectionPipeline.deliveryPassThroughContaminatesBlindUndo(
+                ExpansionUndoPolicy.deliveryPassThroughContaminatesBlindUndo(
                     resetsCaret: resets, isDelete: delete, unicodeCount: unicode
                 ),
                 expected,
@@ -69,11 +69,11 @@ final class UndoBackspaceReinjectTests: XCTestCase {
 
     func testAcceptedUndoReturnsNothing() {
         XCTAssertEqual(
-            TextInjectionPipeline.classifyUndoExit(accepted: true, heldBackspace: heldKey(didSwallow: true)),
+            ExpansionUndoPolicy.classifyUndoExit(accepted: true, heldBackspace: heldKey(didSwallow: true)),
             .accepted
         )
         XCTAssertEqual(
-            TextInjectionPipeline.classifyUndoExit(accepted: true, heldBackspace: nil),
+            ExpansionUndoPolicy.classifyUndoExit(accepted: true, heldBackspace: nil),
             .accepted,
             "An accepted undo owes nothing even without a held key."
         )
@@ -81,7 +81,7 @@ final class UndoBackspaceReinjectTests: XCTestCase {
 
     func testRefusedUndoReturnsAHeldBackspace() {
         XCTAssertEqual(
-            TextInjectionPipeline.classifyUndoExit(accepted: false, heldBackspace: heldKey(didSwallow: true)),
+            ExpansionUndoPolicy.classifyUndoExit(accepted: false, heldBackspace: heldKey(didSwallow: true)),
             .refusedWithBackspaceReturned,
             "The exact case that used to eat the user's keystroke."
         )
@@ -89,7 +89,7 @@ final class UndoBackspaceReinjectTests: XCTestCase {
 
     func testRefusedProgrammaticUndoHasNoKeyToReturn() {
         XCTAssertEqual(
-            TextInjectionPipeline.classifyUndoExit(accepted: false, heldBackspace: nil),
+            ExpansionUndoPolicy.classifyUndoExit(accepted: false, heldBackspace: nil),
             .refusedWithoutHeldKey
         )
     }
@@ -98,7 +98,7 @@ final class UndoBackspaceReinjectTests: XCTestCase {
     /// inject paths) — there is nothing to give back.
     func testUnswallowedPayloadIsNotReturned() {
         XCTAssertEqual(
-            TextInjectionPipeline.classifyUndoExit(accepted: false, heldBackspace: heldKey(didSwallow: false)),
+            ExpansionUndoPolicy.classifyUndoExit(accepted: false, heldBackspace: heldKey(didSwallow: false)),
             .refusedWithoutHeldKey
         )
     }

@@ -89,7 +89,7 @@ final class UndoLifecycleStressTests: XCTestCase {
         pipeline.noteInputAfterExpansion(units: Int.max)
         let attempt = try XCTUnwrap(pipeline.takeUndoAttempt(now: Date(), frontmostPID: 1234))
         XCTAssertEqual(attempt.inputEvents, Int.max)
-        XCTAssertNotNil(TextInjectionPipeline.undoEraseRefusalReason(
+        XCTAssertNotNil(ExpansionUndoPolicy.undoEraseRefusalReason(
             result: .unavailable("opaque"), inputEventsSinceExpansion: attempt.inputEvents
         ))
     }
@@ -218,7 +218,7 @@ final class UndoLifecycleStressTests: XCTestCase {
 
     func testLongFieldWideningUsesOnlyTheCaretWindow() throws {
         let value = String(repeating: "z", count: 1_000_000) + "expanded🎓"
-        let result = try XCTUnwrap(TextInjectionPipeline.widenedUndo(
+        let result = try XCTUnwrap(ExpansionUndoPolicy.widenedUndo(
             injectedText: "expanded", triggerText: "abc", value: value,
             caretLocation: value.utf16.count
         ))
@@ -230,13 +230,13 @@ final class UndoLifecycleStressTests: XCTestCase {
         for injected in ["a", "aa", "aba", "🎓", "e\u{0301}"] {
             for copies in 1...4 {
                 let tail = String(repeating: injected, count: copies)
-                guard tail.utf16.count <= TextInjectionPipeline.undoMaxTypedAfter else { continue }
+                guard tail.utf16.count <= ExpansionUndoPolicy.undoMaxTypedAfter else { continue }
                 let record = TextInjectionPipeline.LastExpansion(
                     erasePlan: ErasePlan(text: "x"), injectedText: injected,
                     triggerText: "xy", bundleID: "test.editor"
                 )
                 let field = "prefix " + injected + tail
-                XCTAssertEqual(TextInjectionPipeline.prepareUndo(
+                XCTAssertEqual(ExpansionUndoPolicy.prepareUndo(
                     record: record,
                     originalRange: NSRange(location: 7 + injected.utf16.count, length: 0),
                     inputEvents: copies, field: (field, field.utf16.count, 0)
@@ -249,10 +249,10 @@ final class UndoLifecycleStressTests: XCTestCase {
         let record = TextInjectionPipeline.LastExpansion(
             erasePlan: ErasePlan(text: "x"), injectedText: "aa", triggerText: "xy", bundleID: nil
         )
-        XCTAssertEqual(TextInjectionPipeline.prepareUndo(
+        XCTAssertEqual(ExpansionUndoPolicy.prepareUndo(
             record: record, originalRange: nil, inputEvents: 2, field: ("aaaa", 4, 0)
         ), .refused(.originalPosition))
-        XCTAssertEqual(TextInjectionPipeline.prepareUndo(
+        XCTAssertEqual(ExpansionUndoPolicy.prepareUndo(
             record: record, originalRange: NSRange(location: 2, length: 0),
             inputEvents: 0, field: ("aa!", 3, 0)
         ), .refused(.verification), "Unobserved edits cannot authorize widening.")

@@ -149,7 +149,7 @@ final class EraseUndoStressTests: XCTestCase {
                 caret = Int(rng.next() % 48) - 4
             }
 
-            let result = TextInjectionPipeline.widenedUndo(
+            let result = ExpansionUndoPolicy.widenedUndo(
                 injectedText: injected,
                 triggerText: trigger,
                 value: value,
@@ -167,7 +167,7 @@ final class EraseUndoStressTests: XCTestCase {
             let injectedUnits = injected.utf16.count
             let tailUnits = plan.utf16Count - injectedUnits
             XCTAssertGreaterThan(tailUnits, 0, "iter \(iteration): k starts at 1 — a zero tail is the plain plan's job")
-            XCTAssertLessThanOrEqual(tailUnits, TextInjectionPipeline.undoMaxTypedAfter, "iter \(iteration): unbounded widening")
+            XCTAssertLessThanOrEqual(tailUnits, ExpansionUndoPolicy.undoMaxTypedAfter, "iter \(iteration): unbounded widening")
             XCTAssertLessThanOrEqual(plan.utf16Count, caret, "iter \(iteration): widened span runs past the caret")
 
             let units = Array(value.utf16)

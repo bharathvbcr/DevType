@@ -15,7 +15,7 @@ final class UndoAuditRegressionTests: XCTestCase {
 
     func testWideningHonorsZeroAndNegativeLimits() {
         for limit in [0, -1, Int.min] {
-            XCTAssertNil(TextInjectionPipeline.widenedUndo(
+            XCTAssertNil(ExpansionUndoPolicy.widenedUndo(
                 injectedText: "abc", triggerText: "x", value: "abcd",
                 caretLocation: 4, maxTypedAfter: limit
             ))
@@ -23,7 +23,7 @@ final class UndoAuditRegressionTests: XCTestCase {
     }
 
     func testWideningCannotExceedItsHardLimit() {
-        XCTAssertNil(TextInjectionPipeline.widenedUndo(
+        XCTAssertNil(ExpansionUndoPolicy.widenedUndo(
             injectedText: "abc", triggerText: "x", value: "abc" + String(repeating: "d", count: 17),
             caretLocation: 20, maxTypedAfter: Int.max
         ))
@@ -56,7 +56,7 @@ final class UndoAuditRegressionTests: XCTestCase {
     }
 
     func testDeliveryContaminationSaturatesInsteadOfTrapping() {
-        XCTAssertEqual(TextInjectionPipeline.deliveryInputUnits(
+        XCTAssertEqual(ExpansionUndoPolicy.deliveryInputUnits(
             keyContaminates: true, flushReplayCount: Int.max
         ), Int.max)
         let pipeline = TextInjectionPipeline()
@@ -66,13 +66,13 @@ final class UndoAuditRegressionTests: XCTestCase {
     }
 
     func testWideningRejectsCaretInsideASurrogatePair() {
-        XCTAssertNil(TextInjectionPipeline.widenedUndo(
+        XCTAssertNil(ExpansionUndoPolicy.widenedUndo(
             injectedText: "abc", triggerText: "x", value: "abc🎓", caretLocation: 4
         ))
     }
 
     func testWideningMustNotGuessBetweenRepeatedMatches() {
-        XCTAssertNil(TextInjectionPipeline.widenedUndo(
+        XCTAssertNil(ExpansionUndoPolicy.widenedUndo(
             injectedText: "aa", triggerText: "x", value: "aaaa", caretLocation: 4
         ))
     }

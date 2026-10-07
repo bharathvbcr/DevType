@@ -1029,7 +1029,7 @@ public final class EventTapEngine {
                 // §3.1d: count before acting on the decision. The key itself counts when it is
                 // field-touching; a flush additionally counts its replayed characters, which
                 // land mid-delivery even when the trigger key was inert (F-key flush).
-                let units = TextInjectionPipeline.deliveryInputUnits(
+                let units = ExpansionUndoPolicy.deliveryInputUnits(
                     keyContaminates: admission.contaminatesBlindUndo,
                     flushReplayCount: admission.decision.replayCount
                 )
@@ -1319,7 +1319,7 @@ public final class EventTapEngine {
             let admission = admitTypeAhead(event: event)
             // §3.1d: same delivery-window rule as the callback's expanding gate — the claim
             // lost, so this key (and any flush it forces) lands inside the other delivery.
-            let units = TextInjectionPipeline.deliveryInputUnits(
+            let units = ExpansionUndoPolicy.deliveryInputUnits(
                 keyContaminates: admission.contaminatesBlindUndo,
                 flushReplayCount: admission.decision.replayCount
             )
@@ -2934,7 +2934,7 @@ public final class EventTapEngine {
         // already counted by `replayTypeAhead` — edits or moves text around a paste whose final
         // geometry is unknowable. Poison the blind-undo premise of the record this delivery will
         // write. Pure predicate on the pipeline keeps this testable without an engine.
-        let contaminates = TextInjectionPipeline.deliveryPassThroughContaminatesBlindUndo(
+        let contaminates = ExpansionUndoPolicy.deliveryPassThroughContaminatesBlindUndo(
             resetsCaret: resets,
             isDelete: KeyClassifier.action(forKeyCode: Int(keyCode)) == .deleteLast,
             unicodeCount: length

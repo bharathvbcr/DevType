@@ -13,25 +13,25 @@ final class DeliveryWindowStressTests: XCTestCase {
     // MARK: - Contamination unit policy
 
     func testFieldTouchingKeyCountsOneUnit() {
-        XCTAssertEqual(TextInjectionPipeline.deliveryInputUnits(keyContaminates: true, flushReplayCount: 0), 1)
+        XCTAssertEqual(ExpansionUndoPolicy.deliveryInputUnits(keyContaminates: true, flushReplayCount: 0), 1)
     }
 
     func testInertKeyAloneCountsNothing() {
-        XCTAssertEqual(TextInjectionPipeline.deliveryInputUnits(keyContaminates: false, flushReplayCount: 0), 0)
+        XCTAssertEqual(ExpansionUndoPolicy.deliveryInputUnits(keyContaminates: false, flushReplayCount: 0), 0)
     }
 
     /// The regression: an inert trigger (F-key keyDown) that still forces a flush must charge
     /// its replayed characters — uncounted, they broke the blind-undo premise invisibly.
     func testInertTriggerWithFlushedReplayCountsTheReplay() {
-        XCTAssertEqual(TextInjectionPipeline.deliveryInputUnits(keyContaminates: false, flushReplayCount: 3), 3)
+        XCTAssertEqual(ExpansionUndoPolicy.deliveryInputUnits(keyContaminates: false, flushReplayCount: 3), 3)
     }
 
     func testTouchingTriggerWithFlushCountsBoth() {
-        XCTAssertEqual(TextInjectionPipeline.deliveryInputUnits(keyContaminates: true, flushReplayCount: 4), 5)
+        XCTAssertEqual(ExpansionUndoPolicy.deliveryInputUnits(keyContaminates: true, flushReplayCount: 4), 5)
     }
 
     func testNegativeReplayCountIsClamped() {
-        XCTAssertEqual(TextInjectionPipeline.deliveryInputUnits(keyContaminates: true, flushReplayCount: -2), 1)
+        XCTAssertEqual(ExpansionUndoPolicy.deliveryInputUnits(keyContaminates: true, flushReplayCount: -2), 1)
     }
 
     /// Exhaustive-ish sweep: units are exactly `key + max(0, replay)` for every combination.
@@ -41,7 +41,7 @@ final class DeliveryWindowStressTests: XCTestCase {
             let key = rng.next() % 2 == 0
             let replay = Int(rng.next() % 20) - 4   // includes negatives
             XCTAssertEqual(
-                TextInjectionPipeline.deliveryInputUnits(keyContaminates: key, flushReplayCount: replay),
+                ExpansionUndoPolicy.deliveryInputUnits(keyContaminates: key, flushReplayCount: replay),
                 (key ? 1 : 0) + max(0, replay)
             )
         }

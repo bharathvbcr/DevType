@@ -294,7 +294,7 @@ final class WhitespaceFoldingStressTests: XCTestCase {
         let injected = "Kind regards Bharath"
         let fieldStored = "Kind\u{00A0}regards\u{00A0}Bharath" // host re-encoded the spaces
         let value = "prefix " + fieldStored + "ab"
-        let widened = TextInjectionPipeline.widenedUndo(
+        let widened = ExpansionUndoPolicy.widenedUndo(
             injectedText: injected,
             triggerText: "`kr",
             value: value,
@@ -307,7 +307,7 @@ final class WhitespaceFoldingStressTests: XCTestCase {
 
     func testWidenedUndoStillRefusesCorruptedInjectedText() {
         let value = "prefix KIND regards Bharathab"   // case differs — not our injected text
-        XCTAssertNil(TextInjectionPipeline.widenedUndo(
+        XCTAssertNil(ExpansionUndoPolicy.widenedUndo(
             injectedText: "Kind regards Bharath",
             triggerText: "`kr",
             value: value,

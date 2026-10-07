@@ -20,7 +20,7 @@ final class UndoHardeningTests: XCTestCase {
     // MARK: - undoPointAllowed (guard 3)
 
     func testPlainExpansionIsUndoable() {
-        XCTAssertTrue(TextInjectionPipeline.undoPointAllowed(
+        XCTAssertTrue(ExpansionUndoPolicy.undoPointAllowed(
             trailingKeys: [], cursorOffset: nil, totalUTF16: 9
         ))
     }
@@ -28,10 +28,10 @@ final class UndoHardeningTests: XCTestCase {
     func testTrailingKeysForbidAnUndoPoint() {
         // An Enter posted after the text may have submitted a form; Tab may have moved focus.
         // Either way the caret is no longer ours to reason about.
-        XCTAssertFalse(TextInjectionPipeline.undoPointAllowed(
+        XCTAssertFalse(ExpansionUndoPolicy.undoPointAllowed(
             trailingKeys: ["\r"], cursorOffset: nil, totalUTF16: 9
         ))
-        XCTAssertFalse(TextInjectionPipeline.undoPointAllowed(
+        XCTAssertFalse(ExpansionUndoPolicy.undoPointAllowed(
             trailingKeys: ["\t", "\t"], cursorOffset: nil, totalUTF16: 9
         ))
     }
@@ -39,14 +39,14 @@ final class UndoHardeningTests: XCTestCase {
     func testMidTextCursorPlacementForbidsAnUndoPoint() {
         // A $|$ macro parked the caret inside the injected text — erasing `injectedText.count`
         // units backwards from there would eat text that precedes the injection.
-        XCTAssertFalse(TextInjectionPipeline.undoPointAllowed(
+        XCTAssertFalse(ExpansionUndoPolicy.undoPointAllowed(
             trailingKeys: [], cursorOffset: 4, totalUTF16: 9
         ))
     }
 
     func testCursorPlacedExactlyAtTheEndStaysUndoable() {
         // Offset == length is "caret after the last character" — the premise holds.
-        XCTAssertTrue(TextInjectionPipeline.undoPointAllowed(
+        XCTAssertTrue(ExpansionUndoPolicy.undoPointAllowed(
             trailingKeys: [], cursorOffset: 9, totalUTF16: 9
         ))
     }
@@ -56,13 +56,13 @@ final class UndoHardeningTests: XCTestCase {
     func testCleanPreconditionProceedsRegardlessOfInputCount() {
         // A readable field that verifies is the strongest evidence there is — the counter is
         // only a stand-in for evidence AX cannot provide.
-        XCTAssertNil(TextInjectionPipeline.undoEraseRefusalReason(
+        XCTAssertNil(ExpansionUndoPolicy.undoEraseRefusalReason(
             result: .ok, inputEventsSinceExpansion: 12
         ))
     }
 
     func testMismatchAlwaysRefuses() {
-        XCTAssertNotNil(TextInjectionPipeline.undoEraseRefusalReason(
+        XCTAssertNotNil(ExpansionUndoPolicy.undoEraseRefusalReason(
             result: .mismatch("field holds other text"), inputEventsSinceExpansion: 0
         ))
     }
@@ -70,7 +70,7 @@ final class UndoHardeningTests: XCTestCase {
     func testOpaqueFieldWithNoInputSinceExpansionMayProceedBlind() {
         // Pre-existing §3.1 behaviour, now with its premise actually enforced: zero input events
         // (and clicks clear the record) mean the caret provably still sits after the injection.
-        XCTAssertNil(TextInjectionPipeline.undoEraseRefusalReason(
+        XCTAssertNil(ExpansionUndoPolicy.undoEraseRefusalReason(
             result: .unavailable("AXValue unreadable"), inputEventsSinceExpansion: 0
         ))
     }
@@ -78,7 +78,7 @@ final class UndoHardeningTests: XCTestCase {
     func testOpaqueFieldWithInputSinceExpansionRefusesBlindUndo() {
         // The "Sch`slm" shape in a host where no precondition read can catch it: input landed,
         // the field cannot be read, so the erase span is unknowable. Refuse.
-        let reason = TextInjectionPipeline.undoEraseRefusalReason(
+        let reason = ExpansionUndoPolicy.undoEraseRefusalReason(
             result: .unavailable("AXValue unreadable"), inputEventsSinceExpansion: 3
         )
         XCTAssertNotNil(reason)
@@ -91,7 +91,7 @@ final class UndoHardeningTests: XCTestCase {
     func testSingleInputEventIsEnoughToRefuseBlindUndo() {
         // The type-ahead replay case: one held character replayed after delivery is one unit
         // sitting between the injected text and the caret — one unit of mis-erase.
-        XCTAssertNotNil(TextInjectionPipeline.undoEraseRefusalReason(
+        XCTAssertNotNil(ExpansionUndoPolicy.undoEraseRefusalReason(
             result: .unavailable("no focused element"), inputEventsSinceExpansion: 1
         ))
     }
