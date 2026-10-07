@@ -926,50 +926,11 @@ public final class TextInjectionPipeline {
         }
 
         let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext(focus: focus)
-        // Snapshot clipboard before any paste mutate when macros need it.
-        let clipboardArg = context.clipboardOverride
-        let cursorOffset: Int?
-        let textToInject: String
-        let keysToPress: [String]
-        if let preResolvedText = context.preResolvedText {
-            textToInject = preResolvedText
-            cursorOffset = context.preResolvedCursorOffset
-            keysToPress = context.trailingKeys
-        } else {
-            let lookup = context.snippetLookup ?? { _ in nil }
-            let expanded = MacroRenderer.expand(
-                content: context.snippet.replacementText,
-                fillValues: [:],
-                lookup: lookup,
-                clipboardText: clipboardArg
-            )
-            if let failure = expanded.failure {
-                refuseInject(failure.message, path: "macroPreparation", swallowed: swallowed, completion: completion)
-                return
-            }
-            if expanded.needsFillIn {
-                refuseInject(
-                    "Fill-in required — present FillInPanel before inject",
-                    path: "fillInRequired",
-                    swallowed: swallowed,
-                    completion: completion
-                )
-                return
-            }
-            textToInject = expanded.text
-            cursorOffset = expanded.cursorOffset
-            keysToPress = expanded.trailingKeys
-        }
-        if InjectionPlanner.emptyExpansionDecision(text: textToInject, cursorOffset: cursorOffset) == .refuse {
-            refuseInject(
-                "Expansion resolved to empty text — leaving the trigger in place",
-                path: "emptyExpansion",
-                swallowed: swallowed,
-                completion: completion
-            )
-            return
-        }
-        let totalUTF16 = textToInject.utf16.count
+        guard let resolved = resolveText(context: context, completion: completion) else { return }
+        let textToInject = resolved.text
+        let cursorOffset = resolved.cursorOffset
+        let keysToPress = resolved.trailingKeys
+        let totalUTF16 = resolved.totalUTF16
         let needsCursor = InjectionPlanner.needsCursorHID(
             cursorOffset: cursorOffset,
             totalUTF16Length: totalUTF16
@@ -1088,11 +1049,7 @@ public final class TextInjectionPipeline {
                         path: "axOnlyRange",
                         context: context,
                         injectedText: textToInject,
-                        undoable: ExpansionUndoPolicy.undoPointAllowed(
-                            trailingKeys: keysToPress,
-                            cursorOffset: cursorOffset,
-                            totalUTF16: totalUTF16
-                        ),
+                        undoable: resolved.undoable,
                         completion: completion
                     )
                 }
@@ -1148,11 +1105,7 @@ public final class TextInjectionPipeline {
                         path: "axRange",
                         context: context,
                         injectedText: textToInject,
-                        undoable: ExpansionUndoPolicy.undoPointAllowed(
-                            trailingKeys: keysToPress,
-                            cursorOffset: cursorOffset,
-                            totalUTF16: totalUTF16
-                        ),
+                        undoable: resolved.undoable,
                         completion: completion
                     )
                 }
@@ -1251,11 +1204,7 @@ public final class TextInjectionPipeline {
                     path: "eraseOnly",
                     context: context,
                     injectedText: textToInject,
-                    undoable: ExpansionUndoPolicy.undoPointAllowed(
-                        trailingKeys: keysToPress,
-                        cursorOffset: cursorOffset,
-                        totalUTF16: totalUTF16
-                    ),
+                    undoable: resolved.undoable,
                     completion: completion
                 )
                 return
@@ -1280,11 +1229,7 @@ public final class TextInjectionPipeline {
                                 path: posted == events.count ? "unicodeInsert" : "unicodeInsertPartial",
                                 context: context,
                                 injectedText: textToInject,
-                                undoable: ExpansionUndoPolicy.undoPointAllowed(
-                                    trailingKeys: keysToPress,
-                                    cursorOffset: cursorOffset,
-                                    totalUTF16: totalUTF16
-                                ),
+                                undoable: resolved.undoable,
                                 completion: completion
                             )
                         }
@@ -1336,11 +1281,7 @@ public final class TextInjectionPipeline {
                         path: "axDirect",
                         context: context,
                         injectedText: textToInject,
-                        undoable: ExpansionUndoPolicy.undoPointAllowed(
-                            trailingKeys: keysToPress,
-                            cursorOffset: cursorOffset,
-                            totalUTF16: totalUTF16
-                        ),
+                        undoable: resolved.undoable,
                         completion: completion
                     )
                 }
@@ -1384,6 +1325,77 @@ public final class TextInjectionPipeline {
                 )
             }
         }
+    }
+
+    /// The text one inject delivers, resolved once: the caller's pre-resolved text or the
+    /// rendered macros, the caret offset, and the `%key:` trailing keys.
+    private struct ResolvedText {
+        let text: String
+        let cursorOffset: Int?
+        let trailingKeys: [String]
+
+        var totalUTF16: Int { text.utf16.count }
+
+        /// §3.1: whether the delivered end state supports an undo point at all.
+        var undoable: Bool {
+            ExpansionUndoPolicy.undoPointAllowed(
+                trailingKeys: trailingKeys, cursorOffset: cursorOffset, totalUTF16: totalUTF16
+            )
+        }
+    }
+
+    /// Renders the snippet (unless the caller already did) and refuses an inject that cannot
+    /// proceed: a macro failure, a fill-in that was never presented, or an empty body with no
+    /// caret marker. `nil` means the inject was refused and `completion` already ran.
+    private func resolveText(
+        context: InjectContext,
+        completion: @escaping InjectionCompletion
+    ) -> ResolvedText? {
+        let swallowed = context.swallowed
+        // Snapshot clipboard before any paste mutate when macros need it.
+        let clipboardArg = context.clipboardOverride
+        let cursorOffset: Int?
+        let textToInject: String
+        let keysToPress: [String]
+        if let preResolvedText = context.preResolvedText {
+            textToInject = preResolvedText
+            cursorOffset = context.preResolvedCursorOffset
+            keysToPress = context.trailingKeys
+        } else {
+            let lookup = context.snippetLookup ?? { _ in nil }
+            let expanded = MacroRenderer.expand(
+                content: context.snippet.replacementText,
+                fillValues: [:],
+                lookup: lookup,
+                clipboardText: clipboardArg
+            )
+            if let failure = expanded.failure {
+                refuseInject(failure.message, path: "macroPreparation", swallowed: swallowed, completion: completion)
+                return nil
+            }
+            if expanded.needsFillIn {
+                refuseInject(
+                    "Fill-in required — present FillInPanel before inject",
+                    path: "fillInRequired",
+                    swallowed: swallowed,
+                    completion: completion
+                )
+                return nil
+            }
+            textToInject = expanded.text
+            cursorOffset = expanded.cursorOffset
+            keysToPress = expanded.trailingKeys
+        }
+        if InjectionPlanner.emptyExpansionDecision(text: textToInject, cursorOffset: cursorOffset) == .refuse {
+            refuseInject(
+                "Expansion resolved to empty text — leaving the trigger in place",
+                path: "emptyExpansion",
+                swallowed: swallowed,
+                completion: completion
+            )
+            return nil
+        }
+        return ResolvedText(text: textToInject, cursorOffset: cursorOffset, trailingKeys: keysToPress)
     }
 
     /// Image snippets bypass all text/AX paths: erase the trigger with HID backspaces, then
