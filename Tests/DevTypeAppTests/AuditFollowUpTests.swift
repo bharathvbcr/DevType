@@ -262,7 +262,7 @@ final class AuditFollowUpTests: XCTestCase {
     /// All seven panes were built, constrained and left resident before the window appeared,
     /// with six of seven merely `isHidden`. Most users open one.
     func testPreferencesPanesAreBuiltOnFirstSelection() throws {
-        let prefs = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let prefs = try PreferencesSource.read()
         XCTAssertTrue(prefs.contains("private func ensurePane(_ tab: PreferencesTab) -> NSView?"))
         XCTAssertFalse(
             prefs.contains("for tab in PreferencesTab.visibleCases {\n            let pane = makeScrollingPane(for: tab)"),

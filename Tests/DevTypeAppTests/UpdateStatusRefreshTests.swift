@@ -8,12 +8,7 @@ import XCTest
 final class UpdateStatusRefreshTests: XCTestCase {
     private var preferencesSource: String {
         get throws {
-            let url = URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .appendingPathComponent("Sources/DevTypeAppCore/PreferencesWindowController.swift")
-            return try String(contentsOf: url, encoding: .utf8)
+            try PreferencesSource.read()
         }
     }
 

@@ -204,7 +204,7 @@ final class P1UICompletionTests: XCTestCase {
             loc.s("prefs.voice.triggers.column.phrase")
         )
 
-        let preferencesSource = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let preferencesSource = try PreferencesSource.read()
         for contract in [
             "geminiAPIKeyField.setAccessibilityLabel(loc.s(\"prefs.voice.gemini.keyLabel\"))",
             "geminiAPIKeyField.setAccessibilityTitleUIElement(geminiLabel)",

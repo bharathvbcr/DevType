@@ -43,11 +43,7 @@ final class SecretCleanupMaintenanceUXTests: XCTestCase {
                 .appendingPathComponent("Sources/DevTypeAppCore/AppDelegate.swift"),
             encoding: .utf8
         )
-        let preferences = try String(
-            contentsOf: Self.repositoryRoot
-                .appendingPathComponent("Sources/DevTypeAppCore/PreferencesWindowController.swift"),
-            encoding: .utf8
-        )
+        let preferences = try PreferencesSource.read()
 
         XCTAssertTrue(delegate.contains("requestOrphanSecretCleanupRetry {"))
         XCTAssertTrue(delegate.contains("refreshMaintenanceState()"))

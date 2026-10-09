@@ -1074,7 +1074,7 @@ final class SourceContractTests: XCTestCase {
     /// account needing authorization, but `SecretMenuFlow` gates on snippet UUIDs, so without this
     /// control an unreadable master key has a repair nothing can invoke.
     func testPreferencesOffersTheSecretStorageRepair() throws {
-        let prefs = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let prefs = try PreferencesSource.read()
         XCTAssertTrue(
             prefs.contains("#selector(repairSecretStorage)"),
             "The maintenance card must wire the repair action."
@@ -1266,7 +1266,7 @@ final class SourceContractTests: XCTestCase {
     /// documents. Without a first-presentation reset, long panes (notably Voice and AI) open in
     /// the middle and hide their primary enablement/status controls above the viewport.
     func testPreferencesTabsStartAtTheTopOnFirstPresentation() throws {
-        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let preferences = try PreferencesSource.read()
 
         XCTAssertTrue(
             preferences.contains("tabsShownAtLeastOnce.insert(tab).inserted"),
@@ -1287,7 +1287,7 @@ final class SourceContractTests: XCTestCase {
     /// adds a second set of constraints at that seam and can collapse every preferences pane.
     func testEmbeddedHomePreferencesPaneDisablesAutoresizingMaskConstraints() throws {
         let home = try source("Sources/DevTypeAppCore/HomeViewController.swift")
-        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let preferences = try PreferencesSource.read()
 
         XCTAssertTrue(
             home.contains("scroll.translatesAutoresizingMaskIntoConstraints = false"),
@@ -1303,7 +1303,7 @@ final class SourceContractTests: XCTestCase {
     /// 110-point table leaves a large blank box that looks broken, and the macro table previously
     /// had no empty message at all.
     func testPreferencesListsUseTheSharedEmptyStateContainer() throws {
-        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let preferences = try PreferencesSource.read()
         let uses = preferences.components(separatedBy: "makeTableArea(").count - 1
 
         XCTAssertEqual(
@@ -1321,9 +1321,9 @@ final class SourceContractTests: XCTestCase {
     /// leading edge while popups sit on the trailing edge made adjacent cards feel unrelated and
     /// made long Voice labels harder to scan.
     func testPreferencesToggleRowsAlignLabelsLeadingAndSwitchesTrailing() throws {
-        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
-        guard let start = preferences.range(of: "private func makeToggleRow("),
-              let end = preferences.range(of: "\n    private func", range: start.upperBound..<preferences.endIndex)
+        let preferences = try PreferencesSource.read()
+        guard let start = preferences.range(of: "func makeToggleRow("),
+              let end = preferences.range(of: "\n    func", range: start.upperBound..<preferences.endIndex)
         else {
             return XCTFail("makeToggleRow no longer has the shape this contract describes.")
         }
@@ -1340,7 +1340,7 @@ final class SourceContractTests: XCTestCase {
     /// Speech recognizers and transcript-cleanup LLMs answer different questions, but their
     /// inventory does not need the data-table treatment intended for user-authored mappings.
     func testVoicePreferencesSeparatesSpeechModelsFromCleanupModels() throws {
-        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let preferences = try PreferencesSource.read()
 
         XCTAssertTrue(
             preferences.contains("makeVoiceRecognitionModelInventory"),
@@ -1361,7 +1361,7 @@ final class SourceContractTests: XCTestCase {
     }
 
     func testVoiceVocabularyAndTriggersUseNamedTableColumns() throws {
-        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let preferences = try PreferencesSource.read()
 
         XCTAssertTrue(preferences.contains("configureVoiceDictionaryTable"))
         XCTAssertTrue(preferences.contains("voiceDictSpoken"))

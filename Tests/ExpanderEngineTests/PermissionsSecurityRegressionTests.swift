@@ -317,7 +317,7 @@ final class PermissionsSecurityRegressionTests: XCTestCase {
             .joined(separator: "\n")
         let entitlements = try source("Resources/DevType.entitlements")
         let reset = try source("Scripts/reset-tcc.sh")
-        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let preferences = try PreferencesSource.read()
         let delegate = try source("Sources/DevTypeAppCore/AppDelegate.swift")
 
         XCTAssertFalse(info.contains("on-device Smart Speech-to-Text"))
@@ -438,7 +438,7 @@ final class PermissionsSecurityRegressionTests: XCTestCase {
     }
 
     func testVoiceTracePreferencesUseOrderedTypedRecorderOperations() throws {
-        let preferences = try source("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let preferences = try PreferencesSource.read()
         let toggle = try objcMethod(named: "voiceTracingChanged", in: preferences)
 
         XCTAssertTrue(toggle.contains("disableAndDelete()"), "Turning tracing off must drain writes and delete atomically.")

@@ -47,6 +47,7 @@ Small Objective-C entry points contain window-ordering and KVC exceptions and br
 ### 3. `DevTypeAppCore` (Swift Library Target)
 The AppKit application layer providing the menu bar status item, snippet editor, inline search palette (`⌘/`), AI action palette (`⌘⌥A`), live diff preview, Smart Dictation Liquid Glass HUD, 7-tab Preferences window (`⌘,`), and onboarding setup wizard.
 - **UI ownership**: Window and controller work runs on the main thread; delayed callbacks retain explicit lifetime checks.
+- **Preferences**: `PreferencesWindowController` owns the window and language rebuilds; `Preferences/PreferencesViewController` is the tab host (sidebar, lazy panes, selection). Each tab is a `PreferencesPaneViewController` subclass under `Sources/DevTypeAppCore/Preferences/`, which carries the shared card, row and list helpers. The Voice tab's card builders and provider operations are split across `Preferences/Voice/VoicePreferences+<Card>.swift`.
 
 ### 4. `DevTypeApp` (Executable Target)
 The entry point in `main.swift` delegates to `DevTypeAppCore`. Keeping the executable separate lets controller tests import the application library.
