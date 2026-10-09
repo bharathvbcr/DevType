@@ -258,7 +258,12 @@
 "library.retryRead" = "다시 시도";
 "library.overwrite" = "기본값으로 대체";
 "library.overwrite.confirm.title" = "라이브러리를 기본값으로 대체할까요?";
-"library.overwrite.confirm.message" = "읽을 수 없는 파일은 백업으로 남지만, DevType는 기본 제공 스니펫 4개로 다시 시작합니다.";
+"library.overwrite.confirm.message" = "DevType는 먼저 현재 파일의 복사본을 백업 폴더에 저장한 다음 기본 제공 스니펫 4개로 다시 시작합니다. 복사본을 저장할 수 없으면 아무것도 대체하지 않습니다.";
+"library.overwrite.done.title" = "라이브러리를 기본값으로 대체함";
+"library.overwrite.done.backup" = "이전 라이브러리 파일 저장 위치:\n%@";
+"library.overwrite.done.noBackup" = "백업할 이전 라이브러리 데이터가 없었습니다.";
+"library.overwrite.failed.title" = "라이브러리를 대체하지 않음";
+"library.overwrite.failed.body" = "DevType는 라이브러리를 대체하지 않았으며 저장은 계속 일시 중지됩니다.\n\n%@";
 "library.retry.ok" = "라이브러리를 정상적으로 읽었습니다.";
 "library.retry.failed" = "여전히 읽을 수 없습니다: %@";
 "library.corrupted.title" = "스니펫 파일을 읽을 수 없습니다";

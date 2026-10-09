@@ -2277,7 +2277,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
             return loc.s("editor.transaction.secretWriteFailed")
         case .persistence(let outcome):
             switch outcome {
-            case .saved:
+            case .saved, .savedWithoutBackup:
                 return loc.s("editor.transaction.saveFailed")
             case .blockedByNewerSchema:
                 return loc.s("editor.transaction.newerSchema")

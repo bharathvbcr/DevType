@@ -108,7 +108,7 @@ final class LibraryHealthMonitor {
         saveToken = store.addSaveFailureListener { [weak self] outcome in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if let outcome, outcome != .saved {
+                if let outcome, !outcome.didSave {
                     self.publish(.saveFailed(outcome))
                 } else if self.isShowing(.saveFailedKind) {
                     self.publish(nil)
@@ -143,7 +143,7 @@ final class LibraryHealthMonitor {
             publish(.conflicts(conflicts))
             return
         }
-        if let failure = store.lastSaveFailure, failure != .saved {
+        if let failure = store.lastSaveFailure, !failure.didSave {
             publish(.saveFailed(failure))
             return
         }
@@ -429,7 +429,7 @@ enum LibraryHealthPresenter {
             detail = loc.s("library.save.blockedSchema")
         case .failed(let reason):
             detail = loc.s("library.save.failed", reason)
-        case .saved:
+        case .saved, .savedWithoutBackup:
             return
         }
         DevTypeAlert.present(
@@ -532,6 +532,10 @@ enum LibraryHealthPresenter {
 
     /// §0.3: the store no longer force-writes defaults on its own — the user has
     /// to ask for it, and only after an explicit confirmation.
+    ///
+    /// The store keeps the replaced file as a backup before writing, and refuses to write when it
+    /// cannot. The result names that backup, and a refused overwrite leaves the read-failure
+    /// latch set: clearing it anyway would let the next ordinary save replace the file instead.
     private static func confirmOverwrite(window: NSWindow?, store: SnippetStore) {
         let loc = LocalizationManager.shared
         DevTypeAlert.confirm(
@@ -548,12 +552,50 @@ enum LibraryHealthPresenter {
                     snippets: store.defaultSnippets()
                 )
             ]
-            let outcome = store.forceOverwriteLibrary(with: defaults)
+            let result = store.forceOverwriteLibrary(with: defaults)
             DevTypeLog.app.notice(
-                "[Library] user forced overwrite with defaults saved=\(outcome.didSave, privacy: .public)"
+                "[Library] user forced overwrite with defaults saved=\(result.didSave, privacy: .public) backedUp=\(result.backupURL != nil, privacy: .public)"
             )
-            store.clearLibraryReadFailure()
             LibraryHealthMonitor.shared.refresh()
+            presentOverwriteResult(result, window: window)
+        }
+    }
+
+    private static func presentOverwriteResult(_ result: SnippetStore.OverwriteResult, window: NSWindow?) {
+        let loc = LocalizationManager.shared
+        guard result.didSave else {
+            let reason: String
+            switch result.outcome {
+            case .failed(let message): reason = message
+            case .blockedByRemoteChange: reason = loc.s("library.save.blockedRemote")
+            case .blockedByNewerSchema: reason = loc.s("library.save.blockedSchema")
+            case .saved, .savedWithoutBackup: return
+            }
+            DevTypeAlert.warn(
+                title: loc.s("library.overwrite.failed.title"),
+                message: loc.s("library.overwrite.failed.body", reason),
+                window: window
+            )
+            return
+        }
+        guard let backupURL = result.backupURL else {
+            DevTypeAlert.info(
+                title: loc.s("library.overwrite.done.title"),
+                message: loc.s("library.overwrite.done.noBackup"),
+                window: window
+            )
+            return
+        }
+        DevTypeAlert.present(
+            title: loc.s("library.overwrite.done.title"),
+            message: loc.s("library.overwrite.done.backup", backupURL.path),
+            style: .informational,
+            buttons: [loc.s("common.ok"), loc.s("common.revealInFinder")],
+            window: window
+        ) { index in
+            if index == 1 {
+                NSWorkspace.shared.activateFileViewerSelecting([backupURL])
+            }
         }
     }
 }

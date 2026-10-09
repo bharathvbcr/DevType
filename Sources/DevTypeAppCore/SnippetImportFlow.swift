@@ -470,7 +470,7 @@ enum SnippetImportFlow {
             return loc.s("alert.import.saveFailed.remote")
         case .blockedByNewerSchema:
             return loc.s("alert.import.saveFailed.schema")
-        case .failed, .saved:
+        case .failed, .saved, .savedWithoutBackup:
             return loc.s("alert.import.saveFailed.generic")
         }
     }

@@ -134,11 +134,20 @@ public final class SnippetStore {
 
     public enum SaveOutcome: Equatable {
         case saved
+        /// The library was written, but the rolling backup of the bytes it replaced was not.
+        /// A backup is a safety net for the save, not a precondition of it; the reason is kept
+        /// so the caller can say so, and the store has already logged the error.
+        case savedWithoutBackup(String)
         case blockedByNewerSchema
         case blockedByRemoteChange
         case failed(String)
 
-        public var didSave: Bool { self == .saved }
+        public var didSave: Bool {
+            switch self {
+            case .saved, .savedWithoutBackup: return true
+            case .blockedByNewerSchema, .blockedByRemoteChange, .failed: return false
+            }
+        }
 
         /// Stable, content-free label for public diagnostics. The associated failure prose is
         /// retained for user-facing recovery, but can contain a library path or an OS/provider
@@ -146,11 +155,39 @@ public final class SnippetStore {
         public var diagnosticLabel: String {
             switch self {
             case .saved: return "saved"
+            case .savedWithoutBackup: return "savedWithoutBackup"
             case .blockedByNewerSchema: return "blockedByNewerSchema"
             case .blockedByRemoteChange: return "blockedByRemoteChange"
             case .failed: return "failed"
             }
         }
+    }
+
+    /// Result of `forceOverwriteLibrary(with:)`: whether the replacement landed, and where the
+    /// bytes it replaced were kept. `backupURL` is `nil` only when there was nothing to keep — no
+    /// file, or a zero-byte one; with anything else, a missing backup means nothing was written.
+    public struct OverwriteResult: Equatable {
+        public let outcome: SaveOutcome
+        public let backupURL: URL?
+        public var didSave: Bool { outcome.didSave }
+    }
+
+    /// Result of `restoreLibrary(fromBackup:)`. `preRestoreBackupURL` holds the library the
+    /// restore replaced (`nil` when there was none on disk).
+    public struct RestoreResult: Equatable {
+        public let outcome: SaveOutcome
+        public let preRestoreBackupURL: URL?
+        public var didRestore: Bool { outcome.didSave }
+    }
+
+    /// One restorable backup, as "Restore from Backup…" lists it. `snippetCount` comes from the
+    /// same versioned decoder a load uses; `nil` means the file does not decode as a library this
+    /// version can open, and restoring it is refused.
+    public struct LibraryBackup: Equatable {
+        public let url: URL
+        public let createdAt: Date
+        public let kind: LibraryBackupStore.Kind
+        public let snippetCount: Int?
     }
 
     /// Result of a store-owned whole-library read-modify-write.
@@ -394,6 +431,8 @@ public final class SnippetStore {
         }
     }
 
+    /// `message` explains a failure, or — on success — something the user should still know,
+    /// such as a local backup that could not be written before a link.
     public struct RelocationResult: Equatable {
         public let success: Bool
         public let backupURL: URL?
@@ -459,6 +498,18 @@ public final class SnippetStore {
     private let deviceDefaults: UserDefaults
     private let localSupportDirectory: URL
     private var localDefaultURL: URL { localSupportDirectory.appendingPathComponent("snippets.json") }
+    /// Every copy this store keeps of a library file it is about to replace: rolling copies from
+    /// saves, and the one-off safety copies taken before an overwrite, restore or relocation.
+    let backups: LibraryBackupStore
+    private var conflictRecoveryRoot: URL {
+        localSupportDirectory.appendingPathComponent("ConflictRecovery", isDirectory: true)
+    }
+    private let conflictRecoveryPruneQueue = DispatchQueue(
+        label: "devtype.store.conflict-recovery-prune",
+        qos: .utility
+    )
+    private let conflictRecoveryPruneLock = NSLock()
+    private var _lastConflictRecoveryPrune: LibraryConflictRecovery.PruneReport?
 
     private let watcherFactory: (URL) -> StoreWatching?
     private var watcher: StoreWatching?
@@ -629,8 +680,12 @@ public final class SnippetStore {
         self.deviceDefaults = deviceDefaults
         self.localSupportDirectory = localSupportDirectory
         self.watcherFactory = watcherFactory
+        let backups = LibraryBackupStore(
+            directory: localSupportDirectory.appendingPathComponent("Backups", isDirectory: true)
+        )
+        self.backups = backups
 
-        let loaded = Self.loadFrom(location)
+        let loaded = Self.loadFrom(location, backups: backups)
         _cachedGroups = loaded.groups
         _lastLoadIssue = loaded.loadIssue
         _pendingConflicts = loaded.conflicts
@@ -836,7 +891,8 @@ public final class SnippetStore {
 
     private func loadGroupsUnlocked() -> [SnippetGroup] {
         let loaded = Self.loadFrom(
-            Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary)
+            Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary),
+            backups: backups
         )
         setLastKnownDigest(loaded.digest)
         // `lock` is held by our callers, so store without notifying.
@@ -1065,7 +1121,7 @@ public final class SnippetStore {
             }
         }
 
-        let outcome = writeGroupsToDisk(sanitized)
+        let outcome = writeGroupsToDisk(sanitized).outcome
 
         guard outcome.didSave else {
             DevTypeLog.store.error(
@@ -1518,24 +1574,94 @@ public final class SnippetStore {
         try encodeLibrary(groups)
     }
 
-    /// §0.4: writes the backup envelope to `url` (use with `NSSavePanel`).
-    ///
-    /// Currently unwired: the Preferences "Export Library" item routes to `LibraryExporter`, and
-    /// the recovery advice on `clearLibraryReadFailure()` names this method without yet calling
-    /// it. It is retained because that recovery step is the one place a *full-fidelity* copy is
-    /// wanted. Anything user-facing wants `LibraryExporter` instead — see `exportLibraryData()`.
-    public func exportLibrary(to url: URL) throws {
-        let data = try exportLibraryData()
-        let parent = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
-    }
-
-    /// Single encode implementation reused by export, backups, and relocation.
+    /// Single encode implementation reused by export, relocation and conflict resolution.
     static func encodeLibrary(_ groups: [SnippetGroup]) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(SnippetDocument(groups: groups))
+    }
+
+    // MARK: - Backups and restore (§0.3)
+
+    /// Every backup "Restore from Backup…" can offer, newest first, each with the snippet count
+    /// the versioned decoder finds in it. Reads every listed file (bounded); call off main.
+    public func libraryBackups() -> [LibraryBackup] {
+        backups.entries().map { entry in
+            let count = (try? Self.decodeRestorableBackup(at: entry.url))?.snippets.count
+            return LibraryBackup(url: entry.url, createdAt: entry.createdAt, kind: entry.kind, snippetCount: count)
+        }
+    }
+
+    /// How many backups are on disk, for diagnostics. Lists the directory; reads no file.
+    public var libraryBackupCount: Int { backups.entries().count }
+
+    /// The directory backups are kept in, for "Reveal in Finder".
+    public var libraryBackupDirectory: URL { backups.directory }
+
+    /// Replaces the library with a backup's contents.
+    ///
+    /// Fails closed — and leaves the live library and its file untouched — when the file is not
+    /// a backup in this store's directory, is torn or not a DevType library, was written by a
+    /// newer schema, or when the current library cannot first be kept as a `pre-restore` backup.
+    /// The commit goes through the same serialized save as any edit, so listeners, the search
+    /// index and the event tap pick up the restored library without a relaunch. Secret values are
+    /// never in a backup: on the store that owns secrets (`shared`), a restored secret whose value
+    /// is no longer stored is refused by that save rather than restored as an empty secret.
+    @discardableResult
+    public func restoreLibrary(fromBackup url: URL) -> RestoreResult {
+        guard backups.entry(for: url) != nil else {
+            return RestoreResult(outcome: .failed("That file is not a DevType library backup."), preRestoreBackupURL: nil)
+        }
+        let document: SnippetDocument
+        do {
+            document = try Self.decodeRestorableBackup(at: url)
+        } catch {
+            DevTypeLog.store.error(
+                "[Store] Refused to restore an unreadable backup \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
+            return RestoreResult(
+                outcome: .failed("The backup could not be read as a snippet library: \(error.localizedDescription)"),
+                preRestoreBackupURL: nil
+            )
+        }
+
+        rmwLock.lock()
+        defer { rmwLock.unlock() }
+        if let refusal = blockedReason() {
+            return RestoreResult(outcome: refusal, preRestoreBackupURL: nil)
+        }
+        var preRestore: URL?
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            do {
+                let current = try Self.coordinatedRead(at: fileURL)
+                if !current.isEmpty {
+                    preRestore = try backups.backUp(current, kind: .preRestore).url
+                }
+            } catch {
+                return RestoreResult(
+                    outcome: .failed("The current library could not be backed up, so it was not replaced: \(error.localizedDescription)"),
+                    preRestoreBackupURL: nil
+                )
+            }
+        }
+        let outcome = saveGroupsSerialized(document.transactionGroups)
+        if outcome.didSave {
+            DevTypeLog.store.notice(
+                "[Store] Restored library from \(url.lastPathComponent, privacy: .public)"
+            )
+        }
+        return RestoreResult(outcome: outcome, preRestoreBackupURL: preRestore)
+    }
+
+    /// The versioned decoder plus the checks conflict adoption applies: bounded size, and no
+    /// schema newer than this build understands.
+    private static func decodeRestorableBackup(at url: URL) throws -> SnippetDocument {
+        let data = try LibraryConflictRecovery.boundedRead(url)
+        let document = try decodeDocument(from: data)
+        guard document.schemaVersion <= SnippetDocument.currentSchemaVersion else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return document
     }
 
     // MARK: - Save state (§1.4 / §0.3)
@@ -1664,9 +1790,10 @@ public final class SnippetStore {
         return nil
     }
 
-    /// §0.3: user-driven recovery — stop refusing saves. The next save overwrites
-    /// whatever is on disk, so callers must confirm first and should offer
-    /// `exportLibrary(to:)` beforehand.
+    /// §0.3: user-driven recovery — stop refusing saves. The next save replaces whatever is on
+    /// disk, so callers must confirm first. That save still keeps a copy: readable bytes go to a
+    /// rolling backup, and a file that cannot be read is preserved as a safety copy or not
+    /// replaced at all.
     public func clearLibraryReadFailure() {
         saveBlockLock.lock()
         _hardFailure = nil
@@ -1677,13 +1804,19 @@ public final class SnippetStore {
 
     /// §0.3: the single deliberate escape hatch that bypasses the hard-fail latch
     /// and the digest guard. Nothing on the load path may call this.
+    ///
+    /// The file it replaces is kept first, as a `pre-overwrite` backup of its raw bytes — or,
+    /// when they cannot be read, the file itself moved into the backup directory. When neither is
+    /// possible nothing is written: the result is `.failed`, the read-failure latch stays set, and
+    /// the original file is untouched. The keep happens in `writeGroupsToDisk(force:)`, so no
+    /// caller can reach the forced write without it.
     @discardableResult
-    public func forceOverwriteLibrary(with groups: [SnippetGroup]) -> SaveOutcome {
+    public func forceOverwriteLibrary(with groups: [SnippetGroup]) -> OverwriteResult {
         let sanitized = Self.sanitizeGroups(groups)
-        let outcome = writeGroupsToDisk(sanitized, force: true, bypassHardFailure: true)
-        guard outcome.didSave else {
-            publishSaveFailure(outcome)
-            return outcome
+        let write = writeGroupsToDisk(sanitized, force: true, bypassHardFailure: true)
+        guard write.outcome.didSave else {
+            publishSaveFailure(write.outcome)
+            return OverwriteResult(outcome: write.outcome, backupURL: nil)
         }
         saveBlockLock.lock()
         _hardFailure = nil
@@ -1699,7 +1832,7 @@ public final class SnippetStore {
         let flat = sanitized.flatMap(\.snippets)
         for listener in snippetListeners.values { listener(flat) }
         for listener in groupListenersCopy.values { listener(sanitized) }
-        return outcome
+        return OverwriteResult(outcome: write.outcome, backupURL: write.backupURL)
     }
 
     private func publishSaveFailure(_ outcome: SaveOutcome?) {
@@ -1764,6 +1897,12 @@ public final class SnippetStore {
         rmwLock.lock()
         let result = resolveConflictsSerialized(keeping: choice)
         rmwLock.unlock()
+        // A verified adoption is the moment a new recovery folder lands; bound them now, off the
+        // mutation lock. A failed adoption leaves nothing new worth pruning around.
+        switch result {
+        case .adopted, .adoptedCleanupPending: scheduleConflictRecoveryPrune(completion: nil)
+        case .adoptionFailed: break
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.notifyConflictListeners()
@@ -1794,7 +1933,7 @@ public final class SnippetStore {
                 LibraryConflictRecovery.Version(url: version.url, remove: { try version.remove() })
             }
             result = LibraryConflictRecovery.resolve(
-                fileURL: url, recoveryRoot: localSupportDirectory.appendingPathComponent("ConflictRecovery", isDirectory: true),
+                fileURL: url, recoveryRoot: conflictRecoveryRoot,
                 localCandidate: local, versions: versions
             ) { data in
                 let document = try Self.decodeDocument(from: data)
@@ -1832,6 +1971,36 @@ public final class SnippetStore {
         }
     }
 
+    /// Launch-time housekeeping for everything the store keeps for recovery: rolling library
+    /// backups and conflict-recovery folders. Both run on utility queues; a failure is logged and
+    /// retried by the next trigger.
+    public func scheduleRecoveryMaintenance() {
+        backups.schedulePrune()
+        scheduleConflictRecoveryPrune(completion: nil)
+    }
+
+    /// Conflict-recovery folders still on disk after the last prune pass, or `nil` before any
+    /// pass has completed (or when the folder could not be listed) — never a guessed zero.
+    public var conflictRecoveryRetainedFolderCount: Int? {
+        conflictRecoveryPruneLock.lock()
+        defer { conflictRecoveryPruneLock.unlock() }
+        guard let report = _lastConflictRecoveryPrune, report.enumerationComplete else { return nil }
+        return report.retained
+    }
+
+    func scheduleConflictRecoveryPrune(completion: ((LibraryConflictRecovery.PruneReport) -> Void)?) {
+        let root = conflictRecoveryRoot
+        conflictRecoveryPruneQueue.async { [weak self] in
+            let report = LibraryConflictRecovery.prune(recoveryRoot: root)
+            if let self {
+                self.conflictRecoveryPruneLock.lock()
+                self._lastConflictRecoveryPrune = report
+                self.conflictRecoveryPruneLock.unlock()
+            }
+            completion?(report)
+        }
+    }
+
     /// Stores the snapshot without notifying. Safe to call while `lock` is held
     /// (`loadGroupsUnlocked` does) — it only touches `saveBlockLock`.
     @discardableResult
@@ -1860,16 +2029,141 @@ public final class SnippetStore {
 
     // MARK: - Writing
 
+    /// What a write must do with the bytes it replaces.
+    private enum BackupRequirement {
+        /// An ordinary save: copy the previous bytes into a rolling backup when they changed.
+        /// Failing to copy does not stop the save; it is reported as `.savedWithoutBackup`. A file
+        /// that cannot be read at all is escalated to `.required(.preOverwrite)`, because
+        /// overwriting bytes nobody can read again is not a save the user asked for.
+        case rolling
+        /// A replacement the user confirmed, or one onto a library they did not write here: the
+        /// previous file must be preserved first, or nothing is written.
+        case required(LibraryBackupStore.Kind)
+    }
+
+    private enum ReplaceResult {
+        case written(backupURL: URL?, backupFailure: String?)
+        /// The file already held exactly these bytes; nothing was written or copied.
+        case unchanged
+        case raceDetected
+        case backupFailed(String)
+        case failed(String)
+    }
+
+    /// The one coordinated replace every whole-library write goes through: saves, the forced
+    /// overwrite, and Save As / Stop Syncing onto an existing file.
+    ///
+    /// §1.13: the digest re-check, the backup and the write happen inside one coordinated write
+    /// block, so no other coordinated reader or writer (another DevType, iCloud, Finder) can land
+    /// between them. The bytes read for the digest are the bytes backed up.
+    private func coordinatedReplace(
+        at url: URL,
+        with data: Data,
+        expecting expectedDigest: FileDigest?,
+        backup requirement: BackupRequirement
+    ) -> ReplaceResult {
+        var result: ReplaceResult = .failed("File coordination did not run")
+        var coordinationError: NSError?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(
+            writingItemAt: url,
+            options: [.forReplacing],
+            error: &coordinationError
+        ) { actualURL in
+            let fm = FileManager.default
+            let exists = fm.fileExists(atPath: actualURL.path)
+            let onDisk = exists ? try? Data(contentsOf: actualURL) : nil
+            if let expectedDigest {
+                let digest: FileDigest = !exists
+                    ? .absent
+                    : onDisk.map { FileDigest.sha(Self.sha256(of: $0)) } ?? .unreadable
+                guard digest == expectedDigest else {
+                    result = .raceDetected
+                    return
+                }
+            }
+            if let onDisk, onDisk == data {
+                result = .unchanged
+                return
+            }
+
+            var backupURL: URL?
+            var backupFailure: String?
+            var movedAside = false
+            let required: LibraryBackupStore.Kind?
+            switch requirement {
+            case .required(let kind): required = kind
+            case .rolling: required = exists && onDisk == nil ? .preOverwrite : nil
+            }
+            if let required {
+                do {
+                    let preserved = try self.backups.preserve(fileAt: actualURL, bytes: onDisk, kind: required)
+                    backupURL = preserved?.url
+                    movedAside = preserved?.moved ?? false
+                } catch {
+                    result = .backupFailed(
+                        "The existing library was not replaced because a backup of it could not be saved: \(error.localizedDescription)"
+                    )
+                    return
+                }
+            } else if let onDisk, !onDisk.isEmpty {
+                do {
+                    let copy = try self.backups.backUp(onDisk, kind: .save)
+                    backupURL = copy.url
+                    if copy.created { self.backups.schedulePrune() }
+                } catch {
+                    backupFailure = error.localizedDescription
+                }
+            }
+
+            do {
+                try fm.createDirectory(at: actualURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: actualURL, options: .atomic)
+                result = .written(backupURL: backupURL, backupFailure: backupFailure)
+            } catch {
+                if movedAside, let backupURL {
+                    // The original was renamed into Backups; put it back where it was.
+                    do {
+                        try fm.moveItem(at: backupURL, to: actualURL)
+                    } catch {
+                        DevTypeLog.store.error(
+                            "[Store] Could not return a moved-aside library after a failed write \(DevTypeLog.errorMetadata(error), privacy: .public)"
+                        )
+                    }
+                }
+                DevTypeLog.store.error(
+                    "[Store] Failed to write library \(DevTypeLog.errorMetadata(error), privacy: .public)"
+                )
+                result = .failed(error.localizedDescription)
+            }
+        }
+        if let coordinationError {
+            DevTypeLog.store.error(
+                "[Store] File coordination failed while writing \(DevTypeLog.errorMetadata(coordinationError), privacy: .public)"
+            )
+            return .failed(coordinationError.localizedDescription)
+        }
+        return result
+    }
+
+    private struct DiskWrite {
+        let outcome: SaveOutcome
+        let backupURL: URL?
+    }
+
+    /// `force` skips the save block and the digest guard, and in exchange requires a safety copy
+    /// of whatever it replaces — so the forced overwrite and the first-run seed cannot reach the
+    /// file without the backup step, whichever caller they come from.
     @discardableResult
     private func writeGroupsToDisk(
         _ groups: [SnippetGroup],
         force: Bool = false,
         bypassHardFailure: Bool = false
-    ) -> SaveOutcome {
+    ) -> DiskWrite {
         // §0.3: a latched read failure refuses even forced writes. Only
         // `forceOverwriteLibrary` / conflict resolution may bypass it.
-        if !bypassHardFailure, let hard = hardFailure() { return hard }
-        if !force, let blocked = blockedReason() { return blocked }
+        if !bypassHardFailure, let hard = hardFailure() { return DiskWrite(outcome: hard, backupURL: nil) }
+        if !force, let blocked = blockedReason() { return DiskWrite(outcome: blocked, backupURL: nil) }
 
         let data: Data
         do {
@@ -1878,62 +2172,37 @@ public final class SnippetStore {
             DevTypeLog.store.error(
                 "[Store] Failed to encode snippets \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
-            return .failed(error.localizedDescription)
+            return DiskWrite(outcome: .failed(error.localizedDescription), backupURL: nil)
         }
 
-        // §1.13: the digest re-check and the write happen inside one coordinated
-        // write block, so the previous check-then-write TOCTOU window is closed
-        // against other coordinated readers/writers (other DevType instances,
-        // iCloud, Finder).
-        var raceDetected = false
-        var writeError: Error?
-        var coordinationError: NSError?
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        coordinator.coordinate(
-            writingItemAt: fileURL,
-            options: [.forReplacing],
-            error: &coordinationError
-        ) { actualURL in
-            if !force {
-                let onDisk = Self.currentDigest(at: actualURL)
-                guard onDisk == self.lastKnownDigest() else {
-                    raceDetected = true
-                    return
-                }
-            }
-            do {
-                let parent = actualURL.deletingLastPathComponent()
-                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-                try data.write(to: actualURL, options: .atomic)
-            } catch {
-                writeError = error
-            }
-        }
-
-        if raceDetected {
+        let replaced = coordinatedReplace(
+            at: fileURL,
+            with: data,
+            expecting: force ? nil : lastKnownDigest(),
+            backup: force ? .required(.preOverwrite) : .rolling
+        )
+        let outcome: SaveOutcome
+        var backupURL: URL?
+        switch replaced {
+        case .raceDetected:
             saveBlockLock.lock()
             _saveBlocked = .blockedByRemoteChange
             saveBlockLock.unlock()
-            return .blockedByRemoteChange
-        }
-        if let error = coordinationError {
-            DevTypeLog.store.error(
-                "[Store] File coordination failed while saving \(DevTypeLog.errorMetadata(error), privacy: .public)"
-            )
-            return .failed(error.localizedDescription)
-        }
-        if let error = writeError {
-            DevTypeLog.store.error(
-                "[Store] Failed to save snippets \(DevTypeLog.errorMetadata(error), privacy: .public)"
-            )
-            return .failed(error.localizedDescription)
+            return DiskWrite(outcome: .blockedByRemoteChange, backupURL: nil)
+        case .backupFailed(let reason), .failed(let reason):
+            return DiskWrite(outcome: .failed(reason), backupURL: nil)
+        case .unchanged:
+            outcome = .saved
+        case .written(let url, let backupFailure):
+            backupURL = url
+            outcome = backupFailure.map(SaveOutcome.savedWithoutBackup) ?? .saved
         }
 
         setLastKnownDigest(.sha(Self.sha256(of: data)))
         saveBlockLock.lock()
         _saveBlocked = nil
         saveBlockLock.unlock()
-        return .saved
+        return DiskWrite(outcome: outcome, backupURL: backupURL)
     }
 
     private func blockedReason() -> SaveOutcome? {
@@ -2080,35 +2349,7 @@ public final class SnippetStore {
         return result
     }
 
-    /// §0.3: timestamped, never-overwritten backup. The old code used a single
-    /// `.bak` and deleted the previous one first, so a second failed load
-    /// destroyed the only copy of the user's library.
-    private static func makeTimestampedBackup(of url: URL) -> URL? {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return nil }
-        let stamp = Int(Date().timeIntervalSince1970)
-        var candidate = url.appendingPathExtension("bak.\(stamp)")
-        var suffix = 1
-        while fm.fileExists(atPath: candidate.path) {
-            candidate = url.appendingPathExtension("bak.\(stamp)-\(suffix)")
-            suffix += 1
-            if suffix > 1000 { return nil }
-        }
-        do {
-            try fm.copyItem(at: url, to: candidate)
-            DevTypeLog.store.notice(
-                "[Store] Wrote library backup \(candidate.lastPathComponent, privacy: .public)"
-            )
-            return candidate
-        } catch {
-            DevTypeLog.store.error(
-                "[Store] Could not back up unreadable library \(DevTypeLog.errorMetadata(error), privacy: .public)"
-            )
-            return nil
-        }
-    }
-
-    private static func loadFrom(_ location: Location) -> Loaded {
+    private static func loadFrom(_ location: Location, backups: LibraryBackupStore) -> Loaded {
         var out = Loaded()
         let url = location.fileURL
 
@@ -2161,7 +2402,10 @@ public final class SnippetStore {
             DevTypeLog.store.error(
                 "[Store] Failed to decode snippets \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
-            if let backupURL = makeTimestampedBackup(of: url) {
+            // §0.3: timestamped and never overwritten (the old single `.bak` was deleted by
+            // the next failed load). Identical bytes from a repeated failed load reuse the
+            // existing copy rather than adding one per watcher event.
+            if let backupURL = try? backups.backUp(raw, kind: .corrupted).url {
                 out.loadIssue = .corrupted(backupURL: backupURL)
             } else {
                 out.loadIssue = .unreadable(path: url.path, reason: error.localizedDescription)
@@ -2243,7 +2487,10 @@ public final class SnippetStore {
         rmwLock.lock()
         defer { rmwLock.unlock() }
 
-        let loaded = Self.loadFrom(Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary))
+        let loaded = Self.loadFrom(
+            Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary),
+            backups: backups
+        )
         setLastKnownDigest(loaded.digest)
         let conflictsChanged = storePendingConflicts(loaded.conflicts)
         if conflictsChanged {
@@ -2330,58 +2577,89 @@ public final class SnippetStore {
 
     // MARK: - Store location switching
 
+    /// Writes the library into `directory` and switches to it. A library already there — often
+    /// another Mac's, in a shared folder — is kept as a `pre-save-as` backup first; if it cannot
+    /// be kept, it is not replaced and the store stays where it was.
     @discardableResult
     public func saveSnippetsAs(toDirectory directory: URL) -> RelocationResult {
         let target = directory.appendingPathComponent(Self.syncedFileName)
-        var backup: URL?
-        if FileManager.default.fileExists(atPath: target.path),
-           let existing = try? Data(contentsOf: target), !existing.isEmpty {
-            backup = writeBackup(existing, tag: "pre-save-as")
+        switch replaceForRelocation(at: target, kind: .preSaveAs) {
+        case .failure(let message):
+            return RelocationResult(success: false, backupURL: nil, message: message, activeLocation: fileURL)
+        case .success(let backup):
+            deviceDefaults.set(target.path, forKey: DeviceStateKey.storeLocationPath)
+            return relocate(to: Location(fileURL: target, expectsExistingLibrary: true), backupURL: backup)
         }
-        let groups = loadGroups()
-        guard let raw = try? Self.encodeLibrary(groups) else {
-            return RelocationResult(success: false, backupURL: backup, message: "Could not encode library.", activeLocation: fileURL)
-        }
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try raw.write(to: target, options: .atomic)
-        } catch {
-            return RelocationResult(success: false, backupURL: backup, message: error.localizedDescription, activeLocation: fileURL)
-        }
-        deviceDefaults.set(target.path, forKey: DeviceStateKey.storeLocationPath)
-        return relocate(to: Location(fileURL: target, expectsExistingLibrary: true), backupURL: backup)
     }
 
+    /// Adopts the library at `target`. Nothing is overwritten — the local file stays where it is —
+    /// but what was on screen is kept as a `local-before-link` backup. If that copy cannot be
+    /// written the link still proceeds, and `message` says so rather than leaving it unsaid.
     @discardableResult
     public func linkToSnippets(at target: URL) -> RelocationResult {
-        let localBackup = exportCurrentLibrary(tag: "local-before-link")
+        var localBackup: URL?
+        var message: String?
+        do {
+            localBackup = try backups.backUp(Self.encodeLibrary(loadGroups()), kind: .localBeforeLink).url
+        } catch {
+            DevTypeLog.store.error(
+                "[Store] No local backup before linking \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
+            message = "The library on this Mac could not be backed up before linking: \(error.localizedDescription)"
+        }
         deviceDefaults.set(target.path, forKey: DeviceStateKey.storeLocationPath)
-        return relocate(to: Location(fileURL: target, expectsExistingLibrary: true), backupURL: localBackup)
+        return relocate(
+            to: Location(fileURL: target, expectsExistingLibrary: true),
+            backupURL: localBackup,
+            message: message
+        )
     }
 
+    /// Copies the library back to the local default file and switches to it. A local library
+    /// already there is kept as a `pre-stop-sync` backup first, or it is not replaced.
     @discardableResult
     public func stopSyncing() -> RelocationResult {
-        var backup: URL?
-        if FileManager.default.fileExists(atPath: localDefaultURL.path),
-           let existing = try? Data(contentsOf: localDefaultURL), !existing.isEmpty {
-            backup = writeBackup(existing, tag: "pre-stop-sync")
+        switch replaceForRelocation(at: localDefaultURL, kind: .preStopSync) {
+        case .failure(let message):
+            return RelocationResult(success: false, backupURL: nil, message: message, activeLocation: fileURL)
+        case .success(let backup):
+            deviceDefaults.removeObject(forKey: DeviceStateKey.storeLocationPath)
+            return relocate(to: Location(fileURL: localDefaultURL, expectsExistingLibrary: false), backupURL: backup)
         }
-        let groups = loadGroups()
-        guard let raw = try? Self.encodeLibrary(groups) else {
-            return RelocationResult(success: false, backupURL: backup, message: "Could not encode library.", activeLocation: fileURL)
-        }
+    }
+
+    private enum RelocationWrite {
+        case success(backupURL: URL?)
+        case failure(String)
+    }
+
+    /// Writes the current library over `target` through the canonical coordinated replace, with
+    /// a required safety copy of anything non-empty or unreadable already there.
+    private func replaceForRelocation(at target: URL, kind: LibraryBackupStore.Kind) -> RelocationWrite {
+        let raw: Data
         do {
-            try FileManager.default.createDirectory(at: localDefaultURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try raw.write(to: localDefaultURL, options: .atomic)
+            raw = try Self.encodeLibrary(loadGroups())
         } catch {
-            return RelocationResult(success: false, backupURL: backup, message: error.localizedDescription, activeLocation: fileURL)
+            DevTypeLog.store.error(
+                "[Store] Could not encode the library for relocation \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
+            return .failure("Could not encode library.")
         }
-        deviceDefaults.removeObject(forKey: DeviceStateKey.storeLocationPath)
-        return relocate(to: Location(fileURL: localDefaultURL, expectsExistingLibrary: false), backupURL: backup)
+        switch coordinatedReplace(at: target, with: raw, expecting: nil, backup: .required(kind)) {
+        case .written(let backupURL, _):
+            return .success(backupURL: backupURL)
+        case .unchanged:
+            return .success(backupURL: nil)
+        case .backupFailed(let message), .failed(let message):
+            return .failure(message)
+        case .raceDetected:
+            // Unreachable without an expected digest; refuse rather than assume.
+            return .failure("The destination changed while it was being written.")
+        }
     }
 
     @discardableResult
-    private func relocate(to location: Location, backupURL: URL?) -> RelocationResult {
+    private func relocate(to location: Location, backupURL: URL?, message: String? = nil) -> RelocationResult {
         watcher?.stop()
         let previousDirectory = fileURL.deletingLastPathComponent()
         fileURL = location.fileURL
@@ -2414,27 +2692,7 @@ public final class SnippetStore {
         lock.unlock()
         for listener in snippetListeners.values { listener(flat) }
         for listener in groupListenersCopy.values { listener(groups) }
-        return RelocationResult(success: true, backupURL: backupURL, message: nil, activeLocation: fileURL)
-    }
-
-    private func exportCurrentLibrary(tag: String) -> URL? {
-        guard let raw = try? Self.encodeLibrary(loadGroups()) else { return nil }
-        return writeBackup(raw, tag: tag)
-    }
-
-    private func writeBackup(_ raw: Data, tag: String) -> URL? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd-HHmmss-SSS"
-        let url = localSupportDirectory.appendingPathComponent("devtype-backup-\(tag)-\(formatter.string(from: Date())).json")
-        do {
-            try FileManager.default.createDirectory(at: localSupportDirectory, withIntermediateDirectories: true)
-            // Atomic like every other write here: a crash mid-write must not leave
-            // a torn safety backup behind.
-            try raw.write(to: url, options: .atomic)
-            return url
-        } catch {
-            return nil
-        }
+        return RelocationResult(success: true, backupURL: backupURL, message: message, activeLocation: fileURL)
     }
 
     /// Convenience for non-preview callers: auto-detect once, prepare a value

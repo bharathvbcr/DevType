@@ -81,6 +81,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // into the coalesced sidecar the stats pane reads from.
         SnippetStore.shared.migrateLegacyUsageCounts()
 
+        // Bound rolling library backups and conflict-recovery folders once per launch. Both
+        // passes run on utility queues; a failed pass is retried by the next trigger.
+        SnippetStore.shared.scheduleRecoveryMaintenance()
+
         // §8.11: sweep keychain-resident secrets into the encrypted archive. Launch is the
         // moment v2 items are silently readable by the running identity, so this never shows
         // a dialog — after it, copies read the archive and touch no keychain at all.

@@ -162,6 +162,15 @@ final class DiagnosticReportTests: XCTestCase {
         )
 
         let header = DiagnosticReport.formatHeader(context)
+        XCTAssertTrue(header.contains("-- Library recovery --\n(not captured)"))
+        var recoveryContext = context
+        recoveryContext.libraryRecoveryLine = DiagnosticReport.libraryRecoveryDiagnosticLine(
+            retainedConflictFolders: 4,
+            backupCount: nil
+        )
+        XCTAssertTrue(DiagnosticReport.formatHeader(recoveryContext).contains(
+            "-- Library recovery --\nConflict recovery folders retained: 4; library backups: not yet counted"
+        ))
         XCTAssertTrue(header.contains("Backspace expansion undo: unavailable"))
         var undoContext = context
         undoContext.expansionUndoEnabled = false

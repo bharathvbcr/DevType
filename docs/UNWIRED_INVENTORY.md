@@ -329,6 +329,14 @@ into a file the user intended to share. Both halves are pinned by
 
 Wiring it into the read-failure recovery UI remains open work.
 
+**Retired 2026-10-09.** The read-failure recovery no longer needs it: `forceOverwriteLibrary`
+now keeps the replaced file itself — its raw bytes, or the file moved aside when it cannot be
+read — through `LibraryBackupStore` before writing, and refuses to write when it cannot. That is
+a more faithful copy than this method could make: in a read-failure state `loadGroups()` is the
+last in-memory library, not what is on disk. With no caller (`rg -uu 'exportLibrary\(to'` over
+the tree, and `devmap impact` naming none) it was deleted. `exportLibraryData()` stays; the
+secret-boundary tests pin it.
+
 ### Also noted
 
 The narrative in the bulk-export entry above says `LibraryExporter.present` "reads

@@ -258,7 +258,12 @@
 "library.retryRead" = "再試行";
 "library.overwrite" = "デフォルトで置き換える";
 "library.overwrite.confirm.title" = "ライブラリをデフォルトで置き換えますか？";
-"library.overwrite.confirm.message" = "読み込めないファイルはバックアップとして残りますが、DevType は組み込みの 4 件のスニペットから再開します。";
+"library.overwrite.confirm.message" = "DevType はまず現在のファイルのコピーを Backups フォルダに保存してから、組み込みの 4 件のスニペットで再開します。コピーを保存できない場合は何も置き換えません。";
+"library.overwrite.done.title" = "ライブラリをデフォルトで置き換えました";
+"library.overwrite.done.backup" = "以前のライブラリファイルの保存先:\n%@";
+"library.overwrite.done.noBackup" = "バックアップする以前のライブラリデータはありませんでした。";
+"library.overwrite.failed.title" = "ライブラリは置き換えられませんでした";
+"library.overwrite.failed.body" = "DevType はライブラリを置き換えず、保存は一時停止したままです。\n\n%@";
 "library.retry.ok" = "ライブラリを正常に読み込みました。";
 "library.retry.failed" = "まだ読み込めません: %@";
 "library.corrupted.title" = "スニペットファイルを読み込めません";

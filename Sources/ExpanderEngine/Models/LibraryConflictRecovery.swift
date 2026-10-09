@@ -59,7 +59,8 @@ enum LibraryConflictRecovery {
 
     /// Every alternative is copied and read back before adoption. Failed removals remain
     /// unresolved in the version store, so a fresh process can retry without a hidden queue.
-    /// Recovery folders are retained on success as well as failure; none are auto-pruned here.
+    /// Recovery folders are retained on success as well as failure; `prune(recoveryRoot:)` bounds
+    /// them afterwards, never during a resolution.
     static func resolve(
         fileURL: URL, recoveryRoot: URL, localCandidate: Data?, versions: [Version],
         io: IO = IO(), validate: (Data) throws -> Void
@@ -122,5 +123,107 @@ enum LibraryConflictRecovery {
             return .adopted(chosen, recoveryURL: folder,
                             cleanupPending: "Library adopted; alternate-version cleanup is pending: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Retention
+
+    /// Content-free accounting for one pass; safe for logs and the diagnostic report.
+    struct PruneReport: Equatable {
+        /// Folders still on disk after the pass, whatever kept them.
+        var retained = 0
+        var removed = 0
+        /// Kept because an adoption that references them still has cleanup pending.
+        var referenced = 0
+        /// Kept because their age or journal could not be read; never guessed at.
+        var skipped = 0
+        /// Kept because removal failed; the next pass retries.
+        var failed = 0
+        /// False when the recovery root could not be listed at all; counts are then zero, not
+        /// a measurement.
+        var enumerationComplete = true
+    }
+
+    static let retainedNewestFolders = 10
+    static let retainedFolderAge: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Bounds the recovery folders `resolve` leaves behind, after `VoiceRecoveryService.prune`.
+    ///
+    /// Kept: the `keepingNewest` newest removable folders, every folder younger than `maxAge`,
+    /// every folder whose journal is still in the `adopted` phase (an adoption whose alternate-
+    /// version cleanup is pending refers to it), and every folder whose creation date or journal
+    /// cannot be read — those are skipped, not removed, and the pass carries on. Everything else
+    /// is removed. Only directories directly under `recoveryRoot` are considered.
+    @discardableResult
+    static func prune(
+        recoveryRoot: URL,
+        now: Date = Date(),
+        keepingNewest: Int = retainedNewestFolders,
+        maxAge: TimeInterval = retainedFolderAge
+    ) -> PruneReport {
+        var report = PruneReport()
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: recoveryRoot.path) else { return report }
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .creationDateKey]
+        let folders: [URL]
+        do {
+            folders = try fm.contentsOfDirectory(
+                at: recoveryRoot,
+                includingPropertiesForKeys: Array(keys),
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            report.enumerationComplete = false
+            DevTypeLog.store.error(
+                "[ConflictRecovery] Could not list recovery folders \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
+            return report
+        }
+
+        var removable: [(url: URL, createdAt: Date)] = []
+        for folder in folders {
+            guard let values = try? folder.resourceValues(forKeys: keys) else {
+                report.skipped += 1
+                continue
+            }
+            guard values.isDirectory == true else { continue }
+            guard let createdAt = values.creationDate,
+                  let journalData = try? boundedRead(folder.appendingPathComponent("recovery.json")),
+                  let journal = try? JSONDecoder().decode(Journal.self, from: journalData) else {
+                report.skipped += 1
+                continue
+            }
+            if journal.phase == "adopted" {
+                report.referenced += 1
+                continue
+            }
+            removable.append((folder, createdAt))
+        }
+
+        removable.sort { lhs, rhs in
+            lhs.createdAt != rhs.createdAt ? lhs.createdAt > rhs.createdAt : lhs.url.path < rhs.url.path
+        }
+        var kept = 0
+        for (index, candidate) in removable.enumerated() {
+            if index < max(0, keepingNewest) || now.timeIntervalSince(candidate.createdAt) < maxAge {
+                kept += 1
+                continue
+            }
+            do {
+                try fm.removeItem(at: candidate.url)
+                report.removed += 1
+            } catch {
+                report.failed += 1
+                DevTypeLog.store.error(
+                    "[ConflictRecovery] Could not remove a recovery folder \(DevTypeLog.errorMetadata(error), privacy: .public)"
+                )
+            }
+        }
+        report.retained = kept + report.referenced + report.skipped + report.failed
+        if report.removed > 0 || report.failed > 0 || report.skipped > 0 {
+            DevTypeLog.store.info(
+                "[ConflictRecovery] prune retained=\(report.retained, privacy: .public) removed=\(report.removed, privacy: .public) referenced=\(report.referenced, privacy: .public) skipped=\(report.skipped, privacy: .public) failed=\(report.failed, privacy: .public)"
+            )
+        }
+        return report
     }
 }

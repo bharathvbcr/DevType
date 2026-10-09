@@ -264,6 +264,9 @@ public enum DiagnosticReport {
         /// finite status values, so a configured path or trace payload cannot enter the report.
         public var debugTraceHealth: DebugTrace.Health?
         public var expansionUndoEnabled: Bool? = nil
+        /// Counts of what the library keeps for recovery: conflict-recovery folders retained by
+        /// the last prune pass, and library backups on disk. Counts only — never a path or name.
+        public var libraryRecoveryLine: String? = nil
 
         /// Production capture fills these at the subsystem boundary. Public/test callers keep the
         /// array initializer and are projected during formatting for source compatibility.
@@ -550,6 +553,10 @@ public enum DiagnosticReport {
             debugTraceHealth: DebugTrace.health
         )
         context.expansionUndoEnabled = TextInjectionPipeline.shared.expansionUndoEnabled
+        context.libraryRecoveryLine = libraryRecoveryDiagnosticLine(
+            retainedConflictFolders: SnippetStore.shared.conflictRecoveryRetainedFolderCount,
+            backupCount: SnippetStore.shared.libraryBackupCount
+        )
         context.mutedAppsProjection = mutedAppsProjection
         context.siblingPathsProjection = siblingPathsProjection
         context.injectTelemetryProjection = injectTelemetryProjection
@@ -558,6 +565,13 @@ public enum DiagnosticReport {
         context.axWriteVerdictProjection = axWriteVerdictProjection
         context.unreachableSnippetProjection = unreachableSnippetProjection
         return context
+    }
+
+    /// `nil` counts print as "not yet counted": a prune pass that has not run, or could not list
+    /// its folder, is not a pass that found nothing.
+    static func libraryRecoveryDiagnosticLine(retainedConflictFolders: Int?, backupCount: Int?) -> String {
+        "Conflict recovery folders retained: \(retainedConflictFolders.map(String.init) ?? "not yet counted"); "
+            + "library backups: \(backupCount.map(String.init) ?? "not yet counted")"
     }
 
     static func geminiCredentialState(
@@ -977,6 +991,9 @@ public enum DiagnosticReport {
             domain: "activity-history-health",
             nilValue: "(not captured)"
         ))
+        lines.append("")
+        lines.append("-- Library recovery --")
+        lines.append(context.libraryRecoveryLine ?? "(not captured)")
         lines.append("")
         lines.append("-- Opt-in debug trace --")
         lines.append(context.debugTraceHealth?.diagnosticLine ?? "(not captured)")

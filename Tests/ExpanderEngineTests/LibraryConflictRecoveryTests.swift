@@ -166,3 +166,144 @@ final class LibraryConflictRecoveryTests: XCTestCase {
         ) else { return XCTFail() }
     }
 }
+
+/// Retention for the recovery folders `resolve` leaves behind: the newest 10 and anything younger
+/// than 30 days, never a folder an adoption with pending cleanup still refers to, and never a
+/// folder whose age or journal cannot be read.
+final class LibraryConflictRecoveryPruneTests: XCTestCase {
+    private var root: URL!
+    private let now = Date(timeIntervalSince1970: 1_791_547_200)
+    private let day: TimeInterval = 86_400
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-recovery-prune-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        if let walker = FileManager.default.enumerator(atPath: root.path) {
+            for case let relative as String in walker {
+                try? FilePermissions.setPOSIX(root.appendingPathComponent(relative), 0o700)
+            }
+        }
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @discardableResult
+    private func folder(_ name: String, age: TimeInterval, phase: String? = "complete") throws -> URL {
+        let url = root.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        if let phase {
+            let journal = LibraryConflictRecovery.Journal(
+                libraryPath: "/library.json", versionCount: 1, selectedLocal: true, phase: phase
+            )
+            try JSONEncoder().encode(journal).write(to: url.appendingPathComponent("recovery.json"))
+        }
+        try FileManager.default.setAttributes([.creationDate: now.addingTimeInterval(-age)], ofItemAtPath: url.path)
+        return url
+    }
+
+    private func remaining() throws -> Set<String> {
+        Set(try FileManager.default.contentsOfDirectory(atPath: root.path))
+    }
+
+    func testRetentionTable() throws {
+        struct Row {
+            let name: String
+            let agesInDays: [Double]
+            let kept: Set<Int>
+        }
+        let rows = [
+            Row(name: "none", agesInDays: [], kept: []),
+            Row(name: "ten old folders all stay", agesInDays: (0..<10).map { 100 + Double($0) }, kept: Set(0..<10)),
+            Row(name: "eleven old: the oldest goes", agesInDays: (0..<11).map { 100 + Double($0) }, kept: Set(0..<10)),
+            Row(name: "anything younger than 30 days stays past ten",
+                agesInDays: (0..<15).map { Double($0) }, kept: Set(0..<15)),
+            Row(name: "young plus old: young stay, old beyond the newest ten go",
+                agesInDays: (0..<12).map { Double($0) } + [40, 50], kept: Set(0..<12)),
+            Row(name: "exactly 30 days is not younger",
+                agesInDays: (0..<10).map { Double($0) } + [30], kept: Set(0..<10)),
+        ]
+        for row in rows {
+            try? FileManager.default.removeItem(at: root)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            for (index, age) in row.agesInDays.enumerated() {
+                try folder("\(index)", age: age * day)
+            }
+            let report = LibraryConflictRecovery.prune(recoveryRoot: root, now: now)
+            XCTAssertEqual(try remaining(), Set(row.kept.map(String.init)), row.name)
+            XCTAssertEqual(report.retained, row.kept.count, row.name)
+            XCTAssertEqual(report.removed, row.agesInDays.count - row.kept.count, row.name)
+        }
+    }
+
+    func testFoldersReferencedByAPendingCleanupSurvive() throws {
+        for index in 0..<12 { try folder("old-\(index)", age: Double(100 + index) * day) }
+        try folder("pending", age: 500 * day, phase: "adopted")
+
+        let report = LibraryConflictRecovery.prune(recoveryRoot: root, now: now)
+
+        XCTAssertTrue(try remaining().contains("pending"), "a folder an adoption still refers to was removed")
+        XCTAssertEqual(report.referenced, 1)
+        XCTAssertEqual(report.removed, 2)
+        XCTAssertEqual(report.retained, 11)
+    }
+
+    func testAnUnreadableFolderIsSkippedWithoutAbortingThePass() throws {
+        for index in 0..<12 { try folder("old-\(index)", age: Double(100 + index) * day) }
+        let locked = try folder("locked", age: 900 * day)
+        try FilePermissions.setPOSIX(locked, 0)
+        try folder("no-journal", age: 900 * day, phase: nil)
+        let garbled = try folder("garbled", age: 900 * day, phase: nil)
+        try Data("{not json".utf8).write(to: garbled.appendingPathComponent("recovery.json"))
+        if FileManager.default.isReadableFile(atPath: locked.appendingPathComponent("recovery.json").path) {
+            throw XCTSkip("this process can read inside a mode-000 directory")
+        }
+
+        let report = LibraryConflictRecovery.prune(recoveryRoot: root, now: now)
+
+        let left = try remaining()
+        XCTAssertTrue(left.isSuperset(of: ["locked", "no-journal", "garbled"]), "an unreadable folder was removed")
+        XCTAssertEqual(report.skipped, 3)
+        XCTAssertEqual(report.removed, 2, "the pass must carry on past unreadable folders")
+        XCTAssertFalse(left.contains("old-10"))
+        XCTAssertFalse(left.contains("old-11"))
+        XCTAssertEqual(report.retained, 13)
+        XCTAssertTrue(report.enumerationComplete)
+    }
+
+    func testAMissingRootIsAnEmptyCompletePass() {
+        let report = LibraryConflictRecovery.prune(recoveryRoot: root.appendingPathComponent("absent"), now: now)
+        XCTAssertEqual(report, LibraryConflictRecovery.PruneReport())
+    }
+
+    /// The store owns the trigger and reports the count diagnostics print.
+    func testStorePruneRecordsTheRetainedCountForDiagnostics() throws {
+        let support = root.appendingPathComponent("support", isDirectory: true)
+        let recovery = support.appendingPathComponent("ConflictRecovery", isDirectory: true)
+        try FileManager.default.createDirectory(at: recovery, withIntermediateDirectories: true)
+        let store = SnippetStore(
+            location: .init(fileURL: support.appendingPathComponent("snippets.json"), expectsExistingLibrary: false),
+            localSupportDirectory: support
+        )
+        XCTAssertNil(store.conflictRecoveryRetainedFolderCount, "no pass has run; zero would be a guess")
+        for index in 0..<3 {
+            let url = recovery.appendingPathComponent("f\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            let journal = LibraryConflictRecovery.Journal(libraryPath: "/x", versionCount: 0, selectedLocal: false, phase: "complete")
+            try JSONEncoder().encode(journal).write(to: url.appendingPathComponent("recovery.json"))
+        }
+
+        let done = expectation(description: "prune")
+        store.scheduleConflictRecoveryPrune { _ in done.fulfill() }
+        wait(for: [done], timeout: 5)
+
+        XCTAssertEqual(store.conflictRecoveryRetainedFolderCount, 3)
+        let line = DiagnosticReport.libraryRecoveryDiagnosticLine(
+            retainedConflictFolders: store.conflictRecoveryRetainedFolderCount,
+            backupCount: store.libraryBackupCount
+        )
+        XCTAssertTrue(line.contains("Conflict recovery folders retained: 3"), line)
+    }
+}

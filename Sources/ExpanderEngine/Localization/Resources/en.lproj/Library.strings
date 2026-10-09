@@ -273,7 +273,12 @@
 "library.retryRead" = "Retry";
 "library.overwrite" = "Replace with Defaults";
 "library.overwrite.confirm.title" = "Replace the Library with Defaults?";
-"library.overwrite.confirm.message" = "The unreadable file stays on disk as a backup, but DevType will start again from the four built-in snippets.";
+"library.overwrite.confirm.message" = "DevType first saves a copy of the current file in its Backups folder, then starts again from the four built-in snippets. If the copy cannot be saved, nothing is replaced.";
+"library.overwrite.done.title" = "Library Replaced with Defaults";
+"library.overwrite.done.backup" = "The previous library file was saved to:\n%@";
+"library.overwrite.done.noBackup" = "There was no previous library data to back up.";
+"library.overwrite.failed.title" = "Library Was Not Replaced";
+"library.overwrite.failed.body" = "DevType did not replace the library, and saving stays paused.\n\n%@";
 "library.retry.ok" = "Library read successfully.";
 "library.retry.failed" = "Still unreadable: %@";
 "library.corrupted.title" = "Snippet File Unreadable";

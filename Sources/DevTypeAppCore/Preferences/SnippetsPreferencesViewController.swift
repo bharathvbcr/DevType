@@ -46,6 +46,13 @@ final class SnippetsPreferencesViewController: PreferencesPaneViewController {
                 style: .primary,
                 target: self,
                 action: #selector(exportLibrary)
+            ),
+            CapsuleButton(
+                title: loc.s("prefs.snippets.restore"),
+                symbol: "clock.arrow.circlepath",
+                style: .secondary,
+                target: self,
+                action: #selector(restoreFromBackupClicked)
             )
         ])
         ioButtons.orientation = .horizontal
@@ -270,6 +277,11 @@ final class SnippetsPreferencesViewController: PreferencesPaneViewController {
             if let backup = result.backupURL {
                 message += "\n\n" + loc.s("prefs.snippets.library.done.backup", backup.path)
             }
+            // A success can still carry something the user must hear — a link that went ahead
+            // with no local backup, for one.
+            if let note = result.message {
+                message += "\n\n" + note
+            }
             DevTypeAlert.info(
                 title: loc.s("prefs.snippets.library.done.title"),
                 message: message,
@@ -281,6 +293,110 @@ final class SnippetsPreferencesViewController: PreferencesPaneViewController {
                 message: result.message ?? loc.s("prefs.snippets.library.failed.title"),
                 window: view.window
             )
+        }
+    }
+
+    /// Lists the library backups (date, snippet count, why it was taken) and restores the chosen
+    /// one. Listing decodes every backup, so it runs off main; so does the restore, which writes.
+    @objc private func restoreFromBackupClicked() {
+        let store = self.store
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let backups = store.libraryBackups()
+            DispatchQueue.main.async {
+                self?.presentRestoreChooser(backups, store: store)
+            }
+        }
+    }
+
+    private func presentRestoreChooser(_ backups: [SnippetStore.LibraryBackup], store: SnippetStore) {
+        guard !backups.isEmpty else {
+            DevTypeAlert.info(
+                title: loc.s("prefs.snippets.restore"),
+                message: loc.s("prefs.snippets.restore.none"),
+                window: view.window
+            )
+            return
+        }
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 420, height: 26), pullsDown: false)
+        for backup in backups {
+            popup.addItem(withTitle: restoreItemTitle(for: backup))
+            popup.lastItem?.isEnabled = backup.snippetCount != nil
+        }
+        popup.autoenablesItems = false
+        if let firstRestorable = backups.firstIndex(where: { $0.snippetCount != nil }) {
+            popup.selectItem(at: firstRestorable)
+        }
+
+        let alert = NSAlert()
+        alert.messageText = loc.s("prefs.snippets.restore")
+        alert.informativeText = loc.s("prefs.snippets.restore.message")
+        alert.accessoryView = popup
+        alert.addButton(withTitle: loc.s("prefs.snippets.restore.confirm"))
+        alert.addButton(withTitle: loc.s("common.cancel"))
+        alert.addButton(withTitle: loc.s("prefs.snippets.restore.reveal"))
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                let index = popup.indexOfSelectedItem
+                guard backups.indices.contains(index) else { return }
+                self.restore(backups[index], store: store)
+            case .alertThirdButtonReturn:
+                NSWorkspace.shared.activateFileViewerSelecting([store.libraryBackupDirectory])
+            default:
+                break
+            }
+        }
+        if let window = view.window {
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
+        }
+    }
+
+    func restoreItemTitle(for backup: SnippetStore.LibraryBackup) -> String {
+        let date = DateFormatter.localizedString(from: backup.createdAt, dateStyle: .medium, timeStyle: .medium)
+        let reason = loc.s("prefs.snippets.restore.kind.\(backup.kind.rawValue)")
+        guard let count = backup.snippetCount else {
+            return loc.s("prefs.snippets.restore.item.unreadable", date, reason)
+        }
+        return loc.s("prefs.snippets.restore.item", date, count, reason)
+    }
+
+    private func restore(_ backup: SnippetStore.LibraryBackup, store: SnippetStore) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = store.restoreLibrary(fromBackup: backup.url)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.reload()
+                LibraryHealthMonitor.shared.refresh()
+                NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+                guard result.didRestore else {
+                    let reason: String
+                    switch result.outcome {
+                    case .failed(let message): reason = message
+                    case .blockedByRemoteChange: reason = self.loc.s("library.save.blockedRemote")
+                    case .blockedByNewerSchema: reason = self.loc.s("library.save.blockedSchema")
+                    case .saved, .savedWithoutBackup: return
+                    }
+                    DevTypeAlert.warn(
+                        title: self.loc.s("prefs.snippets.restore.failed.title"),
+                        message: reason,
+                        window: self.view.window
+                    )
+                    return
+                }
+                let date = DateFormatter.localizedString(from: backup.createdAt, dateStyle: .medium, timeStyle: .medium)
+                var message = self.loc.s("prefs.snippets.restore.done.body", date)
+                if let preRestore = result.preRestoreBackupURL {
+                    message += "\n\n" + self.loc.s("prefs.snippets.library.done.backup", preRestore.path)
+                }
+                DevTypeAlert.info(
+                    title: self.loc.s("prefs.snippets.restore.done.title"),
+                    message: message,
+                    window: self.view.window
+                )
+            }
         }
     }
 

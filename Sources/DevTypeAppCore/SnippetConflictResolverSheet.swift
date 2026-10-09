@@ -246,7 +246,7 @@ final class SnippetConflictResolverSheet: NSViewController, NSTableViewDataSourc
 
     private func saveFailureMessage(for outcome: SnippetStore.SaveOutcome) -> String {
         switch outcome {
-        case .saved:
+        case .saved, .savedWithoutBackup:
             return loc.s("library.save.banner")
         case .blockedByNewerSchema:
             return loc.s("library.save.blockedSchema")
