@@ -67,13 +67,11 @@ final class VoiceProviderPreferencesPresentationTests: XCTestCase {
             "A system probe that ignores task cancellation must not repaint a detached view."
         )
 
-        let sourceURL = repositoryRoot()
-            .appendingPathComponent("Sources/DevTypeAppCore/PreferencesWindowController.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        let teardownStart = try XCTUnwrap(source.range(of: "override func viewWillDisappear()"))
+        let source = try PreferencesSource.read()
+        let teardownStart = try XCTUnwrap(source.range(of: "func retireLiveOperations()"))
         let replacementStart = try XCTUnwrap(
             source.range(
-                of: "func prepareForLocalizationReplacement()",
+                of: "var blocksLocalizationReplacement: Bool",
                 range: teardownStart.upperBound..<source.endIndex
             )
         )
@@ -132,9 +130,7 @@ final class VoiceProviderPreferencesPresentationTests: XCTestCase {
     }
 
     func testAppleSpeechAssetDependencyCancellationReleasesControllerOwnershipAndReportsSafely() throws {
-        let sourceURL = repositoryRoot()
-            .appendingPathComponent("Sources/DevTypeAppCore/PreferencesWindowController.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try PreferencesSource.read()
         let installStart = try XCTUnwrap(source.range(of: "@objc private func installAppleSpeechAssets()"))
         let finishStart = try XCTUnwrap(
             source.range(
@@ -144,7 +140,7 @@ final class VoiceProviderPreferencesPresentationTests: XCTestCase {
         )
         let invalidationStart = try XCTUnwrap(
             source.range(
-                of: "private func invalidateAppleSpeechAssetInstall()",
+                of: "func invalidateAppleSpeechAssetInstall()",
                 range: finishStart.upperBound..<source.endIndex
             )
         )
@@ -245,9 +241,7 @@ final class VoiceProviderPreferencesPresentationTests: XCTestCase {
     }
 
     func testPreferencesOwnsReachableAnalyzerSetupAndTeardown() throws {
-        let sourceURL = repositoryRoot()
-            .appendingPathComponent("Sources/DevTypeAppCore/PreferencesWindowController.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try PreferencesSource.read()
 
         XCTAssertTrue(source.contains("AppleSpeechAnalyzerAdapter(locale:"))
         XCTAssertTrue(source.contains("adapter.installAssets("))
@@ -300,13 +294,6 @@ final class VoiceProviderPreferencesPresentationTests: XCTestCase {
             .denied,
             "Current speech authorization must override a completed correction probe"
         )
-    }
-
-    private func repositoryRoot() -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
     }
 
     func testGeminiCredentialPresentationDoesNotCollapseUnavailableIntoMissing() {

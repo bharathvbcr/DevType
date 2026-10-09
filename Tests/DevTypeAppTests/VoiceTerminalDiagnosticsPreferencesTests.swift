@@ -60,16 +60,7 @@ final class VoiceTerminalDiagnosticsPreferencesTests: XCTestCase {
     }
 
     func testPreferencesWiresTheTerminalDeletionButtonToTheRecorder() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: root.appendingPathComponent(
-                "Sources/DevTypeAppCore/PreferencesWindowController.swift"
-            ),
-            encoding: .utf8
-        )
+        let source = try PreferencesSource.read()
 
         XCTAssertTrue(source.contains("#selector(deleteVoiceTerminalDiagnostics)"))
         XCTAssertTrue(source.contains("deleteTerminalDiagnostics()"))

@@ -234,12 +234,7 @@ final class SnippetManagerDuplicationTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let preferences = try String(
-            contentsOf: repositoryRoot.appendingPathComponent(
-                "Sources/DevTypeAppCore/PreferencesWindowController.swift"
-            ),
-            encoding: .utf8
-        )
+        let preferences = try PreferencesSource.read()
         let appDelegate = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
                 "Sources/DevTypeAppCore/AppDelegate.swift"

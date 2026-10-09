@@ -3,13 +3,6 @@ import XCTest
 @testable import DevTypeAppCore
 
 final class PreferencesAsyncRefreshTests: XCTestCase {
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
     func testEndpointRefreshRejectsOutOfOrderCompletionsAndConsumesTheWinnerOnce() throws {
         let endpoint = try XCTUnwrap(URL(string: "http://127.0.0.1:11434/v1/chat/completions"))
         var lifecycle = EndpointBoundRefreshLifecycle()
@@ -362,11 +355,7 @@ final class PreferencesAsyncRefreshTests: XCTestCase {
     }
 
     func testPreferencesUsesGenerationGatesAtBothAsyncEndpointCallSites() throws {
-        let source = try String(
-            contentsOf: Self.repositoryRoot
-                .appendingPathComponent("Sources/DevTypeAppCore/PreferencesWindowController.swift"),
-            encoding: .utf8
-        )
+        let source = try PreferencesSource.read()
 
         XCTAssertTrue(source.contains("localModelScanRefresh.claim("))
         XCTAssertTrue(source.contains("whisperReadinessRefresh.claim("))
@@ -408,7 +397,7 @@ final class PreferencesAsyncRefreshTests: XCTestCase {
         let toggleStart = try XCTUnwrap(source.range(of: "@objc private func toggleWhisperServer()"))
         let invalidationStart = try XCTUnwrap(
             source.range(
-                of: "private func invalidateWhisperActions()",
+                of: "func invalidateWhisperActions()",
                 range: toggleStart.upperBound..<source.endIndex
             )
         )
@@ -432,17 +421,30 @@ final class PreferencesAsyncRefreshTests: XCTestCase {
             "Starting the server must not disable its only Cancel action."
         )
 
-        let teardownStart = try XCTUnwrap(source.range(of: "override func viewWillDisappear()"))
-        let replacementStart = try XCTUnwrap(
+        // The Voice pane owns its operations; the host's teardown retires them.
+        let teardownStart = try XCTUnwrap(source.range(of: "func retireLiveOperations()"))
+        let teardownEnd = try XCTUnwrap(
             source.range(
-                of: "func prepareForLocalizationReplacement()",
+                of: "var blocksLocalizationReplacement: Bool",
                 range: teardownStart.upperBound..<source.endIndex
             )
         )
         XCTAssertTrue(
-            source[teardownStart.lowerBound..<replacementStart.lowerBound]
+            source[teardownStart.lowerBound..<teardownEnd.lowerBound]
                 .contains("invalidateWhisperActions()"),
             "Closing Preferences must invalidate progress and completion already queued for its controls."
+        )
+        let hostTeardownStart = try XCTUnwrap(source.range(of: "override func viewWillDisappear()"))
+        let replacementStart = try XCTUnwrap(
+            source.range(
+                of: "func prepareForLocalizationReplacement()",
+                range: hostTeardownStart.upperBound..<source.endIndex
+            )
+        )
+        XCTAssertTrue(
+            source[hostTeardownStart.lowerBound..<replacementStart.lowerBound]
+                .contains("voice.retireLiveOperations()"),
+            "Closing Preferences must retire the Voice pane's live operations."
         )
 
         let layoutStart = try XCTUnwrap(
