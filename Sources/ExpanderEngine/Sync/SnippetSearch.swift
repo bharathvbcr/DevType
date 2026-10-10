@@ -558,16 +558,20 @@ public enum SnippetSearch {
     }
 
     private static func ranked(_ hits: [SearchHit], limit: Int?) -> [SearchHit] {
-        let hits = hits.sorted { a, b in
+        // `String.count` walks graphemes; take each trigger's length once instead of up to four
+        // times per comparison. The ordering is unchanged.
+        let keyed = hits.map { (hit: $0, triggerLength: $0.snippet.triggerKeyword.count) }
+        let hits = keyed.sorted { lhs, rhs in
+            let a = lhs.hit, b = rhs.hit
             if a.score != b.score { return a.score > b.score }
-            if a.snippet.triggerKeyword.count != b.snippet.triggerKeyword.count {
-                return a.snippet.triggerKeyword.count < b.snippet.triggerKeyword.count
+            if lhs.triggerLength != rhs.triggerLength {
+                return lhs.triggerLength < rhs.triggerLength
             }
             let order = a.snippet.triggerKeyword.localizedCaseInsensitiveCompare(b.snippet.triggerKeyword)
             if order != .orderedSame { return order == .orderedAscending }
             if a.id != b.id { return a.id.uuidString < b.id.uuidString }
             return a.groupID.uuidString < b.groupID.uuidString
-        }
+        }.map { $0.hit }
 
         let result: [SearchHit]
         if let limit, hits.count > limit {

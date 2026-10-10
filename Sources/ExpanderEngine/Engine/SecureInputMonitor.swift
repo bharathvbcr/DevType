@@ -68,8 +68,17 @@ public final class SecureInputMonitor {
         timer.schedule(deadline: .now(), repeating: interval)
         timer.setEventHandler { [weak self] in
             guard let self, self.isCurrent(currentGeneration) else { return }
-            let status = self.statusProvider?() ?? self.checkLockStatus()
-            guard self.shouldReport(status.isLocked, generation: currentGeneration) else { return }
+            let status: LockStatus
+            if let provider = self.statusProvider {
+                status = provider()
+                guard self.shouldReport(status.isLocked, generation: currentGeneration) else { return }
+            } else {
+                // Sample the flag first. Attribution (frontmost app, name, bundle path) is only
+                // worth building on a transition, and Secure Input can stay on for hours.
+                let isLocked = IsSecureEventInputEnabled()
+                guard self.shouldReport(isLocked, generation: currentGeneration) else { return }
+                status = self.lockStatus(isLocked: isLocked)
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isCurrent(currentGeneration) else { return }
                 let app = DevTypeLog.boundedPublicIdentifier(
@@ -110,7 +119,10 @@ public final class SecureInputMonitor {
     }
 
     public func checkLockStatus() -> LockStatus {
-        let isLocked = IsSecureEventInputEnabled()
+        lockStatus(isLocked: IsSecureEventInputEnabled())
+    }
+
+    private func lockStatus(isLocked: Bool) -> LockStatus {
         guard isLocked else {
             return LockStatus(isLocked: false, holdingPID: nil, holdingAppName: nil, holdingExecutablePath: nil)
         }

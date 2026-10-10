@@ -2143,8 +2143,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshOpenAtLoginMenuItem() {
-        let enabled = SMAppService.mainApp.status == .enabled
-        openAtLoginMenuItem?.state = enabled ? .on : .off
+        // The item is nil since §4.1, and `SMAppService.mainApp.status` is a synchronous
+        // XPC round trip; skip it on every status refresh (each expansion, each menu open).
+        guard let item = openAtLoginMenuItem else { return }
+        item.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
 
     @objc func openSnippetManager(_ sender: Any?) {

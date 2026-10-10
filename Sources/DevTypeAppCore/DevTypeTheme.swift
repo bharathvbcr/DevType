@@ -1527,6 +1527,10 @@ final class MarqueeLabel: NSView {
     /// Distance the currently-installed animation was built for, so `layout()`
     /// can run as often as it likes without restarting (and visibly jumping) it.
     private var animatedDistance: CGFloat = -1
+    /// Measured width of the text. `layout()` and `intrinsicContentSize` run far more often than
+    /// the string changes, and the string can be a whole snippet body. Cleared by `stringValue`;
+    /// the font is fixed at `init`.
+    private var cachedTextWidth: CGFloat?
 
     /// Whether this label *wants* to scroll. It still only moves when the text
     /// actually overflows and the user has not asked for reduced motion.
@@ -1543,6 +1547,7 @@ final class MarqueeLabel: NSView {
             guard newValue != primary.stringValue else { return }
             primary.stringValue = newValue
             secondary.stringValue = newValue
+            cachedTextWidth = nil
             invalidateIntrinsicContentSize()
             animatedDistance = -1
             needsLayout = true
@@ -1593,8 +1598,11 @@ final class MarqueeLabel: NSView {
     }
 
     private var textWidth: CGFloat {
+        if let cachedTextWidth { return cachedTextWidth }
         guard let font = primary.font else { return 0 }
-        return (primary.stringValue as NSString).size(withAttributes: [.font: font]).width
+        let width = (primary.stringValue as NSString).size(withAttributes: [.font: font]).width
+        cachedTextWidth = width
+        return width
     }
 
     override var intrinsicContentSize: NSSize {
