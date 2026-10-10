@@ -738,7 +738,7 @@ public enum CommandPaletteCatalog {
             if AIUndoStore.hasUndo, !suggestedIDs.contains("ai.undo") {
                 suggestedIDs.insert("ai.undo", at: 0)
             }
-            let byID = Dictionary(uniqueKeysWithValues: commands.map { ($0.id, $0) })
+            let byID = commandsByID()
             for (index, id) in suggestedIDs.enumerated() {
                 guard let command = byID[id] else { continue }
                 if case .undoAI = command.action, !AIUndoStore.hasUndo { continue }
@@ -973,6 +973,8 @@ public enum CommandPaletteCatalog {
         if isExplicitCommandQuery {
             snippetHits = []
         } else if trimmed.isEmpty {
+            // One locked copy of the stats instead of two lock round trips per comparison.
+            let usageStats = UsageStatsStore.shared.allStats()
             snippetHits = groups
                 .filter(\.enabled)
                 .flatMap { group in
@@ -990,8 +992,8 @@ public enum CommandPaletteCatalog {
                 }
                 .sorted { a, b in
                     if a.score != b.score { return a.score > b.score }
-                    let aLast = UsageStatsStore.shared.lastUsedAt(for: a.snippet.id) ?? a.snippet.updatedAt
-                    let bLast = UsageStatsStore.shared.lastUsedAt(for: b.snippet.id) ?? b.snippet.updatedAt
+                    let aLast = usageStats[a.snippet.id]?.lastUsedAt ?? a.snippet.updatedAt
+                    let bLast = usageStats[b.snippet.id]?.lastUsedAt ?? b.snippet.updatedAt
                     if aLast != bLast { return aLast > bLast }
                     return a.snippet.updatedAt > b.snippet.updatedAt
                 }

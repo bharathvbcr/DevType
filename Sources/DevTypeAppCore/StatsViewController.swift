@@ -393,6 +393,9 @@ final class StatsViewController: NSViewController {
         // pane left open on a quiet machine now costs a counter comparison per tick.
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self else { return }
+            // Preferences switches tabs by hiding panes, which does not trigger
+            // `viewWillDisappear`; skip the refresh while hidden. Re-selecting the tab refreshes.
+            guard !self.view.isHiddenOrHasHiddenAncestor else { return }
             let revision = UsageStatsStore.shared.revision
             guard revision != self.lastRefreshedUsageRevision else { return }
             self.refresh()
@@ -794,9 +797,6 @@ final class StatsSparklineView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard points.count > 1 else { return }
-
-        let card = GlassCardView(tint: DevTypeTheme.accent.withAlphaComponent(0.04))
-        card.frame = bounds
 
         let maxVal = CGFloat(points.max() ?? 1)
         guard maxVal > 0 else { return }

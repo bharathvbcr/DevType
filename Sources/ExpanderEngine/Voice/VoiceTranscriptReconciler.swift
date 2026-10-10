@@ -282,21 +282,27 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
 
         let partial = activePartial.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Appends in place: this runs several times per recognizer partial, and returning
+        // `base + next` copied the whole transcript once per segment.
         var result = ""
         for segment in segments {
-            result = appendSegment(result, next: segment)
+            appendSegment(&result, next: segment)
         }
-        return appendSegment(result, next: partial)
+        appendSegment(&result, next: partial)
+        return result
     }
 
-    private static func appendSegment(_ base: String, next: String) -> String {
-        guard !next.isEmpty else { return base }
-        guard !base.isEmpty else { return next }
-
-        if base.hasSuffix(" ") || base.hasSuffix("\n") || next.hasPrefix(" ") || next.hasPrefix("\n") {
-            return base + next
+    private static func appendSegment(_ base: inout String, next: String) {
+        guard !next.isEmpty else { return }
+        guard !base.isEmpty else {
+            base = next
+            return
         }
-        return base + " " + next
+
+        if !(base.hasSuffix(" ") || base.hasSuffix("\n") || next.hasPrefix(" ") || next.hasPrefix("\n")) {
+            base += " "
+        }
+        base += next
     }
 
     // MARK: - Alignment

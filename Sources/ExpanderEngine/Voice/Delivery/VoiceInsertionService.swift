@@ -166,13 +166,17 @@ public final class VoiceInsertionService {
         guard deliveryPhase == .live, sessionIsCurrent() else { return }
         let changed = assembler.ingest(segment)
 
-        VoiceDiagnosticsRecorder.shared.record(
-            changed ? "segment.ingested" : "segment.ignored",
-            segment: segment,
-            settled: assembler.settledText,
-            active: assembler.activeText,
-            cumulative: assembler.cumulativeText
-        )
+        // Tracing is opt-in, and each of these arguments joins the whole transcript; build
+        // them only when the recorder will keep them.
+        if VoiceDiagnosticsRecorder.shared.isEnabled {
+            VoiceDiagnosticsRecorder.shared.record(
+                changed ? "segment.ingested" : "segment.ignored",
+                segment: segment,
+                settled: assembler.settledText,
+                active: assembler.activeText,
+                cumulative: assembler.cumulativeText
+            )
+        }
 
         // Outside `typeAsYouSpeak` nothing goes on screen yet. The assembler still ingested
         // the segment above, so the HUD has a transcript to show and final delivery knows it
@@ -226,15 +230,17 @@ public final class VoiceInsertionService {
             )
         }
 
-        VoiceDiagnosticsRecorder.shared.record(
-            "reconcile",
-            cumulative: target,
-            committedLength: reconciler.committedText.count,
-            volatileLength: reconciler.volatileText.count,
-            erase: edit.eraseCount,
-            inject: edit.textToInject,
-            suppressed: edit.suppressedCommittedRevision
-        )
+        if VoiceDiagnosticsRecorder.shared.isEnabled {
+            VoiceDiagnosticsRecorder.shared.record(
+                "reconcile",
+                cumulative: target,
+                committedLength: reconciler.committedText.count,
+                volatileLength: reconciler.volatileText.count,
+                erase: edit.eraseCount,
+                inject: edit.textToInject,
+                suppressed: edit.suppressedCommittedRevision
+            )
+        }
 
         guard !edit.isNoop else {
             reconciler.sealPrefix(settled)

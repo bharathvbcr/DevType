@@ -139,7 +139,8 @@ extension TextInjectionPipeline {
 
         func canUndo(now: Date, frontmostPID: pid_t?) -> Bool {
             lock.withLock {
-                undoEnabledLocked && lastExpansion?.isFresh(now: now) == true
+                // Record first: it is almost always nil, and the setting costs two defaults reads.
+                lastExpansion?.isFresh(now: now) == true && undoEnabledLocked
                     && target?.pid == frontmostPID && frontmostPID != nil
             }
         }
@@ -162,7 +163,9 @@ extension TextInjectionPipeline {
         /// foreign record is invalidated instead and nothing is returned.
         func takeUndoAttempt(now: Date, frontmostPID: pid_t?) -> UndoAttempt? {
             lock.withLock {
-                guard undoEnabledLocked, let record = lastExpansion, record.isFresh(now: now),
+                // Every bare backspace lands here, nearly always with no record; check that
+                // before the setting so the common miss skips two defaults reads under the lock.
+                guard let record = lastExpansion, record.isFresh(now: now), undoEnabledLocked,
                       let target, let pid = target.pid, pid > 0,
                       pid == frontmostPID else {
                     invalidateUndoLocked()

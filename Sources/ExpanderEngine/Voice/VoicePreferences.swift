@@ -204,8 +204,10 @@ public enum VoicePreferences {
 
     /// The effective engine preserves the user's explicit provider choice. Provider-specific
     /// prerequisites are enforced by the typed preflight and again at the provider boundary.
+    /// Credential state never changes the answer (see the seam below), so this does not pay
+    /// for a Keychain read on main at every dictation start.
     public static var effectiveEngine: TranscriptionEngine {
-        effectiveEngine(preferred: transcriptionEngine, keyState: GeminiAPIKeyStore.readState())
+        transcriptionEngine
     }
 
     /// Compatibility seam for callers that already obtained credential state. Credential state

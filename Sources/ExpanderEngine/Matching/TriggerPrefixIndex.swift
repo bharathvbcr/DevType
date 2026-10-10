@@ -23,6 +23,9 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
     /// `allKeys` fully lowercased once at init (`allKeys` keeps case-sensitive keys verbatim;
     /// the extension scan must fold those too).
     private let allKeysLowercased: [String]
+    /// `allKeysLowercased[i].count`, taken once: `String.count` walks graphemes, and the
+    /// extension scan read it for every key on every keystroke while a hold is live.
+    private let allKeyLengthsLowercased: [Int]
     /// Same keys as a set, for exact-completion queries.
     private let completeKeys: Set<String>
     /// Longest trigger, so extension scans can bail early.
@@ -59,7 +62,9 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
         self.allKeys = keys
         // Pre-folded once at init: `hasViableExtension` runs per keystroke while a hold is live,
         // and `key.lowercased()` allocated a fresh string for every key on every keystroke.
-        self.allKeysLowercased = keys.map { $0.lowercased() }
+        let lowercased = keys.map { $0.lowercased() }
+        self.allKeysLowercased = lowercased
+        self.allKeyLengthsLowercased = lowercased.map { $0.count }
         self.completeKeys = Set(keys)
         self.maxKeyLength = longest
     }
@@ -80,8 +85,9 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
     public func hasViableExtension(after text: String) -> Bool {
         guard !text.isEmpty, text.count < maxKeyLength else { return false }
         let folded = text.lowercased()
-        for key in allKeysLowercased where key.count > folded.count {
-            if key.hasPrefix(folded) { return true }
+        let foldedCount = folded.count
+        for index in allKeysLowercased.indices where allKeyLengthsLowercased[index] > foldedCount {
+            if allKeysLowercased[index].hasPrefix(folded) { return true }
         }
         return false
     }

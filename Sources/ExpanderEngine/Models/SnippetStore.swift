@@ -951,7 +951,10 @@ public final class SnippetStore {
 
     public static func decodeDocument(from data: Data) throws -> SnippetDocument {
         let decoder = JSONDecoder()
-        if let legacySnippets = try? decoder.decode([SnippetModel].self, from: data) {
+        // Every current envelope is a JSON object, and an object can never decode as the legacy
+        // bare `[SnippetModel]` array; skip that doomed full parse when the payload opens with `{`.
+        if firstNonWhitespaceByte(in: data) != UInt8(ascii: "{"),
+           let legacySnippets = try? decoder.decode([SnippetModel].self, from: data) {
             let document = SnippetDocument(snippets: legacySnippets)
             guard document.hasUniqueSecretIDs else {
                 throw DecodingError.dataCorrupted(.init(codingPath: [],
@@ -960,6 +963,11 @@ public final class SnippetStore {
             return document
         }
         return try decoder.decode(SnippetDocument.self, from: data)
+    }
+
+    /// First byte that is not JSON whitespace (space, tab, LF, CR), or nil for a blank payload.
+    private static func firstNonWhitespaceByte(in data: Data) -> UInt8? {
+        data.first { $0 != 0x20 && $0 != 0x09 && $0 != 0x0A && $0 != 0x0D }
     }
 
     /// `@discardableResult` because most callers genuinely cannot act on a failed save, but the
@@ -2380,9 +2388,16 @@ public final class SnippetStore {
 
         out.digest = .sha(sha256(of: raw))
 
-        let isBlank = raw.isEmpty
-            || String(data: raw, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
+        let isBlank: Bool
+        if let first = firstNonWhitespaceByte(in: raw),
+           first == UInt8(ascii: "{") || first == UInt8(ascii: "[") {
+            // A JSON document is never blank; skip the whole-file String conversion.
+            isBlank = false
+        } else {
+            isBlank = raw.isEmpty
+                || String(data: raw, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
+        }
         if isBlank {
             // An empty file is a legitimate (if suspicious) empty library — never
             // a reason to write demo snippets. Surface it instead.
