@@ -339,6 +339,23 @@ final class SourceContractTests: XCTestCase {
                       "The refresh that calls TIS must assert the main queue first")
     }
 
+    /// `readQueue` runs the whole selection ladder off main. `NSWorkspace` is resolved on main in
+    /// `Platform.live.frontmostApp` before dispatch and nowhere else in the reader, and the reader
+    /// never blocks on main. (`SelectionReaderThreadingTests` covers the behaviour; this keeps a
+    /// later edit from re-adding the call in a spot the seam cannot see.)
+    func testSelectionReaderTouchesNSWorkspaceOnlyInThePlatformSeamAndNeverBlocksOnMain() throws {
+        let text = try source("Sources/ExpanderEngine/AI/SelectionReader.swift")
+        let uses = text.components(separatedBy: "NSWorkspace").count - 1
+        XCTAssertEqual(uses, 1, "NSWorkspace may appear once in SelectionReader: Platform.live.frontmostApp")
+        let live = try XCTUnwrap(text.range(of: "static let live = Platform("))
+        let readOffMain = try XCTUnwrap(text.range(of: "private static func readOffMain("))
+        let use = try XCTUnwrap(text.range(of: "NSWorkspace"))
+        XCTAssertTrue(live.lowerBound < use.lowerBound && use.lowerBound < readOffMain.lowerBound,
+                      "The one NSWorkspace read must sit inside Platform.live")
+        XCTAssertFalse(text.contains("DispatchQueue.main.sync"),
+                       "readQueue must never wait on main: main may be waiting on readQueue")
+    }
+
     private func source(_ relativePath: String) throws -> String {
         let url = Self.repoRoot.appendingPathComponent(relativePath)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {

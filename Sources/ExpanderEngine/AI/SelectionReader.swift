@@ -109,18 +109,90 @@ public enum SelectionReader {
     /// brokered copy's wait for the target app to write. On main that was a beachball for the
     /// whole of it. Serial, so two quick presses read one after the other rather than racing the
     /// same app's AX tree and the same clipboard snapshot.
+    ///
+    /// ### Thread contract: nothing on this queue may call a main-only API
+    ///
+    /// macOS 27 `dispatch_assert_queue`s the main queue inside HIToolbox, so one main-only call
+    /// here is a SIGTRAP, not a glitch (DevType 1.2.1: TIS from the brokered copy). Audit of
+    /// everything `readSelectionImpl` reaches, and how each is kept off the main-only list:
+    ///
+    /// - TIS / TSM / `UCKeyTranslate` (`HIDKeyPoster.virtualKeyCode`): **fixed** — only
+    ///   `KeyboardLayoutState.refresh()` calls them, on main; this queue reads its snapshot.
+    /// - `NSWorkspace.frontmostApplication`: **fixed** — `Platform.frontmostApp` is read on main
+    ///   by `readOffMain` *before* dispatch and handed in as a value. The live re-check right
+    ///   before the ⌘C asks `NSRunningApplication.isActive` instead (below).
+    /// - `NSWorkspace.runningApplications` and other AppKit objects (`NSApp`, `NSView`,
+    ///   `NSWindow`, `NSEvent`): **not reachable** from this queue (`rg` over the files it reads).
+    /// - `NSRunningApplication` (`makeCandidate`, `isActive`): **justified** — Apple documents the
+    ///   class as thread safe; only its KVO notifications are main-delivered, and nothing here
+    ///   observes it.
+    /// - `NSPasteboard` (`captureSelectionViaCopy`): **justified** — pasteboard access is not
+    ///   main-bound and the broker serialises its own ticket state under `restoreLock`. Its
+    ///   restore retries hop to main with `asyncAfter` and never wait on it.
+    /// - `IsSecureEventInputEnabled`, `CGPreflightPostEventAccess`, `AXIsProcessTrustedWithOptions`
+    ///   and every `AXUIElement*` call: **justified** — process-state reads and thread-safe AX
+    ///   IPC; neither flag read asserts a queue (a background-queue probe on macOS 27 ran both
+    ///   without trapping — which proves little, since the same probe could not reproduce the
+    ///   TIS trap either, so this rests on their being plain reads, not on that run).
+    /// - `AXContextChecker.installManualAccessibilityTerminationObserverIfNeeded`
+    ///   (`NSWorkspace.shared.notificationCenter.addObserver`, reached through the Chromium
+    ///   rescue): **justified** — `NSNotificationCenter` registration is thread safe and the
+    ///   observer is delivered on `.main`. The pid handed to `probeFocusedElements` is always
+    ///   explicit, so its own `NSWorkspace.frontmostApplication` fallback is never taken.
+    /// - `AppMuteStore`, `AXWriteCapabilityStore.seedVerdict`, `AIDiagnosticsStore`, `DevTypeLog`:
+    ///   **justified** — lock-guarded or pure.
+    /// - `DispatchQueue.main.sync`: **never** from here. Completion hops back with `main.async`.
+    ///
+    /// `SelectionReaderThreadingTests` drives this path through `Platform` and asserts the
+    /// main-only seam never runs off main; `SourceContractTests` keeps `NSWorkspace` out of this
+    /// file apart from `Platform.live`.
     static let readQueue = DispatchQueue(label: "com.devtype.selection-read", qos: .userInitiated)
 
-    /// Run one read on `readQueue` and hand its outcome back on main. There is no synchronous
-    /// form: one would let a caller put the whole ladder back on the main thread.
+    /// The frontmost app, resolved once per read.
+    struct FrontmostApp: Equatable {
+        var pid: pid_t?
+        var bundleID: String?
+    }
+
+    /// System facts the read consults, behind a seam so a test can see which thread asks.
+    struct Platform {
+        /// **Main queue only** (`NSWorkspace`). `readOffMain` calls it before it dispatches.
+        var frontmostApp: () -> FrontmostApp
+        var isAXTrusted: (AXContextChecker) -> Bool
+        var canPostEvents: () -> Bool
+        var isSecureInputActive: () -> Bool
+        /// Whether `pid` is the active app *now*; safe off main (`NSRunningApplication`).
+        var isProcessFrontmost: (pid_t) -> Bool
+
+        static let live = Platform(
+            frontmostApp: {
+                let app = NSWorkspace.shared.frontmostApplication
+                return FrontmostApp(pid: app?.processIdentifier, bundleID: app?.bundleIdentifier)
+            },
+            isAXTrusted: { $0.isProcessTrusted() },
+            canPostEvents: { CGPreflightPostEventAccess() },
+            isSecureInputActive: { AXContextChecker.isSecureEventInputEnabledLive() },
+            isProcessFrontmost: { NSRunningApplication(processIdentifier: $0)?.isActive == true }
+        )
+    }
+
+    /// Resolve the main-only facts on main, run one read on `readQueue`, and hand its outcome
+    /// back on main. There is no synchronous form: one would let a caller put the whole ladder
+    /// back on the main thread. Called off main it hops to main first (async, never `main.sync`,
+    /// which could deadlock a main thread that is waiting on this queue).
     private static func readOffMain(
-        _ read: @escaping () -> Outcome,
+        platform: Platform,
+        _ read: @escaping (FrontmostApp) -> Outcome,
         completion: @escaping (Outcome) -> Void
     ) {
-        readQueue.async {
-            let outcome = read()
-            DispatchQueue.main.async { completion(outcome) }
+        let dispatch = {
+            let frontmost = platform.frontmostApp()
+            readQueue.async {
+                let outcome = read(frontmost)
+                DispatchQueue.main.async { completion(outcome) }
+            }
         }
+        if Thread.isMainThread { dispatch() } else { DispatchQueue.main.async(execute: dispatch) }
     }
 
     /// Read the current selection through Accessibility, with a typed reason when there is none.
@@ -134,7 +206,7 @@ public enum SelectionReader {
         clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)? = nil,
         completion: @escaping (Outcome) -> Void
     ) {
-        readOffMain({
+        readOffMain(platform: .live, {
             readSelectionImpl(
                 checker: checker,
                 muteStore: muteStore,
@@ -142,7 +214,9 @@ public enum SelectionReader {
                 now: now,
                 diagnostics: diagnostics,
                 clipboardFallbackPolicy: .disabled,
-                clipboardCapture: clipboardCapture
+                clipboardCapture: clipboardCapture,
+                platform: .live,
+                frontmost: $0
             )
         }, completion: completion)
     }
@@ -164,7 +238,30 @@ public enum SelectionReader {
         clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)? = nil,
         completion: @escaping (Outcome) -> Void
     ) {
-        readOffMain({
+        readExplicitAIAction(
+            checker: checker,
+            muteStore: muteStore,
+            monitor: monitor,
+            now: now,
+            diagnostics: diagnostics,
+            clipboardCapture: clipboardCapture,
+            platform: .live,
+            completion: completion
+        )
+    }
+
+    /// `readSelectionForExplicitAIAction` with the platform seam exposed to tests.
+    static func readExplicitAIAction(
+        checker: AXContextChecker,
+        muteStore: AppMuteStore,
+        monitor: SelectionMonitor,
+        now: Date,
+        diagnostics: AIDiagnosticsStore?,
+        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)?,
+        platform: Platform,
+        completion: @escaping (Outcome) -> Void
+    ) {
+        readOffMain(platform: platform, {
             readSelectionImpl(
                 checker: checker,
                 muteStore: muteStore,
@@ -172,7 +269,9 @@ public enum SelectionReader {
                 now: now,
                 diagnostics: diagnostics,
                 clipboardFallbackPolicy: .explicitAIAction,
-                clipboardCapture: clipboardCapture
+                clipboardCapture: clipboardCapture,
+                platform: platform,
+                frontmost: $0
             )
         }, completion: completion)
     }
@@ -186,20 +285,22 @@ public enum SelectionReader {
         now: Date,
         diagnostics: AIDiagnosticsStore?,
         clipboardFallbackPolicy: ClipboardFallbackPolicy,
-        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)?
+        clipboardCapture: (() -> PasteboardBroker.CopyCaptureOutcome)?,
+        platform: Platform,
+        frontmost: FrontmostApp
     ) -> Outcome {
         let started = Date()
         let deadline = started.addingTimeInterval(readBudgetSeconds)
 
-        let axTrusted = checker.isProcessTrusted()
-        let secureInput = AXContextChecker.isSecureEventInputEnabledLive()
+        let axTrusted = platform.isAXTrusted(checker)
+        let secureInput = platform.isSecureInputActive()
 
-        // Resolve the frontmost app exactly once and thread it through. Reading it separately in
-        // each probe let a hotkey pressed mid app-switch wake one app, probe a second, and be
-        // reported against a third — which is unfalsifiable from the diagnostic report.
-        let frontmost = NSWorkspace.shared.frontmostApplication
-        let frontmostBundleID = frontmost?.bundleIdentifier
-        let frontmostPID = frontmost?.processIdentifier
+        // The frontmost app was resolved once, on main, before this read was dispatched, and is
+        // threaded through. Reading it separately in each probe let a hotkey pressed mid
+        // app-switch wake one app, probe a second, and be reported against a third — which is
+        // unfalsifiable from the diagnostic report. (And `NSWorkspace` is not read on this queue.)
+        let frontmostBundleID = frontmost.bundleID
+        let frontmostPID = frontmost.pid
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let frontmostIsOwnProcess = frontmostPID == ownPID
 
@@ -216,7 +317,9 @@ public enum SelectionReader {
             // user has not made one.
             let probe = checker.probeFocusedElements(
                 activateManualAccessibilityIfEmpty: true,
-                frontmostPID: frontmostPID,
+                // Never nil: `probeFocusedElements` resolves a nil pid through `NSWorkspace`,
+                // which this queue does not touch. 0 reads as "no frontmost app" in every probe.
+                frontmostPID: frontmostPID ?? 0,
                 deadline: deadline
             )
             let elements = probe.candidates
@@ -306,16 +409,20 @@ public enum SelectionReader {
            shouldAttemptClipboardFallback(
                failure: failure,
                frontmostIsOwnProcess: frontmostIsOwnProcess,
-               canPostEvents: CGPreflightPostEventAccess(),
-               secureInputActive: AXContextChecker.isSecureEventInputEnabledLive(),
+               canPostEvents: platform.canPostEvents(),
+               secureInputActive: platform.isSecureInputActive(),
                sourceAppStillFrontmost: PasteboardBroker.frontmostProcessMatches(
                    expectedPID: frontmostPID,
-                   actualPID: NSWorkspace.shared.frontmostApplication?.processIdentifier
+                   actualPID: platform.isProcessFrontmost(frontmostPID) ? frontmostPID : nil
                )
            ) {
             let capture = clipboardCapture?()
                 ?? PasteboardBroker.shared.captureSelectionViaCopy(
-                    expectedFrontmostPID: frontmostPID
+                    expectedFrontmostPID: frontmostPID,
+                    frontmostPIDProvider: {
+                        platform.isProcessFrontmost(frontmostPID) ? frontmostPID : nil
+                    },
+                    secureInputProvider: platform.isSecureInputActive
                 )
             probeSummary += " clipboard:\(capture.diagnosticLabel)"
             if case .captured(let text) = capture,
