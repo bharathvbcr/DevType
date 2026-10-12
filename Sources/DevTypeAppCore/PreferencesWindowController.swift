@@ -118,7 +118,9 @@ final class PreferencesWindowController: NSWindowController {
     private var localizationRefreshDeferred = false
     private var sheetEndObserver: NSObjectProtocol?
 
-    private init() {
+    /// Internal rather than private so tests can open a window of their own instead of sharing the
+    /// singleton's state; production code goes through `shared`.
+    init() {
         super.init(window: nil)
         sheetEndObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didEndSheetNotification,
@@ -160,10 +162,13 @@ final class PreferencesWindowController: NSWindowController {
             self.window = newWindow
             renderedLanguage = LocalizationManager.shared.language
         } else if renderedLanguage != LocalizationManager.shared.language {
-            performLocalizationRefresh()
+            // `reloadAll()` below is this open's one full pass.
+            performLocalizationRefresh(reloadingReplacement: false)
         }
         preferences?.refreshHotkeyManager(hotkeyManager)
         if let tab { preferences?.select(tab) }
+        // The single full reload per open. `viewDidLoad`/`viewWillAppear` deliberately do not
+        // reload: they ran in addition to this call and tripled the work of opening the window.
         preferences?.reloadAll()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -199,7 +204,7 @@ final class PreferencesWindowController: NSWindowController {
         }
     }
 
-    private func performLocalizationRefresh() {
+    private func performLocalizationRefresh(reloadingReplacement: Bool = true) {
         guard let window else { return }
         DevTypeTheme.styleWindow(window, title: LocalizationManager.shared.s("window.preferences"))
         guard let current = preferences else { return }
@@ -224,6 +229,7 @@ final class PreferencesWindowController: NSWindowController {
         let replacement = makePreferencesController(restorationState: state)
         preferences = replacement
         window.contentViewController = replacement
+        if reloadingReplacement { replacement.reloadAll() }
         renderedLanguage = LocalizationManager.shared.language
     }
 

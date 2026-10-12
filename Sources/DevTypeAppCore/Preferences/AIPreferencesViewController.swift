@@ -309,11 +309,13 @@ final class AIPreferencesViewController: PreferencesPaneViewController {
         lappiAskSwitch.state = LappiPreferences.isAskEnabled ? .on : .off
         lappiRecordSwitch.state = LappiPreferences.isRecordEnabled ? .on : .off
         repetitionSwitch.state = TypedRepetitionPreferences.isActive ? .on : .off
+        // One read per reload: each `availability` call constructs a SystemLanguageModel.
+        let availability = AITextTransformSupport.availability
         aiAvailabilityLabel.stringValue = loc.s(
             "prefs.ai.availability",
-            loc.s(AITextTransformSupport.availability.localizationKey)
+            loc.s(availability.localizationKey)
         )
-        switch AITextTransformSupport.availability {
+        switch availability {
         case .available:
             aiAvailabilityLabel.textColor = DevTypeTheme.statusGreen
         case .unavailable:
@@ -334,9 +336,7 @@ final class AIPreferencesViewController: PreferencesPaneViewController {
         refreshRemovalButton(for: aiAllowlistTable)
     }
 
-    override func didSelect() {
-        reload()
-    }
+    override var refreshesOnSelect: Bool { true }
 
     @objc private func aiEnabledChanged() {
         AIPreferences.isEnabled = aiEnabledSwitch.state == .on

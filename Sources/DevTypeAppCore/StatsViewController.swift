@@ -125,34 +125,49 @@ struct StatsLocalizedFormatter {
 
     let localization: LocalizationManager
 
-    private var locale: Locale {
-        Locale(identifier: localization.effectiveLanguageCode())
+    private var languageCode: String { localization.effectiveLanguageCode() }
+
+    private func cached<F: Formatter>(_ kind: String, make: (Locale) -> F) -> F {
+        let code = languageCode
+        return LocalizedFormatterCache.shared.formatter(kind: "stats." + kind, languageCode: code) {
+            make(Locale(identifier: code))
+        }
     }
 
     func number(_ value: Int) -> String {
-        let formatter = NumberFormatter()
-        formatter.locale = locale
-        formatter.numberStyle = .decimal
+        let formatter = cached("number") { locale -> NumberFormatter in
+            let formatter = NumberFormatter()
+            formatter.locale = locale
+            formatter.numberStyle = .decimal
+            return formatter
+        }
         return formatter.string(from: NSNumber(value: value)) ?? String(value)
     }
 
     func relativeDate(_ date: Date, relativeTo referenceDate: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.locale = locale
-        formatter.unitsStyle = .abbreviated
+        let formatter = cached("relative") { locale -> RelativeDateTimeFormatter in
+            let formatter = RelativeDateTimeFormatter()
+            formatter.locale = locale
+            formatter.unitsStyle = .abbreviated
+            return formatter
+        }
         return formatter.localizedString(for: date, relativeTo: referenceDate)
     }
 
     func duration(minutes: Double) -> String {
         let safeMinutes = minutes.isFinite ? max(0, minutes) : 0
         let seconds = safeMinutes * 60
-        let formatter = DateComponentsFormatter()
-        formatter.unitsStyle = .abbreviated
-        formatter.allowedUnits = seconds >= 3_600 ? [.hour, .minute] : [.minute, .second]
-        formatter.maximumUnitCount = 2
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.locale = locale
-        formatter.calendar = calendar
+        let hours = seconds >= 3_600
+        let formatter = cached(hours ? "duration.hm" : "duration.ms") { locale -> DateComponentsFormatter in
+            let formatter = DateComponentsFormatter()
+            formatter.unitsStyle = .abbreviated
+            formatter.allowedUnits = hours ? [.hour, .minute] : [.minute, .second]
+            formatter.maximumUnitCount = 2
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.locale = locale
+            formatter.calendar = calendar
+            return formatter
+        }
         return formatter.string(from: seconds) ?? number(0)
     }
 
@@ -491,7 +506,7 @@ final class StatsViewController: NSViewController {
     private func populateInsights(unusedCount: Int, mostValuable: SnippetModel?, maxSaved: Int) {
         insightsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        let conflicts = store.triggerConflicts()
+        let conflicts = TriggerConflictsCache.shared.conflicts(in: store)
         if !conflicts.isEmpty {
             let conflictCard = makeInsightCard(
                 title: loc.s("stats.insight.conflicts.title"),

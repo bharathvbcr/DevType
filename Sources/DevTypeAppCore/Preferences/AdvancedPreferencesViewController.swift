@@ -161,9 +161,7 @@ final class AdvancedPreferencesViewController: PreferencesPaneViewController {
             : DevTypeTheme.statusGreen
     }
 
-    override func didSelect() {
-        reload()
-    }
+    override var refreshesOnSelect: Bool { true }
 
     @objc private func tapThreadChanged() {
         let enabled = tapThreadSwitch.state == .on

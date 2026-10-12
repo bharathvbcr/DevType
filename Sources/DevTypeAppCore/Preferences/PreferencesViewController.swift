@@ -30,6 +30,12 @@ final class PreferencesViewController: NSViewController {
     /// Glanceable engine state pinned to the bottom of the sidebar.
     private var engineStatusPill: PillBadgeView?
     private var homeViewController: HomeViewController?
+    /// Panes `ensurePane` populated since the last `reloadAll()`. The pass that follows skips
+    /// them: they were read moments ago, and a second read per open repeated every probe.
+    private var reloadedSinceLastPass: Set<PreferencesTab> = []
+    /// Counting seams for tests: how many full passes ran, and how often each pane reloaded.
+    private(set) var reloadAllCount = 0
+    private(set) var paneReloadCounts: [PreferencesTab: Int] = [:]
 
     // Tab controllers are created with the host, as their controls always were; each one's view
     // is built only when its tab is first selected.
@@ -258,16 +264,10 @@ final class PreferencesViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        reloadAll()
         if let restorationState {
             self.restorationState = nil
             restoreLocalizationState(restorationState)
         }
-    }
-
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        reloadAll()
     }
 
     func select(_ tab: PreferencesTab) {
@@ -299,11 +299,13 @@ final class PreferencesViewController: NSViewController {
         // reloads are idempotent, and the Voice and AI `reload()`s already guard on their
         // view being loaded, which it is by this point.
         reload(tab)
+        reloadedSinceLastPass.insert(tab)
         return pane
     }
 
     /// Repopulates one pane's controls from current preferences.
     private func reload(_ tab: PreferencesTab) {
+        paneReloadCounts[tab, default: 0] += 1
         if tab == .home {
             homeViewController?.refresh()
         } else {
@@ -327,8 +329,10 @@ final class PreferencesViewController: NSViewController {
 
     private func applyTabSelection(_ tab: PreferencesTab, animated: Bool) {
         let isFirstPresentation = tabsShownAtLeastOnce.insert(tab).inserted
+        let wasBuilt = panes[tab] != nil
         selectedTab = tab
         // Must precede the reload/refresh calls below, which read the pane's controls.
+        // Building the pane also populates it, so only an already-built pane reloads on select.
         ensurePane(tab)
         for row in navRows {
             let selected = row.tab == tab
@@ -350,6 +354,9 @@ final class PreferencesViewController: NSViewController {
             }
         } else {
             panes[tab]?.alphaValue = 1
+        }
+        if wasBuilt, paneController(for: tab)?.refreshesOnSelect == true {
+            reload(tab)
         }
         paneController(for: tab)?.didSelect()
         // Reloading controls (especially popups) can make AppKit reveal their
@@ -410,12 +417,19 @@ final class PreferencesViewController: NSViewController {
     }
 
     /// Re-pulls every value from its source of truth.
+    ///
+    /// Only built panes are read: an unbuilt pane is populated when it is first selected, and
+    /// reading it here ran its probes (conflict scan, Whisper readiness, availability) for a
+    /// view nobody can see. Panes populated since the previous pass are skipped, so one open is
+    /// one read of each pane.
     func reloadAll() {
         guard isViewLoaded else { return }
-        homeViewController?.refresh()
-        for tab in PreferencesTab.allCases {
-            paneController(for: tab)?.reload()
+        reloadAllCount += 1
+        for tab in PreferencesTab.allCases
+        where panes[tab] != nil && !reloadedSinceLastPass.contains(tab) {
+            reload(tab)
         }
+        reloadedSinceLastPass.removeAll()
         refreshEngineStatus()
     }
 

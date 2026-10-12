@@ -153,11 +153,12 @@ extension VoicePreferencesViewController {
     /// on: whether the selected engine will work, and what is missing if it will not.
     func voiceEngineStatus(
         for engine: TranscriptionEngine,
-        speechAuthorization: SpeechAuthorization.Status = SpeechAuthorization.status()
+        speechAuthorization: SpeechAuthorization.Status = SpeechAuthorization.status(),
+        geminiState: GeminiAPIKeyStore.ReadState? = nil
     ) -> (text: String, color: NSColor, detail: String?) {
         switch engine {
         case .gemini:
-            switch GeminiAPIKeyStore.readState() {
+            switch geminiState ?? GeminiAPIKeyStore.readState() {
             case .unavailable:
                 return (
                     loc.s("prefs.voice.keychain.unavailable.pill"),

@@ -12,7 +12,7 @@ final class PreferenceTableAreaView: NSView {}
 
 /// One Preferences tab: a scrolling stack of cards plus the shared card, row and list helpers
 /// every tab builds with. `PreferencesViewController` owns selection and decides when each
-/// hook runs; subclasses override `build(into:)`, `reload()` and, if needed, `didSelect()`.
+/// hook runs; subclasses override `build(into:)`, `reload()` and, if needed, `didSelect()` or `refreshesOnSelect`.
 class PreferencesPaneViewController: NSViewController,
                                      NSTableViewDataSource,
                                      NSTableViewDelegate {
@@ -68,6 +68,11 @@ class PreferencesPaneViewController: NSViewController,
 
     /// Runs every time the tab is selected, after its pane has been built.
     func didSelect() {}
+
+    /// True when the tab's values can drift while it is hidden (live diagnostics, availability),
+    /// so the host reloads it on every selection. The host skips this on the selection that
+    /// builds the pane, which has just been populated.
+    var refreshesOnSelect: Bool { false }
 
     // MARK: Table data source / delegate
 

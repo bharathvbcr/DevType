@@ -401,7 +401,7 @@ final class SnippetsPreferencesViewController: PreferencesPaneViewController {
     }
 
     @objc private func rescanConflicts() {
-        let conflicts = store.triggerConflicts()
+        let conflicts = TriggerConflictsCache.shared.conflicts(in: store)
         guard !conflicts.isEmpty else {
             conflictsLabel.stringValue = loc.s("prefs.snippets.conflicts.none")
             conflictsLabel.textColor = DevTypeTheme.statusGreen
