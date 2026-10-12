@@ -168,4 +168,40 @@ final class SecretArchiveLockTests: XCTestCase {
         let reopened = ConsolidatedSecretBackingStore(fileURL: url, tier: tier, diagnostics: SecretAccessDiagnostics())
         XCTAssertEqual(reopened.value(account: account), "retryable")
     }
+    /// In-process contenders queue for the archive transaction instead of polling for a free
+    /// instant. With polling, a waiter only ever saw the lock free if its 10 ms sample happened to
+    /// land in the microsecond gap between two busy holders, so under load it starved to the
+    /// five-second refusal while the lock was granted to everyone else.
+    func testAWaiterIsNotStarvedBehindBackToBackTransactions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ConsolidatedSecretBackingStore(
+            fileURL: directory.appendingPathComponent("synthetic.enc"),
+            tier: InMemorySecretBackingStore(), diagnostics: SecretAccessDiagnostics()
+        )
+        let stop = NSLock()
+        var stopped = false
+        let holders = DispatchGroup()
+        for _ in 0..<4 {
+            holders.enter()
+            DispatchQueue.global().async {
+                while true {
+                    stop.lock(); let done = stopped; stop.unlock()
+                    if done { break }
+                    _ = store.performExclusiveTransaction { Thread.sleep(forTimeInterval: 0.001) }
+                }
+                holders.leave()
+            }
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        let started = ProcessInfo.processInfo.systemUptime
+        let granted = store.performExclusiveTransaction {}
+        let waited = ProcessInfo.processInfo.systemUptime - started
+        stop.lock(); stopped = true; stop.unlock()
+        holders.wait()
+
+        XCTAssertTrue(granted, "a waiter behind busy holders was refused after \(waited)s")
+        XCTAssertLessThan(waited, 1.0, "the waiter starved for \(waited)s behind back-to-back holders")
+    }
 }
