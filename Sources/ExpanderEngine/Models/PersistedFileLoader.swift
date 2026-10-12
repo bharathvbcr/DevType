@@ -190,6 +190,36 @@ public enum PersistedFileLoader {
         return target
     }
 
+    /// Result of reading a Codable value out of UserDefaults.
+    public enum DefaultsRead<Value> {
+        /// The key was never written (or holds an empty blob): the normal first-run state.
+        case unset
+        case value(Value)
+        /// The key holds something that is not a `Value`. The raw value was copied aside
+        /// (see `preserveUndecodableDefaultsValue`) and the key is left for the next save.
+        case undecodable
+    }
+
+    /// Reads and decodes `key`, preserving the raw value when it cannot be decoded. This is the
+    /// one defaults read for user data that must not silently decode to "empty" and then be
+    /// overwritten by the next save.
+    public static func readDefaultsValue<Value: Decodable>(
+        _ type: Value.Type,
+        store: String,
+        key: String,
+        defaults: UserDefaults = .standard
+    ) -> DefaultsRead<Value> {
+        guard let object = defaults.object(forKey: key) else { return .unset }
+        if let data = object as? Data {
+            if data.isEmpty { return .unset }
+            if let value = try? JSONDecoder().decode(Value.self, from: data) { return .value(value) }
+        }
+        preserveUndecodableDefaultsValue(store: store, key: key, defaults: defaults) { data in
+            _ = try JSONDecoder().decode(Value.self, from: data)
+        }
+        return .undecodable
+    }
+
     /// Single sink for store-failure diagnostics: OSLog (public-safe text only) plus the test observer.
     public static func report(_ line: String) {
         DevTypeLog.store.error("\(line, privacy: .public)")

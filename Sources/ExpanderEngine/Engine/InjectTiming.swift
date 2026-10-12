@@ -366,15 +366,16 @@ public final class InjectTimingStore {
     }
 
     private static func loadFromDisk(fileURL: URL) -> [String: [Double]] {
-        guard FileManager.default.fileExists(atPath: fileURL.path),
-              let data = try? Data(contentsOf: fileURL),
-              let file = try? JSONDecoder().decode(PersistedFile.self, from: data) else {
-            return [:]
-        }
-        guard file.version <= persistenceSchemaVersion else {
-            DevTypeLog.inject.notice(
-                "[Inject] inject-timing file schema \(file.version, privacy: .public) is newer than \(persistenceSchemaVersion, privacy: .public) — ignoring"
-            )
+        // An unreadable file, or one written by a newer schema, is moved aside by the loader
+        // rather than ignored in place: the next save would otherwise overwrite the only copy.
+        guard let file = PersistedFileLoader.load(
+            store: "InjectTimingStore", fileURL: fileURL,
+            decode: { data in
+                let file = try JSONDecoder().decode(PersistedFile.self, from: data)
+                guard file.version <= persistenceSchemaVersion else { throw CocoaError(.fileReadUnsupportedScheme) }
+                return file
+            }
+        ).value else {
             return [:]
         }
         var result: [String: [Double]] = [:]
@@ -388,6 +389,7 @@ public final class InjectTimingStore {
     }
 
     private static func saveToDisk(_ samples: [String: [Double]], fileURL: URL) {
+        guard PersistedFileLoader.permitWrite(store: "InjectTimingStore", fileURL: fileURL) else { return }
         let file = PersistedFile(version: persistenceSchemaVersion, samples: samples)
         do {
             let encoder = JSONEncoder()

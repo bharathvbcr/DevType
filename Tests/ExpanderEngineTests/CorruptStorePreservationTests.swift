@@ -161,6 +161,82 @@ final class CorruptStorePreservationTests: XCTestCase {
         XCTAssertTrue(lines().joined().contains("AXWriteCapabilityStore"))
     }
 
+    // MARK: Newer-schema files and defaults blobs are preserved, not overwritten
+
+    func testNewerSchemaInjectTimingFileIsPreservedAfterNextSave() throws {
+        let newer = Data(#"{"version":99,"samples":{"com.example.app":[0.1]}}"#.utf8)
+        let url = try makeCorrupt("inject-timing.json", bytes: newer)
+
+        let store = InjectTimingStore(fileURL: url)
+        for _ in 0..<InjectTimingStore.minSamplesForConfidence { store.recordDeliveryLatency(0.2, bundleID: "com.example.fresh") }
+        XCTAssertTrue(waitUntil { (try? Data(contentsOf: url)).map { $0 != newer } ?? false }, "store never saved")
+
+        XCTAssertTrue(directoryPreserves(newer), "a newer build's file was overwritten")
+    }
+
+    func testNewerSchemaAXWriteCapabilityFileIsPreservedAfterNextSave() throws {
+        let newer = Data(#"{"version":99,"entries":{"com.example.app":"falseSuccess"}}"#.utf8)
+        let url = try makeCorrupt("ax-write-capability.json", bytes: newer)
+
+        let store = AXWriteCapabilityStore(fileURL: url, currentBuild: { _ in "1" })
+        store.recordFalseSuccess(bundleID: "com.example.other")
+        XCTAssertTrue(waitUntil { (try? Data(contentsOf: url)).map { $0 != newer } ?? false }, "store never saved")
+
+        XCTAssertTrue(directoryPreserves(newer), "a newer build's file was overwritten")
+    }
+
+    private func withDefaultsKey(_ key: String, _ body: (UserDefaults) throws -> Void) rethrows {
+        let defaults = UserDefaults.standard
+        let saved = defaults.object(forKey: key)
+        let copies = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("\(key).unreadable.") }
+        defer {
+            if let saved { defaults.set(saved, forKey: key) } else { defaults.removeObject(forKey: key) }
+            for stray in defaults.dictionaryRepresentation().keys
+            where stray.hasPrefix("\(key).unreadable.") && !copies.contains(stray) {
+                defaults.removeObject(forKey: stray)
+            }
+        }
+        try body(defaults)
+    }
+
+    private func preservedCopy(of bytes: Data, key: String, in defaults: UserDefaults) -> Bool {
+        defaults.dictionaryRepresentation().contains { entry in
+            entry.key.hasPrefix("\(key).unreadable.") && (entry.value as? Data) == bytes
+        }
+    }
+
+    func testUndecodableVoiceCustomDictionaryIsPreservedBeforeTheNextSave() throws {
+        let key = VoicePreferences.customDictionaryKey
+        try withDefaultsKey(key) { defaults in
+            let bytes = Data("{not a dictionary".utf8)
+            defaults.set(bytes, forKey: key)
+
+            XCTAssertEqual(VoicePreferences.customDictionary, VoicePreferences.defaultDictionary)
+            VoicePreferences.customDictionary = ["mine": "Mine"]
+
+            XCTAssertTrue(preservedCopy(of: bytes, key: key, in: defaults), "the user's dictionary bytes were lost")
+        }
+    }
+
+    func testUndecodableTypedPathAllowlistDeniesEveryAppAndIsPreservedUntilResaved() throws {
+        let key = AIPreferences.typedPathAllowlistKey
+        try withDefaultsKey(key) { defaults in
+            let bytes = Data("[\"com.apple.Safari\"".utf8)   // truncated JSON
+            defaults.set(bytes, forKey: key)
+
+            XCTAssertTrue(AIPreferences.typedPathAllowlistIsUnreadable)
+            XCTAssertFalse(AIPreferences.isTypedPathAllowed(bundleID: "com.apple.Safari"),
+                           "an unreadable allowlist decoded to [] and allowed every app")
+            XCTAssertFalse(AIPreferences.isTypedPathAllowed(bundleID: "com.example.any"))
+            XCTAssertTrue(preservedCopy(of: bytes, key: key, in: defaults))
+
+            AIPreferences.typedPathAllowlist = ["com.apple.Safari"]
+            XCTAssertFalse(AIPreferences.typedPathAllowlistIsUnreadable)
+            XCTAssertTrue(AIPreferences.isTypedPathAllowed(bundleID: "com.apple.Safari"))
+            XCTAssertFalse(AIPreferences.isTypedPathAllowed(bundleID: "com.apple.Notes"))
+        }
+    }
+
     // MARK: Adversarial inputs (loader contract)
 
     func testAbsentAndZeroByteFilesAreNotQuarantinedOrLogged() throws {

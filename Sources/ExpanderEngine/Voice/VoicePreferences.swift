@@ -148,11 +148,10 @@ public enum VoicePreferences {
 
     public static var customDictionary: [String: String] {
         get {
-            guard let data = UserDefaults.standard.data(forKey: customDictionaryKey),
-                  let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
-                return defaultDictionary
-            }
-            return dict
+            if case .value(let dict) = PersistedFileLoader.readDefaultsValue(
+                [String: String].self, store: "Voice custom dictionary", key: customDictionaryKey
+            ) { return dict }
+            return defaultDictionary
         }
         set {
             if let data = try? JSONEncoder().encode(newValue) {
@@ -241,11 +240,10 @@ public enum VoicePreferences {
     /// Augments `ToneCategory.category(forBundleID:)` with user preferences.
     public static var perAppToneOverrides: [String: String] {
         get {
-            guard let data = UserDefaults.standard.data(forKey: perAppToneOverridesKey),
-                  let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
-                return [:]
-            }
-            return dict
+            if case .value(let dict) = PersistedFileLoader.readDefaultsValue(
+                [String: String].self, store: "Voice per-app tone overrides", key: perAppToneOverridesKey
+            ) { return dict }
+            return [:]
         }
         set {
             if let data = try? JSONEncoder().encode(newValue) {
@@ -394,11 +392,10 @@ public enum VoicePreferences {
 
     public static var customVoiceTriggers: [String: String] {
         get {
-            guard let data = UserDefaults.standard.data(forKey: customVoiceTriggersKey),
-                  let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
-                return defaultVoiceTriggers
-            }
-            return dict
+            if case .value(let dict) = PersistedFileLoader.readDefaultsValue(
+                [String: String].self, store: "Voice custom triggers", key: customVoiceTriggersKey
+            ) { return dict }
+            return defaultVoiceTriggers
         }
         set {
             if let data = try? JSONEncoder().encode(newValue) {
