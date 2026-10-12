@@ -469,14 +469,10 @@ public final class UsageStatsStore {
     private func scheduleFlush() { writer.schedule() }
 
     private static func loadFromDisk(fileURL: URL) -> LoadResult {
-        guard FileManager.default.fileExists(atPath: fileURL.path),
-              let data = try? Data(contentsOf: fileURL), !data.isEmpty else {
-            return LoadResult(stats: [:], needsRewrite: false)
-        }
-        guard let document = try? JSONDecoder().decode(Document.self, from: data) else {
-            DevTypeLog.store.error(
-                "[Store] Usage stats unreadable \(DevTypeLog.publicPathMetadata(fileURL.path), privacy: .public); starting empty"
-            )
+        guard let document = PersistedFileLoader.load(
+            store: "UsageStatsStore", fileURL: fileURL,
+            decode: { try JSONDecoder().decode(Document.self, from: $0) }
+        ).value else {
             return LoadResult(stats: [:], needsRewrite: false)
         }
         var out: [UUID: Stat] = [:]

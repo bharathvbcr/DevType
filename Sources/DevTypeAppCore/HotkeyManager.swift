@@ -129,8 +129,11 @@ final class HotkeyManager {
     /// Preferences after `applyMacros(_:)`.
     private(set) var lastMacroRegistrationFailures: [(label: String, status: OSStatus)] = []
 
-    static func loadMacros() -> [HotkeyMacroAction] {
-        guard let data = UserDefaults.standard.data(forKey: "devtype.hotkeyMacros"),
+    static func loadMacros(defaults: UserDefaults = .standard) -> [HotkeyMacroAction] {
+        PersistedFileLoader.preserveUndecodableDefaultsValue(
+            store: "Hotkey macros", key: HotkeyPreferences.macrosKey, defaults: defaults
+        ) { _ = try JSONDecoder().decode([CodableMacro].self, from: $0) }
+        guard let data = defaults.data(forKey: HotkeyPreferences.macrosKey),
               let decoded = try? JSONDecoder().decode([CodableMacro].self, from: data) else {
             return []
         }

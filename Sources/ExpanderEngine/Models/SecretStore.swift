@@ -1306,7 +1306,10 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         guard let enumerator = FileManager.default.enumerator(
             at: parent, includingPropertiesForKeys: nil, options: [.skipsSubdirectoryDescendants],
             errorHandler: { _, _ in enumerationFailed = true; return false }
-        ) else { return false }
+        ) else {
+            diagnostics.note("archive quarantine could not list directory")
+            return false
+        }
         var count = 0
         for case let url as URL in enumerator where url.lastPathComponent.hasPrefix(prefix) {
             count += 1
@@ -1315,13 +1318,18 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
                 return false
             }
         }
-        guard !enumerationFailed else { return false }
+        guard !enumerationFailed else {
+            diagnostics.note("archive quarantine directory scan failed")
+            return false
+        }
         let aside = fileURL.appendingPathExtension(count == 0 ? "unreadable" : "unreadable.\(UUID().uuidString)")
         do {
             try FileManager.default.moveItem(at: fileURL, to: aside)
             diagnostics.note("archive quarantined as unreadable")
             return true
         } catch {
+            // Error metadata is type/code/fingerprinted domain only: no path, account or value.
+            diagnostics.note("archive quarantine move failed (\(DevTypeLog.errorMetadata(error)))")
             return false
         }
     }

@@ -355,14 +355,28 @@ public final class ImageAttachmentStore {
         }
 
         var removed: [String] = []
+        var failedRemovals = 0
+        var lastFailure: Error?
         for name in names {
             guard !name.hasPrefix("."), !referencedNames.contains(name) else { continue }
             // Only ever touch files we could have written ourselves.
             guard Self.supportedExtensions.contains((name as NSString).pathExtension.lowercased()) else { continue }
-            removed.append(name)
-            if !dryRun {
-                try? fm.removeItem(at: directory.appendingPathComponent(name))
+            if dryRun {
+                removed.append(name)
+                continue
             }
+            do {
+                try removeItemAtURL(directory.appendingPathComponent(name))
+                removed.append(name)
+            } catch {
+                failedRemovals += 1
+                lastFailure = error
+            }
+        }
+        if let lastFailure {
+            PersistedFileLoader.report(
+                "[Store] Failed to remove \(failedRemovals) orphaned image attachment(s) \(DevTypeLog.errorMetadata(lastFailure))"
+            )
         }
         if !removed.isEmpty && !dryRun {
             DevTypeLog.store.notice(

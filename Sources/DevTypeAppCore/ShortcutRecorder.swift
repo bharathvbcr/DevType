@@ -138,14 +138,25 @@ enum HotkeyPreferences {
         set { UserDefaults.standard.set(newValue, forKey: shortcutsDisabledKey) }
     }
 
+    /// A stored shortcut that is present but unreadable falls back to the default; the fallback
+    /// is logged so a shortcut that "reset itself" is explainable. Absent is the normal case.
+    private static func storedShortcut(forKey key: String, fallback: DevTypeShortcut) -> DevTypeShortcut {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return fallback }
+        do {
+            let decoded = try JSONDecoder().decode(DevTypeShortcut.self, from: data)
+            if decoded.hasModifier { return decoded }
+            DevTypeLog.app.error("[Hotkey] stored shortcut \(key, privacy: .public) has no modifier; using default")
+        } catch {
+            DevTypeLog.app.error(
+                "[Hotkey] stored shortcut \(key, privacy: .public) unreadable \(DevTypeLog.errorMetadata(error), privacy: .public); using default"
+            )
+        }
+        return fallback
+    }
+
     static var inlineSearchShortcut: DevTypeShortcut {
         get {
-            guard let data = UserDefaults.standard.data(forKey: inlineSearchKey),
-                  let decoded = try? JSONDecoder().decode(DevTypeShortcut.self, from: data),
-                  decoded.hasModifier else {
-                return .inlineSearchDefault
-            }
-            return decoded
+            storedShortcut(forKey: inlineSearchKey, fallback: .inlineSearchDefault)
         }
         set {
             guard let data = try? JSONEncoder().encode(newValue) else { return }
@@ -159,12 +170,7 @@ enum HotkeyPreferences {
 
     static var aiPaletteShortcut: DevTypeShortcut {
         get {
-            guard let data = UserDefaults.standard.data(forKey: aiPaletteKey),
-                  let decoded = try? JSONDecoder().decode(DevTypeShortcut.self, from: data),
-                  decoded.hasModifier else {
-                return .aiPaletteDefault
-            }
-            return decoded
+            storedShortcut(forKey: aiPaletteKey, fallback: .aiPaletteDefault)
         }
         set {
             guard let data = try? JSONEncoder().encode(newValue) else { return }
@@ -178,12 +184,7 @@ enum HotkeyPreferences {
 
     static var voiceShortcut: DevTypeShortcut {
         get {
-            guard let data = UserDefaults.standard.data(forKey: voiceKey),
-                  let decoded = try? JSONDecoder().decode(DevTypeShortcut.self, from: data),
-                  decoded.hasModifier else {
-                return .voiceDefault
-            }
-            return decoded
+            storedShortcut(forKey: voiceKey, fallback: .voiceDefault)
         }
         set {
             guard let data = try? JSONEncoder().encode(newValue) else { return }
@@ -198,7 +199,9 @@ enum HotkeyPreferences {
     /// §4.3: the macro list was readable only by hand-crafting JSON into
     /// `devtype.hotkeyMacros`. Writing goes through here so the Preferences UI
     /// and `HotkeyManager.loadMacros()` agree on the wire format.
-    static func saveMacros(_ macros: [HotkeyMacroAction]) {
+    static func saveMacros(_ macros: [HotkeyMacroAction], defaults: UserDefaults = .standard) {
+        // Never replace a value this build cannot read without keeping its bytes first.
+        _ = HotkeyManager.loadMacros(defaults: defaults)
         let encodable = macros.map {
             StoredMacro(
                 keyCode: $0.keyCode,
@@ -208,7 +211,7 @@ enum HotkeyPreferences {
             )
         }
         guard let data = try? JSONEncoder().encode(encodable) else { return }
-        UserDefaults.standard.set(data, forKey: macrosKey)
+        defaults.set(data, forKey: macrosKey)
     }
 
     /// Mirrors `HotkeyManager.CodableMacro` (which is private to that type).
