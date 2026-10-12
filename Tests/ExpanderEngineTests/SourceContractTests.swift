@@ -310,23 +310,28 @@ final class SourceContractTests: XCTestCase {
     /// main-asserting owner calls them; everything else reads its snapshot.
     func testTextInputSourceAPIsLiveOnlyInTheKeyboardLayoutOwner() throws {
         let owner = "Sources/ExpanderEngine/Engine/KeyboardLayoutState.swift"
-        let tokens = ["TISCopyCurrentKeyboardInputSource", "TISGetInputSourceProperty",
-                      "kTISProperty", "kTISNotifySelectedKeyboardInputSourceChanged", "UCKeyTranslate"]
+        // Any HIToolbox text-input surface, not a list of today's function names: a new TIS*/TSM*
+        // call added elsewhere has the same off-main trap.
+        let pattern = try NSRegularExpression(
+            pattern: #"\b(TIS[A-Z]\w*|TSM[A-Z]\w*|kTIS\w*|UCKeyTranslate|LMGetKbdType|KBGetLayoutType)\b"#)
         let sourcesRoot = Self.repoRoot.appendingPathComponent("Sources", isDirectory: true)
         let files = try XCTUnwrap(FileManager.default.enumerator(
             at: sourcesRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))
-        var found: [String: Set<String>] = [:]
+        var offenders: [String: Set<String>] = [:]
+        var ownerHits = 0
         for case let url as URL in files where url.pathExtension == "swift" {
-            guard let raw = try? String(contentsOf: url, encoding: .utf8),
-                  tokens.contains(where: raw.contains) else { continue }   // cheap pre-filter
+            guard let raw = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let code = Self.strippingComments(raw)
-            for token in tokens where code.contains(token) {
-                found[token, default: []].insert(String(url.path.dropFirst(Self.repoRoot.path.count + 1)))
+            let range = NSRange(code.startIndex..., in: code)
+            let relative = String(url.path.dropFirst(Self.repoRoot.path.count + 1))
+            for match in pattern.matches(in: code, range: range) {
+                if relative == owner { ownerHits += 1; continue }
+                let token = String(code[Range(match.range, in: code)!])
+                offenders[relative, default: []].insert(token)
             }
         }
-        for token in tokens {
-            XCTAssertEqual(found[token], [owner], "\(token) may appear only in \(owner)")
-        }
+        XCTAssertTrue(offenders.isEmpty, "Text Input Source APIs may appear only in \(owner): \(offenders)")
+        XCTAssertGreaterThan(ownerHits, 0, "the owner no longer uses TIS; the scan is checking nothing")
         let text = try source(owner)
         let refresh = try XCTUnwrap(text.range(of: "func refresh() {"))
         XCTAssertTrue(String(text[refresh.upperBound...].prefix(120))

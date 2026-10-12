@@ -159,6 +159,9 @@ final class DebouncedSidecarWriter {
     /// The atomic disk write, split out so tests can inject failures. Production path
     /// (`writeInterceptor == nil`) is unchanged.
     private func persist(_ data: Data) throws {
+        guard PersistedFileLoader.permitWrite(store: failureMessage, fileURL: fileURL) else {
+            throw CocoaError(.fileWriteVolumeReadOnly)
+        }
         if let writeInterceptor {
             try writeInterceptor(data)
             return

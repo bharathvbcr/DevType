@@ -34,9 +34,14 @@ public final class LibraryBackupStore {
         /// A library file that could not be decoded at load.
         case corrupted
 
-        /// Safety copies are taken once, right before a destructive step, and are never pruned
-        /// automatically. Only the per-save copies roll.
+        /// Per-save copies roll under `retainedRollingBackups`.
         public var isRolling: Bool { self == .save }
+
+        /// Safety copies are taken once, right before a destructive step. Each kind is capped by
+        /// `retainedSafetyBackups` so repeated restores or Save As cannot grow the directory
+        /// without bound. `corrupted` quarantines are the one kind never pruned: they hold the
+        /// only copy of a file this build could not read.
+        public var isCappedSafety: Bool { !isRolling && self != .corrupted }
     }
 
     public struct Entry: Equatable {
@@ -84,6 +89,10 @@ public final class LibraryBackupStore {
     /// of each calendar day for the last `dailyWindowDays` days.
     static let rollingCount = 20
     static let dailyWindowDays = 30
+    /// Retention promise for each capped safety kind: its newest `safetyCountPerKind` copies, plus
+    /// every copy younger than `safetyWindowDays`. The newest of a kind is always kept.
+    static let safetyCountPerKind = 10
+    static let safetyWindowDays = 30
     /// Bounds a restore or listing read, matching the conflict resolver's candidate ceiling.
     static let maximumBackupBytes = LibraryConflictRecovery.maximumCandidateBytes
 
@@ -177,7 +186,11 @@ public final class LibraryBackupStore {
             let destination = try uniqueURLLocked(kind: kind, at: now())
             try fileManager.moveItem(at: url, to: destination)
             do {
-                try FilePermissions.setPOSIX(destination, 0o600)
+                // A directory sitting at the library path is preserved whole; 0o600 would strip its
+                // search bit and leave the contents it was kept for unreachable.
+                var isDirectory: ObjCBool = false
+                _ = fileManager.fileExists(atPath: destination.path, isDirectory: &isDirectory)
+                try FilePermissions.setPOSIX(destination, isDirectory.boolValue ? 0o700 : 0o600)
             } catch {
                 // The bytes are preserved either way; an owner-unreadable backup is still a backup.
                 DevTypeLog.store.error(
@@ -323,7 +336,7 @@ public final class LibraryBackupStore {
 
     /// Exactly the rolling backups the retention promise keeps: the `rollingCount` newest, plus
     /// the newest of every calendar day (in `calendar`) within `dailyWindowDays` of `now`.
-    /// Safety copies are outside this rule: they are ignored here and `prune()` never removes them.
+    /// Safety copies are outside this rule; see `retainedSafetyBackups`.
     static func retainedRollingBackups(
         _ entries: [Entry],
         now: Date,
@@ -348,16 +361,37 @@ public final class LibraryBackupStore {
         return kept
     }
 
-    /// Removes the rolling backups outside the retention promise. A removal failure is logged
+    /// The safety copies the retention promise keeps: per capped kind, the `countPerKind` newest
+    /// plus anything younger than `windowDays`. Other kinds are not this rule's concern.
+    static func retainedSafetyBackups(
+        _ entries: [Entry],
+        now: Date,
+        calendar: Calendar,
+        countPerKind: Int = safetyCountPerKind,
+        windowDays: Int = safetyWindowDays
+    ) -> Set<URL> {
+        let windowStart = calendar.date(byAdding: .day, value: -max(0, windowDays), to: now) ?? now
+        var kept = Set<URL>()
+        for kind in Kind.allCases where kind.isCappedSafety {
+            let ofKind = entries.filter { $0.kind == kind }.sorted(by: newerFirst)
+            // At least one, so a zero count can never delete the newest copy of a kind.
+            kept.formUnion(ofKind.prefix(max(1, countPerKind)).map(\.url))
+            kept.formUnion(ofKind.filter { $0.createdAt > windowStart }.map(\.url))
+        }
+        return kept
+    }
+
+    /// Removes the rolling and capped-safety backups outside the retention promise. A removal failure is logged
     /// and counted; the next pass retries it.
     @discardableResult
     func prune() -> PruneReport {
         lock.lock()
         let all = entries()
         let keep = Self.retainedRollingBackups(all, now: now(), calendar: calendar)
+            .union(Self.retainedSafetyBackups(all, now: now(), calendar: calendar))
         var report = PruneReport()
         for entry in all {
-            guard entry.kind.isRolling, !keep.contains(entry.url) else {
+            guard entry.kind.isRolling || entry.kind.isCappedSafety, !keep.contains(entry.url) else {
                 report.retained += 1
                 continue
             }

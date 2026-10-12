@@ -71,12 +71,14 @@ final class LibraryRestoreRecoveryTests: XCTestCase {
         var registered = false
         let token = store.addGroupListener { _ in if registered { heard.fulfill() } }
         registered = true
-        defer { store.removeListener(token: token) }
 
         let result = store.restoreLibrary(fromBackup: backup)
 
         XCTAssertTrue(result.didRestore, "restore was refused in the state it exists for: \(result.outcome)")
         wait(for: [heard], timeout: 2)
+        // The restore notifies exactly once (the expectation traps a second call). Stop listening
+        // before the follow-up save below, which legitimately notifies again.
+        store.removeListener(token: token)
         let kept = try XCTUnwrap(result.preRestoreBackupURL)
         XCTAssertEqual(try Data(contentsOf: kept), corrupt)
         XCTAssertEqual(store.backups.entry(for: kept)?.kind, .preRestore)

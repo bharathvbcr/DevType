@@ -1201,12 +1201,11 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// diagnostics distinguish a refused transaction from an operation that ran.
     private func withArchiveLock<T>(_ body: () -> T) -> T? {
         let deadline = ProcessInfo.processInfo.systemUptime + 5
-        while !transactionLock.try() {
-            guard ProcessInfo.processInfo.systemUptime < deadline else {
-                diagnostics.note("archive transaction busy — transaction refused")
-                return nil
-            }
-            Thread.sleep(forTimeInterval: 0.01)
+        // Queue on the lock rather than polling for a free instant: a poller only wins if its
+        // sample lands in the gap between two busy holders and starves to the refusal under load.
+        guard transactionLock.lock(before: Date(timeIntervalSinceNow: 5)) else {
+            diagnostics.note("archive transaction busy — transaction refused")
+            return nil
         }
         defer { transactionLock.unlock() }
         if archiveTransactionDepth > 0 { return body() }

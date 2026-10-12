@@ -12,7 +12,9 @@ import Foundation
 /// - **unreadable**: the bytes could not be read or decoded. The file is moved aside (never
 ///   deleted, never overwritten) and one public-safe diagnostic line names the store and the
 ///   error. The caller uses its empty default and may save freely, because the original bytes
-///   now live at `preservedAt`.
+///   now live at `preservedAt`. When the quarantine itself fails (`preservedAt` is nil) the
+///   original is still the only copy, so the path is remembered as write-blocked: stores gate
+///   every save through `permitWrite`, which refuses until the file is quarantined or gone.
 ///
 /// Generic over the decoded value so a merged usage-stats store can call it directly.
 public enum PersistedFileLoader {
@@ -27,6 +29,51 @@ public enum PersistedFileLoader {
             if case .loaded(let value) = self { return value }
             return nil
         }
+    }
+
+    /// Test seam for the quarantine rename, so a failed move is reachable without a read-only volume.
+    public static var moveItem: (URL, URL) throws -> Void {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return moveStorage }
+        set { stateLock.lock(); moveStorage = newValue; stateLock.unlock() }
+    }
+
+    private static let stateLock = NSLock()
+    private static var moveStorage: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }
+    /// Files that were unreadable and could not be moved aside: saving over one destroys the only copy.
+    private static var writeBlocked: Set<String> = []
+
+    private static func key(_ fileURL: URL) -> String { fileURL.standardizedFileURL.path }
+
+    /// Whether a store may write `fileURL`. False while an unreadable original could not be
+    /// preserved: each call retries the quarantine, and a file that has since vanished or been
+    /// moved aside unblocks the path. A refusal is logged through `report` and must be treated by
+    /// the caller as a failed save (kept dirty, retried), never as success.
+    public static func permitWrite(store: String, fileURL: URL) -> Bool {
+        let path = key(fileURL)
+        stateLock.lock()
+        let blocked = writeBlocked.contains(path)
+        stateLock.unlock()
+        guard blocked else { return true }
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            setBlocked(path, false)
+            return true
+        }
+        // The bytes were undecodable when the path was blocked; moving them aside now keeps them
+        // (never deleted) and is what lets the store write again. `quarantine` clears the block
+        // only when the move lands.
+        _ = quarantine(store: store, fileURL: fileURL, error: CocoaError(.fileReadCorruptFile)) as Outcome<Void>
+        stateLock.lock()
+        let stillBlocked = writeBlocked.contains(path)
+        stateLock.unlock()
+        if !stillBlocked { return true }
+        report("[Store] \(store) save refused: the unreadable original could not be preserved \(DevTypeLog.publicPathMetadata(fileURL.path))")
+        return false
+    }
+
+    private static func setBlocked(_ path: String, _ blocked: Bool) {
+        stateLock.lock()
+        if blocked { writeBlocked.insert(path) } else { writeBlocked.remove(path) }
+        stateLock.unlock()
     }
 
     /// Bound on side-by-side quarantined copies of one defaults key.
@@ -46,16 +93,21 @@ public enum PersistedFileLoader {
         fileURL: URL,
         decode: (Data) throws -> Value
     ) -> Outcome<Value> {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return .absent }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            setBlocked(key(fileURL), false)
+            return .absent
+        }
         let data: Data
         do {
             data = try Data(contentsOf: fileURL)
         } catch {
             return quarantine(store: store, fileURL: fileURL, error: error)
         }
-        if data.isEmpty { return .absent }
+        if data.isEmpty { setBlocked(key(fileURL), false); return .absent }
         do {
-            return .loaded(try decode(data))
+            let value = try decode(data)
+            setBlocked(key(fileURL), false)
+            return .loaded(value)
         } catch {
             return quarantine(store: store, fileURL: fileURL, error: error)
         }
@@ -74,7 +126,8 @@ public enum PersistedFileLoader {
             aside = fileURL.appendingPathExtension("unreadable.\(UUID().uuidString)")
         }
         do {
-            try fm.moveItem(at: fileURL, to: aside)
+            try moveItem(fileURL, aside)
+            setBlocked(key(fileURL), false)
             report(
                 "[Store] \(store) unreadable (\(DevTypeLog.errorMetadata(error))); "
                     + "preserved original \(DevTypeLog.publicPathMetadata(aside.path)); starting empty"
@@ -84,8 +137,9 @@ public enum PersistedFileLoader {
             report(
                 "[Store] \(store) unreadable (\(DevTypeLog.errorMetadata(error))) and quarantine failed "
                     + "(\(DevTypeLog.errorMetadata(moveError))) \(DevTypeLog.publicPathMetadata(fileURL.path)); "
-                    + "starting empty"
+                    + "starting empty; saves are refused until it can be preserved"
             )
+            setBlocked(key(fileURL), true)
             return .unreadable(preservedAt: nil)
         }
     }

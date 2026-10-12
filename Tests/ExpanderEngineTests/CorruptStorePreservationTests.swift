@@ -63,6 +63,49 @@ final class CorruptStorePreservationTests: XCTestCase {
         return { lock.lock(); defer { lock.unlock() }; return lines }
     }
 
+    // MARK: Quarantine that cannot move the file
+
+    private struct MoveRefused: Error {}
+
+    func testSaveIsRefusedWhileTheUnreadableOriginalCannotBeMovedAside() throws {
+        let url = try makeCorrupt("muted-apps.json")
+        let lines = captureDiagnostics()
+        let original = PersistedFileLoader.moveItem
+        defer { PersistedFileLoader.moveItem = original }
+        PersistedFileLoader.moveItem = { _, _ in throw MoveRefused() }
+
+        let store = AppMuteStore(fileURL: url)
+        store.mute("com.example.fresh")
+
+        XCTAssertEqual(try Data(contentsOf: url), Self.corruptBytes,
+                       "the only copy of the user's data was overwritten after a failed quarantine")
+        XCTAssertTrue(lines().joined(separator: "\n").contains("save refused"), "the refusal must be logged")
+
+        // Once the move can succeed, the next save preserves the original and then lands.
+        PersistedFileLoader.moveItem = original
+        store.mute("com.example.second")
+        XCTAssertTrue(directoryPreserves(Self.corruptBytes))
+        XCTAssertEqual(AppMuteStore(fileURL: url).allMuted(), ["com.example.fresh", "com.example.second"])
+    }
+
+    func testSidecarWriterRefusesToOverwriteAnUnpreservedUnreadableFileAndRetries() throws {
+        let url = try makeCorrupt("usage-stats.json")
+        let original = PersistedFileLoader.moveItem
+        defer { PersistedFileLoader.moveItem = original }
+        PersistedFileLoader.moveItem = { _, _ in throw MoveRefused() }
+
+        let store = UsageStatsStore(fileURL: url, flushInterval: 0, flushRetryDelay: 0.01)
+        store.recordUsage(for: UUID())
+        store.flush()
+
+        XCTAssertEqual(try Data(contentsOf: url), Self.corruptBytes)
+
+        PersistedFileLoader.moveItem = original
+        store.flush()
+        XCTAssertTrue(directoryPreserves(Self.corruptBytes))
+        XCTAssertNotEqual(try Data(contentsOf: url), Self.corruptBytes)
+    }
+
     // MARK: Per-store preservation
 
     func testCorruptMutedAppsFileIsPreservedAfterNextSave() throws {
