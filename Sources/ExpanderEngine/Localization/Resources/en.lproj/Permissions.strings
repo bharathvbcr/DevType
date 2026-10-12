@@ -275,6 +275,7 @@
 "recovery.refuse.fillIn" = "The last expand still needs its fill-in values. Complete the fill-in fields, then insert.";
 "recovery.refuse.image" = "The last expand could not read its image attachment. Re-add the image to the snippet, then retry.";
 "recovery.refuse.secureClipboard" = "The last secure insertion could not be completed. Secure snippets paste text only — use ⌘/ (Inline Search) or a hotkey in the target field.";
+"inject.secureClipboardManualPaste" = "Password on clipboard — press ⌘V";
 "recovery.refuse.undo" = "Undo was refused because the original insertion could not be verified. Use ⌘Z in the app instead — DevType will not reverse an edit it cannot prove it made.";
 "recovery.refuse.selectionSource" = "The generated text could not be delivered because the source field was no longer available. Click back into it and retry.";
 "recovery.health.idle" = "Inject health: idle";

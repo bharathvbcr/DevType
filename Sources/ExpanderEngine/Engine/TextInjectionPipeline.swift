@@ -25,11 +25,6 @@ public final class TextInjectionPipeline {
     /// for success because refusals and delivery failures also need to release their state.
     public typealias InjectionCompletion = (PermissionCoordinator.InjectOutcome) -> Void
 
-    // MARK: - Types (re-exported so existing call sites and tests are untouched)
-
-    public typealias FocusedTextObservation = DeliveryVerifier.FocusedTextObservation
-
-
     /// §3.1: what the last delivered expansion did, so the user can take it back.
     ///
     /// Every competing expander reverts to the trigger when you press backspace right after an
@@ -143,68 +138,13 @@ public final class TextInjectionPipeline {
         timing = InjectTimingStore.shared
     }
 
-    // MARK: - Timing constants (see `InjectTiming` — these are kept as the public surface)
-
-    /// Floor raised from 0.10 → 0.15 so slow Chromium/Electron hosts can read the pasteboard
-    /// before we restore the user's previous clipboard contents.
-    ///
-    /// §3.4: this is the *blind* formula, used for apps DevType has never measured. Once an app has
-    /// a p90 delivery latency, `PasteboardBroker` uses `InjectTimingStore.restoreDelay` instead.
-    public func calculateRestoreDelay(payloadBytes: Int) -> TimeInterval {
-        clipboard.calculateRestoreDelay(payloadBytes: payloadBytes)
-    }
-
-    /// Settle between Cmd+V and the first AX delivery check (while our text is still on the board).
-    public static let pasteDeliverySettleDelay: TimeInterval = InjectTiming.pasteDeliverySettleDelay
-    /// First Cmd+V + one retry when AX proves the field did not change.
-    public static let pasteDeliveryMaxAttempts = InjectTiming.pasteDeliveryMaxAttempts
-    /// Settle delay for the deferred AX re-verification pass after unverified HID paste.
-    public static let pasteReverifyDelay: TimeInterval = InjectTiming.pasteReverifyDelay
-
-    /// Shown when secure clipboard paste cannot confirm delivery under Secure Input —
-    /// concealed payload stays on the pasteboard for a manual ⌘V.
-    public static let secureClipboardManualPasteMessage =
-        "Password on clipboard — press ⌘V"
+    /// Localization key (Permissions.strings) of the hint shown when secure clipboard paste cannot
+    /// confirm delivery under Secure Input — the concealed payload stays on the pasteboard for a
+    /// manual ⌘V.
+    public static let secureClipboardManualPasteHintKey = "inject.secureClipboardManualPaste"
 
     /// Optional UI hook when secure clipboard paste leaves the payload for manual ⌘V.
     public var onSecureClipboardManualPasteHint: (() -> Void)?
-
-    // MARK: - Pure policy re-exports
-
-    /// Decide the next step of the clipboard-hold loop. `pasteAttemptsCompleted` counts Cmd+V posts so far.
-    public static func decidePasteHold(
-        delivery: DeliveryVerifier.TextDeliveryVerification,
-        pasteAttemptsCompleted: Int,
-        maxAttempts: Int = pasteDeliveryMaxAttempts,
-        elapsed: TimeInterval,
-        holdTimeout: TimeInterval = InjectTiming.pasteDeliveryHoldTimeout
-    ) -> PasteboardBroker.PasteHoldDecision {
-        PasteboardBroker.decidePasteHold(
-            delivery: delivery,
-            pasteAttemptsCompleted: pasteAttemptsCompleted,
-            maxAttempts: maxAttempts,
-            elapsed: elapsed,
-            holdTimeout: holdTimeout
-        )
-    }
-
-    /// Next restore generation token. Pure helper for tests; production uses `beginRestoreGeneration()`.
-    public static func nextRestoreGeneration(current: UInt64) -> UInt64 {
-        PasteboardBroker.nextRestoreGeneration(current: current)
-    }
-
-    /// UTF-16 code units still present in the focused field that must be erased before injection.
-    public static func eraseCount(
-        triggerLength: Int,
-        swallowedFinalKey: Bool,
-        lastEventCharacterCount: Int = 1
-    ) -> Int {
-        EraseExecutor.eraseCount(
-            triggerLength: triggerLength,
-            swallowedFinalKey: swallowedFinalKey,
-            lastEventCharacterCount: lastEventCharacterCount
-        )
-    }
 
     // MARK: - Entry points
 
@@ -1616,7 +1556,7 @@ public final class TextInjectionPipeline {
 
     private func notifySecureClipboardManualPaste() {
         DevTypeLog.inject.notice(
-            "[Inject] \(TextInjectionPipeline.secureClipboardManualPasteMessage, privacy: .public)"
+            "[Inject] Secure clipboard paste unconfirmed — payload left on pasteboard for manual paste"
         )
         onSecureClipboardManualPasteHint?()
     }
@@ -1631,7 +1571,7 @@ public final class TextInjectionPipeline {
     private func finishPasteDelivery(
         result: PasteboardBroker.PasteDeliveryResult,
         expectedText: String,
-        baseline: FocusedTextObservation?,
+        baseline: DeliveryVerifier.FocusedTextObservation?,
         context: InjectContext,
         focusedRole: String? = nil,
         path: String,
@@ -1695,7 +1635,7 @@ public final class TextInjectionPipeline {
                 ),
                 completion: completion
             )
-            DispatchQueue.main.asyncAfter(deadline: .now() + TextInjectionPipeline.pasteReverifyDelay) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteReverifyDelay) {
                 guard self.canContinue(context, observationOnly: true) else { return }
                 let retry = self.verifier.verifyFocusedTextDelivery(
                     expectedText: expectedText,
@@ -1984,20 +1924,6 @@ public final class TextInjectionPipeline {
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.preArrowSettleDelay) {
             self.hid.sendLeftArrowsAsync(count: arrowCount, shouldContinue: shouldContinue, completion: completion)
         }
-    }
-
-    // MARK: - Delegating surface (unchanged signatures; mechanics live in the collaborators)
-
-    public static func verifyTextDelivery(
-        expectedText: String,
-        baseline: FocusedTextObservation?,
-        after: FocusedTextObservation?
-    ) -> DeliveryVerifier.TextDeliveryVerification {
-        DeliveryVerifier.verifyTextDelivery(
-            expectedText: expectedText,
-            baseline: baseline,
-            after: after
-        )
     }
 
     // #region agent log

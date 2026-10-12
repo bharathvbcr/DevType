@@ -267,6 +267,7 @@
 "recovery.refuse.fillIn" = "마지막 확장에는 입력 값이 필요합니다. 입력 필드를 채운 뒤 삽입하세요.";
 "recovery.refuse.image" = "마지막 확장이 이미지 첨부를 읽지 못했습니다. 스니펫에 이미지를 다시 추가한 뒤 시도하세요.";
 "recovery.refuse.secureClipboard" = "마지막 보안 삽입을 완료하지 못했습니다. 보안 스니펫은 텍스트만 붙여넣습니다 — 대상 필드에서 ⌘/(인라인 검색)이나 단축키를 사용하세요.";
+"inject.secureClipboardManualPaste" = "비밀번호가 클립보드에 있습니다 — ⌘V를 누르세요";
 "recovery.refuse.undo" = "원래 삽입을 확인할 수 없어 실행 취소가 거부되었습니다. 대신 앱에서 ⌘Z를 사용하세요 — DevType은 자신이 했다고 증명할 수 없는 편집을 되돌리지 않습니다.";
 "recovery.refuse.selectionSource" = "원본 필드를 더 이상 사용할 수 없어 생성된 텍스트를 전달하지 못했습니다. 해당 필드를 다시 클릭한 뒤 시도하세요.";
 "recovery.health.idle" = "삽입 상태: 유휴";
