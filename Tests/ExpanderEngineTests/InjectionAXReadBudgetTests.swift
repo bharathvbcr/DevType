@@ -203,6 +203,21 @@ final class InjectionAXReadBudgetTests: XCTestCase {
         XCTAssertEqual(verdict, .delivered)
     }
 
+    func testComposedCountEqualToBaselineLengthIsNotReadAsNothingLanded() {
+        // "a😀" is 3 UTF-16 units but 2 composed characters. After "b" lands, a host counting
+        // composed characters reports 3 — the baseline's UTF-16 length. That must not short-cut
+        // to "nothing landed yet"; the whole-field read sees the delivery.
+        let composed = Field("a😀", selection: NSRange(location: 3, length: 0), element: element)
+        var access = composed.access()
+        access.numberOfCharacters = { [unowned composed] _ in composed.text.count }
+        let verifier = DeliveryVerifier(access: access)
+        let baseline = verifier.captureFocusedTextObservation(focus: .resolved(element))
+        composed.text = "a😀b"
+        composed.selection = NSRange(location: 4, length: 0)
+        XCTAssertEqual(verifier.verifyFocusedTextDelivery(expectedText: "b", baseline: baseline), .delivered)
+        XCTAssertEqual(composed.fullReads, 2, "baseline plus the fallback whole-field read")
+    }
+
     func testEmojiAndSurrogateOffsetsAreInUTF16Units() {
         let before = "😀😀😀 tail"      // 3 emoji = 6 units, caret after them
         let (verdict, field) = run(before: before, caret: 6, payload: "👍🏽é")

@@ -103,11 +103,6 @@ enum AIPreviewPanel {
         pendingRestoreOnCancel = restoreOnCancel
         pendingRestoreSourceApp = sourceApp
 
-        #if canImport(FoundationModels)
-        if #available(macOS 26.0, *) {
-            Task { await AITextTransformer.shared.prewarm(kind: kind, customInstructions: customInstructions) }
-        }
-        #endif
         let panel = KeyablePanel(
             contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless, .nonactivatingPanel],

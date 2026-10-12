@@ -13,16 +13,21 @@ public final class DeliveryVerifier {
         public let caretLocation: Int?
         public let selectedRange: NSRange?
         public let target: AXUIElement?
+        /// `kAXNumberOfCharacters` read with the baseline. The windowed hold-loop check trusts the
+        /// element's count only when this equals `value`'s UTF-16 length, i.e. the host is shown
+        /// to count in the same units the window offsets use.
+        public let numberOfCharacters: Int?
 
         public init(
             value: String?, selectedText: String?, caretLocation: Int? = nil,
-            selectedRange: NSRange? = nil, target: AXUIElement? = nil
+            selectedRange: NSRange? = nil, target: AXUIElement? = nil, numberOfCharacters: Int? = nil
         ) {
             self.value = value
             self.selectedText = selectedText
             self.caretLocation = selectedRange?.location ?? caretLocation
             self.selectedRange = selectedRange
             self.target = target
+            self.numberOfCharacters = numberOfCharacters
         }
 
         public static func == (lhs: Self, rhs: Self) -> Bool {
@@ -93,7 +98,12 @@ public final class DeliveryVerifier {
 
     public func captureFocusedTextObservation(focus: FocusedElementSource) -> FocusedTextObservation? {
         guard let axElement = focus.element else { return nil }
-        return focusedTextObservation(for: axElement)
+        let observed = focusedTextObservation(for: axElement)
+        return FocusedTextObservation(
+            value: observed.value, selectedText: observed.selectedText,
+            caretLocation: observed.caretLocation, selectedRange: observed.selectedRange,
+            target: observed.target, numberOfCharacters: access.numberOfCharacters(axElement)
+        )
     }
 
     public func focusedTextObservation(for axElement: AXUIElement) -> FocusedTextObservation {
@@ -181,9 +191,12 @@ public final class DeliveryVerifier {
         target: AXUIElement
     ) -> TextDeliveryVerification? {
         guard !expectedText.isEmpty,
-              let baseline, let beforeValue = baseline.value, let insertion = baseline.selectedRange,
-              let count = access.numberOfCharacters(target) else { return nil }
+              let baseline, let beforeValue = baseline.value, let insertion = baseline.selectedRange else { return nil }
         let beforeLength = beforeValue.utf16.count
+        // A host counting composed characters (or anything but UTF-16) can report the baseline's
+        // length after a paste has landed, which would read as "nothing landed yet".
+        guard baseline.numberOfCharacters == beforeLength,
+              let count = access.numberOfCharacters(target) else { return nil }
         let (finalLength, overflow) = (beforeLength - insertion.length).addingReportingOverflow(expectedText.utf16.count)
         guard !overflow, insertion.length >= 0, insertion.length <= beforeLength else { return nil }
         if count != finalLength {

@@ -99,9 +99,15 @@ final class AITransformExtrasTests: XCTestCase {
 
     func testTheEarlierPrewarmOnPanelOpenRemains() throws {
         let panel = try source("Sources/DevTypeAppCore/AIActionPanel.swift")
-        let preview = try source("Sources/DevTypeAppCore/AIPreviewPanel.swift")
         XCTAssertTrue(panel.contains("prewarm(kind: .proofread)"))
-        XCTAssertTrue(preview.contains("prewarm(kind: kind"))
+    }
+
+    /// The preview panel starts generating in the same `open` call, so a prewarm there is the
+    /// same back-to-back race the flow had.
+    func testThePreviewPanelDoesNotPrewarmInFrontOfItsTransform() throws {
+        let preview = try source("Sources/DevTypeAppCore/AIPreviewPanel.swift")
+        XCTAssertFalse(preview.contains("prewarm("))
+        XCTAssertTrue(preview.contains("controller.startGeneration()"))
     }
 
     func testTheTransformerReleasesTheSpentWarmSessionAndBoundsItsCache() throws {
