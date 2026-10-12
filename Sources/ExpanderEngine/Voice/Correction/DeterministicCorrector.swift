@@ -4,6 +4,59 @@ public final class DeterministicCorrector: TranscriptCorrector, @unchecked Senda
     public static let providerID = "deterministic.local"
     public let descriptor: CorrectionProviderDescriptor
 
+    /// Every pattern is compiled once. `correct` runs per final transcript, and compiling
+    /// two dozen `NSRegularExpression`s each time was pure repeated work.
+    private enum Rules {
+        static func compile(_ pattern: String, _ options: NSRegularExpression.Options = []) -> NSRegularExpression? {
+            try? NSRegularExpression(pattern: pattern, options: options)
+        }
+
+        static let retraction = compile(
+            #"\b[\w'-]+\s*(?:,|--|—)\s*(?:sorry|no wait|i mean|scratch that|make that)\s*(?:,|--|—)?\s*"#,
+            .caseInsensitive)
+        static let hesitation = compile(#"\b(um|umm|uh|uhh|er|err|erm|ah|ahh|hmm|mm|mhm)\b[\s,]*"#)
+        static let leading = compile(#"^(Um|Umm|Uh|Uhh|Er|Err|Erm|Ah|Ahh|Hmm|Mm|Mhm)\b[\s,]*"#)
+        static let multilingual = compile(#"(?:음|으음|에엥|えーと|えっと|うーん|あのー|あの〜)[\s、,]*"#)
+        static let parenthetical = compile(
+            #"\s*(?:,|--|—)\s*(?:you know|i mean|sort of|kind of)\s*(?:,|--|—)\s*"#,
+            .caseInsensitive)
+
+        static let spokenPunctuation: [(regex: NSRegularExpression, replacement: String)] = [
+            (#"\s*\bperiod\b"#, "."),
+            (#"\s*\bcomma\b"#, ","),
+            (#"\s*\bquestion mark\b"#, "?"),
+            (#"\s*\bexclamation mark\b"#, "!"),
+            (#"\s*\bcolon\b"#, ":"),
+            (#"\s*\bsemicolon\b"#, ";"),
+            (#"\s*\bnew line\b"#, "\n"),
+            (#"\s*\bnew paragraph\b"#, "\n\n"),
+            (#"\s*\bopen parenthesis\b"#, " ("),
+            (#"\s*\bclose parenthesis\b"#, ") "),
+            (#"\s*\bopen quote\b"#, " \""),
+            (#"\s*\bclose quote\b"#, "\" ")
+        ].compactMap { pattern, replacement in
+            compile(pattern, .caseInsensitive).map { ($0, replacement) }
+        }
+
+        static let whitespace: [(regex: NSRegularExpression, replacement: String)] = [
+            (#"[ \t]+"#, " "),
+            (#"[ \t]+([.,!?:;])"#, "$1"),
+            (#"\n[ \t]+"#, "\n"),
+            (#"[ \t]+\n"#, "\n")
+        ].compactMap { pattern, replacement in
+            compile(pattern).map { ($0, replacement) }
+        }
+    }
+
+    private static func replace(_ regex: NSRegularExpression?, in text: String, with template: String) -> String {
+        guard let regex else { return text }
+        return regex.stringByReplacingMatches(
+            in: text, options: [],
+            range: NSRange(location: 0, length: (text as NSString).length),
+            withTemplate: template
+        )
+    }
+
     public init() {
         self.descriptor = CorrectionProviderDescriptor(
             id: Self.providerID,
@@ -35,14 +88,7 @@ public final class DeterministicCorrector: TranscriptCorrector, @unchecked Senda
         // subject, "there is no wait time" loses its verb. Punctuation is what actually
         // distinguishes a spoken retraction from the words used in a normal clause.
         if request.policy.allowFalseStartRemoval {
-            let retraction = #"\b[\w'-]+\s*(?:,|--|—)\s*(?:sorry|no wait|i mean|scratch that|make that)\s*(?:,|--|—)?\s*"#
-            if let regex = try? NSRegularExpression(pattern: retraction, options: [.caseInsensitive]) {
-                text = regex.stringByReplacingMatches(
-                    in: text, options: [],
-                    range: NSRange(location: 0, length: (text as NSString).length),
-                    withTemplate: ""
-                )
-            }
+            text = Self.replace(Rules.retraction, in: text, with: "")
         }
 
         // 2. Hesitation sounds.
@@ -55,24 +101,10 @@ public final class DeterministicCorrector: TranscriptCorrector, @unchecked Senda
         // Multi-word discourse markers ("you know", "I mean") are deliberately absent: they
         // are filler only when set off by commas, which is handled separately below.
         if request.policy.allowDisfluencyRemoval {
-            let hesitation = #"\b(um|umm|uh|uhh|er|err|erm|ah|ahh|hmm|mm|mhm)\b[\s,]*"#
-            if let regex = try? NSRegularExpression(pattern: hesitation, options: []) {
-                text = regex.stringByReplacingMatches(
-                    in: text, options: [],
-                    range: NSRange(location: 0, length: (text as NSString).length),
-                    withTemplate: ""
-                )
-            }
+            text = Self.replace(Rules.hesitation, in: text, with: "")
 
             // Sentence-initial hesitations are capitalised by the recognizer.
-            let leading = #"^(Um|Umm|Uh|Uhh|Er|Err|Erm|Ah|Ahh|Hmm|Mm|Mhm)\b[\s,]*"#
-            if let regex = try? NSRegularExpression(pattern: leading, options: []) {
-                text = regex.stringByReplacingMatches(
-                    in: text, options: [],
-                    range: NSRange(location: 0, length: (text as NSString).length),
-                    withTemplate: ""
-                )
-            }
+            text = Self.replace(Rules.leading, in: text, with: "")
 
             // Non-English hesitations. Only forms that cannot be ordinary words are listed.
             //
@@ -80,54 +112,23 @@ public final class DeterministicCorrector: TranscriptCorrector, @unchecked Senda
             // Japanese あの without the prolonged mark means "that" — stripping any of them
             // unconditionally destroys sentences the same way stripping "like" does in
             // English. Only unambiguous hesitation forms are removed.
-            let multilingual = #"(?:음|으음|에엥|えーと|えっと|うーん|あのー|あの〜)[\s、,]*"#
-            if let regex = try? NSRegularExpression(pattern: multilingual, options: []) {
-                text = regex.stringByReplacingMatches(
-                    in: text, options: [],
-                    range: NSRange(location: 0, length: (text as NSString).length),
-                    withTemplate: ""
-                )
-            }
+            text = Self.replace(Rules.multilingual, in: text, with: "")
 
             // Comma-delimited discourse filler: "the result, you know, was fine".
-            let parenthetical = #"\s*(?:,|--|—)\s*(?:you know|i mean|sort of|kind of)\s*(?:,|--|—)\s*"#
-            if let regex = try? NSRegularExpression(pattern: parenthetical, options: [.caseInsensitive]) {
-                text = regex.stringByReplacingMatches(
-                    in: text, options: [],
-                    range: NSRange(location: 0, length: (text as NSString).length),
-                    withTemplate: ", "
-                )
-            }
+            text = Self.replace(Rules.parenthetical, in: text, with: ", ")
         }
 
         // 3. Spoken punctuation
         if request.policy.allowSpokenPunctuation {
-            let replacements: [(String, String)] = [
-                (#"\s*\bperiod\b"#, "."),
-                (#"\s*\bcomma\b"#, ","),
-                (#"\s*\bquestion mark\b"#, "?"),
-                (#"\s*\bexclamation mark\b"#, "!"),
-                (#"\s*\bcolon\b"#, ":"),
-                (#"\s*\bsemicolon\b"#, ";"),
-                (#"\s*\bnew line\b"#, "\n"),
-                (#"\s*\bnew paragraph\b"#, "\n\n"),
-                (#"\s*\bopen parenthesis\b"#, " ("),
-                (#"\s*\bclose parenthesis\b"#, ") "),
-                (#"\s*\bopen quote\b"#, " \""),
-                (#"\s*\bclose quote\b"#, "\" ")
-            ]
-            for (pattern, repl) in replacements {
-                if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
-                    text = regex.stringByReplacingMatches(in: text, options: [], range: NSRange(location: 0, length: (text as NSString).length), withTemplate: repl)
-                }
+            for (regex, replacement) in Rules.spokenPunctuation {
+                text = Self.replace(regex, in: text, with: replacement)
             }
         }
 
         // 4. Clean up whitespace (preserve newlines)
-        text = text.replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
-        text = text.replacingOccurrences(of: #"[ \t]+([.,!?:;])"#, with: "$1", options: .regularExpression)
-        text = text.replacingOccurrences(of: #"\n[ \t]+"#, with: "\n", options: .regularExpression)
-        text = text.replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+        for (regex, replacement) in Rules.whitespace {
+            text = Self.replace(regex, in: text, with: replacement)
+        }
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 5. Capitalize first letter of lines
