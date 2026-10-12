@@ -211,12 +211,9 @@ public final class CommandUsageStatsStore {
     private func scheduleFlush() { writer.schedule() }
 
     private static func loadFromDisk(fileURL: URL) -> [String: Stat] {
-        guard FileManager.default.fileExists(atPath: fileURL.path),
-              let data = try? Data(contentsOf: fileURL), !data.isEmpty,
-              let document = try? JSONDecoder().decode(Document.self, from: data) else {
-            return [:]
-        }
-        return document.stats
+        PersistedFileLoader.load(store: "CommandUsageStatsStore", fileURL: fileURL) {
+            try JSONDecoder().decode(Document.self, from: $0)
+        }.value?.stats ?? [:]
     }
 }
 

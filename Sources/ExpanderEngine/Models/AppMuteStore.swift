@@ -152,12 +152,10 @@ public final class AppMuteStore {
     }
 
     private static func loadFromDisk(fileURL: URL) -> Set<String> {
-        guard FileManager.default.fileExists(atPath: fileURL.path),
-              let data = try? Data(contentsOf: fileURL),
-              let list = try? JSONDecoder().decode([String].self, from: data) else {
-            return []
+        let outcome = PersistedFileLoader.load(store: "AppMuteStore", fileURL: fileURL) {
+            try JSONDecoder().decode([String].self, from: $0)
         }
-        return Set(list.filter { !$0.isEmpty })
+        return Set((outcome.value ?? []).filter { !$0.isEmpty })
     }
 
     private static func saveToDisk(_ ids: Set<String>, fileURL: URL) {

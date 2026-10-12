@@ -38,19 +38,30 @@ struct SnippetEditResourceAccess {
 
     static let live = using(secretStore: .shared)
 
+    /// The UI only learns "unavailable"; the cause goes to diagnostics as type/code metadata
+    /// (never a path or secret value) so a failed edit is explainable from a support report.
+    private static func recordCause(_ operation: String, _ error: Error) -> SnippetEditResourceError {
+        PersistedFileLoader.report("[Editor] \(operation) failed \(DevTypeLog.errorMetadata(error))")
+        return .unavailable
+    }
+
+    private static func unavailable<T>(_ operation: String, _ error: Error) -> Result<T, SnippetEditResourceError> {
+        .failure(recordCause(operation, error))
+    }
+
     static func using(secretStore: SecretStore) -> Self {
         SnippetEditResourceAccess(
             importImage: { source in
                 do {
                     return .success(try ImageAttachmentStore.shared.importImage(from: source))
                 } catch {
-                    return .failure(.unavailable)
+                    return unavailable("image import", error)
                 }
             },
             deleteImage: { path in
                 guard !path.isEmpty, !path.hasPrefix("/") else { return .success(()) }
                 guard let url = ImageAttachmentStore.shared.resolvedURL(forImagePath: path) else {
-                    return .failure(.unavailable)
+                    return unavailable("image delete", CocoaError(.fileNoSuchFile))
                 }
                 do {
                     if FileManager.default.fileExists(atPath: url.path) {
@@ -58,7 +69,7 @@ struct SnippetEditResourceAccess {
                     }
                     return .success(())
                 } catch {
-                    return .failure(.unavailable)
+                    return unavailable("image delete", error)
                 }
             },
             readSecret: { id in
@@ -66,10 +77,10 @@ struct SnippetEditResourceAccess {
                 return secretStore.hasSecret(for: id) ? .unavailable : .missing
             },
             storeSecret: { value, id in
-                secretStore.store(value, for: id).mapError { _ in .unavailable }
+                secretStore.store(value, for: id).mapError { recordCause("secret store", $0) }
             },
             removeSecret: { id in
-                secretStore.remove(for: id).mapError { _ in .unavailable }
+                secretStore.remove(for: id).mapError { recordCause("secret remove", $0) }
             },
             protectSecretFromOrphanPurge: { id in
                 secretStore.protectFromOrphanPurge(id)

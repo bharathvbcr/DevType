@@ -755,9 +755,10 @@ public final class AXWriteCapabilityStore {
     private static func loadFromDisk(
         fileURL: URL
     ) -> (verdicts: [String: Verdict], proven: Set<String>, condemnedBuild: [String: String]) {
-        guard FileManager.default.fileExists(atPath: fileURL.path),
-              let data = try? Data(contentsOf: fileURL),
-              let file = try? JSONDecoder().decode(PersistedFile.self, from: data) else {
+        guard let file = PersistedFileLoader.load(
+            store: "AXWriteCapabilityStore", fileURL: fileURL,
+            decode: { try JSONDecoder().decode(PersistedFile.self, from: $0) }
+        ).value else {
             return ([:], [], [:])
         }
         guard file.version <= persistenceSchemaVersion else {
