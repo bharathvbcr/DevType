@@ -197,6 +197,16 @@ public enum LiquidBlobGeometry {
         return text == "Speak naturally…" || text == "Listening…" || text == "Listening" || text == "자연스럽게 말씀하세요…" || text == "自然に話してください…"
     }
 
+    /// How many trailing characters are measured. The HUD is clamped to `maximum`, and this
+    /// many characters wrap to far more lines than the clamp allows at any realistic font, so
+    /// text beyond it cannot change the answer — but measuring it costs a full layout of the
+    /// whole transcript on every streamed partial.
+    static let measuredTailLimit = 4_096
+
+    static func measurableTail(of text: String) -> Substring {
+        text.suffix(measuredTailLimit)
+    }
+
     /// Target HUD size for a transcript string. Empty / placeholder copy stays at `base`.
     public static func hudSize(
         forText text: String,
@@ -209,7 +219,7 @@ public enum LiquidBlobGeometry {
             return base
         }
         let maxTextWidth = maximum.width - horizontalTextPadding
-        let bounding = (text as NSString).boundingRect(
+        let bounding = (measurableTail(of: text) as NSString).boundingRect(
             with: NSSize(width: maxTextWidth, height: maximum.height),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font]

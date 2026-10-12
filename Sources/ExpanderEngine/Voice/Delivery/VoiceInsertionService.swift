@@ -23,6 +23,11 @@ public final class VoiceInsertionService {
     /// What the segments received so far say. Pure bookkeeping, kept separate from
     /// injection so it can be tested without touching the user's document.
     private var assembler = LiveTranscriptAssembler()
+    /// Test seam: how many times a segment event built its settled/active/cumulative strings
+    /// for the trace. Stays at zero while tracing is off.
+    private(set) var diagnosticsTextBuildCount = 0
+    /// Test seam: how often the assembler rebuilt its derived transcript.
+    var assemblerRebuildCount: Int { assembler.rebuildCount }
 
     typealias InjectionSubmit = (VoiceReconciledEdit, @escaping TextInjectionPipeline.InjectionCompletion) -> Void
     private let submitOverride: InjectionSubmit?
@@ -169,6 +174,7 @@ public final class VoiceInsertionService {
         // Tracing is opt-in, and each of these arguments joins the whole transcript; build
         // them only when the recorder will keep them.
         if VoiceDiagnosticsRecorder.shared.isEnabled {
+            diagnosticsTextBuildCount &+= 1
             VoiceDiagnosticsRecorder.shared.record(
                 changed ? "segment.ingested" : "segment.ignored",
                 segment: segment,

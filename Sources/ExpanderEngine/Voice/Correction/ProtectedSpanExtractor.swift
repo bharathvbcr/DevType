@@ -1,6 +1,18 @@
 import Foundation
 
 public enum ProtectedSpanExtractor {
+    /// Compiled once: `extract` runs per final transcript and these never change.
+    static let patterns: [(kind: ProtectedSpanKind, regex: NSRegularExpression)] = [
+        (.email, #"[A-Z0-9a-z._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,64}"#),
+        (.filePath, #"(?:/[a-zA-Z0-9._-]+)+|~/[a-zA-Z0-9._/-]+"#),
+        (.shellFlag, #"--[a-zA-Z0-9_-]+(?:=[^\s]+)?|-[a-zA-Z0-9]"#),
+        (.versionNumber, #"\bv?\d+\.\d+(?:\.\d+)*(?:-[a-zA-Z0-9.]+)?\b"#),
+        (.numberWithUnit, #"\b\d+(?:\.\d+)?\s*(?:px|ms|s|gb|mb|kb|tb|m|cm|mm|kg|g|%|\$|€|£)\b"#),
+        (.currency, #"[\$€£¥]\s*\d+(?:\.\d{2})?"#)
+    ].compactMap { kind, pattern in
+        (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])).map { (kind, $0) }
+    }
+
     public static func extract(from text: String, dictionaryTerms: [String] = []) -> [ProtectedSpan] {
         var spans: [ProtectedSpan] = []
         let nsString = text as NSString
@@ -25,34 +37,23 @@ public enum ProtectedSpanExtractor {
         }
 
         // 2. Regex Patterns
-        let patterns: [(kind: ProtectedSpanKind, pattern: String)] = [
-            (.email, #"[A-Z0-9a-z._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,64}"#),
-            (.filePath, #"(?:/[a-zA-Z0-9._-]+)+|~/[a-zA-Z0-9._/-]+"#),
-            (.shellFlag, #"--[a-zA-Z0-9_-]+(?:=[^\s]+)?|-[a-zA-Z0-9]"#),
-            (.versionNumber, #"\bv?\d+\.\d+(?:\.\d+)*(?:-[a-zA-Z0-9.]+)?\b"#),
-            (.numberWithUnit, #"\b\d+(?:\.\d+)?\s*(?:px|ms|s|gb|mb|kb|tb|m|cm|mm|kg|g|%|\$|€|£)\b"#),
-            (.currency, #"[\$€£¥]\s*\d+(?:\.\d{2})?"#)
-        ]
-
-        for (kind, pattern) in patterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
-                let matches = regex.matches(in: text, options: [], range: fullRange)
-                for match in matches {
-                    let matchText = nsString.substring(with: match.range)
-                    // Check if already overlapped by an existing span
-                    let isOverlapped = spans.contains { existing in
-                        NSIntersectionRange(match.range, NSRange(location: existing.utf16RangeStart, length: existing.utf16RangeLength)).length > 0
-                    }
-                    if !isOverlapped {
-                        let span = ProtectedSpan(
-                            kind: kind,
-                            originalText: matchText,
-                            canonicalForm: matchText,
-                            utf16RangeStart: match.range.location,
-                            utf16RangeLength: match.range.length
-                        )
-                        spans.append(span)
-                    }
+        for (kind, regex) in patterns {
+            let matches = regex.matches(in: text, options: [], range: fullRange)
+            for match in matches {
+                let matchText = nsString.substring(with: match.range)
+                // Check if already overlapped by an existing span
+                let isOverlapped = spans.contains { existing in
+                    NSIntersectionRange(match.range, NSRange(location: existing.utf16RangeStart, length: existing.utf16RangeLength)).length > 0
+                }
+                if !isOverlapped {
+                    let span = ProtectedSpan(
+                        kind: kind,
+                        originalText: matchText,
+                        canonicalForm: matchText,
+                        utf16RangeStart: match.range.location,
+                        utf16RangeLength: match.range.length
+                    )
+                    spans.append(span)
                 }
             }
         }

@@ -86,7 +86,12 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
     public static let defaultMaxOwnedLength = 20_000
 
     private let lock = UnfairLock()
-    private var _committed: String = ""
+    private var _committed: String = "" {
+        // The grapheme count is linear, and every reconcile needs it to slice the target.
+        // `_committed` only changes at a seal, so count it there rather than per partial.
+        didSet { _committedCount = _committed.count }
+    }
+    private var _committedCount = 0
     private var _volatile: String = ""
     private let maxEraseBudget: Int
     private let maxOwnedLength: Int
@@ -120,8 +125,10 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
 
             if target == owned { return .noop(owned) }
 
-            // Append-only degradation past the session ceiling.
-            if owned.count >= maxOwnedLength { return .noop(owned) }
+            // Append-only degradation past the session ceiling. A string never has more
+            // characters than UTF-8 bytes, so the exact (linear) count is only taken when
+            // the byte length could actually reach the ceiling.
+            if owned.utf8.count >= maxOwnedLength, owned.count >= maxOwnedLength { return .noop(owned) }
 
             var suppressed = false
             let newVolatile: String
@@ -129,7 +136,7 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
             if _committed.isEmpty {
                 newVolatile = target
             } else if target.hasPrefix(_committed) {
-                newVolatile = String(target.dropFirst(_committed.count))
+                newVolatile = String(target.dropFirst(_committedCount))
             } else {
                 // The recognizer revised text behind the barrier. Keep the committed
                 // spelling and graft the target's tail onto it.
@@ -143,7 +150,7 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
 
             let common = Self.longestCommonPrefixCount(_volatile, newVolatile)
             let erased = String(_volatile.dropFirst(common))
-            let erase = erased.count
+            let erase = erased.isEmpty ? 0 : erased.count
             let inject = String(newVolatile.dropFirst(common))
 
             if erase > maxEraseBudget {
@@ -199,11 +206,11 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
     public func sealPrefix(_ prefix: String) {
         lock.withLock {
             let owned = _committed + _volatile
-            guard prefix.count > _committed.count,
-                  prefix.count <= owned.count,
-                  owned.hasPrefix(prefix) else { return }
+            let prefixCount = prefix.count
+            // `hasPrefix` already implies the prefix is no longer than `owned`.
+            guard prefixCount > _committedCount, owned.hasPrefix(prefix) else { return }
             _committed = prefix
-            _volatile = String(owned.dropFirst(prefix.count))
+            _volatile = String(owned.dropFirst(prefixCount))
         }
     }
 
@@ -276,23 +283,22 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
     /// Joins finalized utterances and the in-flight partial into one cumulative transcript,
     /// inserting a single separating space where the recognizer supplies none.
     public static func combineUtterances(committed: [String], activePartial: String) -> String {
-        let segments = committed
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
         let partial = activePartial.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Appends in place: this runs several times per recognizer partial, and returning
-        // `base + next` copied the whole transcript once per segment.
+        // Appends in place into one reserved buffer: returning `base + next` copied the
+        // whole transcript once per segment, which made one build quadratic.
         var result = ""
-        for segment in segments {
-            appendSegment(&result, next: segment)
+        result.reserveCapacity(committed.reduce(partial.utf8.count) { $0 + $1.utf8.count + 1 } + 1)
+        for segment in committed {
+            appendSegment(&result, next: segment.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         appendSegment(&result, next: partial)
         return result
     }
 
-    private static func appendSegment(_ base: inout String, next: String) {
+    /// Appends `next` to `base`, adding a separating space when neither side supplies one.
+    /// An empty `next` is a no-op. Callers pass trimmed text.
+    static func appendSegment(_ base: inout String, next: String) {
         guard !next.isEmpty else { return }
         guard !base.isEmpty else {
             base = next

@@ -37,6 +37,7 @@ public final class VoiceHUDPanel: NSPanel {
     private var terminalDismissDelay: TimeInterval?
     private var currentModelName: String = "Apple Speech"
     private var pendingTargetSize: CGSize?
+    private var pendingMeasureText: String?
     private var isResizeScheduled = false
     private var usesRealGlass = false
 
@@ -404,16 +405,25 @@ public final class VoiceHUDPanel: NSPanel {
 
     // MARK: - Dynamic Liquid Blob Expansion
 
-    private func scheduleSize(forText text: String) {
-        let font = DevTypeTheme.font(14.5, .regular)
-        let size = LiquidBlobGeometry.hudSize(
+    private func measuredSize(forText text: String) -> CGSize {
+        LiquidBlobGeometry.hudSize(
             forText: text,
-            font: font,
+            font: DevTypeTheme.font(14.5, .regular),
             chromeHeight: LiquidBlobGeometry.defaultChromeHeight,
             base: CGSize(width: Self.baseWidth, height: Self.baseHeight),
             maximum: CGSize(width: Self.maxWidth, height: Self.maxHeight)
         )
-        pendingTargetSize = size
+    }
+
+    /// Streaming updates arrive per recognizer partial. The text is only remembered here and
+    /// measured once, on the next runloop turn, for the newest value. The first show still
+    /// measures at once because `showOnScreen` needs the size before the window appears.
+    private func scheduleSize(forText text: String) {
+        pendingMeasureText = text
+        if !isVisible {
+            pendingTargetSize = measuredSize(forText: text)
+            pendingMeasureText = nil
+        }
         guard !isResizeScheduled else { return }
         isResizeScheduled = true
         DispatchQueue.main.async { [weak self] in
@@ -423,6 +433,10 @@ public final class VoiceHUDPanel: NSPanel {
 
     private func flushPendingResize() {
         isResizeScheduled = false
+        if let text = pendingMeasureText {
+            pendingMeasureText = nil
+            pendingTargetSize = measuredSize(forText: text)
+        }
         guard let size = pendingTargetSize else { return }
         pendingTargetSize = nil
         applyFrame(size: size, animated: true)
