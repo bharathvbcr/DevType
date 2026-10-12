@@ -27,6 +27,15 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
     /// Finalized and in-flight segments, in arrival order.
     private var entries: [(id: String, entry: Entry)] = []
 
+    /// Derived from `entries`, rebuilt once per mutation. The recognizer reads these several
+    /// times per partial, and each read used to join every segment again.
+    private var cachedSettled = ""
+    private var cachedCumulative = ""
+
+    /// How many times the derived text was rebuilt. A test seam: it must grow by one per
+    /// changed segment and never on a read.
+    private(set) var rebuildCount = 0
+
     public init() {}
 
     public static func == (lhs: LiveTranscriptAssembler, rhs: LiveTranscriptAssembler) -> Bool {
@@ -37,6 +46,12 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
     /// Ingests one segment. Returns `true` when it changed the transcript.
     @discardableResult
     public mutating func ingest(_ segment: SpeechSegment) -> Bool {
+        let changed = apply(segment)
+        if changed { rebuild() }
+        return changed
+    }
+
+    private mutating func apply(_ segment: SpeechSegment) -> Bool {
         guard segment.validatedStorageBytes != nil else { return false }
         let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -95,13 +110,7 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
 
     /// Everything the recognizer has settled: all segments except a trailing one that is
     /// still being revised. This is the text the commit barrier may safely be advanced to.
-    public var settledText: String {
-        let settled = entries.last?.entry.isFinal == true ? entries : Array(entries.dropLast())
-        return VoiceTranscriptReconciler.combineUtterances(
-            committed: settled.map(\.entry.text),
-            activePartial: ""
-        )
-    }
+    public var settledText: String { cachedSettled }
 
     /// The utterance still being revised, if any.
     public var activeText: String {
@@ -115,13 +124,22 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
     /// marked final plus the trailing one, so an utterance that was superseded without ever
     /// being finalised vanished from the transcript — and the reconciler, seeing the text
     /// shrink, erased it from the document.
-    public var cumulativeText: String {
-        let last = entries.last
-        let committed = last?.entry.isFinal == true ? entries : Array(entries.dropLast())
-        return VoiceTranscriptReconciler.combineUtterances(
-            committed: committed.map(\.entry.text),
-            activePartial: activeText
-        )
+    public var cumulativeText: String { cachedCumulative }
+
+    /// Joins the settled segments once, then appends the active one to a copy. Entry text is
+    /// stored trimmed, so this matches `combineUtterances` without trimming again.
+    private mutating func rebuild() {
+        rebuildCount &+= 1
+        let settledCount = entries.last?.entry.isFinal == true ? entries.count : entries.count - 1
+        var settled = ""
+        settled.reserveCapacity(entries.reduce(settledCount) { $0 + $1.entry.text.utf8.count })
+        for index in 0..<settledCount {
+            VoiceTranscriptReconciler.appendSegment(&settled, next: entries[index].entry.text)
+        }
+        var cumulative = settled
+        VoiceTranscriptReconciler.appendSegment(&cumulative, next: activeText)
+        cachedSettled = settled
+        cachedCumulative = cumulative
     }
 
     /// Whether the most recent segment sealed an utterance, meaning the caller should
@@ -134,5 +152,7 @@ public struct LiveTranscriptAssembler: Sendable, Equatable {
 
     public mutating func reset() {
         entries.removeAll()
+        cachedSettled = ""
+        cachedCumulative = ""
     }
 }

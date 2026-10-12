@@ -218,10 +218,68 @@ enum AIPreviewDelta {
     }
 }
 
+/// Keeps only the newest streamed partial and applies it once per scheduled turn.
+///
+/// The model emits a snapshot per token, and each used to be its own main-actor task that
+/// replaced the whole text view — a full relayout per token, quadratic over the stream. A
+/// turn that finds several snapshots queued now applies only the last, and `cancel()` drops
+/// whatever is still queued so a completion's exact text is never overwritten by a stale one.
+final class AIPreviewPartialCoalescer {
+    private var pending: String?
+    private var flushScheduled = false
+    private let schedule: (@escaping () -> Void) -> Void
+    private let apply: (String) -> Void
+
+    init(schedule: @escaping (@escaping () -> Void) -> Void, apply: @escaping (String) -> Void) {
+        self.schedule = schedule
+        self.apply = apply
+    }
+
+    func offer(_ partial: String) {
+        pending = partial
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        schedule { [self] in flush() }
+    }
+
+    func cancel() { pending = nil }
+
+    /// Removes and returns the partial still waiting for its turn, without applying it.
+    /// A request that fails keeps what it streamed, so the failure path shows this one.
+    func takePending() -> String? {
+        defer { pending = nil }
+        return pending
+    }
+
+    private func flush() {
+        flushScheduled = false
+        guard let latest = pending else { return }
+        pending = nil
+        apply(latest)
+    }
+
+    /// The text to append to `shown` to reach `next`, or `nil` when `next` revises what is
+    /// already on screen and the view must be replaced. Compared on UTF-8 bytes so that
+    /// appending the returned tail reproduces `next` exactly, grapheme boundaries included.
+    static func appendedTail(from shown: String, to next: String) -> String? {
+        guard next.utf8.count >= shown.utf8.count, next.utf8.starts(with: shown.utf8) else { return nil }
+        return String(decoding: Array(next.utf8.dropFirst(shown.utf8.count)), as: UTF8.self)
+    }
+}
+
 // MARK: - Controller
 
 private final class AIPreviewController: NSViewController {
     private let input: String
+    /// `input` never changes, so its measures are taken once rather than per streamed partial.
+    private lazy var inputWordCount = AIPreviewDelta.words(in: input)
+    private lazy var inputCharCount = input.count
+    private lazy var partialCoalescer = AIPreviewPartialCoalescer(
+        schedule: { work in DispatchQueue.main.async(execute: work) },
+        apply: { [weak self] partial in self?.showPartial(partial) }
+    )
+    /// The request whose partials the coalescer is currently carrying.
+    private var partialGeneration: UInt64 = 0
     private var kind: AITransformKind
     private let sourceApp: NSRunningApplication?
     /// The user's own instruction, fixed for the life of the panel.
@@ -614,6 +672,7 @@ private final class AIPreviewController: NSViewController {
         supersededHandle = nil
         superseded?.discard()
 
+        partialCoalescer.cancel()
         resultText = ""
         showingDiff = false
         textView.string = ""
@@ -673,15 +732,30 @@ private final class AIPreviewController: NSViewController {
 
     private func applyPartial(_ partial: String?, generation: UInt64) {
         guard isLive(generation), let partial else { return }
+        partialGeneration = generation
+        partialCoalescer.offer(partial)
+    }
+
+    /// Applies the newest queued partial. Growth is appended to the text storage, which lays
+    /// out only the new tail; a revision of earlier text replaces the view.
+    private func showPartial(_ partial: String) {
+        guard isLive(partialGeneration) else { return }
         if scrollView.isHidden {
             spinner.stopAnimation(nil)
             spinner.isHidden = true
             waitingLabel.isHidden = true
             scrollView.isHidden = false
         }
+        if !showingDiff, let storage = textView.textStorage,
+           let tail = AIPreviewPartialCoalescer.appendedTail(from: resultText, to: partial) {
+            if !tail.isEmpty {
+                storage.append(NSAttributedString(string: tail, attributes: textView.typingAttributes))
+            }
+        } else {
+            textView.string = partial
+        }
         resultText = partial
         showingDiff = false
-        textView.string = partial
         textView.scrollToEndOfDocument(nil)
         updateDeltas(for: partial)
     }
@@ -692,6 +766,10 @@ private final class AIPreviewController: NSViewController {
         // and silenced the spinner of the request that had replaced it — leaving a panel
         // with no text, no spinner and nothing on the way.
         guard isLive(generation) else { return }
+        // A success replaces the text with its exact result, so a queued partial is dropped.
+        // A failure keeps the streamed text for Replace/Copy — and the newest partial may
+        // still be queued when the completion task overtakes the coalescer's turn.
+        let unshownPartial = partialCoalescer.takePending()
         stopPresentingWork()
 
         // `.discarded` for the *live* request is unreachable from this panel — every discard
@@ -712,6 +790,9 @@ private final class AIPreviewController: NSViewController {
             errorLabel.isHidden = true
             updateDeltas(for: text)
         case .failure(let error):
+            if let unshownPartial, partialGeneration == generation {
+                showPartial(unshownPartial)
+            }
             errorLabel.stringValue = AITransformFlow.localizedError(error, loc: loc)
             errorLabel.isHidden = false
             if resultText.isEmpty {
@@ -750,8 +831,8 @@ private final class AIPreviewController: NSViewController {
     }
 
     private func updateDeltas(for text: String) {
-        let wordDelta = AIPreviewDelta.words(in: text) - AIPreviewDelta.words(in: input)
-        let charDelta = text.count - input.count
+        let wordDelta = AIPreviewDelta.words(in: text) - inputWordCount
+        let charDelta = text.count - inputCharCount
 
         wordsDeltaPill.isHidden = false
         wordsDeltaPill.update(
