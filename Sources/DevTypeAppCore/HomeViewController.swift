@@ -493,12 +493,13 @@ final class HomeViewController: NSViewController {
     }
 
     @objc private func newSnippetTapped() {
+        let groups = store.loadGroups()
         SnippetEditorSheet.present(
             from: view.window,
             existing: nil,
             draft: nil,
-            groups: store.loadGroups(),
-            currentGroupID: store.loadGroups().first?.id,
+            groups: groups,
+            currentGroupID: groups.first?.id,
             completion: { [weak self] snippet, chosenGroupID in
                 guard let self else { return .refused(.failed("Home is unavailable")) }
                 return .mutating(
@@ -524,12 +525,13 @@ final class HomeViewController: NSViewController {
         SnippetTemplatePanel.present(from: view.window) { [weak self] template in
             guard let self else { return }
             let draft = template.makeDraft(loc: self.loc)
+            let groups = self.store.loadGroups()
             SnippetEditorSheet.present(
                 from: self.view.window,
                 existing: nil,
                 draft: draft,
-                groups: self.store.loadGroups(),
-                currentGroupID: self.store.loadGroups().first?.id,
+                groups: groups,
+                currentGroupID: groups.first?.id,
                 completion: { [weak self] snippet, chosenGroupID in
                     guard let self else { return .refused(.failed("Home is unavailable")) }
                     return .mutating(
@@ -590,7 +592,7 @@ final class HomeViewController: NSViewController {
         }
 
         // Conflicts and health
-        let conflicts = store.triggerConflicts()
+        let conflicts = TriggerConflictsCache.shared.conflicts(in: store)
         if !conflicts.isEmpty {
             warningBanner.isHidden = false
             warningLabel.stringValue = loc.s("stats.insight.conflicts.desc", conflicts.count)

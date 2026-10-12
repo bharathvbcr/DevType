@@ -12,6 +12,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuRebuildPending = false
     private var secretsSubmenu: NSMenu?
     private var secretWindowController: NSWindowController?
+    private var nestedResolverCache: (revision: UInt64, resolver: NestedSnippetResolver)?
     private var snippetWindowController: NSWindowController?
     private var snippetManagerRenderedLanguage: AppLanguage?
     private var permissionWindowController: NSWindowController?
@@ -867,7 +868,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.setContentSize(NSSize(width: 620, height: 470))
             window.minSize = NSSize(width: 620, height: 470)
-            window.center()
+            window.dtRestoreFrame(named: "DevTypeSecretsWindow")
             secretWindowController = NSWindowController(window: window)
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -1020,14 +1021,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Nested-snippet lookup for the current library. The index is rebuilt only when the store's
+    /// revision moves; the revision and groups are read together so a save landing in between
+    /// cannot pair an old index with a new revision.
+    private func nestedSnippetLookup() -> (String) -> String? {
+        let (groups, revision) = SnippetStore.shared.loadGroupsWithRevision()
+        if let cached = nestedResolverCache, cached.revision == revision {
+            return cached.resolver.lookup
+        }
+        let resolver = NestedSnippetResolver(snippets: groups.flatMap(\.snippets))
+        nestedResolverCache = (revision, resolver)
+        return resolver.lookup
+    }
+
     private func copyToClipboard(_ snippet: SnippetModel) {
         let clipboard = NSPasteboard.general.string(forType: .string)
         // Secrets are excluded from nested `{{snippet:…}}` lookups: resolving one here would
         // paste a password into whatever document the outer snippet lands in, with no explicit
         // gesture naming it.
-        let lookup = NestedSnippetResolver(
-            snippets: SnippetStore.shared.loadSnippets()
-        ).lookup
+        let lookup = nestedSnippetLookup()
 
         // Gated entry point: a secret asks for Touch ID here, before anything is read.
         SecretMenuFlow.resolve(
@@ -1788,7 +1800,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let sourceApp = sourceApp ?? NSWorkspace.shared.frontmostApplication
         // Inline search: erase 0, no quiescence (palette typing would always abort).
         let clipboard = NSPasteboard.general.string(forType: .string)
-        let lookup = NestedSnippetResolver(snippets: SnippetStore.shared.loadSnippets()).lookup
+        let lookup = nestedSnippetLookup()
         // A secret is fetched at the moment of use and injected verbatim. Never through
         // `MacroRenderer`: a password containing `{{` or `%` is not a template, and expanding
         // one would corrupt it silently — or resolve a nested `{{snippet:…}}` inside it.

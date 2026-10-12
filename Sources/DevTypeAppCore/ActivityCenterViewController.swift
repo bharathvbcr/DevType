@@ -15,10 +15,17 @@ struct ActivityEventRowPresentation: Equatable {
         let localized = event.presentation(localization: localization)
         title = localized.title
         details = localized.details
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: localization.effectiveLanguageCode())
-        formatter.timeStyle = .short
-        formatter.dateStyle = .none
+        let code = localization.effectiveLanguageCode()
+        let formatter = LocalizedFormatterCache.shared.formatter(
+            kind: "activity.time",
+            languageCode: code
+        ) { () -> DateFormatter in
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: code)
+            formatter.timeStyle = .short
+            formatter.dateStyle = .none
+            return formatter
+        }
         timestampText = formatter.string(from: event.timestamp)
     }
 
@@ -306,7 +313,7 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
 
     override func viewWillAppear() {
         super.viewWillAppear()
-        refreshLocalization()
+        applyLocalizedChrome()
         attachObserversIfNeeded()
         reload()
     }
@@ -360,13 +367,18 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
     }
 
     func refreshLocalization() {
+        applyLocalizedChrome()
+        reload()
+    }
+
+    /// Titles and window chrome only; rows are refilled by `reload()`.
+    private func applyLocalizedChrome() {
         headerLabel.stringValue = loc.s("activity.title")
         clearButton?.title = loc.s("activity.clear")
         tableView.setAccessibilityLabel(loc.s("activity.title"))
         if let window = view.window {
             DevTypeTheme.styleWindow(window, title: loc.s("activity.title"))
         }
-        reload()
     }
 
     func reload() {
@@ -453,10 +465,15 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row >= 0 && row < events.count else { return nil }
         let event = events[row]
-        let cell = ActivityEventRowView(event: event, localization: loc) { [weak self] selectedEvent in
+        let onAction: (ActivityHistoryStore.ActivityEvent) -> Void = { [weak self] selectedEvent in
             self?.handleAction(selectedEvent)
         }
-        return cell
+        let identifier = ActivityEventRowView.reuseIdentifier(for: event.category)
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? ActivityEventRowView {
+            reused.configure(event: event, localization: loc, onAction: onAction)
+            return reused
+        }
+        return ActivityEventRowView(event: event, localization: loc, onAction: onAction)
     }
 
     private func handleAction(_ event: ActivityHistoryStore.ActivityEvent) {
@@ -530,9 +547,24 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
 
 /// Internal so accessibility regressions can exercise the rendered AppKit row rather than only
 /// its presentation model. The activity center remains the sole production owner.
+///
+/// The row is built once and refilled by `configure`, so the table can dequeue it. The card's
+/// tint is fixed at construction, which is why the table reuses rows per category (see
+/// `reuseIdentifier(for:)`) rather than across categories.
 final class ActivityEventRowView: NSTableCellView {
-    private let event: ActivityHistoryStore.ActivityEvent
-    private let onAction: (ActivityHistoryStore.ActivityEvent) -> Void
+    static func reuseIdentifier(for category: ActivityHistoryStore.EventCategory) -> NSUserInterfaceItemIdentifier {
+        NSUserInterfaceItemIdentifier("ActivityEventRow.\(category.rawValue)")
+    }
+
+    private var event: ActivityHistoryStore.ActivityEvent
+    private var onAction: (ActivityHistoryStore.ActivityEvent) -> Void
+
+    private let titleLabel: NSTextField
+    private let detailsLabel: NSTextField
+    private let timeLabel: NSTextField
+    private let actionButton: CapsuleButton
+    private var textTrailingToTime: NSLayoutConstraint!
+    private var textTrailingToButton: NSLayoutConstraint!
 
     init(
         event: ActivityHistoryStore.ActivityEvent,
@@ -541,40 +573,30 @@ final class ActivityEventRowView: NSTableCellView {
     ) {
         self.event = event
         self.onAction = onAction
+
+        let card = GlassCardView(tint: Self.tint(for: event.category).withAlphaComponent(0.06))
+        let icon = IconBadgeView(symbol: Self.symbol(for: event.category), tint: Self.tint(for: event.category), size: 28, pointSize: 12)
+        titleLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(12, .semibold), color: DevTypeTheme.textPrimary)
+        detailsLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.font(10.5), color: DevTypeTheme.textSecondary)
+        timeLabel = DevTypeTheme.makeLabel("", font: DevTypeTheme.mono(10), color: DevTypeTheme.textTertiary)
+        actionButton = CapsuleButton(title: "", style: .secondary, target: nil, action: nil)
         super.init(frame: .zero)
+        actionButton.target = self
+        actionButton.action = #selector(actionTapped)
 
-        let presentation = ActivityEventRowPresentation(
-            event: event,
-            localization: localization
-        )
-
-        let card = GlassCardView(tint: tint(for: event.category).withAlphaComponent(0.06))
         card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
 
         let content = card.contentView
 
-        let icon = IconBadgeView(symbol: symbol(for: event.category), tint: tint(for: event.category), size: 28, pointSize: 12)
         icon.translatesAutoresizingMaskIntoConstraints = false
 
-        let titleLabel = DevTypeTheme.makeLabel(presentation.title, font: DevTypeTheme.font(12, .semibold), color: DevTypeTheme.textPrimary)
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.toolTip = presentation.title
-        titleLabel.setAccessibilityLabel(presentation.accessibilityLabel)
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let detailsLabel = DevTypeTheme.makeLabel(presentation.details, font: DevTypeTheme.font(10.5), color: DevTypeTheme.textSecondary)
         detailsLabel.lineBreakMode = .byTruncatingTail
-        detailsLabel.toolTip = presentation.details
-        detailsLabel.setAccessibilityLabel(presentation.details)
-        detailsLabel.setAccessibilityValue(presentation.accessibilityValue)
         detailsLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let timeLabel = DevTypeTheme.makeLabel(
-            presentation.timestampText,
-            font: DevTypeTheme.mono(10),
-            color: DevTypeTheme.textTertiary
-        )
         timeLabel.translatesAutoresizingMaskIntoConstraints = false
         timeLabel.setContentHuggingPriority(.required, for: .horizontal)
         timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -590,27 +612,14 @@ final class ActivityEventRowView: NSTableCellView {
         content.addSubview(textStack)
         content.addSubview(timeLabel)
 
-        var trailingAnchorRef = timeLabel.leadingAnchor
+        actionButton.controlSize = .small
+        actionButton.translatesAutoresizingMaskIntoConstraints = false
+        actionButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        actionButton.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        content.addSubview(actionButton)
 
-        if event.action != .none {
-            let actionBtn = CapsuleButton(
-                title: actionTitle(for: event.action, localization: localization),
-                style: .secondary,
-                target: self,
-                action: #selector(actionTapped)
-            )
-            actionBtn.controlSize = .small
-            actionBtn.translatesAutoresizingMaskIntoConstraints = false
-            actionBtn.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-            actionBtn.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-            content.addSubview(actionBtn)
-
-            NSLayoutConstraint.activate([
-                actionBtn.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -8),
-                actionBtn.centerYAnchor.constraint(equalTo: content.centerYAnchor)
-            ])
-            trailingAnchorRef = actionBtn.leadingAnchor
-        }
+        textTrailingToTime = textStack.trailingAnchor.constraint(lessThanOrEqualTo: timeLabel.leadingAnchor, constant: -8)
+        textTrailingToButton = textStack.trailingAnchor.constraint(lessThanOrEqualTo: actionButton.leadingAnchor, constant: -8)
 
         NSLayoutConstraint.activate([
             card.topAnchor.constraint(equalTo: topAnchor),
@@ -618,12 +627,14 @@ final class ActivityEventRowView: NSTableCellView {
             card.trailingAnchor.constraint(equalTo: trailingAnchor),
             card.bottomAnchor.constraint(equalTo: bottomAnchor),
 
+            actionButton.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -8),
+            actionButton.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+
             icon.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             icon.centerYAnchor.constraint(equalTo: content.centerYAnchor),
 
             textStack.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
             textStack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchorRef, constant: -8),
 
             timeLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             timeLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor)
@@ -631,17 +642,51 @@ final class ActivityEventRowView: NSTableCellView {
 
         setAccessibilityElement(true)
         setAccessibilityRole(.row)
-        setAccessibilityLabel("\(presentation.title), \(presentation.details), \(presentation.timestampText)")
+        identifier = Self.reuseIdentifier(for: event.category)
+        configure(event: event, localization: localization, onAction: onAction)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Refills a dequeued row. The event must be in the category the row was built for.
+    func configure(
+        event: ActivityHistoryStore.ActivityEvent,
+        localization: LocalizationManager,
+        onAction: @escaping (ActivityHistoryStore.ActivityEvent) -> Void
+    ) {
+        self.event = event
+        self.onAction = onAction
+
+        let presentation = ActivityEventRowPresentation(event: event, localization: localization)
+
+        titleLabel.stringValue = presentation.title
+        titleLabel.toolTip = presentation.title
+        titleLabel.setAccessibilityLabel(presentation.accessibilityLabel)
+
+        detailsLabel.stringValue = presentation.details
+        detailsLabel.toolTip = presentation.details
+        detailsLabel.setAccessibilityLabel(presentation.details)
+        detailsLabel.setAccessibilityValue(presentation.accessibilityValue)
+
+        timeLabel.stringValue = presentation.timestampText
+
+        let hasAction = event.action != .none
+        actionButton.isHidden = !hasAction
+        if hasAction {
+            actionButton.title = actionTitle(for: event.action, localization: localization)
+        }
+        textTrailingToTime.isActive = !hasAction
+        textTrailingToButton.isActive = hasAction
+
+        setAccessibilityLabel("\(presentation.title), \(presentation.details), \(presentation.timestampText)")
+    }
+
     @objc private func actionTapped() {
         onAction(event)
     }
 
-    private func symbol(for category: ActivityHistoryStore.EventCategory) -> String {
+    private static func symbol(for category: ActivityHistoryStore.EventCategory) -> String {
         switch category {
         case .expansion: return "bolt.fill"
         case .secureInput: return "lock.shield.fill"
@@ -654,7 +699,7 @@ final class ActivityEventRowView: NSTableCellView {
         }
     }
 
-    private func tint(for category: ActivityHistoryStore.EventCategory) -> NSColor {
+    private static func tint(for category: ActivityHistoryStore.EventCategory) -> NSColor {
         switch category {
         case .expansion, .library, .importExport: return DevTypeTheme.accent
         case .secureInput: return DevTypeTheme.statusOrange

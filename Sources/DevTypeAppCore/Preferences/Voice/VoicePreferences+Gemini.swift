@@ -180,9 +180,11 @@ extension VoicePreferencesViewController {
         refreshGeminiCredentialPresentation()
     }
 
-    func refreshGeminiCredentialPresentation() {
+    func refreshGeminiCredentialPresentation(
+        state: GeminiAPIKeyStore.ReadState = GeminiAPIKeyStore.readState()
+    ) {
         guard !geminiKeyValidationLifecycle.isActive else { return }
-        let credential = GeminiCredentialDisplayState.resolve(GeminiAPIKeyStore.readState())
+        let credential = GeminiCredentialDisplayState.resolve(state)
         geminiKeyStatusPill?.update(
             text: loc.s(credential.statusKey),
             tint: credential.tint

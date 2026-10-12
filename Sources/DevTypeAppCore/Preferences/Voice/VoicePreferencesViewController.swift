@@ -165,7 +165,9 @@ final class VoicePreferencesViewController: PreferencesPaneViewController, NSTex
             voiceModelPopup.selectItem(at: index)
         }
 
-        refreshGeminiCredentialPresentation()
+        // One keychain read per reload, shared by the credential pill and the engine rows.
+        let geminiState = GeminiAPIKeyStore.readState()
+        refreshGeminiCredentialPresentation(state: geminiState)
         geminiCloudConsentSwitch.state = VoicePreferences.hasCloudAudioConsent ? .on : .off
 
         // A previous capability result may be stale after a locale/TCC/system-resource change.
@@ -177,7 +179,8 @@ final class VoicePreferencesViewController: PreferencesPaneViewController, NSTex
         for engine in voiceEngines {
             let presentation = voiceEngineStatus(
                 for: engine,
-                speechAuthorization: speechAuthorization
+                speechAuthorization: speechAuthorization,
+                geminiState: geminiState
             )
             voiceEngineStatusLabels[engine]?.stringValue = presentation.text
             voiceEngineStatusLabels[engine]?.textColor = presentation.color
