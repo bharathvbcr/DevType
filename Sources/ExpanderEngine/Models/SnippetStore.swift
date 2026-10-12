@@ -1088,6 +1088,17 @@ public final class SnippetStore {
     /// were refused by `blockedReason()` or the digest guard — and every edit was
     /// lost at quit.
     private func saveGroupsSerialized(_ groups: [SnippetGroup]) -> SaveOutcome {
+        commitGroupsSerialized(groups, safetyKind: nil, bypassLatch: false).outcome
+    }
+
+    /// `safetyKind` makes the write keep whatever it replaces as that kind of backup, or not
+    /// happen. `bypassLatch` additionally skips the save latch and digest guard; it is only for
+    /// user-confirmed recovery, and clears the read-failure latch when the write lands.
+    private func commitGroupsSerialized(
+        _ groups: [SnippetGroup],
+        safetyKind: LibraryBackupStore.Kind?,
+        bypassLatch: Bool
+    ) -> DiskWrite {
         let sanitized = Self.sanitizeGroups(groups)
         let liveSecretIDs = Set(
             sanitized
@@ -1109,15 +1120,17 @@ public final class SnippetStore {
                 "A referenced secret is still being removed; retry after cleanup finishes."
             )
             publishSaveFailure(failure)
-            return failure
+            return DiskWrite(outcome: failure, backupURL: nil)
         }
         defer { secretCommitLease?.end() }
 
         if secretPurgeEnabled {
-            guard let previouslyLiveSecretIDs = committedLiveSecretIDs() else {
+            // A latched library never committed a cache; recovery then treats every secret the
+            // restored library references as new, so each must still have a stored value.
+            guard let previouslyLiveSecretIDs = committedLiveSecretIDs() ?? (bypassLatch ? [] : nil) else {
                 let failure = SaveOutcome.failed("Secret state is unavailable; the library was not changed.")
                 publishSaveFailure(failure)
-                return failure
+                return DiskWrite(outcome: failure, backupURL: nil)
             }
             let newlyReferencedIDs = liveSecretIDs.subtracting(previouslyLiveSecretIDs)
             guard newlyReferencedIDs.allSatisfy({ secretStore.hasSecret(for: $0) }) else {
@@ -1125,18 +1138,29 @@ public final class SnippetStore {
                     "A newly referenced secret has no stored value; the library was not changed."
                 )
                 publishSaveFailure(failure)
-                return failure
+                return DiskWrite(outcome: failure, backupURL: nil)
             }
         }
 
-        let outcome = writeGroupsToDisk(sanitized).outcome
+        let write = writeGroupsToDisk(
+            sanitized,
+            force: bypassLatch,
+            bypassHardFailure: bypassLatch,
+            safetyKind: safetyKind
+        )
+        let outcome = write.outcome
 
         guard outcome.didSave else {
             DevTypeLog.store.error(
                 "[Store] Save did not land outcome=\(outcome.diagnosticLabel, privacy: .public)"
             )
             publishSaveFailure(outcome)
-            return outcome
+            return write
+        }
+        if bypassLatch {
+            saveBlockLock.lock()
+            _hardFailure = nil
+            saveBlockLock.unlock()
         }
 
         lock.lock()
@@ -1158,7 +1182,7 @@ public final class SnippetStore {
         if secretPurgeEnabled {
             requestOrphanSecretCleanupRetry()
         }
-        return outcome
+        return write
     }
 
     /// Drop keychain entries for snippets that no longer exist.
@@ -1635,30 +1659,22 @@ public final class SnippetStore {
 
         rmwLock.lock()
         defer { rmwLock.unlock() }
-        if let refusal = blockedReason() {
-            return RestoreResult(outcome: refusal, preRestoreBackupURL: nil)
-        }
-        var preRestore: URL?
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            do {
-                let current = try Self.coordinatedRead(at: fileURL)
-                if !current.isEmpty {
-                    preRestore = try backups.backUp(current, kind: .preRestore).url
-                }
-            } catch {
-                return RestoreResult(
-                    outcome: .failed("The current library could not be backed up, so it was not replaced: \(error.localizedDescription)"),
-                    preRestoreBackupURL: nil
-                )
-            }
-        }
-        let outcome = saveGroupsSerialized(document.transactionGroups)
-        if outcome.didSave {
+        // A read-blocked or corrupt library is exactly where a restore is needed, so a latched
+        // state does not refuse it. It bypasses the latch the way `forceOverwriteLibrary` does, and
+        // on the same terms: the file it replaces is first kept as a required `pre-restore` copy
+        // (raw bytes, or the file itself moved aside when unreadable), or nothing is written.
+        let latched = blockedReason() != nil
+        let write = commitGroupsSerialized(
+            document.transactionGroups,
+            safetyKind: .preRestore,
+            bypassLatch: latched
+        )
+        if write.outcome.didSave {
             DevTypeLog.store.notice(
                 "[Store] Restored library from \(url.lastPathComponent, privacy: .public)"
             )
         }
-        return RestoreResult(outcome: outcome, preRestoreBackupURL: preRestore)
+        return RestoreResult(outcome: write.outcome, preRestoreBackupURL: write.backupURL)
     }
 
     /// The versioned decoder plus the checks conflict adoption applies: bounded size, and no
@@ -2098,6 +2114,7 @@ public final class SnippetStore {
             var backupURL: URL?
             var backupFailure: String?
             var movedAside = false
+            var createdBackup = false
             let required: LibraryBackupStore.Kind?
             switch requirement {
             case .required(let kind): required = kind
@@ -2108,6 +2125,7 @@ public final class SnippetStore {
                     let preserved = try self.backups.preserve(fileAt: actualURL, bytes: onDisk, kind: required)
                     backupURL = preserved?.url
                     movedAside = preserved?.moved ?? false
+                    createdBackup = preserved?.created ?? false
                 } catch {
                     result = .backupFailed(
                         "The existing library was not replaced because a backup of it could not be saved: \(error.localizedDescription)"
@@ -2139,6 +2157,12 @@ public final class SnippetStore {
                         )
                     }
                 }
+                if !movedAside, createdBackup, let backupURL, let onDisk,
+                   (try? Data(contentsOf: actualURL)).map({ Self.sha256(of: $0) }) == Self.sha256(of: onDisk) {
+                    // The library is exactly as it was, so the safety copy guards nothing. When the
+                    // live file changed (or cannot be re-read) the copy is kept.
+                    self.backups.discard(backupURL)
+                }
                 DevTypeLog.store.error(
                     "[Store] Failed to write library \(DevTypeLog.errorMetadata(error), privacy: .public)"
                 )
@@ -2166,7 +2190,8 @@ public final class SnippetStore {
     private func writeGroupsToDisk(
         _ groups: [SnippetGroup],
         force: Bool = false,
-        bypassHardFailure: Bool = false
+        bypassHardFailure: Bool = false,
+        safetyKind: LibraryBackupStore.Kind? = nil
     ) -> DiskWrite {
         // §0.3: a latched read failure refuses even forced writes. Only
         // `forceOverwriteLibrary` / conflict resolution may bypass it.
@@ -2187,7 +2212,7 @@ public final class SnippetStore {
             at: fileURL,
             with: data,
             expecting: force ? nil : lastKnownDigest(),
-            backup: force ? .required(.preOverwrite) : .rolling
+            backup: force || safetyKind != nil ? .required(safetyKind ?? .preOverwrite) : .rolling
         )
         let outcome: SaveOutcome
         var backupURL: URL?

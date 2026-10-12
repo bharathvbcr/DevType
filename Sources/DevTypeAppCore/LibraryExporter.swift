@@ -229,7 +229,7 @@ enum LibraryExporter {
         DispatchQueue.global(qos: .userInitiated).async {
             let outcome = Result {
                 let groups = restrict(store.loadSnippetGroups(), to: selectedIDs)
-                return try write(choice: choice, groups: groups, to: url)
+                return try write(choice: choice, groups: groups, to: url, protecting: store.activeLocationURL)
             }
             DispatchQueue.main.async {
                 progress.dismiss()
@@ -245,8 +245,12 @@ enum LibraryExporter {
     static func write(
         choice: Choice,
         groups: [SnippetGroup],
-        to url: URL
+        to url: URL,
+        protecting libraryURL: URL? = nil
     ) throws -> Int {
+        if let libraryURL, destination(url, overwrites: libraryURL) {
+            throw ExportError.destinationIsActiveLibrary
+        }
         switch choice {
         case .json:
             try SnippetStore.exportLibraryData(groups: groups).write(to: url, options: .atomic)
@@ -258,6 +262,28 @@ enum LibraryExporter {
             try writeEspansoDirectory(groups: groups, to: url)
         }
         return groups.reduce(0) { $0 + $1.snippets.count }
+    }
+
+    enum ExportError: Error, Equatable {
+        /// The chosen destination is the live library file (or a path that resolves to it, or a
+        /// folder that holds it). An export is a copy for sharing; writing it there would replace
+        /// the library with a different format.
+        case destinationIsActiveLibrary
+    }
+
+    /// True when writing to `destination` would replace `library` or a folder containing it.
+    /// Both sides are standardized and symlink-resolved, so a link pointing at the library
+    /// counts. A destination that does not exist yet resolves through its parent directory.
+    static func destination(_ destination: URL, overwrites library: URL) -> Bool {
+        func resolved(_ url: URL) -> URL {
+            let full = url.standardizedFileURL.resolvingSymlinksInPath()
+            if FileManager.default.fileExists(atPath: full.path) { return full }
+            return full.deletingLastPathComponent().resolvingSymlinksInPath()
+                .appendingPathComponent(full.lastPathComponent)
+        }
+        let target = resolved(destination).pathComponents
+        let live = resolved(library).pathComponents
+        return live.starts(with: target)
     }
 
     private static func report(
