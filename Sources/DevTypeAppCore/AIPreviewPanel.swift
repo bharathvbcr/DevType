@@ -244,6 +244,13 @@ final class AIPreviewPartialCoalescer {
 
     func cancel() { pending = nil }
 
+    /// Removes and returns the partial still waiting for its turn, without applying it.
+    /// A request that fails keeps what it streamed, so the failure path shows this one.
+    func takePending() -> String? {
+        defer { pending = nil }
+        return pending
+    }
+
     private func flush() {
         flushScheduled = false
         guard let latest = pending else { return }
@@ -759,7 +766,10 @@ private final class AIPreviewController: NSViewController {
         // and silenced the spinner of the request that had replaced it — leaving a panel
         // with no text, no spinner and nothing on the way.
         guard isLive(generation) else { return }
-        partialCoalescer.cancel()
+        // A success replaces the text with its exact result, so a queued partial is dropped.
+        // A failure keeps the streamed text for Replace/Copy — and the newest partial may
+        // still be queued when the completion task overtakes the coalescer's turn.
+        let unshownPartial = partialCoalescer.takePending()
         stopPresentingWork()
 
         // `.discarded` for the *live* request is unreachable from this panel — every discard
@@ -780,6 +790,9 @@ private final class AIPreviewController: NSViewController {
             errorLabel.isHidden = true
             updateDeltas(for: text)
         case .failure(let error):
+            if let unshownPartial, partialGeneration == generation {
+                showPartial(unshownPartial)
+            }
             errorLabel.stringValue = AITransformFlow.localizedError(error, loc: loc)
             errorLabel.isHidden = false
             if resultText.isEmpty {

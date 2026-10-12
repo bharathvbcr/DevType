@@ -50,6 +50,19 @@ final class AIPreviewPartialCoalescerTests: XCTestCase {
         XCTAssertEqual(h.applied, ["fresh"], "Cancelling must not wedge later offers")
     }
 
+    func testTakePendingHandsOverTheQueuedPartialForAFailedRequest() {
+        let h = Harness()
+        h.coalescer.offer("streamed so far")
+        XCTAssertEqual(h.coalescer.takePending(), "streamed so far",
+                       "A failure that overtakes the turn must still get the newest partial")
+        XCTAssertNil(h.coalescer.takePending())
+        h.runTurn()
+        XCTAssertEqual(h.applied, [], "A taken partial is not applied a second time")
+        h.coalescer.offer("next")
+        h.runTurn()
+        XCTAssertEqual(h.applied, ["next"])
+    }
+
     func testEmptyPartialIsStillApplied() {
         let h = Harness()
         h.coalescer.offer("")

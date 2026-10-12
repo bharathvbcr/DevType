@@ -224,7 +224,10 @@ final class VoiceStreamingLinearityTests: XCTestCase {
         let long = String(repeating: "日本語👨‍👩‍👧‍👦🇯🇵", count: 2_000)
         let tail = LiquidBlobGeometry.measurableTail(of: long)
         XCTAssertLessThanOrEqual(tail.count, LiquidBlobGeometry.measuredTailLimit)
-        XCTAssertEqual(String(tail).unicodeScalars.count, String(tail).unicodeScalars.count)
+        // Re-segmenting the tail on its own must give back the original's last clusters: a
+        // cut inside a family emoji or flag pair would re-cluster differently.
+        XCTAssertEqual(Array(String(tail)), Array(Array(long).suffix(tail.count)))
+        XCTAssertTrue(long.hasSuffix(String(tail)))
         XCTAssertEqual(LiquidBlobGeometry.measurableTail(of: "short"), "short")
         XCTAssertEqual(LiquidBlobGeometry.measurableTail(of: ""), "")
     }
