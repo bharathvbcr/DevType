@@ -566,9 +566,19 @@ public final class PasteboardBroker {
         ///
         /// §2.2: a documented re-check. It exists to catch the user moving between the capture
         /// and a mutation, so it must read focus live — never a threaded element.
-        func liveMismatch(checkRange: Bool, checkElement: Bool = true) -> Mismatch? {
-            mismatch(observing: AXContextChecker.shared.focusedElement(),
-                     pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+        ///
+        /// Focus is only read when the answer can depend on it: with neither `checkElement` nor
+        /// `checkRange` the comparison is pid-only, and an N-character erase would otherwise pay
+        /// N full focus queries for an element nothing looks at. `observeFocus` and `currentPID`
+        /// are the test seam; production uses the live defaults.
+        func liveMismatch(
+            checkRange: Bool,
+            checkElement: Bool = true,
+            observeFocus: () -> AXUIElement? = { AXContextChecker.shared.focusedElement() },
+            currentPID: () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+        ) -> Mismatch? {
+            mismatch(observing: (checkElement || checkRange) ? observeFocus() : nil,
+                     pid: currentPID(),
                      checkRange: checkRange,
                      checkElement: checkElement)
         }
