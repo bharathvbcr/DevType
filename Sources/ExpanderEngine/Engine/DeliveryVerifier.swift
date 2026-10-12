@@ -52,7 +52,42 @@ public final class DeliveryVerifier {
     /// past the inserted text (trailing newline normalisation, autocorrect).
     public static let verificationCaretSlackUTF16 = 512
 
-    public init() {}
+    /// The AX reads the hold-loop verification makes, injectable so unsupported attributes,
+    /// field edges and surrogate offsets can be reproduced without a live AX tree.
+    struct TextAccess {
+        var focusedElement: () -> AXUIElement?
+        /// `kAXNumberOfCharacters`; `nil` when the element does not answer it.
+        var numberOfCharacters: (AXUIElement) -> Int?
+        var selectedRange: (AXUIElement) -> NSRange?
+        /// Parameterized `kAXStringForRange`; `nil` when unsupported or the range is refused.
+        var stringForRange: (AXUIElement, NSRange) -> String?
+        /// The full read the windowed path falls back to.
+        var observation: (AXUIElement) -> FocusedTextObservation
+
+        static let live = TextAccess(
+            focusedElement: { AXContextChecker.shared.focusedElement() },
+            numberOfCharacters: { element in
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(
+                    element, kAXNumberOfCharactersAttribute as CFString, &ref
+                ) == .success else { return nil }
+                return (ref as? NSNumber)?.intValue
+            },
+            selectedRange: DeliveryVerifier.selectedRange,
+            stringForRange: { element, range in
+                var cfRange = CFRange(location: range.location, length: range.length)
+                guard let parameter = AXValueCreate(.cfRange, &cfRange) else { return nil }
+                return SelectionReader.copyStringForRange(element, parameter, attributed: false)
+            },
+            observation: { DeliveryVerifier.fullObservation(for: $0) }
+        )
+    }
+
+    private let access: TextAccess
+
+    public init() { access = .live }
+
+    init(access: TextAccess) { self.access = access }
 
     // MARK: - Observation
 
@@ -62,6 +97,10 @@ public final class DeliveryVerifier {
     }
 
     public func focusedTextObservation(for axElement: AXUIElement) -> FocusedTextObservation {
+        access.observation(axElement)
+    }
+
+    static func fullObservation(for axElement: AXUIElement) -> FocusedTextObservation {
         var value: String?
         var selectedText: String?
 
@@ -115,14 +154,49 @@ public final class DeliveryVerifier {
         staleProbeCaseInsensitive: Bool = false
     ) -> TextDeliveryVerification {
         guard let target = baseline?.target,
-              let current = AXContextChecker.shared.focusedElement(), CFEqual(target, current) else {
+              let current = access.focusedElement(), CFEqual(target, current) else {
             return .unavailable
+        }
+        if let windowed = verifyDeliveryByWindow(expectedText: expectedText, baseline: baseline, target: target) {
+            return windowed
         }
         return Self.verifyTextDelivery(
             expectedText: expectedText, baseline: baseline,
             after: focusedTextObservation(for: target), staleProbe: staleProbe,
             staleProbeCaseInsensitive: staleProbeCaseInsensitive
         )
+    }
+
+    /// Verifies against `kAXNumberOfCharacters` plus a `kAXStringForRange` read over the insertion
+    /// window instead of the whole field — this runs on every 50 ms hold-loop tick.
+    ///
+    /// It answers only where the answer is the same one the full read gives, and returns `nil`
+    /// ("read the whole field") everywhere else, so an element that lacks either attribute, a
+    /// count that disagrees with the baseline's UTF-16 units, or a refused range reads exactly as
+    /// before. The one answer it gives without a window read is "nothing has landed yet": the
+    /// field still has the baseline's length while the expected final length differs.
+    private func verifyDeliveryByWindow(
+        expectedText: String,
+        baseline: FocusedTextObservation?,
+        target: AXUIElement
+    ) -> TextDeliveryVerification? {
+        guard !expectedText.isEmpty,
+              let baseline, let beforeValue = baseline.value, let insertion = baseline.selectedRange,
+              let count = access.numberOfCharacters(target) else { return nil }
+        let beforeLength = beforeValue.utf16.count
+        let (finalLength, overflow) = (beforeLength - insertion.length).addingReportingOverflow(expectedText.utf16.count)
+        guard !overflow, insertion.length >= 0, insertion.length <= beforeLength else { return nil }
+        if count != finalLength {
+            return count == beforeLength ? .unavailable : nil
+        }
+        guard let finalSelection = access.selectedRange(target) else { return nil }
+        let verdict = Self.verifyCore(
+            expectedText: expectedText, baseline: baseline, observedLength: count,
+            finalSelection: finalSelection, afterValue: nil,
+            observedWindow: { [access] window in access.stringForRange(target, window) }
+        )
+        // A refused or short window read is an unreadable window, not a verdict.
+        return verdict == .delivered ? .delivered : nil
     }
 
     public static func verifyTextDelivery(
@@ -136,20 +210,41 @@ public final class DeliveryVerifier {
         guard let baseline, let after,
               let beforeTarget = baseline.target, let afterTarget = after.target,
               CFEqual(beforeTarget, afterTarget),
-              let beforeValue = baseline.value, let afterValue = after.value,
-              let insertion = baseline.selectedRange, let finalSelection = after.selectedRange else {
+              let afterValue = after.value, let finalSelection = after.selectedRange else {
+            return .unavailable
+        }
+        let observed = afterValue as NSString
+        return verifyCore(
+            expectedText: expectedText, baseline: baseline, observedLength: observed.length,
+            finalSelection: finalSelection, afterValue: afterValue,
+            observedWindow: { observed.substring(with: $0) }
+        )
+    }
+
+    /// The comparison both reads share. `observedWindow` yields the observed text over a UTF-16
+    /// range inside `observedLength`, from the whole value or from a ranged AX read; `afterValue`
+    /// is present only when the whole value was read, to check the selection sits on scalar
+    /// boundaries.
+    private static func verifyCore(
+        expectedText: String,
+        baseline: FocusedTextObservation,
+        observedLength: Int,
+        finalSelection: NSRange,
+        afterValue: String?,
+        observedWindow: (NSRange) -> String?
+    ) -> TextDeliveryVerification {
+        guard let beforeValue = baseline.value, let insertion = baseline.selectedRange else {
             return .unavailable
         }
         let before = beforeValue as NSString
-        let observed = afterValue as NSString
         guard validRange(insertion, length: before.length),
-              validRange(finalSelection, length: observed.length),
+              validRange(finalSelection, length: observedLength),
               Range(insertion, in: beforeValue) != nil,
-              Range(finalSelection, in: afterValue) != nil else { return .unavailable }
+              afterValue.map({ Range(finalSelection, in: $0) != nil }) ?? true else { return .unavailable }
 
         let payloadUnits = expectedText.utf16.count
         let (finalLength, overflow) = (before.length - insertion.length).addingReportingOverflow(payloadUnits)
-        guard !overflow, observed.length == finalLength else { return .unavailable }
+        guard !overflow, observedLength == finalLength else { return .unavailable }
         let (insertionEnd, endOverflow) = insertion.location.addingReportingOverflow(payloadUnits)
         guard !endOverflow else { return .unavailable }
         let collapsedAfterInsert = finalSelection.location == insertionEnd && finalSelection.length == 0
@@ -169,8 +264,9 @@ public final class DeliveryVerifier {
             let oldWindow = before.substring(with: NSRange(location: lower, length: prefixUnits + insertion.length + suffixUnits))
             guard oldWindow.normalizedWhitespace != requiredWindow else { return .unavailable }
         }
-        let observedWindow = observed.substring(with: NSRange(location: lower, length: prefixUnits + payloadUnits + suffixUnits))
-        guard observedWindow.normalizedWhitespace == requiredWindow else { return .unavailable }
+        guard let observedText = observedWindow(
+            NSRange(location: lower, length: prefixUnits + payloadUnits + suffixUnits)
+        ), observedText.normalizedWhitespace == requiredWindow else { return .unavailable }
         return .delivered
     }
 

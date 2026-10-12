@@ -221,7 +221,6 @@ enum AITransformFlow {
 
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
-            Task { await AITextTransformer.shared.prewarm(kind: kind) }
             _ = AITextTransformer.shared.transform(
                 kind: kind,
                 input: input,

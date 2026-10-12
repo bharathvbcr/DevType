@@ -216,6 +216,76 @@ public enum AITokenBudget {
     }
 }
 
+// MARK: - Chunk budgeting and bounded static-token cache (no FoundationModels dependency)
+
+/// Plans a chunked run: every segment is sized against the budget exactly once, and the budget
+/// that admitted it is carried with it so generation never re-counts the same text.
+public enum AIChunkPlanner {
+    public struct Planned: Equatable, Sendable {
+        public let segment: AITransformText.Segment
+        public let maxResponseTokens: Int
+    }
+
+    /// Recursively divides only the segment `evaluate` rejects with `.inputTooLarge`, preserving
+    /// its exact separator. `evaluate` returns the segment body's `maximumResponseTokens`.
+    public static func plan(
+        _ initial: [AITransformText.Segment],
+        evaluate: (String) async throws -> Int
+    ) async throws -> [Planned] {
+        var pending = initial
+        var result: [Planned] = []
+        result.reserveCapacity(initial.count)
+        while !pending.isEmpty {
+            let segment = pending.removeFirst()
+            do {
+                result.append(Planned(segment: segment, maxResponseTokens: try await evaluate(segment.body)))
+            } catch let error as AITransformError {
+                guard case .inputTooLarge = error,
+                      let split = AITransformText.splitForChunking(segment) else {
+                    throw error
+                }
+                pending.insert(split.second, at: 0)
+                pending.insert(split.first, at: 0)
+            }
+        }
+        return result
+    }
+}
+
+/// Least-recently-used cache with a hard entry cap. `.custom` instructions are user text, so a
+/// cache keyed by instructions without a cap grows with every distinct instruction ever run.
+public struct AIBoundedCache<Value> {
+    public let capacity: Int
+    private var storage: [String: Value] = [:]
+    private var recency: [String] = []
+
+    public init(capacity: Int) {
+        precondition(capacity > 0, "A cache needs room for at least one entry")
+        self.capacity = capacity
+    }
+
+    public var count: Int { storage.count }
+
+    public mutating func value(forKey key: String) -> Value? {
+        guard let value = storage[key] else { return nil }
+        touch(key)
+        return value
+    }
+
+    public mutating func insert(_ value: Value, forKey key: String) {
+        storage[key] = value
+        touch(key)
+        while recency.count > capacity {
+            storage.removeValue(forKey: recency.removeFirst())
+        }
+    }
+
+    private mutating func touch(_ key: String) {
+        if let index = recency.firstIndex(of: key) { recency.remove(at: index) }
+        recency.append(key)
+    }
+}
+
 // MARK: - Pure text plumbing (no FoundationModels dependency)
 
 /// Input/output shaping shared by `AITextTransformer` and unit tests.
@@ -920,7 +990,8 @@ public actor AITextTransformer {
     /// Session kept only for `prewarm()`; request work always builds a fresh session.
     private var warmSession: LanguageModelSession?
     /// Static token counts keyed by kind (+ framing). Input remains dynamic.
-    private var staticTokenCache: [String: (instruction: Int, framing: Int)] = [:]
+    /// Bounded: `.custom` keys carry user instruction text.
+    private var staticTokenCache = AIBoundedCache<(instruction: Int, framing: Int)>(capacity: 32)
     /// Monotonic seed for reproducible retries when sampling is random.
     private var retrySeed: UInt64 = 1
     /// Detects a repeated request (the Retry button) so deterministic kinds re-roll.
@@ -1170,7 +1241,12 @@ public actor AITextTransformer {
         }
 
         inFlight = true
-        defer { inFlight = false }
+        // The warm session only primes the system prefix cache for the request that follows it;
+        // once a request has run it is spent, and holding it would pin its instructions.
+        defer {
+            inFlight = false
+            warmSession = nil
+        }
 
         let instructions = Self.resolvedInstructions(
             kind: kind,
@@ -1239,11 +1315,13 @@ public actor AITextTransformer {
 
         // B′4: paragraph chunking for chunk-safe kinds, serialized on this actor latch.
         do {
-            let chunks = try await budgetedChunks(
-                AITransformText.segments(trimmed, granularity: chunkGranularity),
-                kind: kind,
-                instructions: instructions
-            )
+            let planned = try await AIChunkPlanner.plan(
+                AITransformText.segments(trimmed, granularity: chunkGranularity)
+            ) { body in
+                try await self.evaluateBudget(kind: kind, instructions: instructions, input: body)
+                    .maxResponseTokens
+            }
+            let chunks = planned.map(\.segment)
             guard chunks.count > 1 else {
                 // A single grapheme can still be too large once the prompt framing and minimum
                 // response reserve are included. There is no safe smaller input to produce.
@@ -1267,21 +1345,17 @@ public actor AITextTransformer {
             var pieces: [String] = []
             pieces.reserveCapacity(chunks.count)
             var assembled = ""
-            for (index, chunk) in chunks.enumerated() {
+            for (index, plan) in planned.enumerated() {
+                let chunk = plan.segment
                 // A chunked run is the longest thing this actor does; it must be
                 // abandonable between chunks rather than only at the end.
                 try Task.checkCancellation()
-                let budget = try await evaluateBudget(
-                    kind: kind,
-                    instructions: instructions,
-                    input: chunk.body
-                )
                 let piece = try await generateOnce(
                     kind: kind,
                     instructions: instructions,
                     input: chunk.body,
                     markdownPolicy: markdownPolicy,
-                    maxResponseTokens: budget.maxResponseTokens,
+                    maxResponseTokens: plan.maxResponseTokens,
                     attempt: attempt,
                     streamPartials: false,
                     onPartial: { _ in }
@@ -1318,39 +1392,6 @@ public actor AITextTransformer {
         } catch {
             once.complete(.failure(Self.mapGenerationError(error, kind: kind, input: trimmed)))
         }
-    }
-
-    /// Evaluates every chunk against the same budget used for generation. Paragraph and line
-    /// splitting alone is insufficient for a single huge paragraph or an unbroken identifier;
-    /// recursively divide only the segment that does not fit, preserving its exact separator.
-    private func budgetedChunks(
-        _ initial: [AITransformText.Segment],
-        kind: AITransformKind,
-        instructions: String
-    ) async throws -> [AITransformText.Segment] {
-        var pending = initial
-        var result: [AITransformText.Segment] = []
-        result.reserveCapacity(initial.count)
-
-        while !pending.isEmpty {
-            let segment = pending.removeFirst()
-            do {
-                _ = try await evaluateBudget(
-                    kind: kind,
-                    instructions: instructions,
-                    input: segment.body
-                )
-                result.append(segment)
-            } catch let error as AITransformError {
-                guard case .inputTooLarge = error,
-                      let split = AITransformText.splitForChunking(segment) else {
-                    throw error
-                }
-                pending.insert(split.second, at: 0)
-                pending.insert(split.first, at: 0)
-            }
-        }
-        return result
     }
 
     /// Generates, then enforces the kind's script and length policies. A violation is
@@ -1591,13 +1632,13 @@ public actor AITextTransformer {
         let cacheKey = kind.rawValue + "\u{1f}" + instructions
         let instructionTokens: Int
         let framingTokens: Int
-        if let cached = staticTokenCache[cacheKey] {
+        if let cached = staticTokenCache.value(forKey: cacheKey) {
             instructionTokens = cached.instruction
             framingTokens = cached.framing
         } else {
             let i = await estimateTokenCount(instructions)
             let f = await estimateTokenCount(Self.promptFraming(for: kind))
-            staticTokenCache[cacheKey] = (i, f)
+            staticTokenCache.insert((i, f), forKey: cacheKey)
             instructionTokens = i
             framingTokens = f
         }
