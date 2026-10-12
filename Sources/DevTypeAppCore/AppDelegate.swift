@@ -299,7 +299,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func wireSecureClipboardPasteHint() {
         TextInjectionPipeline.shared.onSecureClipboardManualPasteHint = { [weak self] in
             guard let self, let button = self.statusItem?.button else { return }
-            let message = TextInjectionPipeline.secureClipboardManualPasteMessage
+            let message = LocalizationManager.shared.s(TextInjectionPipeline.secureClipboardManualPasteHintKey)
             button.toolTip = message
             DevTypeLog.app.notice("[App] \(message, privacy: .public)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in

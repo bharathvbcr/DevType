@@ -27,7 +27,7 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
         let after = DeliveryObservationFixture.at("abcHello", 8)
 
         XCTAssertEqual(
-            TextInjectionPipeline.verifyTextDelivery(
+            DeliveryVerifier.verifyTextDelivery(
                 expectedText: "Hello",
                 baseline: before,
                 after: after
@@ -37,17 +37,17 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
     }
 
     func testReadableAbsenceRemainsUnverified() {
-        let before = TextInjectionPipeline.FocusedTextObservation(
+        let before = DeliveryVerifier.FocusedTextObservation(
             value: "abc",
             selectedText: nil
         )
-        let after = TextInjectionPipeline.FocusedTextObservation(
+        let after = DeliveryVerifier.FocusedTextObservation(
             value: "abc",
             selectedText: nil
         )
 
         XCTAssertEqual(
-            TextInjectionPipeline.verifyTextDelivery(
+            DeliveryVerifier.verifyTextDelivery(
                 expectedText: "Hello",
                 baseline: before,
                 after: after
@@ -57,17 +57,17 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
     }
 
     func testVerifyTextDeliveryReturnsUnavailableWhenExpectedWasAlreadyPresentWithoutObservableChange() {
-        let before = TextInjectionPipeline.FocusedTextObservation(
+        let before = DeliveryVerifier.FocusedTextObservation(
             value: "Hello",
             selectedText: nil
         )
-        let after = TextInjectionPipeline.FocusedTextObservation(
+        let after = DeliveryVerifier.FocusedTextObservation(
             value: "Hello",
             selectedText: nil
         )
 
         XCTAssertEqual(
-            TextInjectionPipeline.verifyTextDelivery(
+            DeliveryVerifier.verifyTextDelivery(
                 expectedText: "Hello",
                 baseline: before,
                 after: after
@@ -78,12 +78,12 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
 
     func testSelectedTextAloneCannotConfirmDelivery() {
         // Matching selection without a relevant observed transition is ambiguous.
-        let after = TextInjectionPipeline.FocusedTextObservation(
+        let after = DeliveryVerifier.FocusedTextObservation(
             value: nil,
             selectedText: "Hello"
         )
         XCTAssertEqual(
-            TextInjectionPipeline.verifyTextDelivery(
+            DeliveryVerifier.verifyTextDelivery(
                 expectedText: "Hello",
                 baseline: nil,
                 after: after
@@ -94,7 +94,7 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
 
     func testVerifyTextDeliveryReturnsUnavailableWhenAfterIsNil() {
         XCTAssertEqual(
-            TextInjectionPipeline.verifyTextDelivery(
+            DeliveryVerifier.verifyTextDelivery(
                 expectedText: "Hello",
                 baseline: nil,
                 after: nil
@@ -105,7 +105,7 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
 
     func testVerifyTextDeliveryTreatsEmptyExpectedAsDelivered() {
         XCTAssertEqual(
-            TextInjectionPipeline.verifyTextDelivery(
+            DeliveryVerifier.verifyTextDelivery(
                 expectedText: "",
                 baseline: nil,
                 after: nil
@@ -117,13 +117,13 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
     func testPasteReverifyDelayIsReasonable() {
         // The deferred re-check delay must be short enough to feel instant but long enough
         // for slow apps to process the paste (100–500 ms range is acceptable).
-        XCTAssertGreaterThanOrEqual(TextInjectionPipeline.pasteReverifyDelay, 0.10)
-        XCTAssertLessThanOrEqual(TextInjectionPipeline.pasteReverifyDelay, 0.50)
+        XCTAssertGreaterThanOrEqual(InjectTiming.pasteReverifyDelay, 0.10)
+        XCTAssertLessThanOrEqual(InjectTiming.pasteReverifyDelay, 0.50)
     }
 
     func testDecidePasteHoldSucceedsWhenDelivered() {
         XCTAssertEqual(
-            TextInjectionPipeline.decidePasteHold(
+            PasteboardBroker.decidePasteHold(
                 delivery: .delivered,
                 pasteAttemptsCompleted: 1,
                 elapsed: 0.01,
@@ -135,7 +135,7 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
 
     func testRepeatedMissesDoNotAuthorizeReplay() {
         XCTAssertEqual(
-            TextInjectionPipeline.decidePasteHold(
+            PasteboardBroker.decidePasteHold(
                 delivery: .failed,
                 pasteAttemptsCompleted: 1,
                 elapsed: 0.05,
@@ -144,7 +144,7 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
             .waitMore
         )
         XCTAssertEqual(
-            TextInjectionPipeline.decidePasteHold(
+            PasteboardBroker.decidePasteHold(
                 delivery: .failed,
                 pasteAttemptsCompleted: 2,
                 elapsed: 0.10,
@@ -156,7 +156,7 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
 
     func testDecidePasteHoldWaitsThenGivesUpWhenUnavailable() {
         XCTAssertEqual(
-            TextInjectionPipeline.decidePasteHold(
+            PasteboardBroker.decidePasteHold(
                 delivery: .unavailable,
                 pasteAttemptsCompleted: 1,
                 elapsed: 0.10,
@@ -165,7 +165,7 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
             .waitMore
         )
         XCTAssertEqual(
-            TextInjectionPipeline.decidePasteHold(
+            PasteboardBroker.decidePasteHold(
                 delivery: .unavailable,
                 pasteAttemptsCompleted: 1,
                 elapsed: 0.35,
@@ -176,9 +176,9 @@ final class DeliveryVerificationPolicyTests: XCTestCase {
     }
 
     func testPasteDeliverySettleDelayIsShort() {
-        XCTAssertGreaterThan(TextInjectionPipeline.pasteDeliverySettleDelay, 0)
-        XCTAssertLessThanOrEqual(TextInjectionPipeline.pasteDeliverySettleDelay, 0.12)
-        XCTAssertEqual(TextInjectionPipeline.pasteDeliveryMaxAttempts, 2)
+        XCTAssertGreaterThan(InjectTiming.pasteDeliverySettleDelay, 0)
+        XCTAssertLessThanOrEqual(InjectTiming.pasteDeliverySettleDelay, 0.12)
+        XCTAssertEqual(InjectTiming.pasteDeliveryMaxAttempts, 2)
     }
 
     func testSecureFieldHelperFailClosedWithoutFocusedElement() {

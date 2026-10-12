@@ -4,46 +4,46 @@ import XCTest
 final class TriggerMatchingTests: XCTestCase {
 
     func testDynamicPasteboardRestoreDelayMath() {
-        let pipeline = TextInjectionPipeline.shared
+        let broker = PasteboardBroker.shared
 
-        let smallDelay = pipeline.calculateRestoreDelay(payloadBytes: 100)
+        let smallDelay = broker.calculateRestoreDelay(payloadBytes: 100)
         XCTAssertEqual(smallDelay, 0.15, accuracy: 0.001)
 
-        let mediumDelay = pipeline.calculateRestoreDelay(payloadBytes: 4000)
+        let mediumDelay = broker.calculateRestoreDelay(payloadBytes: 4000)
         XCTAssertEqual(mediumDelay, 0.15, accuracy: 0.001)
 
-        let hugeDelay = pipeline.calculateRestoreDelay(payloadBytes: 50000)
+        let hugeDelay = broker.calculateRestoreDelay(payloadBytes: 50000)
         XCTAssertEqual(hugeDelay, 0.45, accuracy: 0.001)
     }
 
     func testEraseCountWithSwallowedFinalKey() {
-        XCTAssertEqual(TextInjectionPipeline.eraseCount(triggerLength: 4, swallowedFinalKey: true), 3)
-        XCTAssertEqual(TextInjectionPipeline.eraseCount(triggerLength: 4, swallowedFinalKey: false), 4)
-        XCTAssertEqual(TextInjectionPipeline.eraseCount(triggerLength: 1, swallowedFinalKey: true), 0)
-        XCTAssertEqual(TextInjectionPipeline.eraseCount(triggerLength: 0, swallowedFinalKey: true), 0)
-        XCTAssertEqual(TextInjectionPipeline.eraseCount(triggerLength: 0, swallowedFinalKey: false), 0)
+        XCTAssertEqual(EraseExecutor.eraseCount(triggerLength: 4, swallowedFinalKey: true), 3)
+        XCTAssertEqual(EraseExecutor.eraseCount(triggerLength: 4, swallowedFinalKey: false), 4)
+        XCTAssertEqual(EraseExecutor.eraseCount(triggerLength: 1, swallowedFinalKey: true), 0)
+        XCTAssertEqual(EraseExecutor.eraseCount(triggerLength: 0, swallowedFinalKey: true), 0)
+        XCTAssertEqual(EraseExecutor.eraseCount(triggerLength: 0, swallowedFinalKey: false), 0)
     }
 
     func testEraseCountUsesLastEventCharacterCount() {
         // Multi-scalar final key (e.g. composed character) swallowed → erase fewer code units.
         XCTAssertEqual(
-            TextInjectionPipeline.eraseCount(triggerLength: 5, swallowedFinalKey: true, lastEventCharacterCount: 2),
+            EraseExecutor.eraseCount(triggerLength: 5, swallowedFinalKey: true, lastEventCharacterCount: 2),
             3
         )
         XCTAssertEqual(
-            TextInjectionPipeline.eraseCount(triggerLength: 2, swallowedFinalKey: true, lastEventCharacterCount: 2),
+            EraseExecutor.eraseCount(triggerLength: 2, swallowedFinalKey: true, lastEventCharacterCount: 2),
             0
         )
         XCTAssertEqual(
-            TextInjectionPipeline.eraseCount(triggerLength: 3, swallowedFinalKey: true, lastEventCharacterCount: 5),
+            EraseExecutor.eraseCount(triggerLength: 3, swallowedFinalKey: true, lastEventCharacterCount: 5),
             0
         )
     }
 
     func testRestoreGenerationTokenMonotonic() {
-        XCTAssertEqual(TextInjectionPipeline.nextRestoreGeneration(current: 0), 1)
-        XCTAssertEqual(TextInjectionPipeline.nextRestoreGeneration(current: 41), 42)
-        XCTAssertEqual(TextInjectionPipeline.nextRestoreGeneration(current: UInt64.max), 0)
+        XCTAssertEqual(PasteboardBroker.nextRestoreGeneration(current: 0), 1)
+        XCTAssertEqual(PasteboardBroker.nextRestoreGeneration(current: 41), 42)
+        XCTAssertEqual(PasteboardBroker.nextRestoreGeneration(current: UInt64.max), 0)
     }
 
     func testShouldResetBufferPolicy() {

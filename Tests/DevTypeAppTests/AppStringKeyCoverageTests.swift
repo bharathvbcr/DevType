@@ -127,6 +127,14 @@ final class AppStringKeyCoverageTests: XCTestCase {
         }
     }
 
+    /// The menu-bar tooltip shown when secure clipboard paste leaves the payload for a manual ⌘V.
+    func testSecureClipboardManualPasteHintKeyResolves() {
+        assertResolves(
+            TextInjectionPipeline.secureClipboardManualPasteHintKey,
+            origin: "TextInjectionPipeline.secureClipboardManualPasteHintKey"
+        )
+    }
+
     func testVoiceBuildLacksSpeechKeyResolves() {
         assertResolves(
             "prefs.voice.speechModels.status.buildLacksSpeech",
