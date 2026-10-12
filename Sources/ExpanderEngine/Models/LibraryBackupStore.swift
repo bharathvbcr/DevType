@@ -177,7 +177,11 @@ public final class LibraryBackupStore {
             let destination = try uniqueURLLocked(kind: kind, at: now())
             try fileManager.moveItem(at: url, to: destination)
             do {
-                try FilePermissions.setPOSIX(destination, 0o600)
+                // A directory sitting at the library path is preserved whole; 0o600 would strip its
+                // search bit and leave the contents it was kept for unreachable.
+                var isDirectory: ObjCBool = false
+                _ = fileManager.fileExists(atPath: destination.path, isDirectory: &isDirectory)
+                try FilePermissions.setPOSIX(destination, isDirectory.boolValue ? 0o700 : 0o600)
             } catch {
                 // The bytes are preserved either way; an owner-unreadable backup is still a backup.
                 DevTypeLog.store.error(
