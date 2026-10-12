@@ -2511,7 +2511,11 @@ public final class EventTapEngine {
                 // Consume is single-use so a second trigger cannot reuse the same stale text.
                 // Same-element check (CFEqual) makes the longer TTL safe.
                 let weakAXBlocked = SelectionMonitor.shared.hasWeakAXBlockedSelection()
-                guard let selection = SelectionMonitor.shared.consumeSelection() else {
+                // The element comes from the focus resolution this closure already holds (§2.2) —
+                // `consumeSelection` runs no AX query of its own on this main-thread path.
+                guard let selection = SelectionMonitor.shared.consumeSelection(
+                    focusedElement: focus.element
+                ) else {
                     self.refuseAfterSwallow(
                         reason: weakAXBlocked ? "AI selection weak-AX" : "AI selection unavailable",
                         swallowed: swallowed
