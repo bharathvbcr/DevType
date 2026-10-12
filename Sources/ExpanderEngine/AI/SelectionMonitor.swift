@@ -73,6 +73,26 @@ public final class SelectionMonitor {
     /// When the full attribute ladder last ran, for `shouldRunFallbackLadder`.
     private var lastFallbackLadderAt: Date?
 
+    /// Bumped (under `lock`) whenever what a refresh was reading stops being current: an app
+    /// switch, `stop()`. A refresh stamped with an older value may not store or clear anything.
+    private var epoch: UInt64 = 0
+    /// The newest notification not yet picked up by `drainRefreshes`. A burst collapses into one
+    /// pending refresh, so a stalled target app cannot grow a backlog of reads.
+    private var pendingRefresh: RefreshContext?
+    private var refreshDrainScheduled = false
+
+    /// The single serial queue every notification-driven AX read runs on. Not `readQueue`: an
+    /// explicit hotkey read must never wait behind a burst of per-keystroke refreshes.
+    let refreshQueue = DispatchQueue(label: "com.devtype.selection-monitor", qos: .utility)
+
+    /// What the main-thread callback hands to `refreshQueue`: facts that need `NSWorkspace`,
+    /// resolved on main, plus the epoch the result must still match when it lands.
+    private struct RefreshContext {
+        let epoch: UInt64
+        let frontmostBundleID: String
+        let frontmostIsOwnProcess: Bool
+    }
+
     private var axObserver: AXObserver?
     private var observedPID: pid_t = 0
     private var appSwitchObserver: NSObjectProtocol?
@@ -96,6 +116,13 @@ public final class SelectionMonitor {
         public var isOwnProcessFrontmost: () -> Bool
         public var isMuted: (String) -> Bool
         public var isTypedPathAllowed: (String) -> Bool
+        /// **Main queue only** (`NSWorkspace`): called by the AX callback before it hops to
+        /// `refreshQueue`, never from the queue itself.
+        var frontmostBundleID: () -> String? = {
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        }
+        /// The AX reads a notification triggers. They run on `refreshQueue`, never on main.
+        var axReads: AXReads = .live
 
         public init(
             isSecureInputActive: @escaping () -> Bool,
@@ -134,6 +161,29 @@ public final class SelectionMonitor {
                 isTypedPathAllowed: { typedPathAllowlist.isEmpty || typedPathAllowlist.contains($0) }
             )
         }
+    }
+
+    /// The AX attribute reads behind a selection-changed notification, behind a seam so a test
+    /// can prove none of them runs on the main thread.
+    struct AXReads {
+        var isProcessTrusted: () -> Bool
+        var queryFocusedElement: () -> AXContextChecker.FocusQueryResult
+        var ownerBundleID: (AXUIElement) -> String?
+        var copySelectedText: (_ element: AXUIElement, _ allowFallbackAttributes: Bool) -> String?
+
+        static let live = AXReads(
+            isProcessTrusted: { AXContextChecker.shared.isProcessTrusted() },
+            queryFocusedElement: { AXContextChecker.shared.queryFocusedElement() },
+            ownerBundleID: { SelectionMonitor.bundleID(owning: $0) },
+            // No `kAXValue` slice: that rung pulls the element's whole value (up to 2M
+            // characters) over AX IPC, and an empty `kAXSelectedText` is the normal answer while
+            // typing. Explicit reads (`SelectionReader.readSelection*`) keep it.
+            copySelectedText: {
+                SelectionReader.copySelectedText(
+                    from: $0, allowFallbackAttributes: $1, allowValueSlice: false
+                )
+            }
+        )
     }
 
     public init(defaults: UserDefaults = .standard, environment: Environment = .live) {
@@ -241,15 +291,21 @@ public final class SelectionMonitor {
 
     /// Peek + single-use consume for the typed expand path.
     ///
-    /// Returns `nil` (and clears) when the focused AX element no longer matches the element
-    /// that produced the cache entry. Passing `requireSameElement: false` skips that check
-    /// (unit tests that seed without a live focus).
+    /// Returns `nil` (and clears) when `focusedElement` is not the element that produced the cache
+    /// entry. Passing `requireSameElement: false` skips that check (unit tests that seed without
+    /// a live focus).
+    ///
+    /// This never queries AX: the caller (the typed AI trigger, on main) has just resolved the
+    /// focused element for its own gate (§2.2) and hands that same resolution in, rather than
+    /// paying for a second live round-trip on the main thread. A caller with no resolved element
+    /// passes `nil`, which fails closed — an unverifiable element is a mismatch.
     @discardableResult
     public func consumeSelection(
         maxAge: TimeInterval = defaultTTL,
         asOf now: Date = Date(),
         rejectWeakAX: Bool = true,
-        requireSameElement: Bool = true
+        requireSameElement: Bool = true,
+        focusedElement: AXUIElement? = nil
     ) -> CachedSelection? {
         lock.lock()
         let snapshot = cache
@@ -261,8 +317,8 @@ public final class SelectionMonitor {
 
         if requireSameElement {
             guard let storedElement,
-                  let focused = AXContextChecker.shared.focusedElement(),
-                  CFEqual(storedElement, focused) else {
+                  let focusedElement,
+                  CFEqual(storedElement, focusedElement) else {
                 _ = takeCache(ifMatching: snapshot)
                 return nil
             }
@@ -288,6 +344,38 @@ public final class SelectionMonitor {
         cache = nil
         cacheElement = nil
         lock.unlock()
+    }
+
+    /// Clear on behalf of a refresh stamped `epoch`; a no-op once that epoch is stale (the app
+    /// switched or the monitor stopped while the read was in flight). `nil` clears unconditionally.
+    private func clearCache(ifEpoch epoch: UInt64?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let epoch, epoch != self.epoch { return }
+        cache = nil
+        cacheElement = nil
+    }
+
+    /// Retire every read in flight or queued: its result describes a focus that is gone.
+    private func invalidateInFlightRefreshes() {
+        lock.lock()
+        epoch &+= 1
+        pendingRefresh = nil
+        lock.unlock()
+    }
+
+    /// Benchmark hook: the whole refresh the callback used to run on main, run inline on the
+    /// calling thread — the "before" arm of `SelectionMonitorBenchmarkTests`.
+    func performRefreshInlineForBenchmark(bundleID: String) {
+        lock.lock()
+        let context = RefreshContext(epoch: epoch, frontmostBundleID: bundleID, frontmostIsOwnProcess: false)
+        lock.unlock()
+        performRefresh(context)
+    }
+
+    /// Test hook: returns once every queued and running notification refresh has finished.
+    func waitForRefreshesForTesting() {
+        refreshQueue.sync {}
     }
 
     /// Inject a cache entry (unit tests).
@@ -331,6 +419,7 @@ public final class SelectionMonitor {
 
     private func stopOnMain() {
         precondition(Thread.isMainThread)
+        invalidateInFlightRefreshes()
         removeAppSwitchObserver()
         unregisterAXObserver()
         isRunning = false
@@ -353,7 +442,9 @@ public final class SelectionMonitor {
             if activated?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
                 return
             }
-            // A real switch to another app invalidates last-known-good from the previous one.
+            // A real switch to another app invalidates last-known-good from the previous one —
+            // including any refresh of that app still reading on `refreshQueue`.
+            self?.invalidateInFlightRefreshes()
             self?.clearCache()
             self?.reregisterForFrontmostApp()
         }
@@ -376,6 +467,7 @@ public final class SelectionMonitor {
         // on in Preferences (DevType frontmost by definition) or by starting up while frontmost.
         guard !environment.isOwnProcessFrontmost() else { return }
 
+        invalidateInFlightRefreshes()
         unregisterAXObserver()
 
         guard isFeatureEnabled, AXContextChecker.shared.isProcessTrusted() else {
@@ -448,7 +540,7 @@ public final class SelectionMonitor {
         axObserver = observer
         observedPID = pid
 
-        refreshCacheFromFocus(bundleID: bundleID)
+        enqueueRefresh(bundleID: bundleID, frontmostIsOwnProcess: false)
     }
 
     private func unregisterAXObserver() {
@@ -476,14 +568,58 @@ public final class SelectionMonitor {
         observedPID = 0
     }
 
-    fileprivate func handleAXNotification() {
+    /// The AX observer callback, on the main run loop. It reads **no AX attribute**: it resolves
+    /// the `NSWorkspace` facts (main-only) and hands the rest to `refreshQueue`, where every AX
+    /// round-trip happens. A burst of notifications coalesces into one pending refresh.
+    func handleAXNotification() {
+        precondition(Thread.isMainThread)
         guard isFeatureEnabled else { return }
-        guard AXContextChecker.shared.isProcessTrusted() else {
-            clearCache()
+        enqueueRefresh(
+            bundleID: environment.frontmostBundleID() ?? "",
+            frontmostIsOwnProcess: environment.isOwnProcessFrontmost()
+        )
+    }
+
+    private func enqueueRefresh(bundleID: String, frontmostIsOwnProcess: Bool) {
+        lock.lock()
+        pendingRefresh = RefreshContext(
+            epoch: epoch,
+            frontmostBundleID: bundleID,
+            frontmostIsOwnProcess: frontmostIsOwnProcess
+        )
+        let schedule = !refreshDrainScheduled
+        refreshDrainScheduled = true
+        lock.unlock()
+        guard schedule else { return }
+        refreshQueue.async { [weak self] in self?.drainRefreshes() }
+    }
+
+    /// Runs on `refreshQueue`: serial, so a refresh never overlaps another, and each pass takes
+    /// the *latest* pending context — an older notification's snapshot is never read after a newer
+    /// one arrived.
+    private func drainRefreshes() {
+        while true {
+            lock.lock()
+            guard let context = pendingRefresh else {
+                refreshDrainScheduled = false
+                lock.unlock()
+                return
+            }
+            pendingRefresh = nil
+            lock.unlock()
+            performRefresh(context)
+        }
+    }
+
+    /// `refreshQueue` only. Every store or clear is stamped with `context.epoch`.
+    private func performRefresh(_ context: RefreshContext) {
+        guard isFeatureEnabled else { return }
+        guard environment.axReads.isProcessTrusted() else {
+            clearCache(ifEpoch: context.epoch)
             return
         }
         if environment.isSecureInputActive() {
-            clearCache()
+            clearCache(ifEpoch: context.epoch)
             return
         }
 
@@ -503,11 +639,11 @@ public final class SelectionMonitor {
         // same invariant on the notification path. Nothing is leaked by holding the entry: a real
         // switch to another app still clears it, the TTL still retires it, and the typed path still
         // consumes it single-use.
-        guard !environment.isOwnProcessFrontmost() else { return }
+        guard !context.frontmostIsOwnProcess else { return }
 
-        let bundleID = AXContextChecker.shared.frontmostApplicationBundleIdentifier() ?? ""
+        let bundleID = context.frontmostBundleID
         if !bundleID.isEmpty, environment.isMuted(bundleID) {
-            clearCache()
+            clearCache(ifEpoch: context.epoch)
             return
         }
         // Deliberately *not* gated on `isTypedPathAllowed`. That allowlist scopes the typed
@@ -516,7 +652,7 @@ public final class SelectionMonitor {
         // read through `rawCachedSelection()` precisely because a hotkey types nothing into the
         // selection and so does not need the allowlist's protection. Configuring an allowlist
         // used to silently disable Prompt Enhance everywhere outside it.
-        refreshCacheFromFocus(bundleID: bundleID)
+        refreshCacheFromFocus(bundleID: bundleID, context: context)
     }
 
     // MARK: - Own-process guard
@@ -589,7 +725,8 @@ public final class SelectionMonitor {
         return elapsed < 0 || elapsed >= minInterval
     }
 
-    private func refreshCacheFromFocus(bundleID: String, now: Date = Date()) {
+    /// `refreshQueue` only: every AX read of a notification-driven refresh is here.
+    private func refreshCacheFromFocus(bundleID: String, context: RefreshContext, now: Date = Date()) {
         // Typed query, not `focusedElement()`: that collapses "this app has no focused element"
         // and "the AX round-trip failed" into the same `nil`, and only the first is evidence.
         // Chromium answers `.cannotComplete` mid-transition all the time — the whole
@@ -597,12 +734,12 @@ public final class SelectionMonitor {
         // a good cache on an app that is about to answer perfectly well. Same principle as the
         // delivery-evidence rule: a failed read condemns nothing.
         let element: AXUIElement
-        switch AXContextChecker.shared.queryFocusedElement() {
+        switch environment.axReads.queryFocusedElement() {
         case .available(let resolved):
             element = resolved
         case .missing:
             // The app answered, and the answer was "nothing is focused". That is evidence.
-            clearCache()
+            clearCache(ifEpoch: context.epoch)
             return
         case .axFailure, .untrusted:
             return
@@ -614,15 +751,15 @@ public final class SelectionMonitor {
         // entry is not a cosmetic problem: `SelectionGate.cacheMatchesFrontmost` uses the label to
         // decide the text may be used *in that app*, so a wrong one both leaks app A's selection
         // into app B and walks around a mute on A.
-        let owner = Self.bundleID(owning: element) ?? bundleID
+        let owner = environment.axReads.ownerBundleID(element) ?? bundleID
         if !owner.isEmpty, environment.isMuted(owner) {
-            clearCache()
+            clearCache(ifEpoch: context.epoch)
             return
         }
 
         // Cheap attribute first: this runs from an AX notification that many apps fire on every
         // keystroke, and the extra round-trips are wasted whenever the primary one answers.
-        let primary = SelectionReader.copySelectedText(from: element, allowFallbackAttributes: false)
+        let primary = environment.axReads.copySelectedText(element, false)
 
         lock.lock()
         let lastLadderAt = lastFallbackLadderAt
@@ -637,9 +774,15 @@ public final class SelectionMonitor {
             lock.lock()
             lastFallbackLadderAt = now
             lock.unlock()
-            text = SelectionReader.copySelectedText(from: element, allowFallbackAttributes: true)
+            text = environment.axReads.copySelectedText(element, true)
         }
-        applySelectionRefresh(text: text, bundleID: owner, element: element)
+        applySelectionRefresh(
+            text: text,
+            bundleID: owner,
+            element: element,
+            frontmostIsOwnProcess: context.frontmostIsOwnProcess,
+            epoch: context.epoch
+        )
     }
 
     /// Shared refresh logic used by live AX notifications and unit tests.
@@ -648,7 +791,17 @@ public final class SelectionMonitor {
     /// - Empty / unreadable text on the **same** element → keep existing cache (TTL retires it).
     /// - Focus moved to a **different** AX element → clear, then store only if the new
     ///   element has a non-empty selection.
-    private func applySelectionRefresh(text: String?, bundleID: String, element: AXUIElement?) {
+    ///
+    /// `epoch` stamps a refresh read on `refreshQueue`: once the app has switched or the monitor
+    /// stopped, its result is dropped rather than stored over the newer state. `nil` (the test
+    /// hook) applies unconditionally, with the own-process fact read from `environment`.
+    private func applySelectionRefresh(
+        text: String?,
+        bundleID: String,
+        element: AXUIElement?,
+        frontmostIsOwnProcess: Bool? = nil,
+        epoch: UInt64? = nil
+    ) {
         // §8.8: enforced at the mutation funnel rather than at each caller — nothing observed while
         // DevType owns the focus — frontmost, or merely holding the focused element behind a
         // `.nonactivatingPanel` like the inline search palette — may store *or* invalidate
@@ -656,7 +809,7 @@ public final class SelectionMonitor {
         // without this the refresh below reads as "focus moved" and clears the selection the
         // palette was opened to transform.
         guard Self.mayApplyRefresh(
-            frontmostIsOwnProcess: environment.isOwnProcessFrontmost(),
+            frontmostIsOwnProcess: frontmostIsOwnProcess ?? environment.isOwnProcessFrontmost(),
             focusedElementIsOwnProcess: element.map(Self.elementBelongsToOwnProcess) ?? false
         ) else { return }
 
@@ -665,9 +818,9 @@ public final class SelectionMonitor {
         lock.unlock()
 
         if let previousElement, let element, !CFEqual(previousElement, element) {
-            clearCache()
+            clearCache(ifEpoch: epoch)
         } else if previousElement != nil, element == nil {
-            clearCache()
+            clearCache(ifEpoch: epoch)
             return
         }
 
@@ -675,11 +828,13 @@ public final class SelectionMonitor {
             // Empty selection on the same element: keep last-known-good for TTL.
             return
         }
-        storeCache(text: text, bundleID: bundleID, element: element)
+        storeCache(text: text, bundleID: bundleID, element: element, epoch: epoch)
     }
 
-    private func storeCache(text: String, bundleID: String, element: AXUIElement?) {
+    private func storeCache(text: String, bundleID: String, element: AXUIElement?, epoch: UInt64?) {
         lock.lock()
+        defer { lock.unlock() }
+        if let epoch, epoch != self.epoch { return }
         changeToken &+= 1
         let token = changeToken
         cache = CachedSelection(
@@ -689,7 +844,6 @@ public final class SelectionMonitor {
             timestamp: Date()
         )
         cacheElement = element
-        lock.unlock()
     }
 }
 
@@ -701,6 +855,6 @@ private func selectionObserverCallback(
 ) {
     guard let refcon else { return }
     let monitor = Unmanaged<SelectionMonitor>.fromOpaque(refcon).takeUnretainedValue()
-    // AX callbacks arrive on the run-loop that owns the observer (main).
-    SelectionMonitor.handleAXNotification(monitor)()
+    // The source sits on the main run loop, so this is main: it only hops to `refreshQueue`.
+    monitor.handleAXNotification()
 }

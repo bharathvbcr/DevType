@@ -351,6 +351,22 @@ final class SourceContractTests: XCTestCase {
                        "readQueue must never wait on main: main may be waiting on readQueue")
     }
 
+    /// The monitor's per-notification refresh must not drag a whole document over AX IPC, and its
+    /// observer callback must only hop: every AX read goes through `Environment.axReads`.
+    func testSelectionMonitorRefreshSkipsValueSliceAndKeepsAXOffTheCallback() throws {
+        let text = try source("Sources/ExpanderEngine/AI/SelectionMonitor.swift")
+        XCTAssertTrue(text.contains("allowValueSlice: false"),
+                      "The monitor's live selected-text read must not use the kAXValue-slice rung")
+        XCTAssertFalse(text.contains("AXContextChecker.shared.focusedElement()"),
+                       "consumeSelection must not run its own focus query")
+        XCTAssertFalse(text.contains("SelectionReader.copySelectedText(from: element"),
+                       "Refresh reads go through environment.axReads so they stay off main")
+        let callback = try XCTUnwrap(text.range(of: "private func selectionObserverCallback("))
+        let body = String(text[callback.upperBound...])
+        XCTAssertTrue(body.contains("monitor.handleAXNotification()"))
+        XCTAssertFalse(body.contains("refreshCacheFromFocus"))
+    }
+
     private func source(_ relativePath: String) throws -> String {
         let url = Self.repoRoot.appendingPathComponent(relativePath)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {

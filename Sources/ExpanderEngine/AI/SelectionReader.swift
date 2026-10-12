@@ -613,15 +613,20 @@ public enum SelectionReader {
     /// - Parameter allowFallbackAttributes: try the range, attributed, value-substring, plural
     ///   and text-marker forms when the primary attribute reports nothing. **Off for
     ///   high-frequency callers**, which pay for the extra IPC on every keystroke.
+    /// - Parameter allowValueSlice: permit the `kAXValue`-sliced-by-range rung, which pulls the
+    ///   element's *whole* value (up to `maxSliceableDocumentCharacters`) across AX IPC. Off for
+    ///   `SelectionMonitor`; the explicit reads keep it.
     public static func copySelectedText(
         from element: AXUIElement,
         allowSlowRetry: Bool = false,
-        allowFallbackAttributes: Bool = true
+        allowFallbackAttributes: Bool = true,
+        allowValueSlice: Bool = true
     ) -> String? {
         readSelectedText(
             from: element,
             allowSlowRetry: allowSlowRetry,
-            allowFallbackAttributes: allowFallbackAttributes
+            allowFallbackAttributes: allowFallbackAttributes,
+            allowValueSlice: allowValueSlice
         ).text
     }
 
@@ -629,6 +634,7 @@ public enum SelectionReader {
         from element: AXUIElement,
         allowSlowRetry: Bool,
         allowFallbackAttributes: Bool,
+        allowValueSlice: Bool = true,
         deadline: Date? = nil
     ) -> ElementRead {
         AXContextChecker.applyMessagingTimeout(to: element)
@@ -679,7 +685,8 @@ public enum SelectionReader {
             // value: slice it with the selected range. UTF-16 offsets, so this goes through
             // NSString — `String.Index` arithmetic would corrupt any selection containing an
             // emoji or a combining mark.
-            if let sliced = copyValueSubstring(element, rangeValue), !isBlankSelection(sliced) {
+            if allowValueSlice,
+               let sliced = copyValueSubstring(element, rangeValue), !isBlankSelection(sliced) {
                 return ElementRead(text: sliced, timedOut: false, via: .valueSubstring)
             }
         }
@@ -688,7 +695,8 @@ public enum SelectionReader {
             return ElementRead(text: nil, timedOut: timedOut, via: .unknown)
         }
 
-        if let plural = copySelectedTextByRanges(element, deadline: deadline), !isBlankSelection(plural) {
+        if let plural = copySelectedTextByRanges(element, deadline: deadline, allowValueSlice: allowValueSlice),
+           !isBlankSelection(plural) {
             return ElementRead(text: plural, timedOut: false, via: .selectedTextRanges)
         }
 
@@ -830,7 +838,11 @@ public enum SelectionReader {
     /// Apple documents it alongside the singular attribute, and multi-cursor editors answer it
     /// when the singular range reports only the last caret. Pieces are joined with newlines,
     /// which is what a multi-cursor copy produces in every editor that supports one.
-    private static func copySelectedTextByRanges(_ element: AXUIElement, deadline: Date?) -> String? {
+    private static func copySelectedTextByRanges(
+        _ element: AXUIElement,
+        deadline: Date?,
+        allowValueSlice: Bool
+    ) -> String? {
         var rangesRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             element,
@@ -847,7 +859,7 @@ public enum SelectionReader {
             guard isUsableSelectedRange(axValue) else { return nil }
             return copyStringForRange(element, axValue, attributed: false)
                 ?? copyStringForRange(element, axValue, attributed: true)
-                ?? copyValueSubstring(element, axValue)
+                ?? (allowValueSlice ? copyValueSubstring(element, axValue) : nil)
         }
     }
 
