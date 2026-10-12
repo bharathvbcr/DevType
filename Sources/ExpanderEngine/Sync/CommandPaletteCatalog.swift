@@ -454,6 +454,8 @@ public enum CommandPaletteCatalog {
         let commandLimit: Int
         let snippetLimit: Int
         let hasUndo: Bool
+        /// Pasteboard `changeCount` when the caller supplies one; otherwise the preview's hash.
+        let clipboardChangeCount: Int?
         let clipboardHash: Int
         let aiDisabledReason: String?
         let semanticBoostIDs: [String]
@@ -464,6 +466,7 @@ public enum CommandPaletteCatalog {
         /// store would mutate that store without moving `shared.revision`, leaving the cache
         /// serving rankings computed from counts that had already changed.
         let boostRevision: UInt64
+        let boostSource: ObjectIdentifier?
     }
 
     /// Test seam: number of `buildRows` calls served from the cache.
@@ -902,6 +905,8 @@ public enum CommandPaletteCatalog {
         commandLimit: Int = 20,
         snippetLimit: Int = 40,
         boostRevision: UInt64? = nil,
+        boostSource: ObjectIdentifier? = nil,
+        clipboardChangeCount: Int? = nil,
         libraryRevision: UInt64? = nil,
         libraryID: UUID? = nil,
         routedResult: PaletteToolRouter.Routed? = nil,
@@ -911,31 +916,34 @@ public enum CommandPaletteCatalog {
         let trimmed = boundedQuery(query)
         let commandLimit = max(0, commandLimit)
         let snippetLimit = max(0, snippetLimit)
-        let canCache = usageBoost == nil && commandUsageBoost == nil
-        let libStamp = SearchLibraryStamp.resolve(groups: groups, includeDisabled: false,
-                                                 revision: libraryRevision, libraryID: libraryID, locale: .current)
-        let cmdRev = CommandUsageStatsStore.shared.revision
-        let snipRev = UsageStatsStore.shared.revision
-        let clipHash = clipboardPreview?.hashValue ?? 0
-        let cacheKey = PaletteQueryCacheKey(
+        // Boost closures cannot be compared, so rankings computed from them are cacheable only
+        // when the caller names the object they read and its revision (both are part of the key).
+        let canCache = (usageBoost == nil && commandUsageBoost == nil)
+            || (boostRevision != nil && boostSource != nil)
+        let cacheKey: PaletteQueryCacheKey? = canCache ? PaletteQueryCacheKey(
             query: trimmed,
-            libraryStamp: libStamp,
-            commandStatsRevision: cmdRev,
-            snippetStatsRevision: snipRev,
+            libraryStamp: SearchLibraryStamp.resolve(groups: groups, includeDisabled: false,
+                                                     revision: libraryRevision, libraryID: libraryID,
+                                                     locale: .current),
+            commandStatsRevision: CommandUsageStatsStore.shared.revision,
+            snippetStatsRevision: UsageStatsStore.shared.revision,
             language: loc.language,
             commandLimit: commandLimit,
             snippetLimit: snippetLimit,
             hasUndo: AIUndoStore.hasUndo,
-            clipboardHash: clipHash,
+            clipboardChangeCount: clipboardChangeCount,
+            // Hashing the preview walks the whole clipboard; the change count names it for free.
+            clipboardHash: clipboardChangeCount == nil ? (clipboardPreview?.hashValue ?? 0) : 0,
             aiDisabledReason: aiDisabledReason,
             semanticBoostIDs: semanticBoostIDs,
             routedText: routedResult.flatMap { $0.query == trimmed ? $0.text : nil },
             context: context,
-            boostRevision: boostRevision ?? 0
-        )
+            boostRevision: boostRevision ?? 0,
+            boostSource: boostSource
+        ) : nil
 
         paletteCacheLock.lock()
-        if canCache, let cached = rowQueryCache[cacheKey] {
+        if let cacheKey, let cached = rowQueryCache[cacheKey] {
             rowCacheHitCount &+= 1
             paletteCacheLock.unlock()
             // Cache ranking, not generated values or clock readings. Every opening gets a
@@ -1007,6 +1015,7 @@ public enum CommandPaletteCatalog {
                 limit: snippetLimit,
                 boost: usageBoost,
                 boostRevision: boostRevision,
+                boostSource: boostSource,
                 revision: libraryRevision,
                 libraryID: libraryID
             )
@@ -1049,7 +1058,7 @@ public enum CommandPaletteCatalog {
             rows.append(contentsOf: entry.rows)
         }
 
-        guard canCache else { return rows }
+        guard let cacheKey else { return rows }
         paletteCacheLock.lock()
         if rowQueryCache[cacheKey] != nil {
             paletteCacheLock.unlock()
