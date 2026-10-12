@@ -804,6 +804,7 @@ public final class AXWriteCapabilityStore {
         condemnedBuild: [String: String],
         fileURL: URL
     ) {
+        guard PersistedFileLoader.permitWrite(store: "AXWriteCapabilityStore", fileURL: fileURL) else { return }
         var entries: [String: String] = [:]
         for (key, verdict) in verdicts {
             guard let raw = rawValue(for: verdict) else { continue }

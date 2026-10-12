@@ -159,6 +159,7 @@ public final class AppMuteStore {
     }
 
     private static func saveToDisk(_ ids: Set<String>, fileURL: URL) {
+        guard PersistedFileLoader.permitWrite(store: "AppMuteStore", fileURL: fileURL) else { return }
         do {
             let data = try JSONEncoder().encode(ids.sorted())
             try data.write(to: fileURL, options: .atomic)
