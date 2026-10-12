@@ -306,6 +306,34 @@ final class SourceContractTests: XCTestCase {
         }
     }
 
+    /// HIToolbox's Text Input Source APIs trap off the main queue on macOS 27 (1.2.1 crash). One
+    /// main-asserting owner calls them; everything else reads its snapshot.
+    func testTextInputSourceAPIsLiveOnlyInTheKeyboardLayoutOwner() throws {
+        let owner = "Sources/ExpanderEngine/Engine/KeyboardLayoutState.swift"
+        let tokens = ["TISCopyCurrentKeyboardInputSource", "TISGetInputSourceProperty",
+                      "kTISProperty", "kTISNotifySelectedKeyboardInputSourceChanged", "UCKeyTranslate"]
+        let sourcesRoot = Self.repoRoot.appendingPathComponent("Sources", isDirectory: true)
+        let files = try XCTUnwrap(FileManager.default.enumerator(
+            at: sourcesRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))
+        var found: [String: Set<String>] = [:]
+        for case let url as URL in files where url.pathExtension == "swift" {
+            guard let raw = try? String(contentsOf: url, encoding: .utf8),
+                  tokens.contains(where: raw.contains) else { continue }   // cheap pre-filter
+            let code = Self.strippingComments(raw)
+            for token in tokens where code.contains(token) {
+                found[token, default: []].insert(String(url.path.dropFirst(Self.repoRoot.path.count + 1)))
+            }
+        }
+        for token in tokens {
+            XCTAssertEqual(found[token], [owner], "\(token) may appear only in \(owner)")
+        }
+        let text = try source(owner)
+        let refresh = try XCTUnwrap(text.range(of: "func refresh() {"))
+        XCTAssertTrue(String(text[refresh.upperBound...].prefix(120))
+                        .contains("dispatchPrecondition(condition: .onQueue(.main))"),
+                      "The refresh that calls TIS must assert the main queue first")
+    }
+
     private func source(_ relativePath: String) throws -> String {
         let url = Self.repoRoot.appendingPathComponent(relativePath)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {

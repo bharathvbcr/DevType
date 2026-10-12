@@ -277,7 +277,7 @@ public final class EventTapEngine {
 
     private let contextLock = UnfairLock()
     private var _frontmostContext = FrontmostContext()
-    /// Cached `isTwoSetKoreanSourceID(currentInputSourceID())`. The tap used to call
+    /// Cached `KeyboardLayoutState.shared.snapshot().isTwoSetKorean`. The tap used to call
     /// `TISCopyCurrentKeyboardInputSource` + a CFString bridge per key just to test a constant.
     private var _allowPhysicalFallback = false
     private var muteObserverInstalled = false
@@ -332,7 +332,7 @@ public final class EventTapEngine {
     public let inputClock = InputClock()
 
     private var appSwitchObserver: NSObjectProtocol?
-    private var inputSourceObserver: NSObjectProtocol?
+    private var layoutListener: UUID?
     private var healthTimer: DispatchSourceTimer?
     /// How often to probe `CGEvent.tapIsEnabled` for silent inert taps (macOS TCC/re-sign class).
     private let healthCheckInterval: TimeInterval = 2.0
@@ -917,15 +917,6 @@ public final class EventTapEngine {
         return false
     }
 
-    /// Current TIS input source ID (empty on failure → physical Hangul fallback stays off).
-    public static func currentInputSourceID() -> String {
-        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-              let cfID = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else {
-            return ""
-        }
-        return Unmanaged<CFString>.fromOpaque(cfID).takeUnretainedValue() as String
-    }
-
     /// Autorepeat must not append or match — holding a key floods the ring buffer.
     public static func shouldIgnoreForMatching(isAutorepeat: Bool) -> Bool {
         isAutorepeat
@@ -1379,6 +1370,7 @@ public final class EventTapEngine {
         installInputSourceObserver()
         installMuteListObserver()
         refreshInputSourceCache()
+        KeyboardLayoutState.shared.refreshOnMain()
         primeFrontmostContext()
     }
 
@@ -1478,6 +1470,7 @@ public final class EventTapEngine {
         // Refresh the AppKit-derived caches the callback depends on before the first key arrives.
         primeFrontmostContext()
         refreshInputSourceCache()
+        KeyboardLayoutState.shared.refreshOnMain()
         startHealthMonitor()
         DevTypeLog.eventTap.info(
             "[EventTap] start success — defaultTap installed + health monitor (dedicatedThread=\(onDedicatedThread, privacy: .public))"
@@ -3043,10 +3036,10 @@ public final class EventTapEngine {
         contextLock.unlock()
     }
 
-    /// §2.3: `TISCopyCurrentKeyboardInputSource` + a CFString bridge, once per input-source
-    /// change instead of once per keystroke (it was only being used to test a constant).
+    /// §2.3: copies the owner's snapshot into the tap's own flag once per input-source change
+    /// instead of once per keystroke. Never calls TIS; any thread.
     private func refreshInputSourceCache() {
-        let allow = isTwoSetKoreanSourceID(EventTapEngine.currentInputSourceID())
+        let allow = KeyboardLayoutState.shared.snapshot().isTwoSetKorean
         contextLock.lock()
         _allowPhysicalFallback = allow
         contextLock.unlock()
@@ -3117,13 +3110,11 @@ public final class EventTapEngine {
         }
     }
 
+    /// The layout owner refreshes on main (initial prime and every system layout change) and
+    /// calls back here on main.
     private func installInputSourceObserver() {
-        guard inputSourceObserver == nil else { return }
-        inputSourceObserver = DistributedNotificationCenter.default().addObserver(
-            forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
+        guard layoutListener == nil else { return }
+        layoutListener = KeyboardLayoutState.shared.addChangeListener { [weak self] in
             // §2.3: recompute the physical-fallback flag here, not per keystroke.
             self?.refreshInputSourceCache()
             self?.resetBuffer()
@@ -3131,9 +3122,9 @@ public final class EventTapEngine {
     }
 
     private func removeInputSourceObserver() {
-        if let observer = inputSourceObserver {
-            DistributedNotificationCenter.default().removeObserver(observer)
-            inputSourceObserver = nil
+        if let token = layoutListener {
+            KeyboardLayoutState.shared.removeChangeListener(token)
+            layoutListener = nil
         }
     }
 

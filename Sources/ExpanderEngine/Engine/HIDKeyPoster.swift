@@ -16,13 +16,6 @@ import Foundation
 public final class HIDKeyPoster: BackspacePosting {
     public static let shared = HIDKeyPoster()
 
-    /// §2.7: `resolveVirtualKeyCodeForChar` brute-forces up to 128 `UCKeyTranslate` calls. It used
-    /// to run on main for every ⌘V *and* every paste retry, to look up the same constant. The
-    /// answer only changes when the keyboard input source changes, so cache it per source ID.
-    private let lock = UnfairLock()
-    private var cachedSourceID: String?
-    private var cachedKeyCodes: [Character: CGKeyCode] = [:]
-
     /// Command-chord I/O is injectable so permission changes can be reproduced without
     /// sending keyboard input to another application.
     struct CommandEventIO {
@@ -38,10 +31,18 @@ public final class HIDKeyPoster: BackspacePosting {
     }
 
     private let commandEventIO: CommandEventIO
+    /// The sole owner of keyboard-layout state. This class never calls TIS itself.
+    private let layout: KeyboardLayoutState
 
-    public init() { commandEventIO = .live }
+    public init() {
+        commandEventIO = .live
+        layout = .shared
+    }
 
-    init(commandEventIO: CommandEventIO) { self.commandEventIO = commandEventIO }
+    init(commandEventIO: CommandEventIO, layout: KeyboardLayoutState = .shared) {
+        self.commandEventIO = commandEventIO
+        self.layout = layout
+    }
 
     // MARK: - Event source
 
@@ -337,76 +338,16 @@ public final class HIDKeyPoster: BackspacePosting {
 
     // MARK: - Virtual key lookup
 
-    /// Virtual key code producing `targetChar` on the current layout, cached per input source.
-    /// Missing layout data or an unmapped character returns nil; each command owns its fallback.
+    /// Virtual key code producing `targetChar` on the current layout, from the owner's snapshot.
+    /// Safe on any queue (it never calls TIS). Not yet primed, missing layout data or an unmapped
+    /// character returns nil; each command owns its fallback.
     public func virtualKeyCode(for targetChar: Character) -> CGKeyCode? {
-        let sourceID = Self.currentInputSourceID()
-
-        lock.lock()
-        if cachedSourceID != sourceID {
-            cachedSourceID = sourceID
-            cachedKeyCodes.removeAll(keepingCapacity: true)
-        }
-        let cached = cachedKeyCodes[targetChar]
-        lock.unlock()
-        if let cached { return cached }
-
-        let resolved = Self.resolveVirtualKeyCodeForChar(targetChar)
-
-        lock.lock()
-        // Only keep the entry if the source has not changed underneath the (unlocked) resolve.
-        if cachedSourceID == sourceID {
-            cachedKeyCodes[targetChar] = resolved
-        }
-        lock.unlock()
-        return resolved
+        layout.keyCode(for: targetChar)
     }
 
-    private static func currentInputSourceID() -> String? {
-        guard let inputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-              let idPointer = TISGetInputSourceProperty(inputSource, kTISPropertyInputSourceID) else {
-            return nil
-        }
-        return unsafeBitCast(idPointer, to: CFString.self) as String
-    }
-
-    /// The uncached brute-force scan. 128 `UCKeyTranslate` calls — never call this per paste.
+    /// The uncached brute-force scan on the live layout. Main queue only: the owner asserts it.
     public static func resolveVirtualKeyCodeForChar(_ targetChar: Character) -> CGKeyCode? {
-        guard let inputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-              let layoutData = TISGetInputSourceProperty(inputSource, kTISPropertyUnicodeKeyLayoutData) else {
-            return nil
-        }
-
-        let data = unsafeBitCast(layoutData, to: CFData.self)
-        guard let bytes = CFDataGetBytePtr(data) else { return nil }
-
-        return bytes.withMemoryRebound(to: UCKeyboardLayout.self, capacity: 1) { keyboardLayout -> CGKeyCode? in
-            var chars = [UniChar](repeating: 0, count: 4)
-            var realLength = 0
-
-            for code: CGKeyCode in 0..<128 {
-                var deadKeyState: UInt32 = 0
-                let status = UCKeyTranslate(
-                    keyboardLayout,
-                    code,
-                    UInt16(kUCKeyActionDisplay),
-                    0,
-                    UInt32(KBGetLayoutType(0)),
-                    OptionBits(kUCKeyTranslateNoDeadKeysBit),
-                    &deadKeyState,
-                    4,
-                    &realLength,
-                    &chars
-                )
-                if status == noErr && realLength > 0 {
-                    let str = String(utf16CodeUnits: chars, count: realLength)
-                    if str.lowercased() == String(targetChar).lowercased() {
-                        return code
-                    }
-                }
-            }
-            return nil
-        }
+        KeyboardLayoutState.shared.resolveKeyCodeNow(for: targetChar)
     }
 
     /// Recheck authority before each pair; once key-down posts, key-up is cleanup.
