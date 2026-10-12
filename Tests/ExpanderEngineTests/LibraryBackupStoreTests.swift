@@ -129,7 +129,58 @@ final class LibraryBackupStoreTests: XCTestCase {
         XCTAssertEqual(store.prune().removed, 0)
     }
 
-    func testSafetyCopiesAreNeverPruned() throws {
+    func testSafetyRetentionTable() {
+        struct Row {
+            let name: String
+            let offsets: [TimeInterval]
+            let kept: Set<Int>
+        }
+        let rows = [
+            Row(name: "empty", offsets: [], kept: []),
+            Row(name: "ancient newest of a kind is kept", offsets: [-400 * day], kept: [0]),
+            Row(name: "twelve ancient: the ten newest stay",
+                offsets: (0..<12).map { -Double(400 + $0) * day }, kept: Set(0..<10)),
+            Row(name: "twelve recent are all inside the window",
+                offsets: (0..<12).map { -Double($0) * hour }, kept: Set(0..<12)),
+            Row(name: "window edge: 30 days is outside",
+                offsets: (0..<10).map { -Double($0) * hour } + [-30 * day + 1, -30 * day], kept: Set(0..<11)),
+        ]
+        for kind in LibraryBackupStore.Kind.allCases where kind.isCappedSafety {
+            for row in rows {
+                let entries = row.offsets.enumerated().map { entry(kind, $0.element, "\($0.offset)") }
+                let kept = LibraryBackupStore.retainedSafetyBackups(entries, now: noon, calendar: utc)
+                XCTAssertEqual(Set(kept.map { Int($0.lastPathComponent)! }), row.kept, "\(kind) \(row.name)")
+            }
+        }
+        // Kinds are capped independently, and the unprunable kinds are not this rule's.
+        let mixed = (0..<11).map { entry(.preRestore, -Double(400 + $0) * day, "r\($0)") }
+            + [entry(.preSaveAs, -500 * day, "s0"), entry(.corrupted, -500 * day, "c0"), entry(.save, -500 * day, "v0")]
+        let keptMixed = Set(LibraryBackupStore.retainedSafetyBackups(mixed, now: noon, calendar: utc).map(\.lastPathComponent))
+        XCTAssertEqual(keptMixed, Set((0..<10).map { "r\($0)" } + ["s0"]))
+    }
+
+    func testPruneCapsEachSafetyKindOnDiskButKeepsItsNewest() throws {
+        let clock = Clock(noon.addingTimeInterval(-1_000 * day))
+        let store = LibraryBackupStore(directory: root, now: { clock.now }, calendar: utc)
+        var restores: [URL] = []
+        for index in 0..<14 {
+            clock.now = noon.addingTimeInterval(Double(index - 1_000) * day)
+            restores.append(try store.backUp(Data("restore \(index)".utf8), kind: .preRestore).url)
+        }
+        let quarantine = try store.backUp(Data("torn".utf8), kind: .corrupted).url
+        clock.now = noon
+
+        let report = store.prune()
+
+        XCTAssertEqual(report.removed, 4)
+        for (index, url) in restores.enumerated() {
+            XCTAssertEqual(FileManager.default.fileExists(atPath: url.path), index >= 4, "pre-restore \(index)")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: quarantine.path), "a corrupted quarantine is never pruned")
+        XCTAssertEqual(store.prune().removed, 0)
+    }
+
+    func testTheNewestSafetyCopyOfEachKindIsNeverPruned() throws {
         let clock = Clock(noon.addingTimeInterval(-1_000 * day))
         let store = LibraryBackupStore(directory: root, now: { clock.now }, calendar: utc)
         var safety: [URL] = []
