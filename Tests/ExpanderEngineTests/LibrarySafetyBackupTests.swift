@@ -296,12 +296,17 @@ final class LibraryWritePathContractTests: XCTestCase {
 
     func testTheForcedWriteRequiresABackupWhoeverCallsIt() throws {
         let source = try storeSource()
-        XCTAssertTrue(source.contains("backup: force ? .required(.preOverwrite) : .rolling"),
+        XCTAssertTrue(source.contains("backup: force || safetyKind != nil ? .required(safetyKind ?? .preOverwrite) : .rolling"),
                       "force must imply a required safety copy inside writeGroupsToDisk itself")
         XCTAssertEqual(
             source.components(separatedBy: "bypassHardFailure: true)").count - 1, 1,
-            "only forceOverwriteLibrary may bypass the read-failure latch"
+            "only forceOverwriteLibrary may bypass the read-failure latch directly"
         )
+        XCTAssertEqual(
+            source.components(separatedBy: "bypassLatch: latched").count - 1, 1,
+            "restoreLibrary is the only other latch bypass, and it always requires a pre-restore copy"
+        )
+        XCTAssertTrue(source.contains("safetyKind: .preRestore,\n            bypassLatch: latched"))
         let force = try XCTUnwrap(source.range(of: "public func forceOverwriteLibrary("))
         let call = try XCTUnwrap(source.range(of: "writeGroupsToDisk(sanitized, force: true, bypassHardFailure: true)"))
         XCTAssertLessThan(force.lowerBound, call.lowerBound)

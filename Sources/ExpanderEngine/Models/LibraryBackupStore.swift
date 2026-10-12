@@ -60,6 +60,18 @@ public final class LibraryBackupStore {
         /// The original was renamed into the backup directory rather than copied, because its
         /// bytes could not be read. The caller must put it back if the replacement fails.
         let moved: Bool
+        /// This call wrote the backup. `false` when an identical backup already existed and was
+        /// reused, which a caller undoing its own backup must never remove.
+        var created = false
+    }
+
+    /// A rolling copy that `maximumBackupBytes` would make unlistable and unrestorable is not
+    /// written; the save it belongs to still lands.
+    struct OversizedBackup: LocalizedError {
+        let byteCount: Int
+        var errorDescription: String? {
+            "The previous library is \(byteCount) bytes, over the \(LibraryBackupStore.maximumBackupBytes)-byte backup limit, so no rolling backup was kept."
+        }
     }
 
     struct PruneReport: Equatable {
@@ -119,6 +131,11 @@ public final class LibraryBackupStore {
     /// - Returns: the backup holding `data`, and whether this call created it.
     @discardableResult
     func backUp(_ data: Data, kind: Kind) throws -> (url: URL, created: Bool) {
+        // Listing and restore read at most `maximumBackupBytes`, so a larger rolling copy would be
+        // written but never offered. Safety copies are exempt: keeping the bytes outranks listing.
+        if kind.isRolling, data.count > Self.maximumBackupBytes {
+            throw OversizedBackup(byteCount: data.count)
+        }
         let digest = Self.sha256(of: data)
         lock.lock()
         defer { lock.unlock() }
@@ -145,7 +162,8 @@ public final class LibraryBackupStore {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         if let bytes {
             guard !bytes.isEmpty else { return nil }
-            return Preserved(url: try backUp(bytes, kind: kind).url, moved: false)
+            let copy = try backUp(bytes, kind: kind)
+            return Preserved(url: copy.url, moved: false, created: copy.created)
         }
         if let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
            size.intValue == 0 {
@@ -172,13 +190,28 @@ public final class LibraryBackupStore {
             // Its digest is unknown, so it can never satisfy a later dedupe; forget the cache
             // entry rather than let an older one claim to be newest.
             newest = nil
-            return Preserved(url: destination, moved: true)
+            return Preserved(url: destination, moved: true, created: true)
         } catch {
             DevTypeLog.store.error(
                 "[Backup] Could not preserve the library before replacing it kind=\(kind.rawValue, privacy: .public) \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             throw error
         }
+    }
+
+    /// Removes a backup this process just wrote because the replacement it guarded never landed.
+    func discard(_ url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            DevTypeLog.store.error(
+                "[Backup] Could not remove an orphaned backup \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
+            return
+        }
+        if newest?.entry.url == url { newest = nil; newestSeeded = false }
     }
 
     private func writeLocked(_ data: Data, kind: Kind, digest: String) throws -> URL {
