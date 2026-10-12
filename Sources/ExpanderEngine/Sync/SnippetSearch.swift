@@ -558,7 +558,10 @@ public enum SnippetSearch {
         let cacheKey = QueryCacheKey(query: trimmed, indexID: index.cacheID, limit: limit, boostRevision: nil, boostSource: nil)
         if let cached = cachedResult(for: cacheKey) { return cached }
 
-        guard case .success(let terms) = tokenize(query, locale: index.stamp.localeID.map { Locale(identifier: $0) }) else { return [] }
+        // Tokenize the text the cache is keyed on. Raw text differs from it inside an unclosed
+        // quote (`"i ` is the literal "i "), so tokenizing `query` let `"i ` be served the
+        // cached answer for `"i`, and made boosted and unboosted runs disagree.
+        guard case .success(let terms) = tokenize(trimmed, locale: index.stamp.localeID.map { Locale(identifier: $0) }) else { return [] }
         guard !terms.isEmpty else { return [] }
 
         cacheLock.lock()
