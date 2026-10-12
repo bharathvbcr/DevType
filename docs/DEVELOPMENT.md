@@ -81,8 +81,8 @@ DevType maintains unit, fuzz, race, persistence, controller and stress tests acr
 # Instrument the suite and write coverage/lcov.info for GitPulse
 ./Scripts/test.sh --coverage
 
-# Include the five audit performance checks
-DEVTYPE_BENCH=1 ./Scripts/test.sh
+# Run the audit performance gate (asserts ceilings; see "Benchmark regression gate")
+DEVTYPE_BENCH=1 ./Scripts/test.sh --filter AuditBenchmark
 
 # Run with verbose output
 ./Scripts/test.sh -v
@@ -259,6 +259,19 @@ The installer validates the new package, swaps the canonical application recover
 Inventory old builds before packaging; the packager removes known legacy bundles. Preserve release logs, tag provenance, and a recoverable archive when replacing artifacts. A local install or tag does not publish a GitHub release. Pushing a version tag triggers publication and must be deliberate.
 
 An Apple Development signature supports local installation; it does not establish notarized distribution. Run Gatekeeper assessment separately from `codesign` and report the actual outcome.
+
+## Benchmark regression gate
+
+`Tests/ExpanderEngineTests/AuditBenchmarkTests.swift` (P1-P6 plus B1, library save to snapshot rebuild at 2,000 snippets) asserts a documented ceiling per benchmark through `Tests/ExpanderEngineTests/BenchmarkGate.swift`: warmup, min-of-N timing, `XCTFail` with measured vs ceiling. Ceilings are about 10x the release-build numbers, so they catch algorithmic regressions (O(n²), main-thread I/O), not drift. `BenchmarkGateSelfTests` always runs and proves the gate flags a deliberately quadratic reference. New benchmarks should use `BenchmarkGate` (`requireBenchMode`, `measure`, `interleaved`, `assertWithin`) rather than local timers.
+
+```sh
+# Release configuration (the one the ceilings are derived from)
+DEVTYPE_BENCH=1 swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests'
+```
+
+`-DDEBUG` is required because other test files use `#if DEBUG` hooks that a plain release test build drops.
+
+**Why it is local-only.** `.github/workflows/ci.yml` does not run it. Hosted macOS runners are shared VMs with variable CPU allocation and throttling, and a release test build adds several minutes to a 30-minute job. A wall-clock gate that flakes gets disabled, which is worse than a gate that runs reliably on one machine. `Scripts/ci-local.sh` step 2b runs the release gate when `DEVTYPE_BENCH=1` (the documented release gate) and fails the script on any exceeded ceiling; without the variable it prints that the gate was skipped. The structural guarantee that does run in hosted CI is `BenchmarkGateSelfTests` plus `TriggerPrefixScanTests` (exhaustive parity with the naive algorithm).
 
 ## Productivity release stress checks
 
