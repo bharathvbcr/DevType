@@ -345,11 +345,6 @@ public final class HIDKeyPoster: BackspacePosting {
         layout.keyCode(for: targetChar)
     }
 
-    /// The uncached brute-force scan on the live layout. Main queue only: the owner asserts it.
-    public static func resolveVirtualKeyCodeForChar(_ targetChar: Character) -> CGKeyCode? {
-        KeyboardLayoutState.shared.resolveKeyCodeNow(for: targetChar)
-    }
-
     /// Recheck authority before each pair; once key-down posts, key-up is cleanup.
     static func postKeyPairs(count: Int, shouldContinue: () -> Bool, postPair: (Int) -> Bool) -> Int {
         guard count > 0, count <= maxKeyPairsPerBurst else { return 0 }

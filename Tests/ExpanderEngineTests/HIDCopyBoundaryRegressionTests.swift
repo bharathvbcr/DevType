@@ -48,7 +48,7 @@ final class HIDCopyBoundaryRegressionTests: XCTestCase {
     }
 
     func testUnresolvableCharacterNeverTurnsIntoThePasteKey() {
-        XCTAssertNil(HIDKeyPoster.resolveVirtualKeyCodeForChar("🐢"),
+        XCTAssertNil(KeyboardLayoutState.shared.resolveKeyCodeNow(for: "🐢"),
                      "The caller must choose its own fallback; 9 means V, even for a copy request")
     }
 }
