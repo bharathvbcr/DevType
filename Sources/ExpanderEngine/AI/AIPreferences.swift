@@ -70,14 +70,15 @@ public enum AIPreferences {
 
     // MARK: - Typed-path allowlist
 
-    /// Bundle IDs allowed to use the typed AI path. Empty = every app.
+    /// Bundle IDs allowed to use the typed AI path. Empty = every app, except that a stored value
+    /// that cannot be decoded reads as empty here and is denied for every app by
+    /// `isTypedPathAllowed` (see `typedPathAllowlistIsUnreadable`).
     public static var typedPathAllowlist: [String] {
         get {
-            guard let data = UserDefaults.standard.data(forKey: typedPathAllowlistKey),
-                  let decoded = try? JSONDecoder().decode([String].self, from: data) else {
-                return []
-            }
-            return decoded.filter { !$0.isEmpty }.sorted()
+            if case .value(let decoded) = PersistedFileLoader.readDefaultsValue(
+                [String].self, store: "AI typed-path allowlist", key: typedPathAllowlistKey
+            ) { return decoded.filter { !$0.isEmpty }.sorted() }
+            return []
         }
         set {
             let cleaned = Array(Set(newValue.filter { !$0.isEmpty })).sorted()
@@ -86,8 +87,25 @@ public enum AIPreferences {
         }
     }
 
+    /// True when a stored allowlist exists but cannot be read. An empty list means "every app", so
+    /// decoding a corrupt value to `[]` would silently widen access; the raw value is preserved and
+    /// the typed path is denied everywhere until the user saves a list again.
+    public static var typedPathAllowlistIsUnreadable: Bool {
+        if case .undecodable = PersistedFileLoader.readDefaultsValue(
+            [String].self, store: "AI typed-path allowlist", key: typedPathAllowlistKey
+        ) { return true }
+        return false
+    }
+
     public static func isTypedPathAllowed(bundleID: String) -> Bool {
-        let list = typedPathAllowlist
+        let list: [String]
+        switch PersistedFileLoader.readDefaultsValue(
+            [String].self, store: "AI typed-path allowlist", key: typedPathAllowlistKey
+        ) {
+        case .undecodable: return false
+        case .unset: list = []
+        case .value(let decoded): list = decoded.filter { !$0.isEmpty }.sorted()
+        }
         if list.isEmpty { return true }
         guard !bundleID.isEmpty else { return false }
         return list.contains { $0.caseInsensitiveCompare(bundleID) == .orderedSame }

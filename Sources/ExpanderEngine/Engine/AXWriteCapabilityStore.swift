@@ -757,15 +757,14 @@ public final class AXWriteCapabilityStore {
     ) -> (verdicts: [String: Verdict], proven: Set<String>, condemnedBuild: [String: String]) {
         guard let file = PersistedFileLoader.load(
             store: "AXWriteCapabilityStore", fileURL: fileURL,
-            decode: { try JSONDecoder().decode(PersistedFile.self, from: $0) }
+            decode: { data in
+                let file = try JSONDecoder().decode(PersistedFile.self, from: data)
+                // Written by a newer build: its semantics are unknown, so relearn — but the
+                // loader moves the file aside rather than letting the next save overwrite it.
+                guard file.version <= persistenceSchemaVersion else { throw CocoaError(.fileReadUnsupportedScheme) }
+                return file
+            }
         ).value else {
-            return ([:], [], [:])
-        }
-        guard file.version <= persistenceSchemaVersion else {
-            // Written by a newer build — do not guess at its semantics, just relearn.
-            DevTypeLog.inject.notice(
-                "[Inject] AX write-capability file schema \(file.version, privacy: .public) is newer than \(persistenceSchemaVersion, privacy: .public) — ignoring"
-            )
             return ([:], [], [:])
         }
         var verdicts: [String: Verdict] = [:]
