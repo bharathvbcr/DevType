@@ -2263,7 +2263,21 @@ public final class SnippetStore {
     }
 
     private static func sha256(of data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        hexString(of: SHA256.hash(data: data))
+    }
+
+    private static let hexDigits = Array("0123456789abcdef".utf8)
+
+    /// Lowercase hex of a digest, built from a lookup table rather than one `String(format:)`
+    /// (a varargs formatter plus a heap string) per byte.
+    static func hexString<D: Sequence>(of bytes: D) -> String where D.Element == UInt8 {
+        var out: [UInt8] = []
+        out.reserveCapacity(64)
+        for byte in bytes {
+            out.append(hexDigits[Int(byte >> 4)])
+            out.append(hexDigits[Int(byte & 0x0f)])
+        }
+        return String(decoding: out, as: UTF8.self)
     }
 
     private static func currentDigest(at url: URL) -> FileDigest {

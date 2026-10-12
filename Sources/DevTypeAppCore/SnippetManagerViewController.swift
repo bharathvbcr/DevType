@@ -459,14 +459,27 @@ private final class GroupRowView: NSView {
 /// same library by different rules, which meant typing a tag here found nothing while typing it
 /// in the palette found the snippet.
 enum SnippetManagerFilter {
+    /// Names the manager's secret-free view of the library. It is not the store's own
+    /// `searchCacheIdentity`: the same revision there labels the unfiltered list, and the
+    /// search index cache is process-wide.
+    static let searchIdentity = UUID()
+
     /// One indexed pass over the complete groups preserves field-filter parity with the
     /// palette. The manager then intersects these IDs with its selected group and chip.
-    static func matchingIDs(in groups: [SnippetGroup], query: String) -> Set<UUID> {
+    ///
+    /// `revision` (a `SnippetStore.libraryRevision` read together with `groups`) lets the search
+    /// index be identified by a counter. Without it `SnippetSearch` falls back to
+    /// `fingerprint(of:)`, which hashes every field of every snippet — replacement text included —
+    /// on each keystroke.
+    static func matchingIDs(in groups: [SnippetGroup], query: String, revision: UInt64? = nil) -> Set<UUID> {
         guard SnippetSearch.queryIssue(for: query) == nil else { return [] }
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Set(groups.flatMap(\.snippets).map(\.id))
         }
-        return Set(SnippetSearch.run(query: query, in: groups).map(\.id))
+        return Set(SnippetSearch.run(
+            query: query, in: groups,
+            revision: revision, libraryID: revision == nil ? nil : searchIdentity
+        ).map(\.id))
     }
 }
 
@@ -786,7 +799,13 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     /// Conflict IDs for the `.conflicts` chip, cached against `SnippetStore.libraryRevision`.
     private var cachedConflictIDs: Set<UUID>?
     private var cachedConflictRevision: UInt64?
-    private var groups: [SnippetGroup] = []
+    /// Any write other than the load in `reloadGroups` (an optimistic local edit) drops the
+    /// revision, because `groups` no longer is the library that revision names.
+    private var groups: [SnippetGroup] = [] {
+        didSet { groupsRevision = nil }
+    }
+    /// `SnippetStore.libraryRevision` that `groups` was loaded at.
+    private var groupsRevision: UInt64?
     private var selectedGroupID: UUID?
     private var snippets: [SnippetModel] = []
     private var statsPill = PillBadgeView(text: "", tint: DevTypeTheme.accent)
@@ -1538,7 +1557,9 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     private func reloadGroups() {
-        groups = SnippetStore.shared.loadSnippetGroups()
+        let snapshot = SnippetStore.shared.loadGroupsWithRevision()
+        groups = SnippetDocument(groups: snapshot.groups).groups
+        groupsRevision = snapshot.revision
         if !hasResolvedInitialGroupSelection, let first = groups.first {
             selectedGroupID = first.id
             hasResolvedInitialGroupSelection = true
@@ -1582,7 +1603,8 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             // Cached against the library revision: this is the O(n²)-shaped whole-library
             // analysis in `triggerConflicts()`, and running it inside the filter pass meant
             // running it on every keystroke in the search field.
-            filtered = filtered.filter { conflictSnippetIDs().contains($0.id) }
+            let conflicting = conflictSnippetIDs()
+            filtered = filtered.filter { conflicting.contains($0.id) }
         case .unused:
             // One dictionary read rather than one locked store call per snippet.
             let counts = SnippetStore.shared.usageCountsByID()
@@ -1592,7 +1614,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         }
 
         if !filter.isEmpty {
-            let matchingIDs = SnippetManagerFilter.matchingIDs(in: groups, query: filter)
+            let matchingIDs = SnippetManagerFilter.matchingIDs(in: groups, query: filter, revision: groupsRevision)
             filtered = filtered.filter { matchingIDs.contains($0.id) }
         }
         // Selection survives the reload: refining a search after selecting rows for a bulk

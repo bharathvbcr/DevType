@@ -205,15 +205,20 @@ public enum PaletteToolRouter {
         /// cache can identify it without hashing every snippet. `nil` means "unknown", which
         /// falls back to the content fingerprint.
         public let revisionProvider: @Sendable () -> UInt64?
+        /// Identity of the library `revisionProvider` counts in. A revision means nothing
+        /// without it, so `nil` still falls back to the content fingerprint.
+        public let libraryIDProvider: @Sendable () -> UUID?
         public let onCall: ToolCallObserver?
 
         public init(
             groupsProvider: @escaping @Sendable () -> [SnippetGroup] = { SnippetStore.shared.loadGroups() },
             revisionProvider: @escaping @Sendable () -> UInt64? = { nil },
+            libraryIDProvider: @escaping @Sendable () -> UUID? = { nil },
             onCall: ToolCallObserver? = nil
         ) {
             self.groupsProvider = groupsProvider
             self.revisionProvider = revisionProvider
+            self.libraryIDProvider = libraryIDProvider
             self.onCall = onCall
         }
 
@@ -224,7 +229,8 @@ public enum PaletteToolRouter {
                 in: SnippetDocument(groups: groupsProvider()).groups,
                 includeDisabled: false,
                 limit: 1,
-                revision: revisionProvider()
+                revision: revisionProvider(),
+                libraryID: libraryIDProvider()
             )
             guard let hit = hits.first else { return "" }
             return hit.snippet.triggerKeyword

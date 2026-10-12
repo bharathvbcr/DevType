@@ -235,7 +235,24 @@ public enum SnippetSearch {
         let query: String
         let indexID: UUID
         let limit: Int?
+        /// Non-nil only for personalised results. The caller vouches that this revision names
+        /// the state its boost closure reads, so a changed revision is a different key.
+        var boostRevision: UInt64?
+        /// Names whose state `boostRevision` counts, so two callers that happen to share a
+        /// revision number can never share a ranking.
+        var boostSource: ObjectIdentifier?
     }
+
+    /// What the last full or narrowed scan matched, so a query that only extends it can
+    /// re-evaluate those entries instead of the whole index. One slot: typing is sequential,
+    /// and the slot holds at most one index's worth of integers.
+    private struct NarrowingSlot {
+        let indexID: UUID
+        let terms: [QueryTerm]
+        let entryIndices: [Int]
+    }
+
+    private static var narrowingSlot: NarrowingSlot?
 
     private static var queryCache: [QueryCacheKey: [SearchHit]] = [:]
     /// FIFO order as a ring: the previous `Array` was drained with `removeFirst()`, an O(n)
@@ -371,6 +388,7 @@ public enum SnippetSearch {
     /// Drops query results whose stamp belongs to no live index. Caller holds `cacheLock`.
     private static func pruneQueryCacheLocked() {
         let live = Set(cachedIndices.values.map(\.cacheID))
+        if let slot = narrowingSlot, !live.contains(slot.indexID) { narrowingSlot = nil }
         guard !queryCache.isEmpty else { return }
         queryCache = queryCache.filter { key, _ in
             live.contains(key.indexID)
@@ -405,6 +423,22 @@ public enum SnippetSearch {
         defer { fingerprintCallLock.unlock() }
         return fingerprintCallCountForTesting
     }
+
+    private static var evaluationCallCountForTesting = 0
+
+    /// How many index entries have been scored. A query that narrows the previous one must
+    /// score only that query's hits, not the library.
+    static var evaluationCountForTesting: Int {
+        fingerprintCallLock.lock()
+        defer { fingerprintCallLock.unlock() }
+        return evaluationCallCountForTesting
+    }
+
+    static func resetEvaluationCountForTesting() {
+        fingerprintCallLock.lock()
+        evaluationCallCountForTesting = 0
+        fingerprintCallLock.unlock()
+    }
     #endif
 
     /// Live query-cache entry count. Test seam for the pruning and bounding rules.
@@ -428,6 +462,7 @@ public enum SnippetSearch {
         queryCache.removeAll(keepingCapacity: false)
         queryCacheKeys.removeAll(keepingCapacity: false)
         queryCacheHead = 0
+        narrowingSlot = nil
         cacheLock.unlock()
     }
 
@@ -466,6 +501,7 @@ public enum SnippetSearch {
         limit: Int? = nil,
         boost: ((UUID) -> Int)?,
         boostRevision: UInt64? = nil,
+        boostSource: ObjectIdentifier? = nil,
         revision: UInt64? = nil,
         libraryID: UUID? = nil
     ) -> [SearchHit] {
@@ -474,51 +510,78 @@ public enum SnippetSearch {
             index: index(for: groups, includeDisabled: includeDisabled, revision: revision, libraryID: libraryID),
             limit: limit,
             boost: boost,
-            boostRevision: boostRevision
+            boostRevision: boostRevision,
+            boostSource: boostSource
         )
     }
 
     /// Searches a caller-owned index.
+    ///
+    /// Personalised results are cached only when the caller supplies both `boostRevision` and
+    /// `boostSource`: together they vouch that the boost closure's output is a pure function of
+    /// that object's state at that revision. A revision alone cannot — another caller's closure
+    /// may carry the same number over different counts.
     public static func run(
         query: String,
         index: SnippetSearchIndex,
         limit: Int? = nil,
         boost: ((UUID) -> Int)? = nil,
-        boostRevision: UInt64? = nil
+        boostRevision: UInt64? = nil,
+        boostSource: ObjectIdentifier? = nil
     ) -> [SearchHit] {
         if let limit, limit <= 0 { return [] }
-        guard case .success(let terms) = tokenize(query, locale: index.stamp.localeID.map { Locale(identifier: $0) }) else { return [] }
+        // Same bound `tokenize` enforces, checked first so a cached answer for the trimmed text
+        // can never be served for a raw query that is itself over the limit.
+        guard query.utf8.count <= maximumQueryUTF8Bytes else { return [] }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
         if let boost {
             // Cache lexical work independently of personalization. A closure's identity and
-            // state cannot be inferred from a revision supplied by an arbitrary caller.
+            // state cannot be inferred, so personalised results are cached only when the caller
+            // names the object the closure reads and that object's revision.
+            let boostedKey: QueryCacheKey? = {
+                guard let boostRevision, let boostSource else { return nil }
+                return QueryCacheKey(query: trimmed, indexID: index.cacheID, limit: limit,
+                                     boostRevision: boostRevision, boostSource: boostSource)
+            }()
+            if let boostedKey, let cached = cachedResult(for: boostedKey) { return cached }
             let base = run(query: trimmed, index: index, limit: nil)
-            return ranked(base.map { hit in
+            let result = ranked(base.map { hit in
                 SearchHit(snippet: hit.snippet, groupID: hit.groupID, groupName: hit.groupName,
                           score: Saturating.adding(hit.score, max(0, boost(hit.id))), highlights: hit.highlights)
             }, limit: limit)
+            if let boostedKey { storeResult(result, for: boostedKey) }
+            return result
         }
 
-        let cacheKey = QueryCacheKey(
-            query: trimmed,
-            indexID: index.cacheID,
-            limit: limit
-        )
+        let cacheKey = QueryCacheKey(query: trimmed, indexID: index.cacheID, limit: limit, boostRevision: nil, boostSource: nil)
+        if let cached = cachedResult(for: cacheKey) { return cached }
 
-        cacheLock.lock()
-        if let cached = queryCache[cacheKey] {
-            cacheLock.unlock()
-            return cached
-        }
-        cacheLock.unlock()
-
+        // Tokenize the text the cache is keyed on. Raw text differs from it inside an unclosed
+        // quote (`"i ` is the literal "i "), so tokenizing `query` let `"i ` be served the
+        // cached answer for `"i`, and made boosted and unboosted runs disagree.
+        guard case .success(let terms) = tokenize(trimmed, locale: index.stamp.localeID.map { Locale(identifier: $0) }) else { return [] }
         guard !terms.isEmpty else { return [] }
 
+        cacheLock.lock()
+        let slot = narrowingSlot
+        cacheLock.unlock()
+        let candidates: [Int]?
+        if let slot, slot.indexID == index.cacheID, isNarrowing(slot.terms, to: terms) {
+            candidates = slot.entryIndices
+        } else {
+            candidates = nil
+        }
+
         var hits: [SearchHit] = []
-        for entry in index.entries {
-            guard let evaluation = evaluate(entry: entry, terms: terms) else { continue }
+        var matched: [Int] = []
+        var evaluated = 0
+        func consider(_ position: Int) {
+            evaluated += 1
+            let entry = index.entries[position]
+            guard let evaluation = evaluate(entry: entry, terms: terms) else { return }
+            matched.append(position)
             hits.append(SearchHit(
                 snippet: entry.snippet,
                 groupID: entry.groupID,
@@ -527,13 +590,52 @@ public enum SnippetSearch {
                 highlights: evaluation.highlights
             ))
         }
+        if let candidates {
+            for position in candidates { consider(position) }
+        } else {
+            for position in index.entries.indices { consider(position) }
+        }
+        #if DEBUG
+        fingerprintCallLock.lock()
+        evaluationCallCountForTesting += evaluated
+        fingerprintCallLock.unlock()
+        #endif
 
         let result = ranked(hits, limit: limit)
         cacheLock.lock()
-        if queryCache[cacheKey] != nil {
-            cacheLock.unlock()
-            return result
+        narrowingSlot = NarrowingSlot(indexID: index.cacheID, terms: terms, entryIndices: matched)
+        cacheLock.unlock()
+        storeResult(result, for: cacheKey)
+        return result
+    }
+
+    /// True when every entry that matches `new` is guaranteed to have matched `old`.
+    ///
+    /// Holds for AND-ed positive terms where each old term is a prefix of the new term at the
+    /// same position (more terms only add constraints): every matcher tier is a prefix, substring
+    /// or subsequence test, and a longer needle satisfying one implies the shorter needle does.
+    /// Exclusions and `is:` states run the other way or ignore the text, so they never narrow.
+    private static func isNarrowing(_ old: [QueryTerm], to new: [QueryTerm]) -> Bool {
+        guard !old.isEmpty, new.count >= old.count else { return false }
+        guard old.allSatisfy({ !$0.excluded && $0.state == nil }),
+              new.allSatisfy({ !$0.excluded && $0.state == nil }) else { return false }
+        for (previous, next) in zip(old, new) {
+            guard previous.field == next.field, previous.literal == next.literal,
+                  next.text.starts(with: previous.text) else { return false }
         }
+        return true
+    }
+
+    private static func cachedResult(for key: QueryCacheKey) -> [SearchHit]? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return queryCache[key]
+    }
+
+    private static func storeResult(_ result: [SearchHit], for cacheKey: QueryCacheKey) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if queryCache[cacheKey] != nil { return }
         if queryCache.count >= maxQueryCacheEntries {
             // Walk forward past keys a prune already dropped until one real eviction lands.
             while queryCacheHead < queryCacheKeys.count {
@@ -552,9 +654,14 @@ public enum SnippetSearch {
         }
         queryCache[cacheKey] = result
         queryCacheKeys.append(cacheKey)
-        cacheLock.unlock()
+    }
 
-        return result
+    /// Same order as comparing `uuidString`s (fixed-width uppercase hex, so lexicographic order
+    /// is byte order) without allocating two strings per comparison.
+    private static func uuidPrecedes(_ lhs: UUID, _ rhs: UUID) -> Bool {
+        withUnsafeBytes(of: lhs.uuid) { a in
+            withUnsafeBytes(of: rhs.uuid) { b in a.lexicographicallyPrecedes(b) }
+        }
     }
 
     private static func ranked(_ hits: [SearchHit], limit: Int?) -> [SearchHit] {
@@ -567,10 +674,13 @@ public enum SnippetSearch {
             if lhs.triggerLength != rhs.triggerLength {
                 return lhs.triggerLength < rhs.triggerLength
             }
-            let order = a.snippet.triggerKeyword.localizedCaseInsensitiveCompare(b.snippet.triggerKeyword)
-            if order != .orderedSame { return order == .orderedAscending }
-            if a.id != b.id { return a.id.uuidString < b.id.uuidString }
-            return a.groupID.uuidString < b.groupID.uuidString
+            // Identical triggers are `.orderedSame` by definition; skip the locale-aware compare.
+            if a.snippet.triggerKeyword != b.snippet.triggerKeyword {
+                let order = a.snippet.triggerKeyword.localizedCaseInsensitiveCompare(b.snippet.triggerKeyword)
+                if order != .orderedSame { return order == .orderedAscending }
+            }
+            if a.id != b.id { return uuidPrecedes(a.id, b.id) }
+            return uuidPrecedes(a.groupID, b.groupID)
         }.map { $0.hit }
 
         let result: [SearchHit]

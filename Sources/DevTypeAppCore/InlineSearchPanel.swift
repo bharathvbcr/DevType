@@ -894,6 +894,8 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
             // The boost closures below read this panel's own store, not the shared singleton,
             // so the cache has to key on that store's revision or it serves stale rankings.
             boostRevision: store.usageStatsStore.revision,
+            boostSource: ObjectIdentifier(store.usageStatsStore),
+            clipboardChangeCount: cachedClipboardChangeCount,
             libraryRevision: groupsRevision,
             libraryID: store.searchCacheIdentity,
             routedResult: routedResult,

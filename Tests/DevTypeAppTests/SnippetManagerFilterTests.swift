@@ -1,5 +1,5 @@
 import XCTest
-import ExpanderEngine
+@testable import ExpanderEngine
 @testable import DevTypeAppCore
 
 /// The manager's free-text filter.
@@ -192,3 +192,24 @@ final class SnippetManagerFilterTests: XCTestCase {
         }
     }
 }
+
+#if DEBUG
+/// The manager filter runs on every keystroke; with a revision it must not hash the library.
+final class SnippetManagerFilterFingerprintTests: XCTestCase {
+    func testRevisionBackedFilteringDoesNotFingerprintTheLibrary() {
+        SnippetSearch.invalidateIndexCache()
+        defer { SnippetSearch.invalidateIndexCache() }
+        let snippet = SnippetModel(title: "Hello", triggerKeyword: ":hi", replacementText: String(repeating: "body ", count: 400))
+        let groups = [SnippetGroup(name: "G", snippets: [snippet])]
+
+        SnippetSearch.resetFingerprintCountForTesting()
+        for query in ["h", "he", "hel", "hello"] {
+            XCTAssertEqual(SnippetManagerFilter.matchingIDs(in: groups, query: query, revision: 5), [snippet.id])
+        }
+        XCTAssertEqual(SnippetSearch.fingerprintCountForTesting, 0)
+
+        _ = SnippetManagerFilter.matchingIDs(in: groups, query: "hello")
+        XCTAssertGreaterThan(SnippetSearch.fingerprintCountForTesting, 0, "Control: no revision falls back to hashing")
+    }
+}
+#endif
