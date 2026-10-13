@@ -153,6 +153,28 @@ final class LibrarySafetyBackupTests: XCTestCase {
         XCTAssertEqual(try bytes(of: file), original)
     }
 
+    /// A zero-byte file has nothing worth keeping, but the replacement still has to be a new
+    /// readable library. `Data.write(.atomic)` updates a mode-000 inode in place when it is the
+    /// only link, so the bytes land and the file stays unreadable.
+    func testForceOverwriteOfAnUnreadableZeroByteFilePublishesAReadableLibrary() throws {
+        let support = try dir("support")
+        let file = support.appendingPathComponent("snippets.json")
+        try Data().write(to: file)
+        try makeUnreadable(file)
+        let store = makeStore(file: file, support: support)
+        XCTAssertTrue(store.isLibraryReadFailed, "a mode-000 file must latch the read failure")
+
+        XCTAssertTrue(store.forceOverwriteLibrary(with: defaultGroups).didSave)
+
+        XCTAssertTrue(
+            FileManager.default.isReadableFile(atPath: file.path),
+            "the overwrite wrote the new library into the mode-000 inode, so a relaunch cannot read it"
+        )
+        let reloaded = makeStore(file: file, support: support)
+        XCTAssertFalse(reloaded.isLibraryReadFailed, "relaunch still treats the overwritten library as unreadable")
+        XCTAssertEqual(reloaded.loadSnippets().map(\.triggerKeyword), [":default"])
+    }
+
     // MARK: - Save As
 
     func testSaveSnippetsAsOntoANonEmptyLibraryRefusesWhenTheBackupCannotBeWritten() throws {
