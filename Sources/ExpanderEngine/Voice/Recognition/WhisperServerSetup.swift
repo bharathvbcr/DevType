@@ -130,6 +130,24 @@ public enum WhisperServerSetup {
         endpoint.deletingLastPathComponent()
     }
 
+    /// Readiness URL for a `whisper-server` this controller has just spawned.
+    ///
+    /// The child is always launched with `--host 127.0.0.1` and `--port` equal to `port`
+    /// (`endpoint.port ?? 8080`). A saved host of `localhost` or `::1` is still a loopback
+    /// endpoint for the pre-launch "already running" check, but it is not where that child listens.
+    static func spawnedChildProbeURL(port: Int) -> URL {
+        precondition((1 ... 65_535).contains(port), "whisper-server port is outside 1...65535")
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = port
+        components.path = "/"
+        guard let url = components.url, url.host == "127.0.0.1" else {
+            preconditionFailure("http://127.0.0.1:\(port)/ must be a valid loopback URL")
+        }
+        return url
+    }
+
     /// Whether the configured whisper.cpp server is answering at its request-path root.
     public static func isReachable(
         endpoint: URL = VoicePreferences.whisperEndpoint,

@@ -32,6 +32,13 @@ public final class WhisperServerController: @unchecked Sendable {
     /// Grace between SIGTERM and SIGKILL.
     public static let terminationGrace: TimeInterval = 2.0
 
+    /// SIGKILL escalation never runs on the caller. Quit invokes `stopIfManaged()` on the main
+    /// thread; blocking there for `terminationGrace` froze the app on the way out.
+    private static let terminationQueue = DispatchQueue(
+        label: "com.devtype.whisper-server.termination",
+        qos: .utility
+    )
+
     /// Cap on retained server output. Enough to see a model-load failure, bounded so a
     /// chatty server cannot grow memory for the life of the app.
     public static let maxLogCharacters = 32_768
@@ -262,7 +269,12 @@ public final class WhisperServerController: @unchecked Sendable {
                 clearProcess(ifMatching: process)
                 return .failure(.neverBecameReady(log: log))
             }
-            let isReady = await readinessProbe(endpoint, 1.0)
+            // Poll the address passed to `--host` / `--port`, not the saved spelling.
+            // `localhost` and `::1` are valid loopback endpoints but this child is not listening there.
+            let isReady = await readinessProbe(
+                WhisperServerSetup.spawnedChildProbeURL(port: port),
+                1.0
+            )
             guard !Task.isCancelled else {
                 stopManagedProcess(process)
                 return .failure(.cancelled)
@@ -340,23 +352,83 @@ public final class WhisperServerController: @unchecked Sendable {
         guard isOurs else { return false }
 
         if expected.isRunning {
-            DevTypeLog.voice.info(
-                "[Voice] stopping whisper-server pid=\(expected.processIdentifier)"
-            )
-            expected.terminate()
-
-            // Escalate if it ignores SIGTERM, so quitting DevType cannot leave a server behind.
-            let deadline = Date().addingTimeInterval(Self.terminationGrace)
-            while expected.isRunning && Date() < deadline {
-                usleep(50_000)
+            let pid = expected.processIdentifier
+            DevTypeLog.voice.info("[Voice] stopping whisper-server pid=\(pid)")
+            scheduleForcedExit(of: expected)
+            deliverSIGTERM(expected)
+            // Drop ownership now so `isManagedByApp` is false without waiting out the grace
+            // period. The waiter retains `expected` and still escalates that process.
+            // Keep draining its pipe until it exits; closing the pipe now can stall a child
+            // that is logging on the way down and make SIGTERM look ignored.
+            lock.withLock {
+                guard process === expected else { return }
+                process = nil
             }
-            if expected.isRunning {
-                kill(expected.processIdentifier, SIGKILL)
-            }
+        } else {
+            clearProcess(ifMatching: expected)
         }
-
-        clearProcess(ifMatching: expected)
         return true
+    }
+
+    /// SIGTERM now, SIGKILL after `terminationGrace` if this exact `Process` is still running.
+    /// The handler is installed before the signal so an exit cannot be missed, and it cancels
+    /// the waiter so a recycled pid is never killed.
+    private func scheduleForcedExit(of expected: Process) {
+        let timer = DispatchSource.makeTimerSource(queue: Self.terminationQueue)
+        timer.schedule(
+            deadline: .now() + Self.terminationGrace,
+            leeway: .milliseconds(50)
+        )
+        timer.setEventHandler {
+            timer.cancel()
+            Self.killIfStillRunning(expected, signal: SIGKILL, action: "SIGKILL")
+        }
+        expected.terminationHandler = { finished in
+            timer.cancel()
+            if let pipe = finished.standardOutput as? Pipe {
+                pipe.fileHandleForReading.readabilityHandler = nil
+            }
+            finished.terminationHandler = nil
+        }
+        timer.resume()
+    }
+
+    private func deliverSIGTERM(_ expected: Process) {
+        let pid = expected.processIdentifier
+        guard pid > 0 else {
+            DevTypeLog.voice.error("[Voice] whisper-server SIGTERM failed: no pid")
+            return
+        }
+        expected.terminate()
+        // `Process.terminate()` discards kill(2)'s result. While this task is still the
+        // live child, a second SIGTERM reports EPERM and the like. ESRCH means it already
+        // exited, which is not a delivery failure. A child that ignores SIGTERM returns 0.
+        guard expected.isRunning else { return }
+        if kill(pid, SIGTERM) != 0 {
+            let err = errno
+            guard err != ESRCH else { return }
+            Self.logSignalFailure(action: "SIGTERM", pid: pid, err: err)
+        }
+    }
+
+    private static func killIfStillRunning(_ expected: Process, signal: Int32, action: String) {
+        guard expected.isRunning else { return }
+        let pid = expected.processIdentifier
+        guard pid > 0 else {
+            DevTypeLog.voice.error("[Voice] whisper-server \(action, privacy: .public) failed: no pid")
+            return
+        }
+        if kill(pid, signal) != 0 {
+            let err = errno
+            logSignalFailure(action: action, pid: pid, err: err)
+        }
+    }
+
+    private static func logSignalFailure(action: String, pid: Int32, err: Int32) {
+        let detail = String(cString: strerror(err))
+        DevTypeLog.voice.error(
+            "[Voice] whisper-server \(action, privacy: .public) failed pid=\(pid, privacy: .public) errno=\(err, privacy: .public) \(detail, privacy: .public)"
+        )
     }
 
     private func clearProcess(ifMatching expected: Process? = nil) {

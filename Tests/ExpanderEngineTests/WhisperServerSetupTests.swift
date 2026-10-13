@@ -178,6 +178,26 @@ final class WhisperServerSetupTests: XCTestCase {
         )
     }
 
+    /// The spawned child is bound to 127.0.0.1 even when the saved endpoint says localhost or ::1.
+    func testSpawnedChildProbeURLUsesTheBoundLoopbackAddress() {
+        XCTAssertEqual(
+            WhisperServerSetup.spawnedChildProbeURL(port: 8080).absoluteString,
+            "http://127.0.0.1:8080/"
+        )
+        let localhost = URL(string: "http://localhost:18181/inference")!
+        let probe = WhisperServerSetup.spawnedChildProbeURL(port: localhost.port ?? 8080)
+        XCTAssertEqual(probe.scheme, "http")
+        XCTAssertEqual(probe.host, "127.0.0.1")
+        XCTAssertEqual(probe.port, 18_181)
+        XCTAssertEqual(probe.path, "/")
+        XCTAssertNotEqual(probe.host, localhost.host)
+
+        let ipv6 = URL(string: "http://[::1]:9090/inference")!
+        let ipv6Probe = WhisperServerSetup.spawnedChildProbeURL(port: ipv6.port ?? 8080)
+        XCTAssertEqual(ipv6Probe.host, "127.0.0.1")
+        XCTAssertEqual(ipv6Probe.port, 9090)
+    }
+
     /// Detection must look where Homebrew actually installs, on both architectures.
     func testSearchPathsCoverBothHomebrewPrefixes() {
         XCTAssertTrue(WhisperServerSetup.searchPaths.contains("/opt/homebrew/bin/whisper-server"),
