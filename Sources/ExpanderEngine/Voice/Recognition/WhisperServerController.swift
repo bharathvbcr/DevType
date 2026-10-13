@@ -194,6 +194,12 @@ public final class WhisperServerController: @unchecked Sendable {
         } catch {
             return .failure(.modelUnreadable(path: modelPath))
         }
+        // A blocked open does not fail when the task is cancelled. Once it returns, a
+        // non-cancellation status such as `.unreadable` must not hide that cancellation,
+        // and must not proceed to spawn.
+        guard !Task.isCancelled else {
+            return .failure(.cancelled)
+        }
         let verifiedModel: WhisperVerifiedModel
         switch modelStatus {
         case .unsupportedModel:
@@ -271,15 +277,26 @@ public final class WhisperServerController: @unchecked Sendable {
             }
             // Poll the address passed to `--host` / `--port`, not the saved spelling.
             // `localhost` and `::1` are valid loopback endpoints but this child is not listening there.
-            let isReady = await readinessProbe(
-                WhisperServerSetup.spawnedChildProbeURL(port: port),
-                1.0
-            )
+            // The probe closure may ignore cancellation. Stop this child when the task is
+            // cancelled instead of waiting for the closure to return. The await stays outside
+            // the lock; `onCancel` only takes the lock inside `stopManagedProcess`.
+            let isReady = await withTaskCancellationHandler {
+                await readinessProbe(
+                    WhisperServerSetup.spawnedChildProbeURL(port: port),
+                    1.0
+                )
+            } onCancel: {
+                self.stopManagedProcess(process)
+            }
             guard !Task.isCancelled else {
                 stopManagedProcess(process)
                 return .failure(.cancelled)
             }
             if isReady {
+                let stillManaged = lock.withLock { self.process === process }
+                guard stillManaged else {
+                    return .failure(.neverBecameReady(log: recentLog))
+                }
                 DevTypeLog.voice.info("[Voice] whisper-server ready")
                 return .success(())
             }
