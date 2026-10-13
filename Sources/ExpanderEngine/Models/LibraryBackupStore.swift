@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// The one owner of snippet-library backups.
@@ -62,12 +63,13 @@ public final class LibraryBackupStore {
     /// What `preserve(fileAt:bytes:kind:)` did with a file that is about to be replaced.
     struct Preserved: Equatable {
         let url: URL
-        /// The original was renamed into the backup directory rather than copied, because its
-        /// bytes could not be read. The caller must put it back if the replacement fails.
-        let moved: Bool
         /// This call wrote the backup. `false` when an identical backup already existed and was
         /// reused, which a caller undoing its own backup must never remove.
         var created = false
+        /// `url` is a second directory entry for the live inode. `reveal` it only after the live
+        /// path has been replaced: chmod before that would change the file the overwrite has not
+        /// committed, and removing the live name before that would drop the bytes on a crash.
+        var revealAfterCommit = false
     }
 
     /// A rolling copy that `maximumBackupBytes` would make unlistable and unrestorable is not
@@ -161,10 +163,13 @@ public final class LibraryBackupStore {
     /// under file coordination.
     ///
     /// `bytes` are the file's contents when the caller could read them. When it could not, the
-    /// file itself is renamed into the backup directory: a rename needs permission on the
-    /// directories only, so an unreadable library is preserved byte for byte instead of being
-    /// overwritten. A rename that crosses volumes degrades to a copy and fails the same way the
-    /// read did — that failure is thrown, and the caller must not replace the file.
+    /// file is hard-linked into the backup directory: a link needs permission on the directories
+    /// only, so an unreadable library is preserved byte for byte, and the live path still names
+    /// those bytes until the caller's replace commits. A directory, or a file on another volume,
+    /// cannot be linked; it is copied instead, which also leaves the live path untouched. When
+    /// neither works the error is thrown and the caller must not replace the file. The live file
+    /// is never renamed aside — a crash between that rename and the overwrite would leave no file
+    /// at the library path.
     ///
     /// - Returns: `nil` when there is nothing to preserve (no file, or a zero-byte one).
     func preserve(fileAt url: URL, bytes: Data?, kind: Kind) throws -> Preserved? {
@@ -172,7 +177,7 @@ public final class LibraryBackupStore {
         if let bytes {
             guard !bytes.isEmpty else { return nil }
             let copy = try backUp(bytes, kind: kind)
-            return Preserved(url: copy.url, moved: false, created: copy.created)
+            return Preserved(url: copy.url, created: copy.created)
         }
         if let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
            size.intValue == 0 {
@@ -181,34 +186,76 @@ public final class LibraryBackupStore {
 
         lock.lock()
         defer { lock.unlock() }
+        let destination: URL
         do {
             try createDirectoryLocked()
-            let destination = try uniqueURLLocked(kind: kind, at: now())
-            try fileManager.moveItem(at: url, to: destination)
-            do {
-                // A directory sitting at the library path is preserved whole; 0o600 would strip its
-                // search bit and leave the contents it was kept for unreachable.
-                var isDirectory: ObjCBool = false
-                _ = fileManager.fileExists(atPath: destination.path, isDirectory: &isDirectory)
-                try FilePermissions.setPOSIX(destination, isDirectory.boolValue ? 0o700 : 0o600)
-            } catch {
-                // The bytes are preserved either way; an owner-unreadable backup is still a backup.
-                DevTypeLog.store.error(
-                    "[Backup] Moved an unreadable library aside but could not make it readable \(DevTypeLog.errorMetadata(error), privacy: .public)"
-                )
-            }
-            DevTypeLog.store.notice(
-                "[Backup] Moved unreadable library aside as \(destination.lastPathComponent, privacy: .public)"
-            )
-            // Its digest is unknown, so it can never satisfy a later dedupe; forget the cache
-            // entry rather than let an older one claim to be newest.
-            newest = nil
-            return Preserved(url: destination, moved: true, created: true)
+            destination = try uniqueURLLocked(kind: kind, at: now())
         } catch {
             DevTypeLog.store.error(
                 "[Backup] Could not preserve the library before replacing it kind=\(kind.rawValue, privacy: .public) \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
             throw error
+        }
+        do {
+            try fileManager.linkItem(at: url, to: destination)
+            // Digest unknown, and the name still shares the live inode. Do not let an older
+            // backup claim to be newest, and do not chmod this inode until the caller has
+            // replaced the live path.
+            newest = nil
+            newestSeeded = false
+            DevTypeLog.store.notice(
+                "[Backup] Linked unreadable library as \(destination.lastPathComponent, privacy: .public)"
+            )
+            return Preserved(url: destination, created: true, revealAfterCommit: true)
+        } catch let linkError {
+            do {
+                try fileManager.copyItem(at: url, to: destination)
+            } catch {
+                DevTypeLog.store.error(
+                    "[Backup] Could not preserve the library before replacing it kind=\(kind.rawValue, privacy: .public) link=\(DevTypeLog.errorMetadata(linkError), privacy: .public) \(DevTypeLog.errorMetadata(error), privacy: .public)"
+                )
+                throw error
+            }
+            makeOwnerReadable(destination)
+            newest = nil
+            newestSeeded = false
+            DevTypeLog.store.notice(
+                "[Backup] Copied unreadable library as \(destination.lastPathComponent, privacy: .public) link=\(DevTypeLog.errorMetadata(linkError), privacy: .public)"
+            )
+            return Preserved(url: destination, created: true)
+        }
+    }
+
+    /// Makes a backup created as a second link owner-readable. Call only after the live path no
+    /// longer names that inode.
+    func reveal(_ url: URL) {
+        makeOwnerReadable(url)
+        lock.lock()
+        newest = nil
+        newestSeeded = false
+        lock.unlock()
+    }
+
+    /// True when both paths are directory entries for one inode. A failed replace can drop the
+    /// extra link without touching the live file; a successful atomic replace makes this false.
+    func sameInode(_ lhs: URL, _ rhs: URL) -> Bool {
+        var left = stat()
+        var right = stat()
+        guard lstat(lhs.path, &left) == 0, lstat(rhs.path, &right) == 0 else { return false }
+        return left.st_ino == right.st_ino && left.st_dev == right.st_dev
+    }
+
+    private func makeOwnerReadable(_ url: URL) {
+        var isDirectory: ObjCBool = false
+        _ = fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        do {
+            // A directory sitting at the library path is preserved whole; 0o600 would strip its
+            // search bit and leave the contents it was kept for unreachable.
+            try FilePermissions.setPOSIX(url, isDirectory.boolValue ? 0o700 : 0o600)
+        } catch {
+            DevTypeLog.store.error(
+                "[Backup] Preserved a library but could not make the backup readable \(DevTypeLog.errorMetadata(error), privacy: .public)"
+            )
         }
     }
 

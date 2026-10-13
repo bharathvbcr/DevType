@@ -287,6 +287,23 @@ final class LibraryWritePathContractTests: XCTestCase {
         )
         XCTAssertFalse(source.contains("raw.write(to:"), "a hand-rolled relocation write bypasses the backup step")
         XCTAssertFalse(source.contains("copyItem("), "backups belong to LibraryBackupStore")
+        XCTAssertFalse(source.contains(".moveItem("), "moving the live library aside drops it if the process dies before the overwrite")
+        XCTAssertTrue(source.contains("[Store] No local backup before linking"),
+                      "linkToSnippets must log a missing local backup")
+        XCTAssertTrue(source.contains("[Store] Could not encode the library for relocation"),
+                      "a relocation encode failure must be logged")
+        let backupSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/ExpanderEngine/Models/LibraryBackupStore.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(backupSource.contains("[Backup] Could not write library backup"),
+                      "a backup write failure must be logged")
+        XCTAssertTrue(backupSource.contains("[Backup] Could not preserve the library before replacing it"))
+        XCTAssertFalse(backupSource.contains(".moveItem("), "preserve must not rename the live library aside")
         let replace = try XCTUnwrap(source.range(of: "private func coordinatedReplace("))
         let write = try XCTUnwrap(source.range(of: "data.write(to: actualURL, options: .atomic)"))
         let backupStep = try XCTUnwrap(source.range(of: "self.backups.preserve(fileAt: actualURL"))

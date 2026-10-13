@@ -1662,7 +1662,8 @@ public final class SnippetStore {
         // A read-blocked or corrupt library is exactly where a restore is needed, so a latched
         // state does not refuse it. It bypasses the latch the way `forceOverwriteLibrary` does, and
         // on the same terms: the file it replaces is first kept as a required `pre-restore` copy
-        // (raw bytes, or the file itself moved aside when unreadable), or nothing is written.
+        // (raw bytes, or a hard link / copy when unreadable), or nothing is written. The live
+        // path keeps its bytes until that copy exists and the replacement commits.
         let latched = blockedReason() != nil
         let write = commitGroupsSerialized(
             document.transactionGroups,
@@ -1830,10 +1831,12 @@ public final class SnippetStore {
     /// and the digest guard. Nothing on the load path may call this.
     ///
     /// The file it replaces is kept first, as a `pre-overwrite` backup of its raw bytes — or,
-    /// when they cannot be read, the file itself moved into the backup directory. When neither is
-    /// possible nothing is written: the result is `.failed`, the read-failure latch stays set, and
-    /// the original file is untouched. The keep happens in `writeGroupsToDisk(force:)`, so no
-    /// caller can reach the forced write without it.
+    /// when they cannot be read, a hard link (or a copy, when a link is impossible) in the backup
+    /// directory. The live path is not renamed aside, so a crash before the overwrite commits
+    /// still leaves the pre-overwrite bytes there. When no backup can be made nothing is written:
+    /// the result is `.failed`, the read-failure latch stays set, and the original file is
+    /// untouched. The keep happens in `writeGroupsToDisk(force:)`, so no caller can reach the
+    /// forced write without it.
     @discardableResult
     public func forceOverwriteLibrary(with groups: [SnippetGroup]) -> OverwriteResult {
         let sanitized = Self.sanitizeGroups(groups)
@@ -2058,7 +2061,8 @@ public final class SnippetStore {
         /// An ordinary save: copy the previous bytes into a rolling backup when they changed.
         /// Failing to copy does not stop the save; it is reported as `.savedWithoutBackup`. A file
         /// that cannot be read at all is escalated to `.required(.preOverwrite)`, because
-        /// overwriting bytes nobody can read again is not a save the user asked for.
+        /// overwriting bytes nobody can read again is not a save the user asked for. The live
+        /// file stays in place until the replacement commits.
         case rolling
         /// A replacement the user confirmed, or one onto a library they did not write here: the
         /// previous file must be preserved first, or nothing is written.
@@ -2113,8 +2117,8 @@ public final class SnippetStore {
 
             var backupURL: URL?
             var backupFailure: String?
-            var movedAside = false
             var createdBackup = false
+            var revealAfterCommit = false
             let required: LibraryBackupStore.Kind?
             switch requirement {
             case .required(let kind): required = kind
@@ -2124,8 +2128,8 @@ public final class SnippetStore {
                 do {
                     let preserved = try self.backups.preserve(fileAt: actualURL, bytes: onDisk, kind: required)
                     backupURL = preserved?.url
-                    movedAside = preserved?.moved ?? false
                     createdBackup = preserved?.created ?? false
+                    revealAfterCommit = preserved?.revealAfterCommit ?? false
                 } catch {
                     result = .backupFailed(
                         "The existing library was not replaced because a backup of it could not be saved: \(error.localizedDescription)"
@@ -2145,22 +2149,15 @@ public final class SnippetStore {
             do {
                 try fm.createDirectory(at: actualURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try data.write(to: actualURL, options: .atomic)
+                if revealAfterCommit, let backupURL {
+                    self.backups.reveal(backupURL)
+                }
                 result = .written(backupURL: backupURL, backupFailure: backupFailure)
             } catch {
-                if movedAside, let backupURL {
-                    // The original was renamed into Backups; put it back where it was.
-                    do {
-                        try fm.moveItem(at: backupURL, to: actualURL)
-                    } catch {
-                        DevTypeLog.store.error(
-                            "[Store] Could not return a moved-aside library after a failed write \(DevTypeLog.errorMetadata(error), privacy: .public)"
-                        )
-                    }
-                }
-                if !movedAside, createdBackup, let backupURL, let onDisk,
-                   (try? Data(contentsOf: actualURL)).map({ Self.sha256(of: $0) }) == Self.sha256(of: onDisk) {
+                if createdBackup, let backupURL, self.backupGuardsNothing(backupURL, live: actualURL, previous: onDisk) {
                     // The library is exactly as it was, so the safety copy guards nothing. When the
-                    // live file changed (or cannot be re-read) the copy is kept.
+                    // live file changed (or cannot be re-read) the copy is kept. A hard link shares
+                    // the live inode: dropping the backup name leaves the pre-overwrite bytes in place.
                     self.backups.discard(backupURL)
                 }
                 DevTypeLog.store.error(
@@ -2176,6 +2173,13 @@ public final class SnippetStore {
             return .failed(coordinationError.localizedDescription)
         }
         return result
+    }
+
+    /// The safety copy can be removed because the live path still holds the bytes it was taken from.
+    private func backupGuardsNothing(_ backup: URL, live: URL, previous: Data?) -> Bool {
+        if backups.sameInode(backup, live) { return true }
+        guard let previous else { return false }
+        return (try? Data(contentsOf: live)).map { Self.sha256(of: $0) } == Self.sha256(of: previous)
     }
 
     private struct DiskWrite {
