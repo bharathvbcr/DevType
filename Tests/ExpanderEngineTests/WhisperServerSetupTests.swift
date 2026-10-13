@@ -198,6 +198,37 @@ final class WhisperServerSetupTests: XCTestCase {
         XCTAssertEqual(ipv6Probe.port, 9090)
     }
 
+    /// Ports the child is allowed to bind must survive both the spawn URL builder and the
+    /// production reachability rewrite (`deletingLastPathComponent` on a root path).
+    func testSpawnedChildProbeStaysOnTheBoundRootForEdgePorts() {
+        for port in [1, 8080, 65_535] {
+            let spawned = WhisperServerSetup.spawnedChildProbeURL(port: port)
+            XCTAssertEqual(spawned.absoluteString, "http://127.0.0.1:\(port)/")
+            XCTAssertEqual(spawned.path, "/")
+            XCTAssertEqual(
+                WhisperServerSetup.readinessProbeURL(for: spawned).absoluteString,
+                spawned.absoluteString,
+                "isReachable rewrites the post-launch probe away from /"
+            )
+        }
+    }
+
+    /// Stripping a custom path for the pre-launch reachability check must keep the saved host.
+    /// The child bind address is a separate URL built only after that check.
+    func testReadinessProbeKeepsTheSavedHostWhenStrippingACustomPath() {
+        let localhost = URL(string: "http://localhost:18181/custom")!
+        XCTAssertEqual(
+            WhisperServerSetup.readinessProbeURL(for: localhost).absoluteString,
+            "http://localhost:18181/"
+        )
+        let ipv6 = URL(string: "http://[::1]:18181/custom")!
+        let stripped = WhisperServerSetup.readinessProbeURL(for: ipv6)
+        XCTAssertEqual(stripped.port, 18_181)
+        XCTAssertEqual(stripped.path, "/")
+        XCTAssertNotEqual(stripped.host, "127.0.0.1")
+        XCTAssertNotEqual(stripped.absoluteString, "http://127.0.0.1:18181/")
+    }
+
     /// Detection must look where Homebrew actually installs, on both architectures.
     func testSearchPathsCoverBothHomebrewPrefixes() {
         XCTAssertTrue(WhisperServerSetup.searchPaths.contains("/opt/homebrew/bin/whisper-server"),
