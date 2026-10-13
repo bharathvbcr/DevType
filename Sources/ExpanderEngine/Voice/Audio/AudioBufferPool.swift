@@ -103,12 +103,6 @@ public final class AudioBufferPool: @unchecked Sendable {
         let isInterleaved: Bool
     }
 
-    private enum EnqueueOutcome {
-        case queued
-        case ignored
-        case dropped
-    }
-
     private let capacity: Int
     private var bufferSlots: [Data]
     private var sequences: [UInt64]
@@ -125,8 +119,13 @@ public final class AudioBufferPool: @unchecked Sendable {
     private var readHead: Int = 0
     private var currentSequence: UInt64 = 0
     private var droppedFrameCount: UInt64 = 0
-    private let lock = NSLock()
-    private let dataAvailable = DispatchSemaphore(value: 0)
+    /// Enqueues not yet observed by `waitForEnqueue`. Cleared when `dequeueAll` empties the ring,
+    /// so a batched drain cannot leave a counting semaphore credited once per chunk.
+    private var pendingNotices: Int = 0
+    /// `wakeWaiters` must unblock a drain even when the ring is empty. A lost `signal` before
+    /// the waiter arrives stays latched until the next wait.
+    private var wakeRequested = false
+    private let condition = NSCondition()
     private let maxChunkByteSize: Int
 
     /// Prevent malformed configuration from turning a callback buffer into an allocation or
@@ -169,34 +168,82 @@ public final class AudioBufferPool: @unchecked Sendable {
     /// A zero-length buffer is ignored. Overflow and buffers that cannot be copied are drops:
     /// the ring slot a reader has not consumed is left unchanged.
     public func enqueue(buffer: AVAudioPCMBuffer, sampleTime: Double) -> Bool {
-        let outcome = enqueueLocked(buffer: buffer, sampleTime: sampleTime)
-        if outcome == .queued {
-            dataAvailable.signal()
+        let frames = buffer.frameLength
+        if frames == 0 {
+            return true
         }
-        return outcome != .dropped
+        // Copy before the lock. NSLock/NSCondition are not recursive, and the memcpy must not
+        // run while a reader is blocked on this pool's lock.
+        let copied = copyFloatPCM(buffer)
+
+        condition.lock()
+        defer { condition.unlock() }
+
+        let nextWrite = (writeHead + 1) % capacity
+        if nextWrite == readHead || copied == nil {
+            droppedFrameCount = Saturating.adding(droppedFrameCount, UInt64(frames))
+            return false
+        }
+        guard let copied else { return false }
+
+        let wasEmpty = readHead == writeHead
+        currentSequence = Saturating.incrementing(currentSequence)
+        bufferSlots[writeHead] = copied.pcmData
+        sequences[writeHead] = currentSequence
+        sampleTimes[writeHead] = sampleTime
+        frameCounts[writeHead] = frames
+        sampleRates[writeHead] = buffer.format.sampleRate
+        channelCounts[writeHead] = buffer.format.channelCount
+        commonFormatRawValues[writeHead] = copied.commonFormatRawValue
+        interleavedFlags[writeHead] = copied.isInterleaved
+        audioBufferByteCounts[writeHead] = copied.audioBufferByteCounts
+        streamDescriptions[writeHead] = copied.streamDescription
+        channelLayoutTags[writeHead] = copied.channelLayoutTag
+        writeHead = nextWrite
+        pendingNotices += 1
+        if wasEmpty {
+            condition.signal()
+        }
+        return true
     }
 
-    /// Blocks until `enqueue` publishes a chunk, `wakeWaiters` runs, or `timeout` expires.
+    /// Blocks until a published chunk is still unnoticed, `wakeWaiters` runs, or `timeout` expires.
     /// Callers must not invoke this on the `DurableVoiceCapture` actor executor.
     func waitForEnqueue(timeout: DispatchTime) -> Bool {
-        dataAvailable.wait(timeout: timeout) == .success
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date().addingTimeInterval(Self.seconds(until: timeout))
+        while pendingNotices == 0 && !wakeRequested {
+            if !condition.wait(until: deadline) {
+                return false
+            }
+        }
+        if pendingNotices > 0 {
+            pendingNotices -= 1
+            return true
+        }
+        wakeRequested = false
+        return true
     }
 
     func wakeWaiters() {
-        dataAvailable.signal()
+        condition.lock()
+        wakeRequested = true
+        condition.signal()
+        condition.unlock()
     }
 
     /// Frames rejected by overflow or by a copy that could not be made. Saturates.
     public var droppedFrames: UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
+        condition.lock()
+        defer { condition.unlock() }
         return droppedFrameCount
     }
 
     /// Dequeues available chunks for background serial writer.
     public func dequeueAll() -> [Chunk] {
-        lock.lock()
-        defer { lock.unlock() }
+        condition.lock()
+        defer { condition.unlock() }
 
         var results: [Chunk] = []
         while readHead != writeHead {
@@ -216,65 +263,38 @@ public final class AudioBufferPool: @unchecked Sendable {
             results.append(chunk)
             readHead = (readHead + 1) % capacity
         }
+        pendingNotices = 0
         return results
     }
 
     public func reset() {
-        lock.lock()
-        defer { lock.unlock() }
+        condition.lock()
+        defer { condition.unlock() }
         writeHead = 0
         readHead = 0
         currentSequence = 0
         droppedFrameCount = 0
+        pendingNotices = 0
     }
 
-    private func enqueueLocked(buffer: AVAudioPCMBuffer, sampleTime: Double) -> EnqueueOutcome {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let frames = buffer.frameLength
-        if frames == 0 {
-            return .ignored
-        }
-
-        let nextWrite = (writeHead + 1) % capacity
-        if nextWrite == readHead {
-            noteDropLocked(frames)
-            return .dropped
-        }
-
-        guard let copied = copyFloatPCM(buffer) else {
-            noteDropLocked(frames)
-            return .dropped
-        }
-
-        currentSequence = Saturating.incrementing(currentSequence)
-        bufferSlots[writeHead] = copied.pcmData
-        sequences[writeHead] = currentSequence
-        sampleTimes[writeHead] = sampleTime
-        frameCounts[writeHead] = frames
-        sampleRates[writeHead] = buffer.format.sampleRate
-        channelCounts[writeHead] = buffer.format.channelCount
-        commonFormatRawValues[writeHead] = copied.commonFormatRawValue
-        interleavedFlags[writeHead] = copied.isInterleaved
-        audioBufferByteCounts[writeHead] = copied.audioBufferByteCounts
-        streamDescriptions[writeHead] = copied.streamDescription
-        channelLayoutTags[writeHead] = copied.channelLayoutTag
-        writeHead = nextWrite
-        return .queued
+    private static func seconds(until timeout: DispatchTime) -> TimeInterval {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let target = timeout.uptimeNanoseconds
+        guard target > now else { return 0 }
+        return Double(target - now) / 1_000_000_000
     }
 
-    private func noteDropLocked(_ frames: AVAudioFrameCount) {
-        droppedFrameCount = Saturating.adding(droppedFrameCount, UInt64(frames))
-    }
-
-    /// Float PCM only. Non-float buffers have no `floatChannelData` and are drops, not aliases.
+    /// Float PCM only. `AVAudioBuffer.h` documents `floatChannelData` as non-nil only for 32-bit
+    /// float, so float64 is copied from the audio buffer list. Anything else is a drop, not an alias.
     private func copyFloatPCM(_ buffer: AVAudioPCMBuffer) -> OwnedPCM? {
         let format = buffer.format
         let commonFormat = format.commonFormat
-        guard buffer.floatChannelData != nil,
-              commonFormat == .pcmFormatFloat32 || commonFormat == .pcmFormatFloat64
-        else {
+        switch commonFormat {
+        case .pcmFormatFloat32:
+            guard buffer.floatChannelData != nil else { return nil }
+        case .pcmFormatFloat64:
+            break
+        default:
             return nil
         }
 
