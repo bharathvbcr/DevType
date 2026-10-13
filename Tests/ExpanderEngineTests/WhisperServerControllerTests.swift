@@ -797,6 +797,49 @@ final class WhisperServerControllerTests: XCTestCase {
         )
     }
 
+    /// The post-launch probe can outlive the child. Readiness must not be reported if that
+    /// process has already exited, even when the probe closure returns true.
+    func testPostLaunchProbeTrueAfterChildExitsDoesNotReportReady() async throws {
+        let directory = try makeFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("child.pid")
+        let script = try writeSleepScript(named: "sleep-die.sh", in: directory, pidFile: pidFile)
+        let probes = LockedIntegerCounter()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? whisperFixtureArtifact() : nil },
+            readinessProbe: { _, _ in
+                probes.increment()
+                if probes.value == 1 { return false }
+                let deadline = Date().addingTimeInterval(2)
+                var pid: pid_t = 0
+                while Date() < deadline && pid == 0 {
+                    if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+                       let recorded = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                        pid = recorded
+                    }
+                }
+                guard pid > 0 else { return false }
+                _ = kill(pid, SIGKILL)
+                let gone = Date().addingTimeInterval(2)
+                while Date() < gone && kill(pid, 0) == 0 {
+                    try? await Task.sleep(nanoseconds: 20_000_000)
+                }
+                return kill(pid, 0) != 0
+            }
+        )
+        defer { controller.stopIfManaged() }
+        let result = await controller.start(
+            model: "fixture",
+            endpoint: URL(string: "http://127.0.0.1:28221/inference")!
+        )
+        guard case .failure = result else {
+            return XCTFail("start reported ready after the spawned child had already exited: \(result)")
+        }
+        XCTAssertFalse(controller.isManagedByApp)
+    }
+
     /// `stop()` during a hung post-launch probe must return immediately and must not let a
     /// later probe success report the torn-down child as ready.
     func testStopDuringHungPostLaunchProbeDoesNotReportReady() async throws {
