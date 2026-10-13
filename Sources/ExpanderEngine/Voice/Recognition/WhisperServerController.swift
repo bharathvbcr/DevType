@@ -293,9 +293,13 @@ public final class WhisperServerController: @unchecked Sendable {
                 return .failure(.cancelled)
             }
             if isReady {
-                let stillManaged = lock.withLock { self.process === process }
-                guard stillManaged else {
-                    return .failure(.neverBecameReady(log: recentLog))
+                // The probe can return after this child has exited. Ownership alone is not
+                // readiness: a dead process still referenced here must not be reported ready.
+                let ready = lock.withLock { self.process === process && process.isRunning }
+                guard ready else {
+                    let log = recentLog
+                    clearProcess(ifMatching: process)
+                    return .failure(.neverBecameReady(log: log))
                 }
                 DevTypeLog.voice.info("[Voice] whisper-server ready")
                 return .success(())
