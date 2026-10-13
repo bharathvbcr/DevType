@@ -74,6 +74,31 @@ final class DevTypeSafetyTests: XCTestCase {
         XCTAssertEqual(raw, [], "Raw window ordering must go through DevTypeSafety: \(raw)")
     }
 
+    /// `NSWindowController.showWindow` orders on the Swift caller. An exception
+    /// there aborts before the ObjC catch runs. `showWindow(` covers both
+    /// `.showWindow(` and a bare `showWindow(nil)` on `self`.
+    func testProductionShowWindowDoesNotOrderFromSwift() throws {
+        let sources = repoRoot.appendingPathComponent("Sources", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: sources,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return XCTFail("Could not enumerate \(sources.path)")
+        }
+        var hits: [String] = []
+        for case let url as URL in enumerator {
+            let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+            guard isFile else { continue }
+            let relative = String(url.path.dropFirst(repoRoot.path.count + 1))
+            let text = try String(contentsOf: url, encoding: .utf8)
+            if text.contains(".showWindow(") || text.contains("showWindow(") {
+                hits.append(relative)
+            }
+        }
+        XCTAssertEqual(hits, [], "showWindow orders through Swift and must not remain: \(hits)")
+    }
+
     private var repoRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

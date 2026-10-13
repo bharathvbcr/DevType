@@ -204,7 +204,6 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
 
         let wc = NSWindowController(window: window)
         windowController = wc
-        wc.showWindow(nil)
         WindowOrdering.makeKeyAndOrderFront(window, context: "Activity")
         NSApp.activate(ignoringOtherApps: true)
     }

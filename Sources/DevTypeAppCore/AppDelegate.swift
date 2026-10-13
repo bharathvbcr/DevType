@@ -872,7 +872,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             secretWindowController = NSWindowController(window: window)
         }
         NSApp.activate(ignoringOtherApps: true)
-        secretWindowController?.showWindow(nil)
         WindowOrdering.makeKeyAndOrderFront(secretWindowController?.window, context: "Secrets")
     }
 
@@ -2179,7 +2178,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let window = snippetWindowController?.window else { return }
-        snippetWindowController?.showWindow(nil)
         WindowOrdering.makeKeyAndOrderFront(window, context: "Snippets")
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
@@ -2261,7 +2259,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let window = permissionWindowController?.window else { return }
-        permissionWindowController?.showWindow(nil)
         WindowOrdering.makeKeyAndOrderFront(window, context: "PermissionRecovery")
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
@@ -2322,7 +2319,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             onboardingWindowController = NSWindowController(window: window)
         }
         PermissionRequester.shared.beginSetupActivation()
-        onboardingWindowController?.showWindow(nil)
         WindowOrdering.makeKeyAndOrderFront(onboardingWindowController?.window, context: "Onboarding")
         NSApp.activate(ignoringOtherApps: true)
         onboardingPresentationInFlight = false

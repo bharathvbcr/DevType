@@ -170,7 +170,6 @@ final class PreferencesWindowController: NSWindowController {
         // The single full reload per open. `viewDidLoad`/`viewWillAppear` deliberately do not
         // reload: they ran in addition to this call and tripled the work of opening the window.
         preferences?.reloadAll()
-        showWindow(nil)
         WindowOrdering.makeKeyAndOrderFront(window, context: "Preferences")
         NSApp.activate(ignoringOtherApps: true)
     }
