@@ -27,7 +27,7 @@ final class ShortcutReferenceWindowController: NSWindowController {
     static func show() {
         (shared.window?.contentViewController as? ShortcutReferenceViewController)?.refreshLocalization()
         shared.showWindow(nil)
-        shared.window?.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(shared.window, context: "Shortcuts")
         NSApp.activate(ignoringOtherApps: true)
     }
 }

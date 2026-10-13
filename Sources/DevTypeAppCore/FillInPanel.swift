@@ -74,8 +74,7 @@ enum FillInPanel {
         panel.center()
 
         NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        panel.orderFrontRegardless()
+        WindowOrdering.makeKeyAndOrderFront(panel, context: "FillIn")
         controller.focusFirstField()
 
         activePanel = panel

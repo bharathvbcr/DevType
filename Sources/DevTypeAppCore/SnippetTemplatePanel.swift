@@ -55,7 +55,7 @@ enum SnippetTemplatePanel {
             hostWindow.beginSheet(panel, completionHandler: nil)
         } else {
             panel.center()
-            panel.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(panel, context: "SnippetTemplate")
             NSApp.activate(ignoringOtherApps: true)
         }
         controller.focusTable()

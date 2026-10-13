@@ -40,7 +40,7 @@ final class SnippetImportPreviewSheet: NSViewController, NSTableViewDataSource, 
             window.beginSheet(sheetWindow)
         } else {
             sheetWindow.center()
-            sheetWindow.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(sheetWindow, context: "SnippetImportPreview")
             NSApp.activate(ignoringOtherApps: true)
         }
     }

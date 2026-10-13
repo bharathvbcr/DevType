@@ -265,7 +265,7 @@ private final class LabSession: NSObject {
             hostWindow.beginSheet(panel, completionHandler: nil)
         } else {
             panel.center()
-            panel.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(panel, context: "TestExpansionLab")
             NSApp.activate(ignoringOtherApps: true)
         }
 
@@ -278,7 +278,7 @@ private final class LabSession: NSObject {
         // Focus lab field, then inject with eraseCount=0 (empty field).
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            panel.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(panel, context: "TestExpansionLab")
             panel.makeFirstResponder(textView)
             textView.window?.makeFirstResponder(textView)
             statusLabel.stringValue = self.loc.s("lab.injecting")

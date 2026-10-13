@@ -25,7 +25,7 @@ final class SnippetConflictResolverSheet: NSViewController, NSTableViewDataSourc
             window.beginSheet(sheetWindow)
         } else {
             sheetWindow.center()
-            sheetWindow.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(sheetWindow, context: "SnippetConflict")
             NSApp.activate(ignoringOtherApps: true)
         }
     }

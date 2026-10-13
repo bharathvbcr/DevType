@@ -37,7 +37,7 @@ final class RecoveredDictationWindowController: NSWindowController {
     static func show(referenceID: String, activityEventID: UUID) {
         if let existing = controllers[referenceID] {
             existing.showWindow(nil)
-            existing.window?.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(existing.window, context: "RecoveredDictation")
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -59,7 +59,7 @@ final class RecoveredDictationWindowController: NSWindowController {
         )
         controllers[referenceID] = controller
         controller.showWindow(nil)
-        controller.window?.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(controller.window, context: "RecoveredDictation")
         NSApp.activate(ignoringOtherApps: true)
     }
 

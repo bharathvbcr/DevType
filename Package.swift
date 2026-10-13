@@ -76,6 +76,14 @@ let package = Package(
                 .copy("Fixtures")
             ]
         ),
+        // ObjC-only: SwiftPM rejects mixed-language targets, and a Swift
+        // NSWindow subclass that raises aborts before `@catch` can run.
+        // The class name stays `DevTypeSafetyTestsRaisingWindow` so the
+        // DevTypeSafetyTests filter selects it.
+        .testTarget(
+            name: "DevTypeSafetyOrderFrontTests",
+            dependencies: ["DevTypeSafety"]
+        ),
         .testTarget(
             name: "DevTypeAppTests",
             dependencies: ["DevTypeAppCore"]

@@ -149,7 +149,7 @@ enum SnippetEditorSheet {
             hostWindow.beginSheet(panel, completionHandler: nil)
         } else {
             panel.center()
-            panel.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(panel, context: "SnippetEditor")
             NSApp.activate(ignoringOtherApps: true)
         }
         controller.focusInitialField()

@@ -171,7 +171,7 @@ final class PreferencesWindowController: NSWindowController {
         // reload: they ran in addition to this call and tripled the work of opening the window.
         preferences?.reloadAll()
         showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(window, context: "Preferences")
         NSApp.activate(ignoringOtherApps: true)
     }
 
