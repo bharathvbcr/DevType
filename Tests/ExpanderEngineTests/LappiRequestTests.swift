@@ -84,6 +84,18 @@ final class LappiRequestTests: XCTestCase {
         XCTAssertEqual(object["example_id"] as? String, "devtype:devtype.route:\(attempt.ticket.recordID)")
     }
 
+    func testAskStaysOffWhenThePreferenceIsUnset() {
+        let defaults = UserDefaults.standard
+        let saved = defaults.object(forKey: LappiPreferences.askEnabledKey)
+        defer {
+            if let saved { defaults.set(saved, forKey: LappiPreferences.askEnabledKey) }
+            else { defaults.removeObject(forKey: LappiPreferences.askEnabledKey) }
+        }
+        defaults.removeObject(forKey: LappiPreferences.askEnabledKey)
+        XCTAssertFalse(LappiPreferences.isAskEnabled)
+        XCTAssertEqual(LappiPreferences.askEnabledKey, "devtype.lappi.askEnabled")
+    }
+
     func testAskingDisabledSendsNothing() async throws {
         let agent = try LappiFakeAgent.replying("off", #"{"status":"error","schema_version":1}"#)
         let path = agent.path
