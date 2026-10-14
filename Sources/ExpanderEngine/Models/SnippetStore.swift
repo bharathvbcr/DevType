@@ -165,7 +165,8 @@ public final class SnippetStore {
 
     /// Result of `forceOverwriteLibrary(with:)`: whether the replacement landed, and where the
     /// bytes it replaced were kept. `backupURL` is `nil` only when there was nothing to keep — no
-    /// file, or a zero-byte one; with anything else, a missing backup means nothing was written.
+    /// file, or one whose bytes were read and were empty. An unreadable file is linked first even
+    /// when it is zero length; a missing backup then means nothing was written.
     public struct OverwriteResult: Equatable {
         public let outcome: SaveOutcome
         public let backupURL: URL?

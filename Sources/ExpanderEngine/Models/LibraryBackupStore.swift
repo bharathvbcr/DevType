@@ -171,17 +171,18 @@ public final class LibraryBackupStore {
     /// is never renamed aside — a crash between that rename and the overwrite would leave no file
     /// at the library path.
     ///
-    /// - Returns: `nil` when there is nothing to preserve (no file, or a zero-byte one).
+    /// A file the caller could not read is linked even when it is zero length. Replacing its only
+    /// directory entry in place can leave the new bytes on the old inode, mode included, so a
+    /// relaunch still cannot read them. An empty `Data` the caller did read is not linked: there
+    /// is nothing to keep, and the following write is not stuck on an unreadable inode.
+    ///
+    /// - Returns: `nil` when there is no file, or the caller read it and it was empty.
     func preserve(fileAt url: URL, bytes: Data?, kind: Kind) throws -> Preserved? {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         if let bytes {
             guard !bytes.isEmpty else { return nil }
             let copy = try backUp(bytes, kind: kind)
             return Preserved(url: copy.url, created: copy.created)
-        }
-        if let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
-           size.intValue == 0 {
-            return nil
         }
 
         lock.lock()
