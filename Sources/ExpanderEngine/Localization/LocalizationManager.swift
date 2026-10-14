@@ -90,7 +90,23 @@ public final class LocalizationManager: ObservableObject {
     /// from the inject queue and the tap thread as well as from AppKit.
     private let resolutionLock = NSLock()
     private var _resolvedLanguage: AppLanguage?
+    /// Bumped on every invalidation so a candidate computed before the bump
+    /// cannot be published afterwards, even when `language` itself is unchanged.
+    private var resolutionEpoch: UInt64 = 0
     private var localeObserver: NSObjectProtocol?
+
+    /// Test seam. Nil in production. Runs on a cache miss after the lock is
+    /// released and a candidate has been computed, before publication.
+    /// `language.didSet` takes `resolutionLock`; calling this while the lock
+    /// is held deadlocks.
+    var resolutionMissHookForTesting: (() -> Void)?
+
+    /// Published cache, or nil when the next lookup must resolve again.
+    var cachedResolvedLanguageForTesting: AppLanguage? {
+        resolutionLock.lock()
+        defer { resolutionLock.unlock() }
+        return _resolvedLanguage
+    }
 
     public init(pseudolocalize: Bool = Pseudolocalizer.isEnabled()) {
         let stored = UserDefaults.standard.string(forKey: Self.deviceKey)
@@ -115,11 +131,13 @@ public final class LocalizationManager: ObservableObject {
         }
     }
 
-    /// Drops the cached resolution. Public so a test (or a caller that changed
-    /// `AppleLanguages` itself) can force the next lookup to re-resolve.
+    /// Drops the cached resolution and retires any in-flight candidate so it
+    /// cannot be published afterwards. Public so a test (or a caller that
+    /// changed `AppleLanguages` itself) can force the next lookup to re-resolve.
     public func invalidateResolvedLanguage() {
         resolutionLock.lock()
         _resolvedLanguage = nil
+        resolutionEpoch &+= 1
         resolutionLock.unlock()
     }
 
@@ -188,23 +206,50 @@ public final class LocalizationManager: ObservableObject {
             resolutionLock.unlock()
             return cached
         }
+        let captured = language
+        let capturedEpoch = resolutionEpoch
+        let missHook = resolutionMissHookForTesting
         resolutionLock.unlock()
 
-        // Resolved outside the lock: `effectiveLanguageCode()` reads `Locale.preferredLanguages`,
-        // and holding a lock across a Foundation call that can itself take locks invites a
-        // deadlock. A concurrent resolver computing the same answer is harmless.
-        let resolved = AppLanguage(rawValue: effectiveLanguageCode()) ?? .en
+        // Both the locale walk and the miss hook stay outside the lock.
+        // `Locale.preferredLanguages` can take Foundation locks, and the hook
+        // may set `language`, whose `didSet` calls `invalidateResolvedLanguage()`.
+        let resolved = AppLanguage(rawValue: code(for: captured)) ?? .en
+        missHook?()
 
         resolutionLock.lock()
-        _resolvedLanguage = resolved
+        if _resolvedLanguage == nil, language == captured, resolutionEpoch == capturedEpoch {
+            _resolvedLanguage = resolved
+            resolutionLock.unlock()
+            return resolved
+        }
+        if let published = _resolvedLanguage {
+            resolutionLock.unlock()
+            return published
+        }
+        let observed = language
         resolutionLock.unlock()
-        return resolved
+
+        // The candidate was computed for a language that has since changed,
+        // or an invalidation retired it. Do not store it. A concrete language
+        // needs no locale walk; `.system` is resolved again, still outside
+        // the lock, and left unpublished so the next caller resolves fresh.
+        if observed != .system {
+            return observed
+        }
+        return AppLanguage(rawValue: effectiveLanguageCode()) ?? .en
     }
 
     /// §6.2: table-driven. Walks the user's preferred languages in order and
     /// returns the first `AppLanguage` whose `localeMatchPrefixes` matches.
     public func effectiveLanguageCode() -> String {
-        guard language == .system else { return language.rawValue }
+        code(for: language)
+    }
+
+    /// Resolution for one setting. `.system` reads `Locale.preferredLanguages`
+    /// and must not be called while `resolutionLock` is held.
+    private func code(for setting: AppLanguage) -> String {
+        guard setting == .system else { return setting.rawValue }
         for preferred in Locale.preferredLanguages {
             let lowered = preferred.lowercased()
             for candidate in AppLanguage.concreteCases {
