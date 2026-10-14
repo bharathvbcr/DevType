@@ -65,7 +65,8 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
             )
         }
 
-        var cleaned = try Self.responseText(from: data, endpoint: endpoint)
+        let decoded = try Self.responseText(from: data, endpoint: endpoint)
+        var cleaned = decoded.text
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Strip enclosing quotes if model added them
@@ -85,7 +86,8 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
             edits: [],
             latencyMs: latency,
             promptVersion: CorrectionPromptBuilder.version,
-            refusalDetected: false
+            refusalDetected: false,
+            modelStopIsComplete: decoded.modelStopIsComplete
         )
     }
 
@@ -153,18 +155,40 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
         return urlRequest
     }
 
-    static func responseText(from data: Data, endpoint: URL) throws -> String {
+    static func responseText(from data: Data, endpoint: URL) throws -> DecodedCorrectionText {
         let route = try LocalCorrectionEndpointRoute.resolve(endpoint)
         switch route.api {
         case .ollamaChat:
             struct ChatResponse: Decodable {
-                struct Message: Decodable { let content: String }
-                let message: Message
+                struct Message: Decodable { let content: String? }
+                let message: Message?
+                let done: Bool?
+                let doneReason: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case message
+                    case done
+                    case doneReason = "done_reason"
+                }
             }
-            return try JSONDecoder().decode(ChatResponse.self, from: data).message.content
+            let parsed = try JSONDecoder().decode(ChatResponse.self, from: data)
+            let stop = CorrectionGenerationStop.classify(reason: parsed.doneReason, done: parsed.done)
+            return try DecodedCorrectionText.resolve(content: parsed.message?.content, stop: stop)
         case .ollamaGenerate:
-            struct GenerateResponse: Decodable { let response: String }
-            return try JSONDecoder().decode(GenerateResponse.self, from: data).response
+            struct GenerateResponse: Decodable {
+                let response: String?
+                let done: Bool?
+                let doneReason: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case response
+                    case done
+                    case doneReason = "done_reason"
+                }
+            }
+            let parsed = try JSONDecoder().decode(GenerateResponse.self, from: data)
+            let stop = CorrectionGenerationStop.classify(reason: parsed.doneReason, done: parsed.done)
+            return try DecodedCorrectionText.resolve(content: parsed.response, stop: stop)
         case .openAIChatCompletions:
             throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath
         }
