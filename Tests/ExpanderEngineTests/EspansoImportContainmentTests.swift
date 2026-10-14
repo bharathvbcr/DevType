@@ -184,6 +184,37 @@ final class EspansoImportContainmentTests: XCTestCase {
         XCTAssertEqual(result.skippedImage, 1)
     }
 
+    /// A leading backslash is a Windows absolute path. It must not be copied.
+    func testBackslashImagePathIsRejected() throws {
+        let root = try makeTempDir("imgslash")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let leakedPNG = outside.appendingPathComponent("leak.png")
+        try makePNGData().write(to: leakedPNG)
+
+        let config = root.appendingPathComponent("config", isDirectory: true)
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        try """
+        matches:
+          - trigger: ":win"
+            image_path: "\\\\outside\\\\leak.png"
+        """.write(to: config.appendingPathComponent("img.yml"), atomically: true, encoding: .utf8)
+
+        let storeDir = root.appendingPathComponent("store", isDirectory: true)
+        try FileManager.default.createDirectory(at: storeDir, withIntermediateDirectories: true)
+        let store = ImageAttachmentStore(directory: storeDir)
+
+        let result = try EspansoImporter.importFrom(config, imageStore: store)
+
+        XCTAssertEqual(result.imageCount, 0, "a backslash image_path must not be copied")
+        XCTAssertEqual(result.skippedImage, 1)
+        XCTAssertTrue(result.groups.flatMap(\.snippets).isEmpty)
+        let copied = try FileManager.default.contentsOfDirectory(atPath: storeDir.path)
+        XCTAssertTrue(copied.isEmpty, "nothing may land in the attachment store: \(copied)")
+    }
+
     // MARK: - Per-file parse resilience
 
     /// One malformed file reached via `imports:` used to abort the entire

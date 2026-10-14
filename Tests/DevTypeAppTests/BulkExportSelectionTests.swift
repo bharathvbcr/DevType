@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 import ExpanderEngine
 @testable import DevTypeAppCore
@@ -262,5 +263,101 @@ final class EspansoDirectoryExportTests: XCTestCase {
         )
         XCTAssertTrue(contents.contains("aaa"))
         XCTAssertFalse(contents.contains("bbb"), "unselected snippet leaked into the export")
+    }
+
+    private func makePNGData(seed: UInt8) throws -> Data {
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 4 + Int(seed),
+            pixelsHigh: 4,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+        guard let rep, let pixels = rep.bitmapData else {
+            throw NSError(domain: "tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "PNG buffer failed"])
+        }
+        let byteCount = rep.bytesPerRow * rep.pixelsHigh
+        for index in 0..<byteCount {
+            pixels[index] = seed
+        }
+        guard let png = rep.representation(using: .png, properties: [:]) else {
+            throw NSError(domain: "tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "PNG encode failed"])
+        }
+        return png
+    }
+
+    func testDirectoryExportPlacesImageBytesBesideTheMatchFile() throws {
+        let images = root.appendingPathComponent("Images", isDirectory: true)
+        let imageStore = ImageAttachmentStore(directory: images)
+        let png = try makePNGData(seed: 8)
+        let storedName = try imageStore.save(data: png, preferredExtension: "png")
+        let snippet = SnippetModel(title: ":logo", triggerKeyword: ":logo", replacementText: "", imagePath: storedName)
+        let target = root.appendingPathComponent("match", isDirectory: true)
+
+        try LibraryExporter.writeEspansoDirectory(
+            groups: [SnippetGroup(name: "Images", snippets: [snippet])],
+            to: target,
+            options: SnippetExporter.Options(imageStore: imageStore)
+        )
+
+        let files = try FileManager.default.contentsOfDirectory(atPath: target.path)
+        let yamlName = try XCTUnwrap(files.first { $0.hasSuffix(".yml") })
+        let yaml = try String(contentsOf: target.appendingPathComponent(yamlName), encoding: .utf8)
+        XCTAssertTrue(yaml.contains("image_path: images/"))
+        XCTAssertFalse(yaml.contains(images.path))
+        XCTAssertFalse(yaml.contains("\\"))
+        let imageURL = target.appendingPathComponent("images").appendingPathComponent(storedName)
+        XCTAssertEqual(try Data(contentsOf: imageURL), png)
+
+        let importedStore = ImageAttachmentStore(directory: root.appendingPathComponent("imported", isDirectory: true))
+        let result = try EspansoImporter.importFrom(target, imageStore: importedStore)
+        XCTAssertEqual(result.imageCount, 1)
+        let imported = try XCTUnwrap(result.groups.flatMap(\.snippets).first)
+        XCTAssertEqual(try Data(contentsOf: importedStore.url(forImagePath: imported.imagePath)), png)
+
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(".devtype-export-") }
+        XCTAssertTrue(leftovers.isEmpty, "staging directory leaked: \(leftovers)")
+    }
+
+    func testImageCopyFailureLeavesDestinationUntouchedAndRemovesStaging() throws {
+        let images = root.appendingPathComponent("Images", isDirectory: true)
+        let imageStore = ImageAttachmentStore(directory: images)
+        let first = try makePNGData(seed: 1)
+        let second = try makePNGData(seed: 2)
+        try FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
+        try first.write(to: images.appendingPathComponent("one.png"), options: .atomic)
+        try second.write(to: images.appendingPathComponent("two.png"), options: .atomic)
+        let group = SnippetGroup(name: "Pics", snippets: [
+            SnippetModel(title: ":one", triggerKeyword: ":one", replacementText: "", imagePath: "one.png"),
+            SnippetModel(title: ":two", triggerKeyword: ":two", replacementText: "", imagePath: "two.png"),
+        ])
+        let target = root.appendingPathComponent("match", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let sentinel = target.appendingPathComponent("sentinel.txt")
+        try Data("keep".utf8).write(to: sentinel)
+
+        var copies = 0
+        XCTAssertThrowsError(try LibraryExporter.writeEspansoDirectory(
+            groups: [group],
+            to: target,
+            options: SnippetExporter.Options(imageStore: imageStore),
+            writingImage: { url, data in
+                copies += 1
+                if copies > 1 { throw CocoaError(.fileWriteOutOfSpace) }
+                try data.write(to: url, options: .atomic)
+            }
+        ))
+        XCTAssertEqual(copies, 2)
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("images").path))
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(".devtype-export-") }
+        XCTAssertTrue(leftovers.isEmpty, "staging directory leaked: \(leftovers)")
     }
 }
