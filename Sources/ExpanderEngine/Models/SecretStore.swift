@@ -1225,7 +1225,8 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// destroy the only surviving credential copy. The main thread never waits: `try()` is the
     /// only probe it may use, and a busy lock refuses the synchronous call. Contended waits run
     /// on `archiveWaitQueue` until `automaticConsolidationClock()` passes the five-second
-    /// deadline captured before the hop. `transactionLock` is not held across that hop.
+    /// deadline captured before the hop, or until that clock does not advance across a pause.
+    /// A stalled clock never reaches the deadline. `transactionLock` is not held across that hop.
     private func withArchiveLock<T>(_ body: () -> T) -> T? {
         if onArchiveWaitQueue() {
             // Already on the wait queue — the thread that owns the lease, or the waiter that
@@ -1313,7 +1314,12 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         if transactionLock.try() { return true }
         guard allowWait else { return false }
         while automaticConsolidationClock() < deadline {
-            pauseOffMain(0.01)
+            // A clock that does not move will never pass `deadline`. One stall refuses;
+            // the body must not run without the lease.
+            guard pausedClockAdvanced(0.01) else {
+                diagnostics.note("archive lock timed out — transaction refused")
+                return false
+            }
             if transactionLock.lock(before: Date(timeIntervalSinceNow: 0.01)) { return true }
         }
         if transactionLock.try() { return true }
@@ -1381,7 +1387,12 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
                 }
                 return .busy
             }
-            pauseOffMain(0.01)
+            // Same stall rule as the in-process lease: one non-advancing sample refuses.
+            guard pausedClockAdvanced(0.01) else {
+                if close(fd) != 0 { diagnostics.note("archive lock close failed") }
+                diagnostics.note("archive lock timed out — transaction refused")
+                return .refused
+            }
         }
         return .acquired(fd)
     }
@@ -1393,6 +1404,14 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     private func releaseArchiveFileLock(_ fd: Int32) {
         if flock(fd, LOCK_UN) != 0 { diagnostics.note("archive unlock failed") }
         if close(fd) != 0 { diagnostics.note("archive lock close failed") }
+    }
+
+    /// False when the injected clock does not move forward across the pause. Callers refuse
+    /// the transaction: a stalled clock leaves `clock < deadline` true for the whole wait.
+    private func pausedClockAdvanced(_ seconds: TimeInterval) -> Bool {
+        let previous = automaticConsolidationClock()
+        pauseOffMain(seconds)
+        return automaticConsolidationClock() > previous
     }
 
     /// Short pause for a contended `flock` or the in-process lease. Never callable on main.
