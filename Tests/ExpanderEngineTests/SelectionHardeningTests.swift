@@ -364,6 +364,255 @@ final class SelectionHardeningTests: XCTestCase {
         XCTAssertEqual(outcome.failure, .accessibilityUntrusted)
     }
 
+    /// The pure ceiling. Exactly 200_000 Characters is kept; the body is not rewritten.
+    func testBoundSelectionKeepsExactlyTheCharacterLimit() {
+        let atLimit = String(repeating: "y", count: SelectionReader.maxSelectionCharacters)
+        let bound = SelectionReader.boundSelectionBody(atLimit)
+        XCTAssertEqual(bound.text, atLimit)
+        XCTAssertNil(bound.oversizedCharacterCount)
+        let read = SelectionReader.ElementRead(text: bound.text, timedOut: false, via: .textMarker)
+        XCTAssertEqual(read.text?.count, SelectionReader.maxSelectionCharacters)
+        XCTAssertNil(read.oversizedCharacterCount)
+    }
+
+    /// 200_001 non-blank Characters is too large, and neither the read nor the candidate keeps the body.
+    func testOversizedNonBlankBodyIsReleasedAndRefused() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let huge = String(repeating: "x", count: count)
+        let bound = SelectionReader.boundSelectionBody(huge)
+        XCTAssertNil(bound.text)
+        XCTAssertEqual(bound.oversizedCharacterCount, count)
+        XCTAssertNotEqual(bound.text?.count, SelectionReader.maxSelectionCharacters)
+
+        let read = SelectionReader.ElementRead(
+            text: huge,
+            timedOut: false,
+            via: .textMarker,
+            oversizedCharacterCount: count
+        )
+        XCTAssertNil(read.text)
+        XCTAssertEqual(read.oversizedCharacterCount, count)
+
+        let candidate = SelectionReader.Candidate(
+            text: huge,
+            isOwnProcess: false,
+            bundleID: "com.apple.TextEdit",
+            via: .textMarker,
+            oversizedCharacterCount: count
+        )
+        XCTAssertNil(candidate.text)
+        XCTAssertEqual(candidate.oversizedCharacterCount, count)
+
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [candidate],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.failure, .selectionTooLarge(count))
+        XCTAssertNil(outcome.result?.text)
+    }
+
+    /// A count with no body still wins over a later smaller candidate. Do not allocate the body.
+    func testOversizedCountOutranksALaterSmallerCandidate() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(
+                    text: nil,
+                    isOwnProcess: false,
+                    bundleID: "com.apple.TextEdit",
+                    via: .textMarker,
+                    oversizedCharacterCount: count
+                ),
+                .init(text: "short", isOwnProcess: false, bundleID: "com.apple.TextEdit", via: .selectedText),
+            ],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.failure, .selectionTooLarge(count))
+        XCTAssertNil(outcome.result)
+        XCTAssertNotEqual(outcome.result?.text, "short")
+    }
+
+    /// 200_001 spaces are blank, so they are skipped rather than reported as too large.
+    func testOversizedBlankSelectionIsNotTooLarge() {
+        let spaces = String(repeating: " ", count: SelectionReader.maxSelectionCharacters + 1)
+        let bound = SelectionReader.boundSelectionBody(spaces)
+        XCTAssertNil(bound.text)
+        XCTAssertNil(bound.oversizedCharacterCount)
+
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(text: spaces, isOwnProcess: false, bundleID: "com.apple.TextEdit"),
+                .init(text: "short", isOwnProcess: false, bundleID: "com.apple.TextEdit"),
+            ],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.result?.text, "short")
+        XCTAssertNotEqual(outcome.failure, .selectionTooLarge(spaces.count))
+    }
+
+    /// The ceiling is Characters, not UTF-16. One emoji is one Character and two UTF-16 units.
+    func testSelectionCeilingCountsEmojiAsCharacters() {
+        let atLimit = String(repeating: "😀", count: SelectionReader.maxSelectionCharacters)
+        XCTAssertEqual(atLimit.count, SelectionReader.maxSelectionCharacters)
+        XCTAssertGreaterThan((atLimit as NSString).length, SelectionReader.maxSelectionCharacters)
+        let kept = SelectionReader.boundSelectionBody(atLimit)
+        XCTAssertEqual(kept.text?.count, SelectionReader.maxSelectionCharacters)
+        XCTAssertNil(kept.oversizedCharacterCount)
+        let accepted = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [.init(text: atLimit, isOwnProcess: false, bundleID: "com.apple.TextEdit")],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(accepted.result?.text.count, SelectionReader.maxSelectionCharacters)
+
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let tooMany = String(repeating: "😀", count: count)
+        XCTAssertEqual(tooMany.count, count)
+        XCTAssertGreaterThan((tooMany as NSString).length, count)
+        let bound = SelectionReader.boundSelectionBody(tooMany)
+        XCTAssertNil(bound.text)
+        XCTAssertEqual(bound.oversizedCharacterCount, count)
+        let refused = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(
+                    text: nil,
+                    isOwnProcess: false,
+                    bundleID: "com.apple.TextEdit",
+                    oversizedCharacterCount: count
+                ),
+            ],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(refused.failure, .selectionTooLarge(count))
+    }
+
+    /// `String.count` includes NUL. A C-string length would stop at the first zero.
+    func testEmbeddedNULDoesNotTruncateTheCharacterCount() {
+        XCTAssertEqual("a\0b".count, 3)
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let over = "\0" + String(repeating: "q", count: SelectionReader.maxSelectionCharacters)
+        XCTAssertEqual(over.count, count)
+        let bound = SelectionReader.boundSelectionBody(over)
+        XCTAssertNil(bound.text)
+        XCTAssertEqual(bound.oversizedCharacterCount, count)
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(
+                    text: nil,
+                    isOwnProcess: false,
+                    oversizedCharacterCount: bound.oversizedCharacterCount
+                ),
+            ],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.failure, .selectionTooLarge(count))
+    }
+
+    /// One over-cap piece is too large. A later smaller piece is not read and is not joined.
+    func testGatherOfOneOversizedPieceDoesNotJoinALaterPiece() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let huge = String(repeating: "x", count: count)
+        var laterReads = 0
+        let gathered = SelectionReader.gatherSelectionPieces([huge, "short"], deadline: nil) { piece in
+            if piece == "short" {
+                laterReads += 1
+                XCTFail("A later piece must not be read after an oversized one")
+            }
+            return piece
+        }
+        XCTAssertNil(gathered.text)
+        XCTAssertEqual(gathered.oversizedCharacterCount, count)
+        XCTAssertEqual(laterReads, 0)
+        XCTAssertFalse(gathered.text?.contains("short") ?? false)
+    }
+
+    /// A blank over-cap piece is unavailable, not too large, and is not kept.
+    func testGatherOfBlankOversizedPieceIsUnavailable() {
+        let spaces = String(repeating: " ", count: SelectionReader.maxSelectionCharacters + 1)
+        var laterReads = 0
+        let gathered = SelectionReader.gatherSelectionPieces([spaces, "short"], deadline: nil) { piece in
+            if piece == "short" { laterReads += 1 }
+            return piece
+        }
+        XCTAssertNil(gathered.text)
+        XCTAssertNil(gathered.oversizedCharacterCount)
+        XCTAssertEqual(laterReads, 0)
+    }
+
+    /// An own-process over-cap count is the user's selection, not an empty field.
+    func testOwnProcessOversizedCountIsTooLarge() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.devtype.app",
+            frontmostIsOwnProcess: true,
+            focusAvailable: true,
+            candidates: [
+                .init(
+                    text: nil,
+                    isOwnProcess: true,
+                    bundleID: "com.devtype.app",
+                    oversizedCharacterCount: count
+                ),
+            ],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.failure, .selectionTooLarge(count))
+        XCTAssertNotEqual(outcome.failure, .emptySelection)
+        XCTAssertNotEqual(outcome.failure, .noSourceSelection)
+    }
+
     /// The value-slice rung has to pull the element's whole value across AX IPC to cut the
     /// selection out of it. The range guard bounds the selection; only this bounds the document.
     func testDocumentSliceCeilingIsAboveTheSelectionCeiling() {

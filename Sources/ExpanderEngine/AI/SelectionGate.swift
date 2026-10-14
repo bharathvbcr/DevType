@@ -176,17 +176,21 @@ public extension SelectionReader {
         public let bundleID: String?
         /// Which AX rung answered for this element.
         public let via: ReadVia
+        /// Set only when a non-blank body was over the character cap and was not retained.
+        public let oversizedCharacterCount: Int?
 
         public init(
             text: String?,
             isOwnProcess: Bool,
             bundleID: String? = nil,
-            via: ReadVia = .unknown
+            via: ReadVia = .unknown,
+            oversizedCharacterCount: Int? = nil
         ) {
-            self.text = text
+            self.text = oversizedCharacterCount == nil ? text : nil
             self.isOwnProcess = isOwnProcess
             self.bundleID = bundleID
             self.via = via
+            self.oversizedCharacterCount = oversizedCharacterCount
         }
     }
 
@@ -246,24 +250,32 @@ public extension SelectionReader {
         }
 
         let usableLive = candidates.first { candidate in
-            guard !candidate.isOwnProcess, !isBlankSelection(candidate.text) else { return false }
+            guard !candidate.isOwnProcess else { return false }
+            guard candidate.oversizedCharacterCount != nil || !isBlankSelection(candidate.text) else {
+                return false
+            }
             // The mute list is per app, not per frontmost app.
             if let bundleID = candidate.bundleID, !bundleID.isEmpty, isMuted(bundleID) {
                 return false
             }
             return true
         }
-        if let usableLive, let text = usableLive.text {
-            let bundleID = usableLive.bundleID ?? frontmostBundleID
-            return accept(
-                Result(
-                    text: text,
-                    bundleID: bundleID,
-                    isWeakAX: bundleID.map(isWeakAX) ?? false,
-                    source: .live,
-                    via: usableLive.via
+        if let usableLive {
+            if let count = usableLive.oversizedCharacterCount {
+                return .failure(.selectionTooLarge(count))
+            }
+            if let text = usableLive.text {
+                let bundleID = usableLive.bundleID ?? frontmostBundleID
+                return accept(
+                    Result(
+                        text: text,
+                        bundleID: bundleID,
+                        isWeakAX: bundleID.map(isWeakAX) ?? false,
+                        source: .live,
+                        via: usableLive.via
+                    )
                 )
-            )
+            }
         }
 
         if let cached,
@@ -289,17 +301,23 @@ public extension SelectionReader {
             )
         }
 
-        if let own = candidates.first(where: { $0.isOwnProcess && !isBlankSelection($0.text) }),
-           let text = own.text {
-            return accept(
-                Result(
-                    text: text,
-                    bundleID: own.bundleID ?? frontmostBundleID,
-                    isWeakAX: false,
-                    source: .live,
-                    via: own.via
+        if let own = candidates.first(where: {
+            $0.isOwnProcess && ($0.oversizedCharacterCount != nil || !isBlankSelection($0.text))
+        }) {
+            if let count = own.oversizedCharacterCount {
+                return .failure(.selectionTooLarge(count))
+            }
+            if let text = own.text {
+                return accept(
+                    Result(
+                        text: text,
+                        bundleID: own.bundleID ?? frontmostBundleID,
+                        isWeakAX: false,
+                        source: .live,
+                        via: own.via
+                    )
                 )
-            )
+            }
         }
 
         // Name the situation the user is actually in. With DevType frontmost and nothing captured,
