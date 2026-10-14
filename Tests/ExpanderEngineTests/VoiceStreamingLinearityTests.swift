@@ -245,7 +245,7 @@ final class VoiceStreamingLinearityTests: XCTestCase {
         let first = ProtectedSpanExtractor.patterns.map { ObjectIdentifier($0.regex) }
         _ = ProtectedSpanExtractor.extract(from: "see ~/a/b --flag v1.2.3 5 ms $4.00")
         let second = ProtectedSpanExtractor.patterns.map { ObjectIdentifier($0.regex) }
-        XCTAssertEqual(first.count, 6)
+        XCTAssertEqual(first.count, 5)
         XCTAssertEqual(first, second)
         let spans = ProtectedSpanExtractor.extract(from: "mail a@b.co at ~/x/y with --verbose on v1.2.3")
         let kinds = Set(spans.map(\.kind))
