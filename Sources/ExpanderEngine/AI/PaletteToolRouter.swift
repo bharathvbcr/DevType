@@ -56,6 +56,43 @@ public enum PaletteToolRouter {
 
     public typealias RoutingEngine = @Sendable (String) async throws -> String
 
+    /// A tool recognized the call but will not invent a result. `route` drops the throw.
+    public enum Refusal: Error, Equatable, Sendable {
+        case unrecognizedDate
+        case unknownOperation
+    }
+
+    /// Formatted date when `parseTypedQuery` or `parseRelativeDayQuery` accepts `phrase`.
+    ///
+    /// `format` is the tool's optional preset and is not applied: a hit keeps the format the
+    /// parser already chose, and a miss is nil rather than today in that preset.
+    public static func resolveDatePhrase(phrase: String, format _: String?) -> String? {
+        let phrase = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let typed = CommandPaletteCatalog.parseTypedQuery(phrase) {
+            switch typed {
+            case .relativeDays(let days, let fmt, _):
+                return CommandPaletteCatalog.resolveDate(.offsetDays(days, format: fmt))
+            case .relativeOffset(let offset, let fmt, _):
+                return CommandPaletteCatalog.resolveDate(.offset(offset, format: fmt))
+            default:
+                break
+            }
+        }
+        if let relative = CommandPaletteCatalog.parseRelativeDayQuery(phrase) {
+            return CommandPaletteCatalog.resolveDate(
+                .offsetDays(relative.days, format: relative.format)
+            )
+        }
+        return nil
+    }
+
+    /// The text operation `operation` names, applied to `text`. An unknown id is nil —
+    /// never `text` echoed back.
+    public static func runMacro(operation: String, text: String) -> String? {
+        guard let op = PaletteTextOp.resolved(from: operation) else { return nil }
+        return PaletteTextOps.apply(op, to: text)
+    }
+
     /// Whether this query is worth a model round trip.
     public static func shouldAttemptRouting(query: String) -> Bool {
         guard AIPreferences.isEnabled, AIPreferences.isSemanticRoutingEnabled else { return false }
@@ -138,24 +175,13 @@ public enum PaletteToolRouter {
 
         public func call(arguments: Arguments) async throws -> String {
             onCall?(name)
-            let phrase = arguments.phrase.trimmingCharacters(in: .whitespacesAndNewlines)
-            let format = (arguments.format?.isEmpty == false ? arguments.format! : "medium")
-            if let typed = CommandPaletteCatalog.parseTypedQuery(phrase) {
-                switch typed {
-                case .relativeDays(let days, let fmt, _):
-                    return CommandPaletteCatalog.resolveDate(.offsetDays(days, format: fmt))
-                case .relativeOffset(let offset, let fmt, _):
-                    return CommandPaletteCatalog.resolveDate(.offset(offset, format: fmt))
-                default:
-                    break
-                }
+            guard let resolved = PaletteToolRouter.resolveDatePhrase(
+                phrase: arguments.phrase,
+                format: arguments.format
+            ) else {
+                throw PaletteToolRouter.Refusal.unrecognizedDate
             }
-            if let relative = CommandPaletteCatalog.parseRelativeDayQuery(phrase) {
-                return CommandPaletteCatalog.resolveDate(
-                    .offsetDays(relative.days, format: relative.format)
-                )
-            }
-            return CommandPaletteCatalog.resolveDate(.offsetDays(0, format: format))
+            return resolved
         }
     }
 
@@ -180,12 +206,13 @@ public enum PaletteToolRouter {
 
         public func call(arguments: Arguments) async throws -> String {
             onCall?(name)
-            let key = arguments.operation.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let op = PaletteTextOp(rawValue: key)
-                    ?? PaletteTextOp(rawValue: key.lowercased()) else {
-                return arguments.text
+            guard let transformed = PaletteToolRouter.runMacro(
+                operation: arguments.operation,
+                text: arguments.text
+            ) else {
+                throw PaletteToolRouter.Refusal.unknownOperation
             }
-            return PaletteTextOps.apply(op, to: arguments.text)
+            return transformed
         }
     }
 

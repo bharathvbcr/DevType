@@ -28,6 +28,37 @@ public enum PaletteTextOp: String, Sendable, Equatable, CaseIterable {
     case jsonCompact
     case sha256
     case md5
+
+    /// Model-supplied id, trimmed and case-insensitive, drawn only from this enum.
+    /// English case-names (`uppercase`) alias the short raw values. Anything else is nil.
+    static func resolved(from id: String) -> PaletteTextOp? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let direct = PaletteTextOp(rawValue: trimmed) {
+            return direct
+        }
+        // Longer than any raw value or alias. Reject before folding a hostile payload.
+        guard !trimmed.isEmpty, trimmed.count <= 64 else { return nil }
+        let folded = foldedOperationID(trimmed)
+        guard !folded.isEmpty else { return nil }
+        if let match = allCases.first(where: { foldedOperationID($0.rawValue) == folded }) {
+            return match
+        }
+        switch folded {
+        case "uppercase": return .upper
+        case "lowercase": return .lower
+        case "titlecase": return .title
+        case "sentencecase": return .sentence
+        case "snakecase": return .snake
+        case "kebabcase": return .kebab
+        case "camelcase": return .camel
+        case "pascalcase": return .pascal
+        default: return nil
+        }
+    }
+
+    private static func foldedOperationID(_ raw: String) -> String {
+        String(raw.lowercased().filter { $0.isLetter || $0.isNumber })
+    }
 }
 
 public enum PaletteGenerateOp: String, Sendable, Equatable, CaseIterable {

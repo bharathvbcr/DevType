@@ -309,6 +309,230 @@ final class PaletteToolRoutingTests: XCTestCase {
         let after = await PaletteToolRouter.route(query: "the date next friday") { _ in "2026-09-04" }
         XCTAssertNotNil(after, "A failed route must not hold the latch.")
     }
+
+    // MARK: - False success
+
+    /// `bool(forKey:)` is false when the key was never written. Routing must stay off
+    /// in that state even if the master AI switch is on. The production default is unchanged.
+    func testSemanticRoutingIsOffWhenTheDefaultsKeyIsAbsent() {
+        let key = AIPreferences.semanticRoutingEnabledKey
+        let suiteName = "devtype.tests.palette-routing-absent-key"
+        let suite = UserDefaults(suiteName: suiteName)
+        XCTAssertNotNil(suite)
+        suite?.removePersistentDomain(forName: suiteName)
+        XCTAssertNil(suite?.object(forKey: key))
+        XCTAssertFalse(suite?.bool(forKey: key) ?? true)
+
+        let previous = UserDefaults.standard.object(forKey: key)
+        UserDefaults.standard.removeObject(forKey: key)
+        defer {
+            if let previous {
+                UserDefaults.standard.set(previous, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        XCTAssertNil(UserDefaults.standard.object(forKey: key))
+        XCTAssertFalse(UserDefaults.standard.bool(forKey: key))
+        XCTAssertFalse(AIPreferences.isSemanticRoutingEnabled)
+        AIPreferences.isEnabled = true
+        XCTAssertFalse(
+            PaletteToolRouter.shouldAttemptRouting(query: "date three weeks out"),
+            "Absent semantic-routing key must not route, even when AI is enabled."
+        )
+    }
+
+    func testExtractedDateAndMacroDecisionsFailClosed() {
+        let phrases = [
+            "",
+            "   \n\t",
+            "today",
+            "..",
+            "🎉",
+            "not-a-date",
+            "日期",
+            String(repeating: "日", count: 80),
+        ]
+        for format in ["medium", "iso"] {
+            let today = CommandPaletteCatalog.resolveDate(.offsetDays(0, format: format))
+            for phrase in phrases {
+                XCTAssertNil(CommandPaletteCatalog.parseTypedQuery(phrase), "parser fixture \(phrase.count)")
+                XCTAssertNil(CommandPaletteCatalog.parseRelativeDayQuery(phrase), "parser fixture \(phrase.count)")
+                let resolved = PaletteToolRouter.resolveDatePhrase(phrase: phrase, format: format)
+                XCTAssertNotEqual(resolved, today, "miss must not be today (\(phrase.count) chars, \(format))")
+                XCTAssertNil(resolved, "miss must not be a row (\(phrase.count) chars, \(format))")
+            }
+        }
+        for phrase in ["+1d", "  +3w  ", "next friday"] {
+            let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parsed = CommandPaletteCatalog.parseRelativeDayQuery(trimmed)
+            XCTAssertNotNil(parsed, phrase)
+            guard let parsed else { continue }
+            let expected = CommandPaletteCatalog.resolveDate(
+                .offsetDays(parsed.days, format: parsed.format)
+            )
+            XCTAssertEqual(
+                PaletteToolRouter.resolveDatePhrase(phrase: phrase, format: "iso"),
+                expected,
+                phrase
+            )
+        }
+
+        XCTAssertEqual(
+            PaletteToolRouter.runMacro(operation: "uppercase", text: "ab"),
+            PaletteTextOps.apply(.upper, to: "ab")
+        )
+        XCTAssertEqual(PaletteToolRouter.runMacro(operation: "  UpperCase  ", text: "ab"), "AB")
+        XCTAssertEqual(
+            PaletteToolRouter.runMacro(operation: "lowercase", text: "AB"),
+            PaletteTextOps.apply(.lower, to: "AB")
+        )
+        XCTAssertEqual(PaletteToolRouter.runMacro(operation: "upper", text: "ab"), "AB")
+        for op in PaletteTextOp.allCases {
+            XCTAssertEqual(PaletteTextOp.resolved(from: op.rawValue), op)
+            XCTAssertEqual(PaletteTextOp.resolved(from: " \(op.rawValue.uppercased()) "), op)
+        }
+        let hostile = ["", "   ", "..", "no-such-op", "lorem", "uuid", "password", "🎉"]
+        for operation in hostile {
+            XCTAssertNil(PaletteTextOp.resolved(from: operation), operation)
+            XCTAssertNil(PaletteToolRouter.runMacro(operation: operation, text: "ab"), operation)
+            XCTAssertNotEqual(
+                PaletteToolRouter.runMacro(operation: operation, text: "ab"),
+                "ab",
+                operation
+            )
+        }
+        let longID = String(repeating: "op", count: 4_000)
+        XCTAssertNil(PaletteToolRouter.runMacro(operation: longID, text: "ab"))
+        XCTAssertNotEqual(PaletteToolRouter.runMacro(operation: longID, text: "ab"), "ab")
+    }
+
+    func testAPhraseNeitherParserAcceptsIsNotToday() async throws {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models tool API requires macOS 26")
+        }
+        let tool = PaletteToolRouter.ResolveDateTool()
+        let phrases = [
+            "",
+            "   \n\t",
+            "today",
+            "..",
+            "🎉",
+            "not-a-date",
+            "日期",
+            String(repeating: "日", count: 80),
+        ]
+        for format in ["medium", "iso"] {
+            let today = CommandPaletteCatalog.resolveDate(.offsetDays(0, format: format))
+            for phrase in phrases {
+                XCTAssertNil(CommandPaletteCatalog.parseTypedQuery(phrase))
+                XCTAssertNil(CommandPaletteCatalog.parseRelativeDayQuery(phrase))
+                let result = try? await tool.call(arguments: .init(phrase: phrase, format: format))
+                XCTAssertEqual(result, PaletteToolRouter.resolveDatePhrase(phrase: phrase, format: format))
+                XCTAssertNotEqual(result, today, "miss must not be today (\(phrase.count) chars, \(format))")
+                XCTAssertNil(result, "A parser miss must not become a row (\(phrase.count) chars, \(format))")
+            }
+        }
+        #else
+        throw XCTSkip("Foundation Models SDK unavailable")
+        #endif
+    }
+
+    func testAPhraseTheParsersAcceptMatchesTheCatalogDate() async throws {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models tool API requires macOS 26")
+        }
+        let tool = PaletteToolRouter.ResolveDateTool()
+        for phrase in ["+1d", "  +3w  ", "next friday"] {
+            let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parsed = try XCTUnwrap(
+                CommandPaletteCatalog.parseRelativeDayQuery(trimmed),
+                "fixture must be a phrase the parser accepts: \(phrase)"
+            )
+            let expected = CommandPaletteCatalog.resolveDate(
+                .offsetDays(parsed.days, format: parsed.format)
+            )
+            let result = try await tool.call(arguments: .init(phrase: phrase, format: "iso"))
+            XCTAssertEqual(result, PaletteToolRouter.resolveDatePhrase(phrase: phrase, format: "iso"))
+            XCTAssertEqual(result, expected, phrase)
+            XCTAssertNotEqual(
+                result,
+                CommandPaletteCatalog.resolveDate(.offsetDays(0, format: "iso")),
+                "A hit must not be rewritten as today in the tool's format."
+            )
+        }
+        #else
+        throw XCTSkip("Foundation Models SDK unavailable")
+        #endif
+    }
+
+    func testUppercaseMatchesUpperAndUnknownIdsDoNotEcho() async throws {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models tool API requires macOS 26")
+        }
+        let tool = PaletteToolRouter.RunMacroTool()
+        let upper = try await tool.call(arguments: .init(operation: "uppercase", text: "ab"))
+        XCTAssertEqual(upper, PaletteToolRouter.runMacro(operation: "uppercase", text: "ab"))
+        XCTAssertEqual(upper, PaletteTextOps.apply(.upper, to: "ab"))
+        XCTAssertEqual(upper, "AB")
+        XCTAssertNotEqual(upper, "ab")
+
+        let mixed = try await tool.call(arguments: .init(operation: "  UpperCase  ", text: "ab"))
+        XCTAssertEqual(mixed, "AB")
+        let raw = try await tool.call(arguments: .init(operation: "upper", text: "ab"))
+        XCTAssertEqual(raw, PaletteTextOps.apply(.upper, to: "ab"))
+        let lower = try await tool.call(arguments: .init(operation: "lowercase", text: "AB"))
+        XCTAssertEqual(lower, PaletteTextOps.apply(.lower, to: "AB"))
+        XCTAssertEqual(lower, "ab")
+
+        let hostile = [
+            "",
+            "   ",
+            "..",
+            "no-such-op",
+            "lorem",
+            "🎉",
+            String(repeating: "op", count: 4_000),
+        ]
+        for operation in hostile {
+            let result = try? await tool.call(arguments: .init(operation: operation, text: "ab"))
+            XCTAssertEqual(result, PaletteToolRouter.runMacro(operation: operation, text: "ab"))
+            XCTAssertNotEqual(result, "ab", "unknown id must not echo input (\(operation.count) chars)")
+            XCTAssertNil(result, "unknown id \(operation.count) chars")
+        }
+        #else
+        throw XCTSkip("Foundation Models SDK unavailable")
+        #endif
+    }
+
+    func testEachToolReportsItsOwnNameBeforeReturning() async throws {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models tool API requires macOS 26")
+        }
+        let names = Sendable_List()
+        let date = PaletteToolRouter.ResolveDateTool(onCall: { names.append($0) })
+        _ = try? await date.call(arguments: .init(phrase: "today", format: "medium"))
+        XCTAssertEqual(names.values, ["resolveDate"])
+
+        let macro = PaletteToolRouter.RunMacroTool(onCall: { names.append($0) })
+        _ = try? await macro.call(arguments: .init(operation: "no-such-op", text: "ab"))
+        XCTAssertEqual(names.values, ["resolveDate", "runMacro"])
+
+        let snippets = PaletteToolRouter.FindSnippetTool(
+            groupsProvider: { [] },
+            onCall: { names.append($0) }
+        )
+        let found = try await snippets.call(arguments: .init(query: "anything"))
+        XCTAssertEqual(found, "")
+        XCTAssertEqual(names.values, ["resolveDate", "runMacro", "findSnippet"])
+        #else
+        throw XCTSkip("Foundation Models SDK unavailable")
+        #endif
+    }
 }
 
 /// Minimal thread-safe boxes so the async tests above can observe engine calls.
@@ -317,6 +541,13 @@ final class Sendable_Box: @unchecked Sendable {
     private var flag = false
     func set() { lock.lock(); flag = true; lock.unlock() }
     var value: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+}
+
+final class Sendable_List: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String] = []
+    func append(_ item: String) { lock.lock(); items.append(item); lock.unlock() }
+    var values: [String] { lock.lock(); defer { lock.unlock() }; return items }
 }
 
 final class Sendable_Counter: @unchecked Sendable {
