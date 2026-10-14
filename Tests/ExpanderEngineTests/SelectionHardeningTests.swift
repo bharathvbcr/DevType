@@ -613,6 +613,368 @@ final class SelectionHardeningTests: XCTestCase {
         XCTAssertNotEqual(outcome.failure, .noSourceSelection)
     }
 
+    /// A foreign over-cap count is the live selection. A fresh cache for that same app must not
+    /// replace it, and the refused body must not have been retained on the candidate.
+    func testForeignOversizedCountOutranksAFreshCache() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let bundle = "com.apple.TextEdit"
+        let candidate = SelectionReader.Candidate(
+            text: nil,
+            isOwnProcess: false,
+            bundleID: bundle,
+            via: .textMarker,
+            oversizedCharacterCount: count
+        )
+        XCTAssertNil(candidate.text, "The count is the body. Nothing else may be allocated.")
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: bundle,
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [candidate],
+            cached: SelectionMonitor.CachedSelection(
+                text: "cached-short",
+                bundleID: bundle,
+                changeToken: 1,
+                timestamp: now
+            ),
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.failure, .selectionTooLarge(count))
+        XCTAssertNotEqual(outcome.result?.text, "cached-short")
+        XCTAssertNil(outcome.result)
+    }
+
+    /// Own-process is rule 4. A fresh cache for the app behind the panel still wins, even when
+    /// DevType's own field reports an over-cap count.
+    func testOwnProcessOversizedCountDoesNotOutrankAFreshCache() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.devtype.app",
+            frontmostIsOwnProcess: true,
+            focusAvailable: true,
+            candidates: [
+                .init(
+                    text: nil,
+                    isOwnProcess: true,
+                    bundleID: "com.devtype.app",
+                    oversizedCharacterCount: count
+                ),
+            ],
+            cached: SelectionMonitor.CachedSelection(
+                text: "cached-short",
+                bundleID: "com.apple.Safari",
+                changeToken: 4,
+                timestamp: now
+            ),
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.result?.text, "cached-short")
+        XCTAssertEqual(outcome.result?.source, .cached)
+        XCTAssertEqual(outcome.result?.via, .cache)
+        XCTAssertNil(outcome.failure)
+        XCTAssertNotEqual(outcome.failure, .selectionTooLarge(count))
+    }
+
+    /// Hard blocks are decided before any count is read. A count with no body must not become
+    /// `selectionTooLarge` while Accessibility, Secure Input, or a frontmost mute already applies.
+    func testHardBlocksOutrankAnOversizedCountWithNoBody() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let bundle = "com.apple.TextEdit"
+        let counted = SelectionReader.Candidate(
+            text: nil,
+            isOwnProcess: false,
+            bundleID: bundle,
+            oversizedCharacterCount: count
+        )
+        XCTAssertNil(counted.text)
+
+        let untrusted = SelectionReader.evaluate(
+            axTrusted: false,
+            secureInputActive: false,
+            frontmostBundleID: bundle,
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [counted],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(untrusted.failure, .accessibilityUntrusted)
+        XCTAssertNotEqual(untrusted.failure, .selectionTooLarge(count))
+
+        let secure = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: true,
+            frontmostBundleID: bundle,
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [counted],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(secure.failure, .secureInputActive)
+        XCTAssertNotEqual(secure.failure, .selectionTooLarge(count))
+
+        let muted = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: bundle,
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [counted],
+            cached: nil,
+            now: now,
+            isMuted: { $0 == bundle },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(muted.failure, .appMuted(bundle))
+        XCTAssertNotEqual(muted.failure, .selectionTooLarge(count))
+    }
+
+    /// Mute is per candidate, not only per frontmost app. A muted app's count must be skipped
+    /// so the next non-muted selection is the one that wins.
+    func testMutedNonFrontmostCountIsSkippedForALaterCandidate() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(
+                    text: nil,
+                    isOwnProcess: false,
+                    bundleID: "com.example.muted",
+                    oversizedCharacterCount: count
+                ),
+                .init(
+                    text: "real",
+                    isOwnProcess: false,
+                    bundleID: "com.apple.TextEdit",
+                    via: .selectedText
+                ),
+            ],
+            cached: nil,
+            now: now,
+            isMuted: { $0 == "com.example.muted" },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.result?.text, "real")
+        XCTAssertNotEqual(outcome.failure, .selectionTooLarge(count))
+        XCTAssertNil(outcome.failure)
+    }
+
+    /// Blank over the cap is not a selection and not too large: spaces and U+FFFC.
+    /// A ZWJ run is one Character, so the character cap does not drop it.
+    /// The post-bound form (text nil, no count) still falls through to a fresh cache.
+    func testBlankOverCapIsDroppedAndDoesNotHideAShorterSelectionOrCache() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let blanks = [
+            String(repeating: " ", count: count),
+            String(repeating: "\u{FFFC}", count: count),
+        ]
+        for blank in blanks {
+            XCTAssertEqual(blank.count, count)
+            XCTAssertTrue(SelectionReader.isBlankSelection(blank))
+            let bound = SelectionReader.boundSelectionBody(blank)
+            XCTAssertNil(bound.text)
+            XCTAssertNil(bound.oversizedCharacterCount)
+            var laterReads = 0
+            let gathered = SelectionReader.gatherSelectionPieces([blank, "short"], deadline: nil) { piece in
+                if piece == "short" { laterReads += 1 }
+                return piece
+            }
+            XCTAssertNil(gathered.text)
+            XCTAssertNil(gathered.oversizedCharacterCount)
+            XCTAssertEqual(laterReads, 0, "A blank over-cap piece must not be joined, and must not read what follows")
+        }
+
+        let zwj = String(repeating: "\u{200D}", count: 200)
+        XCTAssertEqual(zwj.count, 1)
+        let zwjBound = SelectionReader.boundSelectionBody(zwj)
+        XCTAssertEqual(zwjBound.text, zwj)
+        XCTAssertNil(zwjBound.oversizedCharacterCount)
+
+        let live = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(text: zwj, isOwnProcess: false, bundleID: "com.apple.TextEdit"),
+                .init(text: "short", isOwnProcess: false, bundleID: "com.apple.TextEdit"),
+            ],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(live.result?.text, "short")
+        XCTAssertNil(live.failure)
+        if case .selectionTooLarge = live.failure {
+            XCTFail("A blank ZWJ run is one Character and must not be reported as too large")
+        }
+
+        let cached = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(text: nil, isOwnProcess: false, bundleID: "com.apple.TextEdit"),
+            ],
+            cached: SelectionMonitor.CachedSelection(
+                text: "cached-short",
+                bundleID: "com.apple.TextEdit",
+                changeToken: 2,
+                timestamp: now
+            ),
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(cached.result?.text, "cached-short")
+        XCTAssertEqual(cached.result?.source, .cached)
+        XCTAssertNotEqual(cached.failure, .emptySelection)
+        XCTAssertNotEqual(cached.failure, .selectionTooLarge(count))
+    }
+
+    /// One trailing non-blank character makes the whole over-cap string a real selection.
+    /// Releasing it must not keep a 200_000-character prefix.
+    func testTrailingNonBlankMakesAnOverCapBodyTooLargeWithoutTruncation() {
+        let maxCount = SelectionReader.maxSelectionCharacters
+        let body = String(repeating: " ", count: maxCount) + "x"
+        XCTAssertEqual(body.count, maxCount + 1)
+        XCTAssertFalse(SelectionReader.isBlankSelection(body))
+        let bound = SelectionReader.boundSelectionBody(body)
+        XCTAssertNil(bound.text, "An over-cap body must be released, not truncated to the cap")
+        XCTAssertNotEqual(bound.text?.count, maxCount)
+        XCTAssertEqual(bound.oversizedCharacterCount, maxCount + 1)
+        if let text = bound.text {
+            XCTFail("Released body was kept as \(text.count) characters")
+        }
+    }
+
+    /// The ceiling is extended grapheme clusters. `e` + combining acute is one Character and
+    /// two UTF-16 units, so a UTF-16 ceiling would refuse a string that is exactly at the cap.
+    func testCombiningMarkCeilingUsesCharacterCountNotUTF16() {
+        let maxCount = SelectionReader.maxSelectionCharacters
+        let atLimit = String(repeating: "e\u{301}", count: maxCount)
+        XCTAssertEqual(atLimit.count, maxCount)
+        XCTAssertEqual((atLimit as NSString).length, maxCount * 2)
+        let kept = SelectionReader.boundSelectionBody(atLimit)
+        XCTAssertEqual(kept.text?.count, maxCount)
+        XCTAssertEqual(kept.text, atLimit)
+        XCTAssertNil(kept.oversizedCharacterCount)
+        XCTAssertNotEqual(kept.oversizedCharacterCount, (atLimit as NSString).length)
+
+        let overCount = maxCount + 1
+        let over = String(repeating: "e\u{301}", count: overCount)
+        XCTAssertEqual(over.count, overCount)
+        XCTAssertEqual((over as NSString).length, overCount * 2)
+        let bound = SelectionReader.boundSelectionBody(over)
+        XCTAssertNil(bound.text)
+        XCTAssertNotEqual(bound.text?.count, maxCount)
+        XCTAssertEqual(bound.oversizedCharacterCount, overCount)
+        XCTAssertNotEqual(bound.oversizedCharacterCount, (over as NSString).length)
+
+        let outcome = SelectionReader.evaluate(
+            axTrusted: true,
+            secureInputActive: false,
+            frontmostBundleID: "com.apple.TextEdit",
+            frontmostIsOwnProcess: false,
+            focusAvailable: true,
+            candidates: [
+                .init(
+                    text: nil,
+                    isOwnProcess: false,
+                    bundleID: "com.apple.TextEdit",
+                    oversizedCharacterCount: bound.oversizedCharacterCount
+                ),
+            ],
+            cached: nil,
+            now: now,
+            isMuted: { _ in false },
+            isWeakAX: { _ in false }
+        )
+        XCTAssertEqual(outcome.failure, .selectionTooLarge(overCount))
+    }
+
+    /// An earlier under-cap piece is not a partial result once a later piece is over the cap.
+    /// The piece after that over-cap piece is not read.
+    func testGatherDropsEarlierPiecesWhenALaterPieceIsOverCap() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let huge = String(repeating: "z", count: count)
+        var thirdReads = 0
+        let gathered = SelectionReader.gatherSelectionPieces(["keep", huge, "nope"], deadline: nil) { piece in
+            if piece == "nope" { thirdReads += 1 }
+            return piece
+        }
+        XCTAssertNil(gathered.text)
+        XCTAssertFalse(gathered.text?.contains("keep") ?? false)
+        XCTAssertFalse(gathered.text?.contains("nope") ?? false)
+        XCTAssertEqual(gathered.oversizedCharacterCount, count)
+        XCTAssertEqual(thirdReads, 0)
+    }
+
+    /// A count and a body cannot both be stored. An over-cap string is not returned as a prefix.
+    func testCountAndBodyCannotBothBeStored() {
+        let count = SelectionReader.maxSelectionCharacters + 1
+        let huge = String(repeating: "x", count: count)
+        let bound = SelectionReader.boundSelectionBody(huge)
+        XCTAssertNil(bound.text)
+        XCTAssertNotEqual(bound.text?.count, SelectionReader.maxSelectionCharacters)
+        XCTAssertEqual(bound.oversizedCharacterCount, count)
+        XCTAssertFalse(bound.text.map { huge.hasPrefix($0) } ?? false)
+
+        let read = SelectionReader.ElementRead(
+            text: "kept-body",
+            timedOut: false,
+            via: .selectedText,
+            oversizedCharacterCount: count
+        )
+        XCTAssertNil(read.text)
+        XCTAssertEqual(read.oversizedCharacterCount, count)
+
+        let candidate = SelectionReader.Candidate(
+            text: "kept-body",
+            isOwnProcess: false,
+            bundleID: "com.apple.TextEdit",
+            oversizedCharacterCount: count
+        )
+        XCTAssertNil(candidate.text)
+        XCTAssertEqual(candidate.oversizedCharacterCount, count)
+    }
+
+    /// A NUL in the middle must not end the count. Ten `q`s, a NUL, then `max` more `q`s is
+    /// `max + 11` Characters. A C-string length stops at the NUL and would be under the cap.
+    func testMiddleNULDoesNotShortenTheCharacterCount() {
+        let maxCount = SelectionReader.maxSelectionCharacters
+        let over = String(repeating: "q", count: 10) + "\0" + String(repeating: "q", count: maxCount)
+        let cStringLength = over.withCString { strlen($0) }
+        XCTAssertEqual(over.count, maxCount + 11)
+        XCTAssertEqual(cStringLength, 10)
+        XCTAssertLessThan(cStringLength, maxCount)
+        let bound = SelectionReader.boundSelectionBody(over)
+        XCTAssertNil(bound.text)
+        XCTAssertEqual(bound.oversizedCharacterCount, maxCount + 11)
+        XCTAssertNotEqual(bound.oversizedCharacterCount, cStringLength)
+    }
+
     /// The value-slice rung has to pull the element's whole value across AX IPC to cut the
     /// selection out of it. The range guard bounds the selection; only this bounds the document.
     func testDocumentSliceCeilingIsAboveTheSelectionCeiling() {

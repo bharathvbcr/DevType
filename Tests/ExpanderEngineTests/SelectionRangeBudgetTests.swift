@@ -69,6 +69,17 @@ final class SelectionRangeBudgetTests: XCTestCase {
         XCTAssertNil(oversized.oversizedCharacterCount, "Two under-cap pieces are unavailable, not too large")
     }
 
+    /// A piece that already fills the cap leaves no room for a separator or another piece.
+    /// The result is unavailable, not the first piece kept as a truncated join.
+    func testPieceExactlyAtTheCapThenAnotherIsUnavailable() {
+        let exact = String(repeating: "x", count: SelectionReader.maxSelectionCharacters)
+        let gathered = SelectionReader.gatherSelectionPieces([exact, "y"], deadline: nil) { $0 }
+        XCTAssertNil(gathered.text)
+        XCTAssertNil(gathered.oversizedCharacterCount)
+        XCTAssertFalse(gathered.text?.contains("y") ?? false)
+        XCTAssertNotEqual(gathered.text, exact)
+    }
+
     func testAcceptedRangeOrderWhitespaceAndUnicodeArePreserved() {
         let pieces = ["  first  ", "👩‍👩‍👧‍👧", "العربية", "e\u{301}"]
         XCTAssertEqual(
