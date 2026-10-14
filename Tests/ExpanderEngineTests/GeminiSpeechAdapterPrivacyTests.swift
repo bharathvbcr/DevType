@@ -136,6 +136,44 @@ final class GeminiSpeechAdapterPrivacyTests: XCTestCase {
         XCTAssertEqual(transports.value, 0)
     }
 
+    func testPreparePayloadRemovesSeededScratchWhenEncodingFails() throws {
+        let sessionID = VoiceSessionID()
+        let scratchURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-\(sessionID.rawValue.uuidString).flac")
+        let captureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("capture-\(UUID().uuidString).caf")
+        try Data("seeded-scratch".utf8).write(to: scratchURL)
+        XCTAssertTrue(FileManager.default.createFile(atPath: captureURL.path, contents: Data()))
+        defer {
+            try? FileManager.default.removeItem(at: scratchURL)
+            try? FileManager.default.removeItem(at: captureURL)
+        }
+
+        let payload = makeAdapter().preparePayload(for: makeRequest(sessionID: sessionID, audioURL: captureURL, byteCount: 0))
+
+        XCTAssertNil(payload.scratchURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratchURL.path))
+        XCTAssertEqual(payload.fileURL, captureURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captureURL.path))
+    }
+
+    func testPreparePayloadDoesNotDeleteCaptureWhenItIsTheScratchPath() throws {
+        let sessionID = VoiceSessionID()
+        let captureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-\(sessionID.rawValue.uuidString).flac")
+        let marker = Data("not-a-capture-to-delete".utf8)
+        try marker.write(to: captureURL)
+        defer { try? FileManager.default.removeItem(at: captureURL) }
+
+        let payload = makeAdapter().preparePayload(
+            for: makeRequest(sessionID: sessionID, audioURL: captureURL, byteCount: Int64(marker.count))
+        )
+
+        XCTAssertNil(payload.scratchURL)
+        XCTAssertEqual(payload.fileURL, captureURL)
+        XCTAssertEqual(try Data(contentsOf: captureURL), marker)
+    }
+
     func testBoundedPayloadReaderAcceptsExactLimitAndRejectsLimitPlusOne() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("gemini-bounded-read-\(UUID().uuidString)", isDirectory: true)
@@ -173,9 +211,18 @@ final class GeminiSpeechAdapterPrivacyTests: XCTestCase {
         return nil
     }
 
-    private func makeRequest(audioURL: URL, byteCount: Int64) -> SpeechRequest {
+    private func makeAdapter() -> GeminiSpeechAdapter {
+        GeminiSpeechAdapter(
+            consentGranted: { false },
+            transcribe: { _, _, _, _, _, _ in
+                GeminiTranscriptionResult(text: "unused", rawText: "unused")
+            }
+        )
+    }
+
+    private func makeRequest(sessionID: VoiceSessionID = VoiceSessionID(), audioURL: URL, byteCount: Int64) -> SpeechRequest {
         SpeechRequest(
-            sessionID: VoiceSessionID(),
+            sessionID: sessionID,
             generation: SessionGeneration(rawValue: 1),
             audio: AudioArtifact(
                 fileURL: audioURL,

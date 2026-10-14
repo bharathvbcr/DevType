@@ -294,6 +294,58 @@ final class GeminiTranscriptionClientTests: XCTestCase {
         XCTAssertEqual(GeminiSSEProtocolState.shared.starts(for: path), 1)
     }
 
+    func testProductionSessionDoesNotFollowCrossHostRedirect() async {
+        let id = UUID().uuidString
+        let origin = URL(string: "https://generativelanguage.googleapis.com/redirect-cross/\(id)")!
+        let location = URL(string: "https://evil.example/collect/\(id)")!
+        await assertProductionSessionRefusesRedirect(from: origin, to: location)
+    }
+
+    func testProductionSessionDoesNotFollowSameHostRedirect() async {
+        let id = UUID().uuidString
+        let origin = URL(string: "https://generativelanguage.googleapis.com/redirect-same/\(id)")!
+        let location = URL(string: "https://generativelanguage.googleapis.com/collect/\(id)")!
+        await assertProductionSessionRefusesRedirect(from: origin, to: location)
+    }
+
+    private func assertProductionSessionRefusesRedirect(from origin: URL, to location: URL) async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GeminiRedirectURLProtocol.self]
+        let session = GeminiTranscriptionClient.makeSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        XCTAssertTrue(session.delegate === LocalEndpointURLSessionDelegate.shared)
+        let client = GeminiTranscriptionClient(
+            session: session,
+            baseURL: origin,
+            maximumResponseBytes: 1_024
+        )
+
+        do {
+            _ = try await client.transcribe(
+                audioData: Data([1]),
+                mimeType: "audio/flac",
+                audioDurationSeconds: 0.01,
+                steeringPrompt: "Transcribe",
+                apiKey: "test-key",
+                uploadAuthorized: { true }
+            )
+            XCTFail("A 3xx response must fail the transcription")
+        } catch let error as GeminiTranscriptionError {
+            guard case .networkError(let reason) = error else {
+                return XCTFail("A 3xx response must fail as a network error, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("302"), "Unexpected failure: \(reason)")
+        } catch {
+            XCTFail("A 3xx response must fail as a network error, got \(error)")
+        }
+
+        XCTAssertEqual(
+            GeminiRedirectURLProtocol.hits(where: { $0.absoluteString == location.absoluteString }),
+            0,
+            "Redirect target must receive zero requests: \(location.absoluteString)"
+        )
+    }
+
     private func makeClient(path: String, maximumResponseBytes: Int) -> GeminiTranscriptionClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [GeminiSSEURLProtocol.self]
@@ -346,6 +398,66 @@ private final class RetryUploadAuthorization: @unchecked Sendable {
 
     func releaseSecondCheck() {
         release.signal()
+    }
+}
+
+private final class GeminiRedirectURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    private static var hitURLs: [URL] = []
+
+    static func hits(where matches: (URL) -> Bool) -> Int {
+        lock.withLock { hitURLs.filter(matches).count }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        Self.lock.withLock { Self.hitURLs.append(url) }
+        if url.path.hasPrefix("/redirect-") {
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 302,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Location": redirectedLocation(for: url).absoluteString]
+            )!
+            let client = self.client
+            let redirected = URLRequest(url: redirectedLocation(for: url))
+            // wasRedirectedTo invokes the session delegate synchronously. Hopping off the
+            // protocol's load stack lets that delegate refuse the redirect without deadlocking,
+            // then delivers the original 302 when the refusal does not start a new load.
+            DispatchQueue.global().async {
+                client?.urlProtocol(self, wasRedirectedTo: redirected, redirectResponse: response)
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data())
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            return
+        }
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "text/plain"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("followed".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private func redirectedLocation(for url: URL) -> URL {
+        let id = url.lastPathComponent
+        if url.path.contains("/redirect-cross/") {
+            return URL(string: "https://evil.example/collect/\(id)")!
+        }
+        return URL(string: "https://generativelanguage.googleapis.com/collect/\(id)")!
     }
 }
 

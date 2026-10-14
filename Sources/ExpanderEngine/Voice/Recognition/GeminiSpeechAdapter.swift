@@ -259,7 +259,7 @@ public final class GeminiSpeechAdapter: SpeechRecognizer, @unchecked Sendable {
 
     // MARK: - Payload
 
-    private struct PayloadSource {
+    struct PayloadSource {
         let fileURL: URL
         let mimeType: String
         let scratchURL: URL?
@@ -267,7 +267,7 @@ public final class GeminiSpeechAdapter: SpeechRecognizer, @unchecked Sendable {
 
     /// FLAC-encodes the capture for upload, falling back to the raw file if encoding fails. Data
     /// is deliberately not read here: the resulting file is size-checked before allocation.
-    private func preparePayload(for request: SpeechRequest) -> PayloadSource {
+    func preparePayload(for request: SpeechRequest) -> PayloadSource {
         let scratchURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("devtype-\(request.sessionID.rawValue.uuidString).flac")
 
@@ -279,12 +279,22 @@ public final class GeminiSpeechAdapter: SpeechRecognizer, @unchecked Sendable {
             DevTypeLog.voice.error(
                 "[Voice] FLAC encoding failed; using original \(DevTypeLog.errorMetadata(error), privacy: .public)"
             )
+            // The success path leaves scratchURL set so transcribe's defer deletes it. A failed
+            // encode never reaches that defer, and the scratch path must not be the capture.
+            if !Self.sameFile(scratchURL, request.audio.fileURL) {
+                try? FileManager.default.removeItem(at: scratchURL)
+            }
             return PayloadSource(
                 fileURL: request.audio.fileURL,
                 mimeType: mimeType(forExtension: request.audio.fileURL.pathExtension),
                 scratchURL: nil
             )
         }
+    }
+
+    private static func sameFile(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.resolvingSymlinksInPath().standardizedFileURL.path
+            == rhs.resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     /// Rejects oversized input before allocating it, then verifies the post-read size to close a

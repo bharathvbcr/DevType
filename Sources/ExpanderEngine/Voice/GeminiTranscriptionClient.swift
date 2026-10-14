@@ -85,13 +85,21 @@ public actor GeminiTranscriptionClient {
     )!
     
     public init() {
-        let config = URLSessionConfiguration.ephemeral
-        config.waitsForConnectivity = false
-        self.session = URLSession(configuration: config)
+        self.session = Self.makeSession()
         self.baseURL = Self.productionBaseURL
         self.maximumResponseBytes = Self.maxResponseSizeBytes
         self.validationURL = Self.productionValidationURL
         self.maximumValidationResponseBytes = Self.maxValidationResponseSizeBytes
+    }
+
+    /// Session used by `init()` and by tests. URLSession follows redirects unless this delegate refuses them.
+    static func makeSession(configuration: URLSessionConfiguration = .ephemeral) -> URLSession {
+        configuration.waitsForConnectivity = false
+        return URLSession(
+            configuration: configuration,
+            delegate: LocalEndpointURLSessionDelegate.shared,
+            delegateQueue: nil
+        )
     }
 
     init(

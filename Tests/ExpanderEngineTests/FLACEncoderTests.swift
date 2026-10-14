@@ -27,4 +27,17 @@ final class FLACEncoderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(result.encodeSeconds, 0.0)
         XCTAssertEqual(result.url, flacURL)
     }
+
+    func testEncodeLeavesPreexistingOutputUntouchedWhenInputIsMissing() throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preexisting-\(UUID().uuidString).flac")
+        let marker = Data("unrelated-output".utf8)
+        try marker.write(to: outputURL)
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-\(UUID().uuidString).caf")
+
+        XCTAssertThrowsError(try FLACEncoder.encode(inputURL: missing, outputURL: outputURL))
+        XCTAssertEqual(try Data(contentsOf: outputURL), marker)
+    }
 }
