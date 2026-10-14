@@ -327,6 +327,51 @@ final class PaletteToolRoutingTestsHostile: XCTestCase {
         )
     }
 
+    /// Fullwidth letters and interior combining marks stay in the id.
+    /// Trailing whitespace still selects the alias. An interior space does not.
+    func testFullwidthCombiningAndInteriorSpaceDoNotFalseMatch() async {
+        let fullwidthUpper = "\u{FF35}\u{FF30}\u{FF30}\u{FF25}\u{FF32}"
+        let fullwidthAlias = "\u{FF35}\u{FF30}\u{FF30}\u{FF25}\u{FF32}\u{FF23}\u{FF21}\u{FF33}\u{FF25}"
+        let fullwidthLowerAlias = "\u{FF55}\u{FF50}\u{FF50}\u{FF45}\u{FF52}\u{FF43}\u{FF41}\u{FF53}\u{FF45}"
+        let rejected = [
+            fullwidthUpper,
+            fullwidthAlias,
+            fullwidthLowerAlias,
+            "upp\u{FF45}r",
+            "upper\u{FF43}ase",
+            "uppe\u{0301}r",
+            "upper\u{0301}case",
+            "s\u{0301}ortLines",
+            "sort\u{0301}Lines",
+            "upper case",
+            "UPPER CASE",
+            "upper\u{00A0}case",
+            "upper\u{3000}case",
+        ]
+        var accepted: [String] = []
+        for id in rejected {
+            let op = PaletteTextOp.resolved(from: id)
+            let result = PaletteToolRouter.runMacro(operation: id, text: "ab")
+            if op != nil || result != nil {
+                accepted.append(
+                    "\(id.debugDescription) → op \(String(describing: op)) result \(String(describing: result))"
+                )
+            }
+            XCTAssertNotEqual(result, "ab", "must not echo \(id.debugDescription)")
+            await assertToolMacroMatches(operation: id, text: "ab", resolved: result)
+        }
+        XCTAssertEqual(accepted, [], "compatibility or interior marks selected a real text op")
+
+        XCTAssertEqual(PaletteTextOp.resolved(from: "UPPERCASE "), .upper)
+        XCTAssertEqual(PaletteToolRouter.runMacro(operation: "UPPERCASE ", text: "ab"), "AB")
+        await assertToolMacroMatches(operation: "UPPERCASE ", text: "ab", resolved: "AB")
+
+        XCTAssertEqual(PaletteTextOp.resolved(from: "SortLines"), .sortLines)
+        let sorted = PaletteTextOps.apply(.sortLines, to: "b\na")
+        XCTAssertEqual(PaletteToolRouter.runMacro(operation: "SortLines", text: "b\na"), sorted)
+        await assertToolMacroMatches(operation: "SortLines", text: "b\na", resolved: sorted)
+    }
+
     func testEmptyOrThrownRouteDoesNotBecomeARow() async {
         XCTAssertNil(PaletteToolRouter.sanitize(""))
         XCTAssertNil(PaletteToolRouter.sanitize("\n"))
