@@ -137,6 +137,23 @@ public final class SecretStore {
         return backing.value(account: Self.account(for: id))
     }
 
+    /// Read a secret without ever waiting on the main thread.
+    ///
+    /// Returns `true` when `completion` has already run on this thread. An uncontended archive
+    /// answers that way, so `secret(for:)` and this method agree before the caller returns.
+    /// Returns `false` only when the caller is on the main thread and the archive lock is busy:
+    /// that is not a missing secret and not a refusal. The read continues on the archive wait
+    /// queue and `completion` runs later on the main queue. A deadline refusal and a secret that
+    /// was read and is absent both arrive as `nil` after the wait, not before it.
+    @discardableResult
+    public func deliverSecret(for id: UUID, completion: @escaping (String?) -> Void) -> Bool {
+        guard Thread.isMainThread, let archive = backing as? ConsolidatedSecretBackingStore else {
+            completion(secret(for: id))
+            return true
+        }
+        return archive.deliverValue(account: Self.account(for: id), completion: completion)
+    }
+
     public func hasSecret(for id: UUID) -> Bool {
         return backing.contains(account: Self.account(for: id))
     }
@@ -1111,6 +1128,10 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     private let transactionLock = NSRecursiveLock()
     /// Guarded by transactionLock. Nested operations reuse the outer archive lease.
     private var archiveTransactionDepth = 0
+    /// Contended archive exclusion waits here, never on the main thread. Serial so overlapping
+    /// waiters acquire in order instead of barging past each other.
+    private let archiveWaitQueue = DispatchQueue(label: "com.devtype.secrets.archive-lock")
+    private static let archiveWaitQueueKey = DispatchSpecificKey<UInt8>()
     private let tier: SecretBackingStore
     private let diagnostics: SecretAccessDiagnostics
     private let fileURL: URL
@@ -1121,6 +1142,9 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     private let automaticConsolidationClock: () -> TimeInterval
     private var lastAutomaticConsolidationFailure: TimeInterval?
     private static let automaticConsolidationRetrySeconds: TimeInterval = 5
+    /// Same bound the synchronous archive lease used to wait. Deadline is
+    /// `automaticConsolidationClock() + archiveLockWaitSeconds`, not wall `Date`.
+    private static let archiveLockWaitSeconds: TimeInterval = 5
 
     public init(
         fileURL: URL? = nil,
@@ -1136,6 +1160,7 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
         self.diagnostics = diagnostics
         self.masterAccount = masterKeyAccount
         self.automaticConsolidationClock = automaticConsolidationClock
+        archiveWaitQueue.setSpecific(key: Self.archiveWaitQueueKey, value: 1)
     }
 
     // MARK: File I/O (always under `lock`)
@@ -1197,64 +1222,233 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     /// with an editor publishing metadata while holding this lease.
     ///
     /// Failure to acquire exclusion refuses the transaction. Running the body unlocked can
-    /// destroy the only surviving credential copy. Contention is bounded to five seconds;
-    /// diagnostics distinguish a refused transaction from an operation that ran.
+    /// destroy the only surviving credential copy. The main thread never waits: `try()` is the
+    /// only probe it may use, and a busy lock refuses the synchronous call. Contended waits run
+    /// on `archiveWaitQueue` until `automaticConsolidationClock()` passes the five-second
+    /// deadline captured before the hop. `transactionLock` is not held across that hop.
     private func withArchiveLock<T>(_ body: () -> T) -> T? {
-        let deadline = ProcessInfo.processInfo.systemUptime + 5
-        // Queue on the lock rather than polling for a free instant: a poller only wins if its
-        // sample lands in the gap between two busy holders and starves to the refusal under load.
-        guard transactionLock.lock(before: Date(timeIntervalSinceNow: 5)) else {
+        if onArchiveWaitQueue() {
+            // Already on the wait queue — the thread that owns the lease, or the waiter that
+            // just acquired it. Re-queueing would deadlock the serial queue.
+            let deadline = automaticConsolidationClock() + Self.archiveLockWaitSeconds
+            return satisfied(attemptArchiveTransaction(allowWait: true, deadline: deadline, body))
+        }
+        if Thread.isMainThread {
+            return satisfied(attemptArchiveTransaction(allowWait: false, deadline: 0, body))
+        }
+        let deadline = automaticConsolidationClock() + Self.archiveLockWaitSeconds
+        // The queue block returns before this scope does, so the body is not called late.
+        return withoutActuallyEscaping(body) { escapingBody in
+            let waited = runOnArchiveWaitQueue {
+                self.attemptArchiveTransaction(allowWait: true, deadline: deadline, escapingBody)
+            }
+            return satisfied(waited)
+        }
+    }
+
+    private enum ArchiveLockOutcome<T> {
+        case ran(T)
+        case busy
+        case refused
+    }
+
+    private func satisfied<T>(_ outcome: ArchiveLockOutcome<T>) -> T? {
+        switch outcome {
+        case .ran(let value):
+            return value
+        case .busy:
             diagnostics.note("archive transaction busy — transaction refused")
             return nil
+        case .refused:
+            return nil
+        }
+    }
+
+    private func onArchiveWaitQueue() -> Bool {
+        DispatchQueue.getSpecific(key: Self.archiveWaitQueueKey) == 1
+    }
+
+    /// Blocks the calling thread until `work` finishes on `archiveWaitQueue`.
+    /// Main must never call this: that would be `semaphore.wait` on the UI thread, and
+    /// `sync` onto this queue from main can deadlock a waiter that hops back to main.
+    private func runOnArchiveWaitQueue<T>(_ work: @escaping () -> T) -> T {
+        precondition(!Thread.isMainThread)
+        precondition(!onArchiveWaitQueue())
+        var output: T?
+        let done = DispatchSemaphore(value: 0)
+        archiveWaitQueue.async {
+            output = work()
+            done.signal()
+        }
+        done.wait()
+        return output!
+    }
+
+    /// `allowWait` is false on the main thread. It may sleep or `lock(before:)` only after
+    /// `precondition(!Thread.isMainThread)`.
+    private func attemptArchiveTransaction<T>(
+        allowWait: Bool,
+        deadline: TimeInterval,
+        _ body: () -> T
+    ) -> ArchiveLockOutcome<T> {
+        guard acquireTransactionLock(allowWait: allowWait, deadline: deadline) else {
+            return allowWait ? .refused : .busy
         }
         defer { transactionLock.unlock() }
-        if archiveTransactionDepth > 0 { return body() }
+        if archiveTransactionDepth > 0 { return .ran(body()) }
+        switch acquireArchiveFileLock(allowWait: allowWait, deadline: deadline) {
+        case .busy:
+            return .busy
+        case .refused:
+            return .refused
+        case .acquired(let fd):
+            defer { releaseArchiveFileLock(fd) }
+            archiveTransactionDepth = 1
+            defer { archiveTransactionDepth = 0 }
+            return .ran(body())
+        }
+    }
+
+    private func acquireTransactionLock(allowWait: Bool, deadline: TimeInterval) -> Bool {
+        if transactionLock.try() { return true }
+        guard allowWait else { return false }
+        while automaticConsolidationClock() < deadline {
+            pauseOffMain(0.01)
+            if transactionLock.lock(before: Date(timeIntervalSinceNow: 0.01)) { return true }
+        }
+        if transactionLock.try() { return true }
+        diagnostics.note("archive lock timed out — transaction refused")
+        return false
+    }
+
+    private enum FileClaim {
+        case acquired(Int32)
+        case busy
+        case refused
+    }
+
+    private func acquireArchiveFileLock(allowWait: Bool, deadline: TimeInterval) -> FileClaim {
         let directory = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let lockPath = fileURL.appendingPathExtension("lock").path
-
-        var fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        var fd = openArchiveLock(lockPath)
         if fd < 0, errno == ELOOP {
             diagnostics.note("archive lock file invalid — transaction refused")
-            return nil
+            return .refused
         }
         if fd < 0 {
             diagnostics.note("archive lock unavailable")
-            Thread.sleep(forTimeInterval: 0.05)
-            fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
+            // A second open, not a 50 ms sleep. The main thread must not pause here, and a
+            // failed open still refuses rather than running the body unlocked.
+            fd = openArchiveLock(lockPath)
         }
         guard fd >= 0 else {
-            diagnostics.note("archive lock still unavailable — transaction refused")
-            return nil
+            if errno == ELOOP {
+                diagnostics.note("archive lock file invalid — transaction refused")
+            } else {
+                diagnostics.note("archive lock still unavailable — transaction refused")
+            }
+            return .refused
         }
-        defer {
-            if close(fd) != 0 { diagnostics.note("archive lock close failed") }
-        }
-        // A special file can open successfully and even accept flock on some platforms;
-        // it is not the persistent regular lock file shared by cooperating archive writers.
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
             diagnostics.note("archive lock file invalid — transaction refused")
-            return nil
+            if close(fd) != 0 { diagnostics.note("archive lock close failed") }
+            return .refused
         }
+        var interruptions = 0
         while flock(fd, LOCK_EX | LOCK_NB) != 0 {
             let error = errno
-            guard error == EINTR || error == EWOULDBLOCK else {
+            if error == EINTR {
+                interruptions += 1
+                if interruptions > 8 {
+                    diagnostics.note("archive lock failed — transaction refused")
+                    if close(fd) != 0 { diagnostics.note("archive lock close failed") }
+                    return .refused
+                }
+                continue
+            }
+            guard error == EWOULDBLOCK else {
                 diagnostics.note("archive lock failed — transaction refused")
-                return nil
+                if close(fd) != 0 { diagnostics.note("archive lock close failed") }
+                return .refused
             }
-            guard ProcessInfo.processInfo.systemUptime < deadline else {
-                diagnostics.note("archive lock timed out — transaction refused")
-                return nil
+            guard allowWait, automaticConsolidationClock() < deadline else {
+                if close(fd) != 0 { diagnostics.note("archive lock close failed") }
+                if allowWait {
+                    diagnostics.note("archive lock timed out — transaction refused")
+                    return .refused
+                }
+                return .busy
             }
-            Thread.sleep(forTimeInterval: 0.01)
+            pauseOffMain(0.01)
         }
-        defer {
-            if flock(fd, LOCK_UN) != 0 { diagnostics.note("archive unlock failed") }
+        return .acquired(fd)
+    }
+
+    private func openArchiveLock(_ path: String) -> Int32 {
+        open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
+    }
+
+    private func releaseArchiveFileLock(_ fd: Int32) {
+        if flock(fd, LOCK_UN) != 0 { diagnostics.note("archive unlock failed") }
+        if close(fd) != 0 { diagnostics.note("archive lock close failed") }
+    }
+
+    /// Short pause for a contended `flock` or the in-process lease. Never callable on main.
+    private func pauseOffMain(_ seconds: TimeInterval) {
+        precondition(!Thread.isMainThread)
+        let clamped = seconds.isFinite && seconds > 0 ? seconds : 0
+        let whole = Int(clamped)
+        var request = timespec(
+            tv_sec: whole,
+            tv_nsec: Int((clamped - Double(whole)) * 1_000_000_000)
+        )
+        var remainder = timespec()
+        while nanosleep(&request, &remainder) != 0 && errno == EINTR {
+            request = remainder
         }
-        archiveTransactionDepth = 1
-        defer { archiveTransactionDepth = 0 }
-        return body()
+    }
+
+    /// Main-thread read. Uncontended work finishes before return. A busy lock does not run the
+    /// body and does not wait; the caller returns `false` and the completion is delivered later
+    /// on the main queue. `transactionLock` is dropped before that hop.
+    func deliverValue(account: String, completion: @escaping (String?) -> Void) -> Bool {
+        precondition(Thread.isMainThread)
+        switch attemptArchiveTransaction(allowWait: false, deadline: 0, {
+            self.readHoldingArchiveLock(account: account)
+        }) {
+        case .ran(let value):
+            diagnostics.recordRetrieval(succeeded: value != nil)
+            completion(value)
+            return true
+        case .refused:
+            diagnostics.recordRetrieval(succeeded: false)
+            completion(nil)
+            return true
+        case .busy:
+            let deadline = automaticConsolidationClock() + Self.archiveLockWaitSeconds
+            archiveWaitQueue.async {
+                let waited = self.attemptArchiveTransaction(allowWait: true, deadline: deadline) {
+                    self.readHoldingArchiveLock(account: account)
+                }
+                let value: String?
+                switch waited {
+                case .ran(let found):
+                    value = found
+                case .busy:
+                    self.diagnostics.note("archive transaction busy — transaction refused")
+                    value = nil
+                case .refused:
+                    value = nil
+                }
+                self.diagnostics.recordRetrieval(succeeded: value != nil)
+                DispatchQueue.main.async {
+                    completion(value)
+                }
+            }
+            return false
+        }
     }
 
     public func performExclusiveTransaction(_ body: () -> Void) -> Bool {
@@ -1436,51 +1630,55 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     }
 
     public func value(account: String) -> String? {
-        let result: String? = withArchiveLock { () -> String? in
-            lock.lock(); defer { lock.unlock() }
-            let archive = loadArchive()
-            switch archive {
-            case .unavailable:
-                diagnostics.note("secret read refused — archive unavailable", account: account)
-                diagnostics.record(.failed(errSecIO))
-                return nil
-            case .missing, .entries, .unreadable: break
-            }
-            if case .entries(let entries) = archive, let blob = entries[account] {
-                guard let key = masterKey(createIfNeeded: false) else {
-                    // Sealed value present but no key: locked keychain (recoverable via the unlock
-                    // flow) or a deleted master key (not). The trail + report tell them apart.
-                    diagnostics.note("sealed value but master key unavailable", account: account)
-                    diagnostics.record(.failed(errSecInteractionNotAllowed))
-                    return nil
-                }
-                guard let value = EncryptedSecretArchive.open(blob, key: key) else {
-                    diagnostics.note("archive decrypt failed", account: account)
-                    diagnostics.record(.failed(errSecDecode))
-                    return nil
-                }
-                diagnostics.record(.ok)
-                return value
-            }
-
-            // Hold exclusion before reading the source: a value captured outside the transaction
-            // could overwrite a newer save or resurrect a deletion while waiting to migrate.
-            guard let value = tier.value(account: account) else { return nil }
-            let now = automaticConsolidationClock()
-            let elapsed = lastAutomaticConsolidationFailure.map { now - $0 }
-            // Migration is optional after a successful read. A failed master-key/IO probe
-            // must not delay every following copy. Explicit saves, repair, and sealed reads
-            // still attempt immediately; this bounds only opportunistic consolidation.
-            if elapsed == nil || elapsed.map({
-                !$0.isFinite || $0 < 0 || $0 >= Self.automaticConsolidationRetrySeconds
-            }) == true {
-                lastAutomaticConsolidationFailure = consolidateLocked(account: account, value: value)
-                    ? nil : automaticConsolidationClock()
-            }
-            return value
-        } ?? nil
+        let result: String? = withArchiveLock { self.readHoldingArchiveLock(account: account) } ?? nil
         diagnostics.recordRetrieval(succeeded: result != nil)
         return result
+    }
+
+    /// Caller holds the archive transaction. Instance `lock` covers the cached key and the
+    /// consolidation timestamp only; it is not the cross-process lease.
+    private func readHoldingArchiveLock(account: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        let archive = loadArchive()
+        switch archive {
+        case .unavailable:
+            diagnostics.note("secret read refused — archive unavailable", account: account)
+            diagnostics.record(.failed(errSecIO))
+            return nil
+        case .missing, .entries, .unreadable: break
+        }
+        if case .entries(let entries) = archive, let blob = entries[account] {
+            guard let key = masterKey(createIfNeeded: false) else {
+                // Sealed value present but no key: locked keychain (recoverable via the unlock
+                // flow) or a deleted master key (not). The trail + report tell them apart.
+                diagnostics.note("sealed value but master key unavailable", account: account)
+                diagnostics.record(.failed(errSecInteractionNotAllowed))
+                return nil
+            }
+            guard let value = EncryptedSecretArchive.open(blob, key: key) else {
+                diagnostics.note("archive decrypt failed", account: account)
+                diagnostics.record(.failed(errSecDecode))
+                return nil
+            }
+            diagnostics.record(.ok)
+            return value
+        }
+
+        // Hold exclusion before reading the source: a value captured outside the transaction
+        // could overwrite a newer save or resurrect a deletion while waiting to migrate.
+        guard let value = tier.value(account: account) else { return nil }
+        let now = automaticConsolidationClock()
+        let elapsed = lastAutomaticConsolidationFailure.map { now - $0 }
+        // Migration is optional after a successful read. A failed master-key/IO probe
+        // must not delay every following copy. Explicit saves, repair, and sealed reads
+        // still attempt immediately; this bounds only opportunistic consolidation.
+        if elapsed == nil || elapsed.map({
+            !$0.isFinite || $0 < 0 || $0 >= Self.automaticConsolidationRetrySeconds
+        }) == true {
+            lastAutomaticConsolidationFailure = consolidateLocked(account: account, value: value)
+                ? nil : automaticConsolidationClock()
+        }
+        return value
     }
 
     public func contains(account: String) -> Bool {
