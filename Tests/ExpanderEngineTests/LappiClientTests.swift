@@ -172,8 +172,8 @@ final class LappiClientTests: XCTestCase {
         XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: socket0600, peerUID: other, ownUID: own))
         XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: nil, peerUID: own, ownUID: own))
         XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: socket0600, peerUID: nil, ownUID: own))
-        // Bits outside 0o777 (setuid) are not part of the permission check the contract states.
-        XCTAssertTrue(LappiClient.peerMayReceiveQuery(stMode: S_ISUID | socket0600, peerUID: own, ownUID: own))
+        // Sticky, setgid, and setuid are not exactly 0600.
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: S_ISUID | socket0600, peerUID: own, ownUID: own))
     }
 
     func testAPeerThatDripsBytesCannotHoldTheCallerPastItsDeadline() throws {

@@ -38,6 +38,10 @@ final class LappiFakeAgent: @unchecked Sendable {
         }
         guard bound == 0, listen(listener, 4) == 0 else { throw LappiTestError.setup("bind/listen errno=\(errno)") }
         guard chmod(path, socketMode) == 0 else { throw LappiTestError.setup("chmod errno=\(errno)") }
+        // A reply written after the client has already closed raises SIGPIPE. Blocking that
+        // signal on the writing thread still killed the process (signal 13), so ignore it
+        // for the rest of this test process. The assertions still require zero request bytes.
+        _ = signal(SIGPIPE, SIG_IGN)
         let listener = self.listener
         Thread.detachNewThread { [self] in
             defer { finished.signal() }

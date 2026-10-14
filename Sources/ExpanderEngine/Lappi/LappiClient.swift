@@ -229,12 +229,12 @@ public struct LappiClient: Sendable {
     /// Whether the connected peer may be sent a query.
     ///
     /// `stMode` is from `lstat` (a symlink is not followed). `peerUID` is nil when `getpeereid`
-    /// failed. Either nil, a non-socket, a mode other than 0600, or a uid other than `ownUID`
-    /// is a refusal.
+    /// failed. Either nil, a non-socket, a mode other than exactly 0600 (sticky, setgid, and
+    /// setuid included), or a uid other than `ownUID` is a refusal.
     static func peerMayReceiveQuery(stMode: mode_t?, peerUID: uid_t?, ownUID: uid_t) -> Bool {
         guard let stMode, let peerUID else { return false }
         guard stMode & S_IFMT == S_IFSOCK else { return false }
-        guard stMode & 0o777 == 0o600 else { return false }
+        guard (stMode & 0o7777) == 0o600 else { return false }
         return peerUID == ownUID
     }
 
