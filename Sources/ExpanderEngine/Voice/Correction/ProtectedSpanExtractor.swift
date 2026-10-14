@@ -67,8 +67,12 @@ public enum ProtectedSpanExtractor {
             }
         }
 
-        // 3. Dictionary Terms
+        // 3. Dictionary Terms. A repeated String was already searched across the
+        // whole transcript, so it cannot claim another span. Case variants stay
+        // distinct: `canonicalForm` is the term itself.
+        var searchedTerms = Set<String>()
         for term in dictionaryTerms where !term.isEmpty {
+            if !searchedTerms.insert(term).inserted { continue }
             var searchRange = fullRange
             while searchRange.location < nsString.length {
                 let foundRange = nsString.range(of: term, options: [.caseInsensitive], range: searchRange)
