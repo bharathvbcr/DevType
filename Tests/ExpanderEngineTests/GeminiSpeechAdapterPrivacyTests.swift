@@ -174,6 +174,169 @@ final class GeminiSpeechAdapterPrivacyTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: captureURL), marker)
     }
 
+    func testPreparePayloadRemovesScratchSymlinkAndKeepsItsTarget() throws {
+        let sessionID = VoiceSessionID()
+        let scratchURL = scratchURL(for: sessionID)
+        let targetURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("scratch-target-\(UUID().uuidString).bin")
+        let captureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("empty-capture-\(UUID().uuidString).caf")
+        let targetBytes = Data("target-bytes-must-remain".utf8)
+        try targetBytes.write(to: targetURL)
+        try FileManager.default.createSymbolicLink(at: scratchURL, withDestinationURL: targetURL)
+        XCTAssertTrue(FileManager.default.createFile(atPath: captureURL.path, contents: Data()))
+        defer {
+            try? FileManager.default.removeItem(at: scratchURL)
+            try? FileManager.default.removeItem(at: targetURL)
+            try? FileManager.default.removeItem(at: captureURL)
+        }
+
+        let payload = makeAdapter().preparePayload(
+            for: makeRequest(sessionID: sessionID, audioURL: captureURL, byteCount: 0)
+        )
+
+        XCTAssertNil(payload.scratchURL)
+        XCTAssertEqual(payload.fileURL, captureURL)
+        XCTAssertThrowsError(try FileManager.default.destinationOfSymbolicLink(atPath: scratchURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratchURL.path))
+        XCTAssertEqual(try Data(contentsOf: targetURL), targetBytes)
+        XCTAssertEqual(try Data(contentsOf: captureURL), Data())
+    }
+
+    func testPreparePayloadKeepsCaptureBytesWhenScratchSymlinkPointsAtCapture() throws {
+        let sessionID = VoiceSessionID()
+        let captureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("symlink-capture-\(UUID().uuidString).caf")
+        let scratchURL = scratchURL(for: sessionID)
+        let marker = Data("capture-bytes-stay".utf8)
+        try marker.write(to: captureURL)
+        try FileManager.default.createSymbolicLink(at: scratchURL, withDestinationURL: captureURL)
+        defer {
+            try? FileManager.default.removeItem(at: scratchURL)
+            try? FileManager.default.removeItem(at: captureURL)
+        }
+
+        let payload = makeAdapter().preparePayload(
+            for: makeRequest(sessionID: sessionID, audioURL: captureURL, byteCount: Int64(marker.count))
+        )
+
+        XCTAssertNil(payload.scratchURL)
+        XCTAssertEqual(payload.fileURL, captureURL)
+        XCTAssertEqual(try Data(contentsOf: captureURL), marker)
+    }
+
+    func testPreparePayloadDoesNotDeleteAnotherSessionsScratchFile() throws {
+        let failingSession = VoiceSessionID()
+        let otherSession = VoiceSessionID()
+        let failingScratch = scratchURL(for: failingSession)
+        let otherScratch = scratchURL(for: otherSession)
+        let otherBytes = Data("other-session-scratch".utf8)
+        let captureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("other-session-capture-\(UUID().uuidString).caf")
+        try Data("failing-session-scratch".utf8).write(to: failingScratch)
+        try otherBytes.write(to: otherScratch)
+        XCTAssertTrue(FileManager.default.createFile(atPath: captureURL.path, contents: Data()))
+        defer {
+            try? FileManager.default.removeItem(at: failingScratch)
+            try? FileManager.default.removeItem(at: otherScratch)
+            try? FileManager.default.removeItem(at: captureURL)
+        }
+
+        _ = makeAdapter().preparePayload(
+            for: makeRequest(sessionID: failingSession, audioURL: captureURL, byteCount: 0)
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: failingScratch.path))
+        XCTAssertEqual(try Data(contentsOf: otherScratch), otherBytes)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captureURL.path))
+    }
+
+    func testPreparePayloadPreservesOddCaptureNamesAndUuidSibling() throws {
+        let temporary = FileManager.default.temporaryDirectory
+        let names = [
+            "spaced capture \(UUID().uuidString).caf",
+            "録音 \(UUID().uuidString).caf",
+            "clip.\(UUID().uuidString).flac"
+        ]
+        for name in names {
+            let sessionID = VoiceSessionID()
+            let captureURL = temporary.appendingPathComponent(name)
+            let captureBytes = Data("capture-\(name)".utf8)
+            let siblingURL = temporary.appendingPathComponent(
+                "not-the-scratch-\(sessionID.rawValue.uuidString).flac"
+            )
+            let siblingBytes = Data("sibling-of-\(sessionID.rawValue.uuidString)".utf8)
+            try captureBytes.write(to: captureURL)
+            try siblingBytes.write(to: siblingURL)
+            defer {
+                try? FileManager.default.removeItem(at: captureURL)
+                try? FileManager.default.removeItem(at: siblingURL)
+                try? FileManager.default.removeItem(at: scratchURL(for: sessionID))
+            }
+
+            let payload = makeAdapter().preparePayload(
+                for: makeRequest(sessionID: sessionID, audioURL: captureURL, byteCount: Int64(captureBytes.count))
+            )
+
+            XCTAssertEqual(try Data(contentsOf: captureURL), captureBytes, name)
+            XCTAssertEqual(try Data(contentsOf: siblingURL), siblingBytes, name)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: temporary.path))
+            XCTAssertTrue(
+                payload.fileURL == captureURL || payload.fileURL == scratchURL(for: sessionID),
+                "payload left the capture directory for \(name)"
+            )
+        }
+    }
+
+    func testPreparePayloadFailureModesDoNotHangOrDeleteTemporaryDirectory() {
+        let temporary = FileManager.default.temporaryDirectory
+        let sentinelURL = temporary.appendingPathComponent("sentinel-\(UUID().uuidString).keep")
+        let sentinel = Data("temporary-directory-sentinel".utf8)
+        XCTAssertNoThrow(try sentinel.write(to: sentinelURL))
+        defer { try? FileManager.default.removeItem(at: sentinelURL) }
+
+        let emptyCapture = temporary.appendingPathComponent("empty-\(UUID().uuidString).caf")
+        XCTAssertTrue(FileManager.default.createFile(atPath: emptyCapture.path, contents: Data()))
+        defer { try? FileManager.default.removeItem(at: emptyCapture) }
+        let emptySession = VoiceSessionID()
+        let emptyPayload = preparePayloadWithoutHanging(
+            for: makeRequest(sessionID: emptySession, audioURL: emptyCapture, byteCount: 0)
+        )
+        XCTAssertNotNil(emptyPayload)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: emptyCapture.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratchURL(for: emptySession).path))
+
+        let missingCapture = temporary.appendingPathComponent("missing-\(UUID().uuidString).caf")
+        let missingSession = VoiceSessionID()
+        let missingPayload = preparePayloadWithoutHanging(
+            for: makeRequest(sessionID: missingSession, audioURL: missingCapture, byteCount: 0)
+        )
+        XCTAssertNotNil(missingPayload)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingCapture.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratchURL(for: missingSession).path))
+
+        let captureDirectory = temporary.appendingPathComponent(
+            "capture-dir-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        XCTAssertNoThrow(try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: true))
+        let insideURL = captureDirectory.appendingPathComponent("inside.txt")
+        let insideBytes = Data("inside-capture-directory".utf8)
+        XCTAssertNoThrow(try insideBytes.write(to: insideURL))
+        defer { try? FileManager.default.removeItem(at: captureDirectory) }
+        let directorySession = VoiceSessionID()
+        let directoryPayload = preparePayloadWithoutHanging(
+            for: makeRequest(sessionID: directorySession, audioURL: captureDirectory, byteCount: 0)
+        )
+        XCTAssertNotNil(directoryPayload)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captureDirectory.path))
+        XCTAssertEqual(try? Data(contentsOf: insideURL), insideBytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratchURL(for: directorySession).path))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: temporary.path))
+        XCTAssertEqual(try? Data(contentsOf: sentinelURL), sentinel)
+    }
+
     func testBoundedPayloadReaderAcceptsExactLimitAndRejectsLimitPlusOne() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("gemini-bounded-read-\(UUID().uuidString)", isDirectory: true)
@@ -211,6 +374,23 @@ final class GeminiSpeechAdapterPrivacyTests: XCTestCase {
         return nil
     }
 
+    private func scratchURL(for sessionID: VoiceSessionID) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-\(sessionID.rawValue.uuidString).flac")
+    }
+
+    private func preparePayloadWithoutHanging(for request: SpeechRequest) -> GeminiSpeechAdapter.PayloadSource? {
+        let finished = expectation(description: "preparePayload returned")
+        let box = PayloadBox()
+        let adapter = makeAdapter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.payload = adapter.preparePayload(for: request)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 5)
+        return box.payload
+    }
+
     private func makeAdapter() -> GeminiSpeechAdapter {
         GeminiSpeechAdapter(
             consentGranted: { false },
@@ -239,6 +419,10 @@ final class GeminiSpeechAdapterPrivacyTests: XCTestCase {
             privacyRoute: .cloudPermitted
         )
     }
+}
+
+private final class PayloadBox {
+    var payload: GeminiSpeechAdapter.PayloadSource?
 }
 
 private final class MutableConsent: @unchecked Sendable {

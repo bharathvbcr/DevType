@@ -308,6 +308,89 @@ final class GeminiTranscriptionClientTests: XCTestCase {
         await assertProductionSessionRefusesRedirect(from: origin, to: location)
     }
 
+    func testProductionSessionDoesNotFollow301CrossHostRedirect() async {
+        await assertAttackRedirectRefused(kind: "301-cross")
+    }
+
+    func testProductionSessionDoesNotFollow303CrossHostRedirect() async {
+        await assertAttackRedirectRefused(kind: "303-cross")
+    }
+
+    func testProductionSessionDoesNotFollow307CrossHostRedirect() async {
+        await assertAttackRedirectRefused(kind: "307-cross")
+    }
+
+    func testProductionSessionDoesNotFollow308CrossHostRedirect() async {
+        await assertAttackRedirectRefused(kind: "308-cross")
+    }
+
+    func testProductionSessionDoesNotFollow307SameHostRedirect() async {
+        await assertAttackRedirectRefused(kind: "307-same")
+    }
+
+    func testProductionSessionDoesNotFollowRelativeLocation() async {
+        await assertAttackRedirectRefused(kind: "relative")
+    }
+
+    func testProductionSessionDoesNotFollowHTTPDowngrade() async {
+        await assertAttackRedirectRefused(kind: "downgrade")
+    }
+
+    func testRedirectBodyIsNotReturnedAsTranscript() async {
+        await assertAttackRedirectRefused(kind: "transcript")
+    }
+
+    func testAPIKeyHeaderIsRecordedOnlyForOriginURL() async {
+        await assertAttackRedirectRefused(kind: "apikey")
+    }
+
+    func testRedirectLoopFinishesWithoutFollowing() async {
+        let id = UUID().uuidString
+        let origin = GeminiAttackRedirect.origin(kind: "loop", id: id)
+        let location = GeminiAttackRedirect.location(kind: "loop", id: id)
+        let apiKey = "gemini-key-\(id)"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GeminiRedirectURLProtocol.self]
+        let session = GeminiTranscriptionClient.makeSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let client = GeminiTranscriptionClient(
+            session: session,
+            baseURL: origin,
+            maximumResponseBytes: 1_024
+        )
+
+        let outcome = await withTaskGroup(of: GeminiRedirectCall.self) { group in
+            group.addTask {
+                await Self.transcribeAttack(client: client, apiKey: apiKey)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                return .timedOut
+            }
+            let first = await group.next() ?? .timedOut
+            group.cancelAll()
+            return first
+        }
+
+        let originHits = GeminiRedirectURLProtocol.hits(where: { $0.absoluteString == origin.absoluteString })
+        let locationHits = GeminiRedirectURLProtocol.hits(where: {
+            GeminiAttackRedirect.isLocation($0, id: id, location: location)
+        })
+        switch outcome {
+        case .timedOut:
+            XCTFail("redirect loop did not finish within 5s origin=\(originHits) location=\(locationHits)")
+        case .transcript(let text):
+            XCTFail("redirect loop returned transcript \(text)")
+        case .other(let description):
+            XCTFail("redirect loop failed as \(description)")
+        case .network(let reason):
+            XCTAssertEqual(reason, "HTTP status 302")
+        }
+        XCTAssertTrue((1...2).contains(originHits), "origin hits \(originHits)")
+        XCTAssertEqual(locationHits, 0, "redirect loop followed \(location.absoluteString)")
+        assertHeadersRecordedOnlyForOrigin(id: id, origin: origin, apiKey: apiKey)
+    }
+
     private func assertProductionSessionRefusesRedirect(from origin: URL, to location: URL) async {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [GeminiRedirectURLProtocol.self]
@@ -344,6 +427,82 @@ final class GeminiTranscriptionClientTests: XCTestCase {
             0,
             "Redirect target must receive zero requests: \(location.absoluteString)"
         )
+    }
+
+    private func assertAttackRedirectRefused(kind: String) async {
+        let id = UUID().uuidString
+        let origin = GeminiAttackRedirect.origin(kind: kind, id: id)
+        let location = GeminiAttackRedirect.location(kind: kind, id: id)
+        let status = GeminiAttackRedirect.status(kind: kind)
+        let apiKey = "gemini-key-\(id)"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GeminiRedirectURLProtocol.self]
+        let session = GeminiTranscriptionClient.makeSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        XCTAssertTrue(session.delegate === LocalEndpointURLSessionDelegate.shared)
+        let client = GeminiTranscriptionClient(
+            session: session,
+            baseURL: origin,
+            maximumResponseBytes: 4_096
+        )
+
+        let outcome = await Self.transcribeAttack(client: client, apiKey: apiKey)
+        switch outcome {
+        case .network(let reason):
+            XCTAssertEqual(reason, "HTTP status \(status)")
+        case .transcript(let text):
+            XCTFail("\(kind) redirect returned transcript \(text)")
+        case .other(let description):
+            XCTFail("\(kind) redirect failed as \(description)")
+        case .timedOut:
+            XCTFail("\(kind) redirect did not finish")
+        }
+
+        let originHits = GeminiRedirectURLProtocol.hits(where: { $0.absoluteString == origin.absoluteString })
+        XCTAssertTrue((1...2).contains(originHits), "\(kind) origin hits \(originHits)")
+        XCTAssertEqual(
+            GeminiRedirectURLProtocol.hits(where: { GeminiAttackRedirect.isLocation($0, id: id, location: location) }),
+            0,
+            "\(kind) location received a request: \(location.absoluteString)"
+        )
+        assertHeadersRecordedOnlyForOrigin(id: id, origin: origin, apiKey: apiKey)
+    }
+
+    private func assertHeadersRecordedOnlyForOrigin(id: String, origin: URL, apiKey: String) {
+        let relevant = GeminiRedirectURLProtocol.exchanges(where: { $0.url.absoluteString.contains(id) })
+        XCTAssertFalse(relevant.isEmpty, "no request headers were recorded for \(id)")
+        for exchange in relevant {
+            XCTAssertEqual(
+                exchange.url.absoluteString,
+                origin.absoluteString,
+                "headers recorded for non-origin \(exchange.url.absoluteString): \(exchange.headers)"
+            )
+            XCTAssertEqual(exchange.headers["x-goog-api-key"], apiKey)
+        }
+    }
+
+    private static func transcribeAttack(
+        client: GeminiTranscriptionClient,
+        apiKey: String
+    ) async -> GeminiRedirectCall {
+        do {
+            let result = try await client.transcribe(
+                audioData: Data([1]),
+                mimeType: "audio/flac",
+                audioDurationSeconds: 0.01,
+                steeringPrompt: "Transcribe",
+                apiKey: apiKey,
+                uploadAuthorized: { true }
+            )
+            return .transcript(result.text)
+        } catch let error as GeminiTranscriptionError {
+            if case .networkError(let reason) = error {
+                return .network(reason)
+            }
+            return .other(String(describing: error))
+        } catch {
+            return .other(String(describing: error))
+        }
     }
 
     private func makeClient(path: String, maximumResponseBytes: Int) -> GeminiTranscriptionClient {
@@ -401,12 +560,100 @@ private final class RetryUploadAuthorization: @unchecked Sendable {
     }
 }
 
+private enum GeminiRedirectCall: Sendable {
+    case network(String)
+    case transcript(String)
+    case other(String)
+    case timedOut
+}
+
+private struct GeminiRedirectExchange: Equatable {
+    let url: URL
+    let headers: [String: String]
+}
+
+private enum GeminiAttackRedirect {
+    static func origin(kind: String, id: String) -> URL {
+        URL(string: "https://generativelanguage.googleapis.com/attack-redirect/\(kind)/\(id)")!
+    }
+
+    static func status(kind: String) -> Int {
+        switch kind {
+        case "301-cross":
+            return 301
+        case "303-cross":
+            return 303
+        case "307-cross", "307-same":
+            return 307
+        case "308-cross":
+            return 308
+        default:
+            return 302
+        }
+    }
+
+    static func location(kind: String, id: String) -> URL {
+        switch kind {
+        case "301-cross", "303-cross", "307-cross", "308-cross", "transcript", "apikey":
+            return URL(string: "https://evil.example/collect/\(id)")!
+        case "307-same", "relative":
+            return URL(string: "https://generativelanguage.googleapis.com/collect/\(id)")!
+        case "downgrade":
+            return URL(string: "http://generativelanguage.googleapis.com/collect/\(id)")!
+        case "loop":
+            return URL(string: "https://generativelanguage.googleapis.com/attack-redirect/loop-next/\(id)")!
+        case "loop-next":
+            return URL(string: "https://generativelanguage.googleapis.com/attack-redirect/loop/\(id)")!
+        default:
+            preconditionFailure("unknown redirect attack \(kind)")
+        }
+    }
+
+    static func locationHeader(kind: String, id: String) -> String {
+        if kind == "relative" {
+            return "/collect/\(id)"
+        }
+        return location(kind: kind, id: id).absoluteString
+    }
+
+    static func body(kind: String) -> Data {
+        guard kind == "transcript" else { return Data() }
+        return Data(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n".utf8
+        )
+    }
+
+    static func isLocation(_ url: URL, id: String, location: URL) -> Bool {
+        let path = url.path.count > 1 && url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path
+        if path == "/collect/\(id)" {
+            return true
+        }
+        let locationPath = location.path.count > 1 && location.path.hasSuffix("/")
+            ? String(location.path.dropLast())
+            : location.path
+        return url.scheme == location.scheme
+            && url.host?.lowercased() == location.host?.lowercased()
+            && path == locationPath
+    }
+
+    static func kindAndID(from url: URL) -> (kind: String, id: String)? {
+        let parts = url.path.split(separator: "/").map(String.init)
+        guard parts.count == 3, parts[0] == "attack-redirect" else { return nil }
+        return (parts[1], parts[2])
+    }
+}
+
 private final class GeminiRedirectURLProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     private static var hitURLs: [URL] = []
+    private static var recordedExchanges: [GeminiRedirectExchange] = []
 
     static func hits(where matches: (URL) -> Bool) -> Int {
         lock.withLock { hitURLs.filter(matches).count }
+    }
+
+    static func exchanges(where matches: (GeminiRedirectExchange) -> Bool) -> [GeminiRedirectExchange] {
+        lock.withLock { recordedExchanges.filter(matches) }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -418,7 +665,31 @@ private final class GeminiRedirectURLProtocol: URLProtocol, @unchecked Sendable 
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
-        Self.lock.withLock { Self.hitURLs.append(url) }
+        let headers = Self.headerFields(from: request)
+        Self.lock.withLock {
+            Self.hitURLs.append(url)
+            Self.recordedExchanges.append(GeminiRedirectExchange(url: url, headers: headers))
+        }
+        if let attack = GeminiAttackRedirect.kindAndID(from: url) {
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: GeminiAttackRedirect.status(kind: attack.kind),
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Location": GeminiAttackRedirect.locationHeader(kind: attack.kind, id: attack.id)]
+            )!
+            var redirected = URLRequest(url: GeminiAttackRedirect.location(kind: attack.kind, id: attack.id))
+            redirected.httpMethod = request.httpMethod
+            redirected.allHTTPHeaderFields = request.allHTTPHeaderFields
+            let body = GeminiAttackRedirect.body(kind: attack.kind)
+            let client = self.client
+            DispatchQueue.global().async {
+                client?.urlProtocol(self, wasRedirectedTo: redirected, redirectResponse: response)
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: body)
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            return
+        }
         if url.path.hasPrefix("/redirect-") {
             let response = HTTPURLResponse(
                 url: url,
@@ -451,6 +722,17 @@ private final class GeminiRedirectURLProtocol: URLProtocol, @unchecked Sendable 
     }
 
     override func stopLoading() {}
+
+    private static func headerFields(from request: URLRequest) -> [String: String] {
+        var fields: [String: String] = [:]
+        for (name, value) in request.allHTTPHeaderFields ?? [:] {
+            fields[name.lowercased()] = value
+        }
+        if let apiKey = request.value(forHTTPHeaderField: "x-goog-api-key") {
+            fields["x-goog-api-key"] = apiKey
+        }
+        return fields
+    }
 
     private func redirectedLocation(for url: URL) -> URL {
         let id = url.lastPathComponent
