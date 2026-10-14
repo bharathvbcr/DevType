@@ -384,12 +384,12 @@ public enum UncleanExitSentinel {
         }
     }
 
-    /// Report facts are a closed token alphabet. A slash, tilde, or other path character
-    /// drops the field instead of being copied into the diagnostic report.
+    /// Report facts are a closed token alphabet. A slash, tilde, `..`, or other path
+    /// character drops the whole field instead of being copied or truncated.
     private static func sanitizedFact(_ raw: String?, allowingPunctuation: Bool = true) -> String? {
         guard let raw else { return nil }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= 128 else { return nil }
+        guard !value.isEmpty, value.utf8.count <= 128, !value.contains("..") else { return nil }
         for scalar in value.unicodeScalars {
             if scalar.value < 0x20 || scalar.value == 0x7F { return nil }
             switch scalar {
@@ -409,11 +409,13 @@ public enum UncleanExitSentinel {
         value as? String
     }
 
+    /// JSON `true`/`false` are `CFBoolean`. JSON `0` and `1` are integer `NSNumber`s
+    /// that also satisfy `is Bool`, so that check would skip faulting-thread indexes 0 and 1.
     private static func int(_ value: Any?) -> Int? {
-        if value is Bool { return nil }
-        if let number = value as? Int { return number }
-        if let number = value as? NSNumber { return number.intValue }
-        return nil
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            return nil
+        }
+        return number.intValue
     }
 
     private static func logUnclean(_ facts: CrashFacts?) {
