@@ -145,6 +145,11 @@ public struct LappiClient: Sendable {
         if let failure = connect(fd: fd, address: &address, deadline: deadline) {
             return .failure(failure)
         }
+        // Mode and peer uid are checked on the connected socket, before any request byte.
+        // A miss is a refusal, not a failed write: do not writeAll and do not readLine.
+        if let failure = refusePeer(fd: fd, socketPath: socketPath) {
+            return .failure(failure)
+        }
 
         var framed = line
         framed.append(0x0A)
@@ -219,6 +224,43 @@ public struct LappiClient: Sendable {
             }
             return soError == 0 ? nil : connectFailure(soError)
         }
+    }
+
+    /// Whether the connected peer may be sent a query.
+    ///
+    /// `stMode` is from `lstat` (a symlink is not followed). `peerUID` is nil when `getpeereid`
+    /// failed. Either nil, a non-socket, a mode other than 0600, or a uid other than `ownUID`
+    /// is a refusal.
+    static func peerMayReceiveQuery(stMode: mode_t?, peerUID: uid_t?, ownUID: uid_t) -> Bool {
+        guard let stMode, let peerUID else { return false }
+        guard stMode & S_IFMT == S_IFSOCK else { return false }
+        guard stMode & 0o777 == 0o600 else { return false }
+        return peerUID == ownUID
+    }
+
+    /// `lstat`s `socketPath` and `getpeereid`s `fd`. Any miss refuses with `connectRefused`
+    /// and does not touch the request bytes.
+    private static func refusePeer(fd: Int32, socketPath: String) -> ExchangeFailure? {
+        var info = stat()
+        let listed = lstat(socketPath, &info)
+        let listErrno = errno
+        var uid: uid_t = 0
+        var gid: gid_t = 0
+        let peered = getpeereid(fd, &uid, &gid)
+        let peerErrno = errno
+        let stMode: mode_t? = listed == 0 ? info.st_mode : nil
+        let peerUID: uid_t? = peered == 0 ? uid : nil
+        guard peerMayReceiveQuery(stMode: stMode, peerUID: peerUID, ownUID: getuid()) else {
+            if listed != 0 {
+                logErrno("lstat(socket)", listErrno)
+            }
+            if peered != 0 {
+                logErrno("getpeereid()", peerErrno)
+            }
+            DevTypeLog.lappi.error("[Lappi] peer refused before write")
+            return ExchangeFailure(reason: .connectRefused)
+        }
+        return nil
     }
 
     private static func connectFailure(_ code: Int32) -> ExchangeFailure {

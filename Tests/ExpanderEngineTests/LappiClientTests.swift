@@ -19,6 +19,7 @@ final class LappiClientTests: XCTestCase {
         {"status":"ok","schema_version":1,"backend":"qd-metal/qwen3.5-2b-base/tessl","degraded":false,"slots":{"route":{"value":"findSnippet","conformal_set":["findSnippet"],"score":0.91,"noul":false,"degraded":false}}}
         """#)
         let exchange = ask(agent)
+        XCTAssertEqual(LappiTestFixtures.permissions(agent.path), 0o600)
         let slot = LappiSlotAnswer(value: .label("findSnippet"), conformalSet: ["findSnippet"], score: 0.91, noul: false, degraded: false)
         XCTAssertEqual(exchange.reading, .modelAnswered(backend: "qd-metal/qwen3.5-2b-base/tessl", slots: ["route": slot]))
         XCTAssertNotNil(exchange.latencyMs)
@@ -129,6 +130,50 @@ final class LappiClientTests: XCTestCase {
         XCTAssertEqual(bound, 0)
         close(fd) // the socket file stays; nobody accepts on it
         XCTAssertEqual(LappiClient(socketPath: path).askBlocking(request).reading, .unavailable(.connectRefused))
+    }
+
+    func testAMode0666SocketIsRefusedWithNoRequestBytes() throws {
+        let agent = try LappiFakeAgent(tag: "mode666", socketMode: 0o666) { fd, agent in
+            // A reply already queued at accept must not become the outcome: a mode refusal
+            // is not a failed write, so the client must not read it.
+            LappiFakeAgent.write(fd, Data(#"{"status":"error","schema_version":1,"error":{"kind":"overloaded"},"message":"x"}"#.utf8 + [0x0A]))
+            agent.readRequest(fd)
+        }
+        XCTAssertEqual(LappiTestFixtures.permissions(agent.path), 0o666)
+        let exchange = ask(agent)
+        XCTAssertEqual(exchange.reading, .unavailable(.connectRefused))
+        XCTAssertTrue(agent.waitUntilDone())
+        XCTAssertEqual(agent.receivedRequest, Data(), "a refused peer must observe zero request bytes")
+    }
+
+    func testASymlinkToAPrivateSocketIsRefusedWithNoRequestBytes() throws {
+        let agent = try LappiFakeAgent(tag: "symlink") { fd, agent in
+            agent.readRequest(fd)
+        }
+        let link = agent.directory + "/link.sock"
+        XCTAssertEqual(symlink(agent.path, link), 0)
+        let exchange = LappiClient(socketPath: link, timeout: 2).askBlocking(request)
+        XCTAssertEqual(exchange.reading, .unavailable(.connectRefused))
+        XCTAssertTrue(agent.waitUntilDone())
+        XCTAssertEqual(agent.receivedRequest, Data(), "lstat must not follow the symlink into a write")
+    }
+
+    /// Not a second OS user. Feeds the mode/uid decision the observed values only.
+    func testPeerMayReceiveQueryRequiresSocketMode0600AndSameUid() {
+        let own = getuid()
+        let other = own &+ 1
+        let socket0600 = S_IFSOCK | mode_t(0o600)
+        XCTAssertTrue(LappiClient.peerMayReceiveQuery(stMode: socket0600, peerUID: own, ownUID: own))
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: S_IFSOCK | mode_t(0o666), peerUID: own, ownUID: own))
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: S_IFSOCK | mode_t(0o700), peerUID: own, ownUID: own))
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: S_IFSOCK | mode_t(0o640), peerUID: own, ownUID: own))
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: S_IFREG | mode_t(0o600), peerUID: own, ownUID: own))
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: S_IFLNK | mode_t(0o777), peerUID: own, ownUID: own))
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: socket0600, peerUID: other, ownUID: own))
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: nil, peerUID: own, ownUID: own))
+        XCTAssertFalse(LappiClient.peerMayReceiveQuery(stMode: socket0600, peerUID: nil, ownUID: own))
+        // Bits outside 0o777 (setuid) are not part of the permission check the contract states.
+        XCTAssertTrue(LappiClient.peerMayReceiveQuery(stMode: S_ISUID | socket0600, peerUID: own, ownUID: own))
     }
 
     func testAPeerThatDripsBytesCannotHoldTheCallerPastItsDeadline() throws {
