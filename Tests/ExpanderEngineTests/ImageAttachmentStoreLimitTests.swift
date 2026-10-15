@@ -318,4 +318,318 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let normalResult = try EspansoImporter.importFrom(root, imageStore: store)
         XCTAssertEqual(normalResult.imageCount, 1, "under the default cap the image imports")
     }
+
+    // One ImageIO walk and one NSImage decode per accepted payload.
+    private final class AttachmentValidationCounter {
+        private(set) var metadata = 0
+        private(set) var decodes = 0
+
+        func inspectMetadata(_ data: Data, _ source: String) throws {
+            metadata += 1
+            try ImageAttachmentStore.validateDecodedImageSize(data, sourceDescription: source)
+        }
+
+        func decode(_ data: Data) -> NSImage? {
+            decodes += 1
+            return NSImage(data: data)
+        }
+    }
+
+    func testImportImageValidatesAndDecodesOnce() throws {
+        let sourceDir = try makeTempDir("once-src")
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let storeDir = try makeTempDir("once-store")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let store = ImageAttachmentStore(directory: storeDir)
+
+        let png = try makePNGData()
+        let pngURL = sourceDir.appendingPathComponent("tiny.png")
+        try png.write(to: pngURL)
+
+        let first = AttachmentValidationCounter()
+        let stored = try store.importImage(
+            from: pngURL,
+            inspectMetadata: first.inspectMetadata,
+            decode: first.decode
+        )
+        XCTAssertEqual(first.metadata, 1)
+        XCTAssertEqual(first.decodes, 1)
+        let written = try Data(contentsOf: store.url(forImagePath: stored))
+        XCTAssertEqual(written, png)
+        XCTAssertNotNil(store.loadImage(path: stored))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).count, 1)
+
+        let second = AttachmentValidationCounter()
+        let storedAgain = try store.importImage(
+            from: pngURL,
+            inspectMetadata: second.inspectMetadata,
+            decode: second.decode
+        )
+        XCTAssertEqual(second.metadata, 1)
+        XCTAssertEqual(second.decodes, 1)
+        XCTAssertNotEqual(storedAgain, stored)
+        XCTAssertEqual(try Data(contentsOf: store.url(forImagePath: storedAgain)), png)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).count, 2)
+    }
+
+    func testPrepareThenSavePreparedValidatesAndDecodesOnce() throws {
+        let sourceDir = try makeTempDir("prepared-src")
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let storeDir = try makeTempDir("prepared-store")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let store = ImageAttachmentStore(directory: storeDir)
+
+        let png = try makePNGData()
+        let pngURL = sourceDir.appendingPathComponent("tiny.png")
+        try png.write(to: pngURL)
+
+        let counter = AttachmentValidationCounter()
+        let prepared = try store.prepareImage(
+            from: pngURL,
+            inspectMetadata: counter.inspectMetadata,
+            decode: counter.decode
+        )
+        let stored = try store.save(prepared: prepared)
+        XCTAssertEqual(counter.metadata, 1)
+        XCTAssertEqual(counter.decodes, 1)
+        XCTAssertEqual(try Data(contentsOf: store.url(forImagePath: stored)), prepared.data)
+        XCTAssertEqual(prepared.data, png)
+        XCTAssertNotNil(store.loadImage(path: stored))
+    }
+
+    func testSavePreparedRefusesWhenCapDropsAfterPrepareWithoutDecodingAgain() throws {
+        let cap = ImageAttachmentStore.maxImportedImageBytes
+        defer { ImageAttachmentStore.maxImportedImageBytes = cap }
+
+        let sourceDir = try makeTempDir("prepared-cap-src")
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let storeDir = try makeTempDir("prepared-cap-store")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let store = ImageAttachmentStore(directory: storeDir)
+        let pngURL = sourceDir.appendingPathComponent("tiny.png")
+        try makePNGData().write(to: pngURL)
+
+        let counter = AttachmentValidationCounter()
+        let prepared = try store.prepareImage(
+            from: pngURL,
+            inspectMetadata: counter.inspectMetadata,
+            decode: counter.decode
+        )
+        ImageAttachmentStore.maxImportedImageBytes = prepared.data.count - 1
+        XCTAssertThrowsError(try store.save(prepared: prepared)) { error in
+            XCTAssertEqual(
+                error as? ImageAttachmentStore.StoreError,
+                .oversizedImage("\(prepared.data.count) bytes")
+            )
+        }
+        XCTAssertEqual(counter.metadata, 1)
+        XCTAssertEqual(counter.decodes, 1)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).isEmpty)
+    }
+
+    func testSaveDataValidatesAndDecodesOnce() throws {
+        let storeDir = try makeTempDir("save-once")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let store = ImageAttachmentStore(directory: storeDir)
+        let png = try makePNGData()
+        let counter = AttachmentValidationCounter()
+
+        let stored = try store.save(
+            data: png,
+            inspectMetadata: counter.inspectMetadata,
+            decode: counter.decode
+        )
+        XCTAssertEqual(counter.metadata, 1)
+        XCTAssertEqual(counter.decodes, 1)
+        XCTAssertEqual(try Data(contentsOf: store.url(forImagePath: stored)), png)
+        XCTAssertNotNil(store.loadImage(path: stored))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).count, 1)
+    }
+
+    func testSaveDataAboveLoweredCapSkipsMetadataDecodeAndWrite() throws {
+        let cap = ImageAttachmentStore.maxImportedImageBytes
+        defer { ImageAttachmentStore.maxImportedImageBytes = cap }
+
+        let storeDir = try makeTempDir("save-cap")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let store = ImageAttachmentStore(directory: storeDir)
+        let png = try makePNGData()
+        let counter = AttachmentValidationCounter()
+
+        ImageAttachmentStore.maxImportedImageBytes = 10
+        XCTAssertThrowsError(try store.save(
+            data: png,
+            inspectMetadata: counter.inspectMetadata,
+            decode: counter.decode
+        )) { error in
+            guard case ImageAttachmentStore.StoreError.oversizedImage = error else {
+                return XCTFail("expected oversizedImage, got \(error)")
+            }
+        }
+        XCTAssertEqual(counter.metadata, 0)
+        XCTAssertEqual(counter.decodes, 0)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).isEmpty)
+    }
+
+    func testImportImageAboveLoweredCapSkipsMetadataDecodeAndWrite() throws {
+        let cap = ImageAttachmentStore.maxImportedImageBytes
+        defer { ImageAttachmentStore.maxImportedImageBytes = cap }
+
+        let sourceDir = try makeTempDir("import-cap-src")
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let storeDir = try makeTempDir("import-cap-store")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let pngURL = sourceDir.appendingPathComponent("tiny.png")
+        try makePNGData().write(to: pngURL)
+
+        let store = ImageAttachmentStore(directory: storeDir)
+        let counter = AttachmentValidationCounter()
+        ImageAttachmentStore.maxImportedImageBytes = 10
+        XCTAssertThrowsError(try store.importImage(
+            from: pngURL,
+            inspectMetadata: counter.inspectMetadata,
+            decode: counter.decode
+        )) { error in
+            guard case ImageAttachmentStore.StoreError.oversizedImage = error else {
+                return XCTFail("expected oversizedImage, got \(error)")
+            }
+        }
+        XCTAssertEqual(counter.metadata, 0)
+        XCTAssertEqual(counter.decodes, 0)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).isEmpty)
+    }
+
+    func testUnsupportedExtensionSkipsMetadataAndDecode() throws {
+        let sourceDir = try makeTempDir("bad-ext-src")
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let storeDir = try makeTempDir("bad-ext-store")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let store = ImageAttachmentStore(directory: storeDir)
+        let png = try makePNGData()
+
+        for ext in ["exe", "txt"] {
+            let counter = AttachmentValidationCounter()
+            XCTAssertThrowsError(try store.save(
+                data: png,
+                preferredExtension: ext,
+                inspectMetadata: counter.inspectMetadata,
+                decode: counter.decode
+            )) { error in
+                XCTAssertEqual(
+                    error as? ImageAttachmentStore.StoreError,
+                    .unsupportedImageType(ext)
+                )
+            }
+            XCTAssertEqual(counter.metadata, 0, ext)
+            XCTAssertEqual(counter.decodes, 0, ext)
+
+            let source = sourceDir.appendingPathComponent("payload.\(ext)")
+            let prepareCounter = AttachmentValidationCounter()
+            XCTAssertThrowsError(try store.prepareImage(
+                from: source,
+                inspectMetadata: prepareCounter.inspectMetadata,
+                decode: prepareCounter.decode
+            )) { error in
+                XCTAssertEqual(
+                    error as? ImageAttachmentStore.StoreError,
+                    .unsupportedImageType(ext)
+                )
+            }
+            XCTAssertEqual(prepareCounter.metadata, 0, ext)
+            XCTAssertEqual(prepareCounter.decodes, 0, ext)
+        }
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).isEmpty)
+    }
+
+    func testMetadataRejectionSkipsDecodeAndWrite() throws {
+        let sourceDir = try makeTempDir("meta-fail-src")
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let storeDir = try makeTempDir("meta-fail-store")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let store = ImageAttachmentStore(directory: storeDir)
+        let png = try makePNGData()
+        let pngURL = sourceDir.appendingPathComponent("tiny.png")
+        try png.write(to: pngURL)
+
+        var saveDecodes = 0
+        XCTAssertThrowsError(try store.save(
+            data: png,
+            inspectMetadata: { _, _ in
+                throw ImageAttachmentStore.StoreError.oversizedImageDimensions
+            },
+            decode: { data in
+                saveDecodes += 1
+                return NSImage(data: data)
+            }
+        )) { error in
+            XCTAssertEqual(error as? ImageAttachmentStore.StoreError, .oversizedImageDimensions)
+        }
+        XCTAssertEqual(saveDecodes, 0)
+
+        var importDecodes = 0
+        XCTAssertThrowsError(try store.importImage(
+            from: pngURL,
+            inspectMetadata: { _, _ in
+                throw ImageAttachmentStore.StoreError.oversizedImageDimensions
+            },
+            decode: { data in
+                importDecodes += 1
+                return NSImage(data: data)
+            }
+        )) { error in
+            XCTAssertEqual(error as? ImageAttachmentStore.StoreError, .oversizedImageDimensions)
+        }
+        XCTAssertEqual(importDecodes, 0)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).isEmpty)
+    }
+
+    func testNilDecodeThrowsUnreadableImageAfterMetadataAndWritesNothing() throws {
+        let sourceDir = try makeTempDir("nil-decode-src")
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let storeDir = try makeTempDir("nil-decode-store")
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        let store = ImageAttachmentStore(directory: storeDir)
+        let png = try makePNGData()
+        let pngURL = sourceDir.appendingPathComponent("tiny.png")
+        try png.write(to: pngURL)
+
+        let saveCounter = AttachmentValidationCounter()
+        var saveDecodes = 0
+        XCTAssertThrowsError(try store.save(
+            data: png,
+            inspectMetadata: saveCounter.inspectMetadata,
+            decode: { _ in
+                XCTAssertEqual(saveCounter.metadata, 1)
+                saveDecodes += 1
+                return nil
+            }
+        )) { error in
+            XCTAssertEqual(
+                error as? ImageAttachmentStore.StoreError,
+                .unreadableImage("\(png.count) bytes")
+            )
+        }
+        XCTAssertEqual(saveCounter.metadata, 1)
+        XCTAssertEqual(saveDecodes, 1)
+
+        let importCounter = AttachmentValidationCounter()
+        var importDecodes = 0
+        XCTAssertThrowsError(try store.importImage(
+            from: pngURL,
+            inspectMetadata: importCounter.inspectMetadata,
+            decode: { _ in
+                XCTAssertEqual(importCounter.metadata, 1)
+                importDecodes += 1
+                return nil
+            }
+        )) { error in
+            XCTAssertEqual(
+                error as? ImageAttachmentStore.StoreError,
+                .unreadableImage(pngURL.path)
+            )
+        }
+        XCTAssertEqual(importCounter.metadata, 1)
+        XCTAssertEqual(importDecodes, 1)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: storeDir.path).isEmpty)
+    }
 }
