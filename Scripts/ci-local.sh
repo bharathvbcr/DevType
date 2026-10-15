@@ -72,7 +72,7 @@ echo "==> 2b. Benchmark regression gate (release)"
 # fails this script; skipping is announced, never silent. -DDEBUG is needed because other test
 # files use `#if DEBUG` hooks that a release test build would otherwise drop.
 if [[ "${DEVTYPE_BENCH:-}" == "1" ]]; then
-  swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests'
+  swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests|VoiceStreamingBenchmark'
 else
   echo "  SKIPPED: DEVTYPE_BENCH=1 is not set, so the performance gate did NOT run."
   echo "  The release gate is DEVTYPE_BENCH=1 ./Scripts/ci-local.sh."

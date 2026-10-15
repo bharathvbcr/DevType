@@ -5,16 +5,10 @@ import XCTest
 /// Set `DEVTYPE_BENCH=1` to run; skipped otherwise so CI is not timing-sensitive.
 ///
 /// A is the pre-change shape: five full-transcript joins per partial, each copying the whole
-/// prefix once per segment (`base + " " + next`). B is the real assembler -> reconciler path
-/// (and the real `VoiceInsertionService`). The runs are interleaved and the minimum of N is
-/// reported, so a noisy neighbour does not decide the answer.
+/// prefix once per segment (`base + " " + next`). B is the real path: `VoiceInsertionService`
+/// (assembler, diagnostics off) plus the reconciler sealing finals. `BenchmarkGate.interleaved`
+/// alternates the two and keeps each side's minimum, so a noisy neighbour does not decide it.
 final class VoiceStreamingBenchmarkTests: XCTestCase {
-
-    private func requireBenchMode() throws {
-        guard ProcessInfo.processInfo.environment["DEVTYPE_BENCH"] == "1" else {
-            throw XCTSkip("set DEVTYPE_BENCH=1 to run benchmarks")
-        }
-    }
 
     private static let segmentCount = 500
     private static let revisionsPerSegment = 3
@@ -42,16 +36,21 @@ final class VoiceStreamingBenchmarkTests: XCTestCase {
         return result
     }
 
-    private func nanos(_ body: () -> Void) -> UInt64 {
-        let start = DispatchTime.now().uptimeNanoseconds
-        body()
-        return DispatchTime.now().uptimeNanoseconds - start
-    }
-
+    /// Before: five quadratic joins per partial. After: insertion service + reconciler.
+    /// Ceiling is 2 ms per partial for the after path (the pre-change join is the comparison,
+    /// not a ceiling — it is expected to be slower). 500 segments × 3 revisions.
+    @MainActor
     func testPerPartialCostLegacyVersusCurrent() throws {
-        try requireBenchMode()
+        try BenchmarkGate.requireBenchMode()
         let stream = Self.stream()
         var sink = 0
+        let tracingKey = VoicePreferences.voiceTracingKey
+        let previousTracing = UserDefaults.standard.object(forKey: tracingKey)
+        VoicePreferences.isVoiceTracingEnabled = false
+        defer {
+            if let previousTracing { UserDefaults.standard.set(previousTracing, forKey: tracingKey) }
+            else { UserDefaults.standard.removeObject(forKey: tracingKey) }
+        }
 
         let legacy = {
             var texts: [String] = []
@@ -67,50 +66,38 @@ final class VoiceStreamingBenchmarkTests: XCTestCase {
             }
         }
         let current = {
-            var assembler = LiveTranscriptAssembler()
+            let service = VoiceInsertionService(
+                submit: { _, completion in completion(.succeeded) },
+                liveMode: .previewInHUD
+            )
+            service.beginSession()
             let reconciler = VoiceTranscriptReconciler(maxOwnedLength: Int.max)
             for segment in stream {
-                guard assembler.ingest(segment) else { continue }
-                let edit = reconciler.reconcile(target: assembler.cumulativeText)
-                reconciler.sealPrefix(assembler.settledText)
-                sink &+= edit.textToInject.utf8.count + assembler.cumulativeText.utf8.count
+                service.applyLiveSegment(segment)
+                let target = service.recognizedText
+                let edit = reconciler.reconcile(target: target)
+                if segment.finality == .final {
+                    reconciler.sealPrefix(target)
+                }
+                sink &+= edit.textToInject.utf8.count &+ target.utf8.count
             }
+            sink &+= service.diagnosticsTextBuildCount
         }
 
-        var bestLegacy = UInt64.max
-        var bestCurrent = UInt64.max
-        for _ in 0..<7 {
-            bestLegacy = min(bestLegacy, nanos(legacy))
-            bestCurrent = min(bestCurrent, nanos(current))
-        }
+        let times = BenchmarkGate.interleaved(warmup: 1, rounds: 5, legacy, current)
         XCTAssertGreaterThan(sink, 0)
         let partials = Double(stream.count)
+        let ceilingMs = partials * 2
         print(String(format: "  legacy  (5 quadratic joins/partial)  %9.1f us/partial  total %8.2f ms",
-                     Double(bestLegacy) / partials / 1_000, Double(bestLegacy) / 1_000_000))
-        print(String(format: "  current (assembler + reconciler)     %9.1f us/partial  total %8.2f ms",
-                     Double(bestCurrent) / partials / 1_000, Double(bestCurrent) / 1_000_000))
-        XCTAssertLessThan(Double(bestCurrent) / partials / 1_000, 2_000, "per-partial ceiling: 2 ms")
-    }
-
-    @MainActor
-    func testInsertionServicePerPartialCost() throws {
-        try requireBenchMode()
-        let stream = Self.stream()
-        var best = UInt64.max
-        for _ in 0..<5 {
-            let service = VoiceInsertionService(submit: { _, completion in completion(.succeeded) },
-                                                liveMode: .previewInHUD)
-            service.beginSession()
-            best = min(best, nanos {
-                for segment in stream {
-                    service.applyLiveSegment(segment)
-                    _ = service.recognizedText
-                }
-            })
+                     times.a / partials * 1_000, times.a))
+        print(String(format: "  current (service + reconciler)       %9.1f us/partial  total %8.2f ms",
+                     times.b / partials * 1_000, times.b))
+        let verdict = BenchmarkGate.verdict(measuredMs: times.b, ceilingMs: ceilingMs)
+        if !verdict.passed {
+            XCTFail(String(format: "current path %.2f ms exceeds ceiling %.0f ms (2 ms/partial)",
+                           times.b, ceilingMs))
         }
-        let perPartial = Double(best) / Double(stream.count) / 1_000
-        print(String(format: "  VoiceInsertionService.applyLiveSegment %9.1f us/partial (%d partials)",
-                     perPartial, stream.count))
-        XCTAssertLessThan(perPartial, 2_000, "per-partial ceiling: 2 ms")
+        XCTAssertLessThan(times.b, times.a,
+                          "The linear path must beat five quadratic joins per partial")
     }
 }

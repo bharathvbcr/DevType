@@ -300,8 +300,9 @@ public final class VoiceTranscriptReconciler: @unchecked Sendable {
     /// An empty `next` is a no-op. Callers pass trimmed text.
     static func appendSegment(_ base: inout String, next: String) {
         guard !next.isEmpty else { return }
-        guard !base.isEmpty else {
-            base = next
+        if base.isEmpty {
+            // Assignment would replace the buffer and drop a caller's `reserveCapacity`.
+            base.append(contentsOf: next)
             return
         }
 

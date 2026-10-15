@@ -266,7 +266,7 @@ An Apple Development signature supports local installation; it does not establis
 
 ```sh
 # Release configuration (the one the ceilings are derived from)
-DEVTYPE_BENCH=1 swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests'
+DEVTYPE_BENCH=1 swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests|VoiceStreamingBenchmark'
 ```
 
 `-DDEBUG` is required because other test files use `#if DEBUG` hooks that a plain release test build drops.

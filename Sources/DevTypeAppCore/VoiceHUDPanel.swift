@@ -39,6 +39,9 @@ public final class VoiceHUDPanel: NSPanel {
     private var pendingTargetSize: CGSize?
     private var pendingMeasureText: String?
     private var isResizeScheduled = false
+    /// Set once the transcript has filled the HUD. Later partials at least that long
+    /// reuse the size and do not measure again.
+    private var hudStreamingMemory: LiquidBlobGeometry.StreamingHUDMemory?
     private var usesRealGlass = false
 
     private var isPinned = false
@@ -406,25 +409,43 @@ public final class VoiceHUDPanel: NSPanel {
     // MARK: - Dynamic Liquid Blob Expansion
 
     private func measuredSize(forText text: String) -> CGSize {
-        LiquidBlobGeometry.hudSize(
+        LiquidBlobGeometry.streamingHUDSize(
             forText: text,
             font: DevTypeTheme.font(14.5, .regular),
             chromeHeight: LiquidBlobGeometry.defaultChromeHeight,
             base: CGSize(width: Self.baseWidth, height: Self.baseHeight),
-            maximum: CGSize(width: Self.maxWidth, height: Self.maxHeight)
-        )
+            maximum: CGSize(width: Self.maxWidth, height: Self.maxHeight),
+            memory: &hudStreamingMemory
+        ).size
     }
 
     /// Streaming updates arrive per recognizer partial. The text is only remembered here and
     /// measured once, on the next runloop turn, for the newest value. The first show still
     /// measures at once because `showOnScreen` needs the size before the window appears.
+    /// Once the HUD is full and the frame already matches that size, a longer partial does
+    /// not schedule a resize. An in-flight resize still keeps the newest partial.
     private func scheduleSize(forText text: String) {
+        if isResizeScheduled {
+            pendingMeasureText = text
+            if !isVisible {
+                pendingTargetSize = measuredSize(forText: text)
+                pendingMeasureText = nil
+            }
+            return
+        }
+        if LiquidBlobGeometry.shouldSkipFilledStreamingResize(
+            isVisible: isVisible,
+            textUTF8Count: text.utf8.count,
+            frame: frame.size,
+            memory: hudStreamingMemory
+        ) {
+            return
+        }
         pendingMeasureText = text
         if !isVisible {
             pendingTargetSize = measuredSize(forText: text)
             pendingMeasureText = nil
         }
-        guard !isResizeScheduled else { return }
         isResizeScheduled = true
         DispatchQueue.main.async { [weak self] in
             self?.flushPendingResize()
@@ -443,10 +464,16 @@ public final class VoiceHUDPanel: NSPanel {
     }
 
     private func applyFrame(size: CGSize, animated: Bool) {
+        let currentFrame = frame
+        guard LiquidBlobGeometry.streamingFrameNeedsPlacement(
+            current: currentFrame.size,
+            target: size,
+            isVisible: isVisible
+        ) else { return }
+
         guard let screen = screenForPlacement() else { return }
         let screenRect = screen.visibleFrame
 
-        let currentFrame = frame
         let centerX = currentFrame.width > 0 ? currentFrame.midX : screenRect.midX
         let bottomY: CGFloat = {
             if currentFrame.height > 0, isVisible {
@@ -460,10 +487,6 @@ public final class VoiceHUDPanel: NSPanel {
             min(screenRect.maxX - size.width - 20, centerX - (size.width / 2))
         )
         let newFrame = NSRect(x: newX, y: bottomY, width: size.width, height: size.height)
-
-        let deltaW = abs(currentFrame.width - size.width)
-        let deltaH = abs(currentFrame.height - size.height)
-        guard deltaW > 2 || deltaH > 2 || !isVisible else { return }
 
         if !animated || DevTypeAccessibility.reduceMotion {
             setFrame(newFrame, display: true)

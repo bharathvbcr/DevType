@@ -229,6 +229,87 @@ public enum LiquidBlobGeometry {
         return CGSize(width: ceil(width), height: ceil(height))
     }
 
+    /// One streaming measurement. `didMeasure` is false when no layout ran.
+    public struct StreamingHUDMeasurement: Equatable {
+        public var size: CGSize
+        public var didMeasure: Bool
+    }
+
+    /// The size that first filled the HUD, and how long the transcript was then.
+    /// A later partial at least this long reuses `size` instead of measuring.
+    public struct StreamingHUDMemory: Equatable {
+        public var filledAtUTF8Count: Int
+        public var size: CGSize
+    }
+
+    /// Word wrap stops a line a few points inside the width constraint, so a full HUD's
+    /// measured width is not always `maximum.width`. A column of short lines is not full:
+    /// its width stays near `base`, and a later wide line still has to be measured.
+    static let maximumWidthSlack: CGFloat = 24
+
+    /// The panel ignores a frame change at or under this. Partials arrive faster than the
+    /// resize animation, and a 2 pt jitter must not start another one or look up a screen.
+    public static let streamingFrameSlack: CGFloat = 2
+
+    /// True when a longer partial cannot change a HUD that is already on screen at `memory.size`.
+    /// A hidden panel still has to be placed, and a shorter transcript still has to be measured.
+    public static func shouldSkipFilledStreamingResize(
+        isVisible: Bool,
+        textUTF8Count: Int,
+        frame: CGSize,
+        memory: StreamingHUDMemory?
+    ) -> Bool {
+        guard isVisible, let memory, textUTF8Count >= memory.filledAtUTF8Count else { return false }
+        return abs(frame.width - memory.size.width) <= streamingFrameSlack
+            && abs(frame.height - memory.size.height) <= streamingFrameSlack
+    }
+
+    /// Whether `applyFrame` has to look up a screen and move the window.
+    /// A hidden window still needs placement even when the size already matches.
+    public static func streamingFrameNeedsPlacement(
+        current: CGSize,
+        target: CGSize,
+        isVisible: Bool
+    ) -> Bool {
+        abs(current.width - target.width) > streamingFrameSlack
+            || abs(current.height - target.height) > streamingFrameSlack
+            || !isVisible
+    }
+
+    /// HUD size for a streamed partial.
+    ///
+    /// Once the panel is at maximum height and about maximum width, more text cannot change
+    /// the answer: height is clamped and the longest line is already as wide as wrapping
+    /// allows. Callers keep `memory` for the session and skip `boundingRect`. Measuring the
+    /// tail on every partial was the wasted work, and that tail is still thousands of
+    /// characters. A shorter partial clears the memory and measures, so a revision that
+    /// deletes text can shrink the HUD. Placeholder copy clears it too.
+    public static func streamingHUDSize(
+        forText text: String,
+        font: NSFont,
+        chromeHeight: CGFloat = defaultChromeHeight,
+        base: CGSize = CGSize(width: 304, height: 68),
+        maximum: CGSize = CGSize(width: 500, height: 188),
+        memory: inout StreamingHUDMemory?
+    ) -> StreamingHUDMeasurement {
+        if isPlaceholderText(text) {
+            memory = nil
+            return StreamingHUDMeasurement(size: base, didMeasure: false)
+        }
+        if let memory, text.utf8.count >= memory.filledAtUTF8Count {
+            return StreamingHUDMeasurement(size: memory.size, didMeasure: false)
+        }
+        let size = hudSize(
+            forText: text, font: font, chromeHeight: chromeHeight, base: base, maximum: maximum
+        )
+        if size.height >= maximum.height, size.width + maximumWidthSlack >= maximum.width {
+            memory = StreamingHUDMemory(filledAtUTF8Count: text.utf8.count, size: size)
+        } else {
+            memory = nil
+        }
+        return StreamingHUDMeasurement(size: size, didMeasure: true)
+    }
+
     /// Rasterize a blob path into an `NSImage` suitable for `NSVisualEffectView.maskImage`.
     public static func maskImage(path: CGPath, size: CGSize) -> NSImage {
         let image = NSImage(size: size, flipped: false) { _ in

@@ -13,13 +13,17 @@ public enum ProtectedSpanExtractor {
         (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])).map { (kind, $0) }
     }
 
+    /// Compiled once. `NSDataDetector` builds its data tables at init, and `extract` runs
+    /// once per final transcript. Matching after init is thread-safe.
+    static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
     public static func extract(from text: String, dictionaryTerms: [String] = []) -> [ProtectedSpan] {
         var spans: [ProtectedSpan] = []
         let nsString = text as NSString
         let fullRange = NSRange(location: 0, length: nsString.length)
 
         // 1. URLs and Emails via NSDataDetector
-        if let urlDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+        if let urlDetector = linkDetector {
             let matches = urlDetector.matches(in: text, options: [], range: fullRange)
             for match in matches {
                 let matchText = nsString.substring(with: match.range)
