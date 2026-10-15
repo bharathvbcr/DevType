@@ -89,7 +89,12 @@ enum MacroPaletteRanking {
         var discriminating = [Bool](repeating: false, count: scoredTerms.count)
         for category in MacroCategory.allCases {
             let title = titles[category] ?? ""
-            for descriptor in MacroCatalog.descriptors(in: category) {
+            // One catalogue: the editor inserts `CommandPaletteCatalog.macros`, and
+            // this ranking walks that same table. A private copy here would let the
+            // rows a person picks drift from the tokens that land in the snippet.
+            // `macros(in:)` is the section order the palette already shows.
+            let descriptors = CommandPaletteCatalog.macros(in: category)
+            for descriptor in descriptors {
                 let scores = termScores(
                     descriptor, terms: scoredTerms, categoryTitle: title, loc: loc
                 )

@@ -252,6 +252,15 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
     }
 
+    /// Save the text this panel already holds. `close` drops the panel without
+    /// activating the source app, which would cover the editor that is about to open.
+    @objc private func saveSelectionAsSnippet() {
+        let text = rawInput
+        AIActionPanel.close(resumeMatching: true)
+        let draft = SnippetManagerViewController.SelectionSnippetDraft.make(fromCapturedText: text)
+        (NSApp.delegate as? AppDelegate)?.presentNewSnippet(draft: draft)
+    }
+
     override func loadView() {
         let glass = GlassContainerView(
             cornerRadius: DevTypeTheme.Radius.panel,
@@ -366,6 +375,24 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
         let footerDivider = DevTypeTheme.makeHairline()
         root.addSubview(footerDivider)
 
+        // A clipboard fallback is not the user's selection. Blank text has nothing to save.
+        // Closing the panel must not activate the source app: that would hide the editor.
+        let showSaveSelection = source != .clipboard && !SelectionReader.isBlankSelection(rawInput)
+        let saveSelectionButton = NSButton(
+            title: loc.s("ai.palette.saveSelection"),
+            target: self,
+            action: #selector(saveSelectionAsSnippet)
+        )
+        saveSelectionButton.bezelStyle = .rounded
+        saveSelectionButton.controlSize = .small
+        saveSelectionButton.font = DevTypeTheme.font(12, .medium)
+        saveSelectionButton.keyEquivalent = ""
+        saveSelectionButton.translatesAutoresizingMaskIntoConstraints = false
+        saveSelectionButton.isHidden = !showSaveSelection
+        if showSaveSelection {
+            root.addSubview(saveSelectionButton)
+        }
+
         let quickCap = KeyCapView("1-9")
         let quickLabel = DevTypeTheme.makeLabel(
             loc.s("ai.palette.quick"),
@@ -426,7 +453,10 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
             customField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             customField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
             customField.heightAnchor.constraint(equalToConstant: 24),
-            customField.bottomAnchor.constraint(equalTo: footerDivider.topAnchor, constant: -6),
+            customField.bottomAnchor.constraint(
+                equalTo: showSaveSelection ? saveSelectionButton.topAnchor : footerDivider.topAnchor,
+                constant: -6
+            ),
 
             footerDivider.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             footerDivider.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
@@ -435,6 +465,13 @@ private final class AIActionController: NSViewController, NSTableViewDataSource,
             footerStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             footerStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
         ])
+        if showSaveSelection {
+            NSLayoutConstraint.activate([
+                saveSelectionButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+                saveSelectionButton.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -16),
+                saveSelectionButton.bottomAnchor.constraint(equalTo: footerDivider.topAnchor, constant: -6)
+            ])
+        }
 
         view = glass
     }

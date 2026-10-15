@@ -278,7 +278,7 @@ public enum CommandPaletteCatalog {
                 trigger: "newsnippet",
                 titleKey: "palette.command.createSnippet",
                 subtitleKey: "home.quickActions.title",
-                aliases: ["new snippet", "create snippet", "add snippet", "make snippet"],
+                aliases: ["new", "new snippet", "create snippet", "add snippet", "make snippet"],
                 action: .navigate(.createSnippet)
             ),
             PaletteCommand(
@@ -371,6 +371,11 @@ public enum CommandPaletteCatalog {
         }
 
         let lower = trimmed.lowercased()
+        // Months, years, hours and the rest. Day and week phrases already returned above,
+        // on the same path as `+3w`, so this branch cannot disagree with it.
+        if let natural = naturalDateOffset(in: lower), !natural.isZero {
+            return .relativeOffset(natural, format: "medium", trigger: lower)
+        }
         if let offset = DateOffset.parse(lower), !offset.isZero {
             // Full offset including weeks/months (e.g. +3w) — day-only already handled above.
             if !(offset.isDayOnly) {
@@ -400,6 +405,18 @@ public enum CommandPaletteCatalog {
     public static func parseRelativeDayQuery(_ raw: String) -> (days: Int, format: String, trigger: String, exactQuery: Bool)? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !text.isEmpty else { return nil }
+
+        // "in 3 weeks" / "3 days from now" / "in a week" — the same day count as +3w / +3d / +1w.
+        if let natural = naturalDateOffset(in: text), !natural.isZero {
+            if natural.isDayOnly {
+                return (natural.days, "medium", text, true)
+            }
+            if natural.years == 0, natural.months == 0, natural.hours == 0,
+               natural.minutes == 0, natural.seconds == 0,
+               natural.weeks != 0, natural.days == 0 {
+                return (natural.weeks * 7, "medium", text, true)
+            }
+        }
 
         // Bare offset: +1d / -2d / +3w (day-equivalent for weeks via DateOffset)
         if let offset = DateOffset.parse(text), !offset.isZero {
@@ -1552,6 +1569,48 @@ public enum CommandPaletteCatalog {
             if !found { return nil }
         }
         return max(0, 40 - gaps)
+    }
+
+    /// Natural offsets the `+3w` grammar does not spell: "in 3 weeks", "3 weeks from now",
+    /// "in a day", "next month". `nil` for weekday phrases such as "next friday", which
+    /// `parseNextWeekdayQuery` owns. The unit `M` stays a month here; the `+3w` parser
+    /// lowercases its input, and a lowercased `m` is a minute.
+    static func naturalDateOffset(in raw: String) -> DateOffset? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !text.isEmpty else { return nil }
+        if let fromNow = text.range(of: " from now"), fromNow.upperBound == text.endIndex {
+            text = String(text[..<fromNow.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if text.hasPrefix("in ") {
+            text = String(text.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let parts = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard parts.count == 2 else { return nil }
+        let magnitude: Int
+        let unit: String
+        if parts[0] == "next" {
+            magnitude = 1
+            unit = parts[1]
+        } else if parts[0] == "a" || parts[0] == "an" {
+            magnitude = 1
+            unit = parts[1]
+        } else if let value = Int(parts[0]), (1...999).contains(value),
+                  parts[0].count <= 3, parts[0].allSatisfy(\.isNumber) {
+            magnitude = value
+            unit = parts[1]
+        } else {
+            return nil
+        }
+        switch unit {
+        case "day", "days": return DateOffset(days: magnitude)
+        case "week", "weeks": return DateOffset(weeks: magnitude)
+        case "month", "months": return DateOffset(months: magnitude)
+        case "year", "years": return DateOffset(years: magnitude)
+        case "hour", "hours": return DateOffset(hours: magnitude)
+        case "minute", "minutes": return DateOffset(minutes: magnitude)
+        case "second", "seconds": return DateOffset(seconds: magnitude)
+        default: return nil
+        }
     }
 
     private static func parseNextWeekdayQuery(_ text: String) -> (days: Int, format: String, trigger: String)? {

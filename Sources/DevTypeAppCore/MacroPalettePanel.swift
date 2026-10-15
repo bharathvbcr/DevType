@@ -488,6 +488,11 @@ private final class MacroPaletteController: NSViewController,
         rebuild()
     }
 
+    /// Size of the one macro catalogue. Ranking and the editor menu read the same value.
+    private func unifiedMacroCount() -> Int {
+        CommandPaletteCatalog.macros.count
+    }
+
     private func rebuild() {
         let sections = MacroPaletteRanking.rank(query: searchField.stringValue, loc: loc)
         var newRows: [MacroPaletteRow] = []
@@ -505,7 +510,8 @@ private final class MacroPaletteController: NSViewController,
         selection = firstSelectableIndex(from: 0, step: 1) ?? -1
         applySelection(scroll: true)
         emptyState.isHidden = matchCount > 0
-        countLabel.stringValue = loc.s("macro.palette.count", matchCount, MacroCatalog.all.count)
+        // The denominator is the unified catalogue the ranking just walked.
+        countLabel.stringValue = loc.s("macro.palette.count", matchCount, unifiedMacroCount())
     }
 
     // MARK: Selection

@@ -25,7 +25,7 @@ final class MacroPaletteRankingTests: XCTestCase {
     /// `MacroDescriptor` strips those markers and keeps them as caret stops.
     func testFillInPaletteTokensMatchTheBuilder() throws {
         let rows = Dictionary(
-            uniqueKeysWithValues: MacroCatalog.descriptors(in: .fillIns).map { ($0.id, $0) }
+            uniqueKeysWithValues: CommandPaletteCatalog.macros(in: .fillIns).map { ($0.id, $0) }
         )
         let text = try XCTUnwrap(rows["fill.text"])
         XCTAssertEqual(text.token, "%filltext:name=Field%")
@@ -95,7 +95,7 @@ final class MacroPaletteRankingTests: XCTestCase {
         for section in sections {
             XCTAssertEqual(
                 section.matches.map(\.descriptor.id),
-                MacroCatalog.descriptors(in: section.category).map(\.id),
+                CommandPaletteCatalog.macros(in: section.category).map(\.id),
                 "Browsing must not reorder macros within a category."
             )
         }
@@ -113,7 +113,7 @@ final class MacroPaletteRankingTests: XCTestCase {
 
     /// Macro usage shares a store with palette commands, so the keys must not collide.
     func testUsageIDsAreNamespaced() {
-        let descriptor = MacroCatalog.all[0]
+        let descriptor = CommandPaletteCatalog.macros[0]
         XCTAssertTrue(MacroPaletteRanking.usageID(descriptor).hasPrefix("macro."))
     }
 }

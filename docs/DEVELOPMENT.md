@@ -252,6 +252,41 @@ Before submitting changes, ensure:
 2. `SecureInputMonitor` and `NSSecureTextField` fail-closed protection remain fully tested.
 3. Sensitive credentials are only handled via `SecretStore` with AES-GCM encryption.
 
+## devtype:// URL scheme and Services
+
+`devtype://` is registered in `Resources/Info.plist` (`CFBundleURLTypes`) and handled only by `application(_:open:)`. There is no `kAEGetURL` handler, so one open is not delivered twice. The allowlist is `new`, `palette`, `preferences`, `dictation/toggle`, and `copy`. There is deliberately no `expand` action: a URL must not inject text into the frontmost app and must not read a secret.
+
+Security impact, which needs a maintainer's sign-off before this is merged: once the app is installed, any local process or web page can ask macOS to open a `devtype://` URL. That is a new entry point. It does not widen Accessibility or Input Monitoring use. The mitigations in `DevTypeURLParser` and `AppDelegate.performDevTypeURL` are:
+
+- Unknown hosts, foreign schemes, dotted hosts, userinfo, and a non-empty port are refused. Unknown query keys are ignored.
+- Values are percent-decoded once (`URLComponents.queryItems`). `hello%2520world` stays `hello%20world`. `application(_:open:)` passes `URL.absoluteString`. On the 2026-10-14 SDK that string still holds the original percent-encoding (`hello%2520world` stays intact), so the app does not decode a second time. A `new` URL is seeded with `DevTypeURLCommand.editorDraft`, which is case-sensitive and `isSecret: false`.
+- Trigger, title, and replacement are bounded by `SnippetImportLimits` (trigger and title 512, replacement 100_000). A raw URL longer than the replacement limit plus 4096 is refused before parse. A preferences tab longer than 64 characters is refused. Oversized URL values are rejected, not truncated.
+- `new`, `palette`, and `preferences` only open UI. Nothing is saved.
+- `copy` and `dictation/toggle` do nothing until `DevTypeAlert.confirm` returns. Copy then uses the existing non-secret `copyToClipboard` path.
+- Copy matches `triggerKeyword` exactly. An empty trigger is malformed and does not match a snippet whose trigger is empty. Any secret match, including a disabled secret, is refused before `SecretStore` is read and before `copyToClipboard`. Two or more non-secret matches copy nothing.
+- The copy log line is built only from a result tag and the originating bundle id (`DevTypeURLCopyAudit.line`). The trigger, title, and body are not parameters of that function. The bundle id comes from the current Apple Event's sender pid and is passed through `DevTypeLog.boundedPublicIdentifier`.
+
+The Services item "New DevType Snippet from Selection" (`newSnippetFromSelection`) reuses the palette's captured-selection draft. It reads `public.utf8-plain-text` and, if that is absent, the legacy `NSStringPboardType`. It does not take another Accessibility selection read. A blank or missing selection sets the Services error to `ai.refuse.noSelection` ("No selected text"), not the AI-palette alert. `userData` is optional so a Services call without `NSUserData` does not trap.
+
+`./Scripts/package-app.sh` checks that the sealed `Info.plist` still contains the `devtype` scheme and the `newSnippetFromSelection` message. A local package on 2026-10-14 passed those checks. That package was not installed, and `lsregister` was not run against `/Applications`.
+
+## App Intents from a SwiftPM package
+
+No. Shortcuts will not list an App Intent that was only compiled by `swift build` and sealed by `Scripts/package-app.sh`.
+
+Evidence, gathered on 2026-10-14 with Xcode's toolchain (`appintentsmetadataprocessor` is at `/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor`):
+
+- A temporary `OpenCommandPaletteIntent` (`AppIntent`, title "Open Command Palette") was added to `DevTypeAppCore` and referenced so the linker kept it. `DEVTYPE_SKIP_AUTO_CERT=1 ./Scripts/package-app.sh` ran `swift build -c debug` and sealed `.build/DevType.app`. The script's log shows no invocation of `appintentsmetadataprocessor`.
+- The sealed Mach-O contained the strings `OpenCommandPaletteIntent` and `Open Command Palette`, so the intent was compiled and linked.
+- `find` over `.build/DevType.app` and `.build` found no `Metadata.appintents`, no `ExtractedAppShortcutsMetadata.strings`, and no `.actionsdata`.
+- The spike source was removed after that check. Nothing in this tree registers an App Intent.
+
+The supported automation path is the URL scheme above: a Shortcut's Open URL action can call `devtype://palette` or `devtype://new?title=&trigger=&text=`. That path was covered by `DevTypeURLCommandTests`. It was not clicked through in Shortcuts, because installing or `lsregister`ing this bundle would take the `com.devtype.app` registration from the copy already on this Mac.
+
+## Catalogue move
+
+Macro rows now live on `CommandPaletteCatalog.macros` (`Sources/ExpanderEngine/Sync/PaletteMacros.swift`). `MacroCatalog` is gone. `docs/ARCHITECTURE.md`, `docs/UNWIRED_INVENTORY.md`, and `docs/releases/v1.2.0.md` still say `MacroCatalog`; those files were left as they were.
+
 ## Verify an installation separately
 
 The installer validates the new package, swaps the canonical application recoverably, quarantines the displaced app, and compares designated signing requirements before deciding whether TCC needs recovery. Read the actual installed bundle's version, executable hash, signature, and running process path. Passing a hardcoded expected version to the checker is not an installation check.

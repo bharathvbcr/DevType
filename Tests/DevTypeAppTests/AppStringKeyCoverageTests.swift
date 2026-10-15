@@ -51,7 +51,7 @@ final class AppStringKeyCoverageTests: XCTestCase {
     /// so only non-empty keys are required to resolve — but a descriptor must have one or
     /// the other, or the palette row has no title at all.
     func testMacroDescriptorKeysResolve() {
-        for descriptor in MacroCatalog.all {
+        for descriptor in CommandPaletteCatalog.macros {
             XCTAssertTrue(
                 !descriptor.nameKey.isEmpty || descriptor.literalName != nil,
                 "macro \"\(descriptor.id)\" has neither a nameKey nor a literalName"
@@ -78,7 +78,7 @@ final class AppStringKeyCoverageTests: XCTestCase {
     /// that passes a `detailArgument` must therefore have a placeholder in all three languages,
     /// and every one that passes none must have a placeholder in none of them.
     func testMacroDetailFormatsMatchTheirArgumentArity() {
-        for descriptor in MacroCatalog.all {
+        for descriptor in CommandPaletteCatalog.macros {
             let expectsArgument = descriptor.detailArgument != nil
             for (language, table) in tables {
                 guard let format = table[descriptor.detailKey] else { continue }

@@ -515,6 +515,16 @@ for USAGE_KEY in NSAccessibilityUsageDescription NSInputMonitoringUsageDescripti
     exit 1
   fi
 done
+URL_SCHEME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "${CONTENTS}/Info.plist" 2>/dev/null || true)"
+if [[ "${URL_SCHEME}" != "devtype" ]]; then
+  echo "error: packaged Info.plist missing devtype URL scheme (got '${URL_SCHEME}')" >&2
+  exit 1
+fi
+SERVICE_MESSAGE="$(/usr/libexec/PlistBuddy -c 'Print :NSServices:0:NSMessage' "${CONTENTS}/Info.plist" 2>/dev/null || true)"
+if [[ "${SERVICE_MESSAGE}" != "newSnippetFromSelection" ]]; then
+  echo "error: packaged Info.plist missing Services message newSnippetFromSelection (got '${SERVICE_MESSAGE}')" >&2
+  exit 1
+fi
 verify_narrow_local_network_ats "${CONTENTS}/Info.plist"
 
 # The system, not DevType's in-process localization table, renders these prompt

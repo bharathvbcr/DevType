@@ -1901,10 +1901,43 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         return nil
     }
 
+    // MARK: - Selection draft
+
+    /// The captured selection is the only input. Callers must not re-read the
+    /// selection after a palette or Services panel has become key.
+    enum SelectionSnippetDraft {
+        /// `.string` is `public.utf8-plain-text`. Services may send only the legacy
+        /// `NSStringPboardType`, which is the other type declared in `NSSendTypes`.
+        static func serviceText(from pasteboard: NSPasteboard) -> String? {
+            if let text = pasteboard.string(forType: .string) { return text }
+            return pasteboard.string(forType: NSPasteboard.PasteboardType("NSStringPboardType"))
+        }
+
+        static func make(fromCapturedText capturedText: String?) -> SnippetModel? {
+            guard let capturedText, !SelectionReader.isBlankSelection(capturedText) else { return nil }
+            let limit = SnippetImporter.SnippetImportLimits.maxReplacementCharacters
+            let body = capturedText.count > limit
+                ? String(capturedText.prefix(limit))
+                : capturedText
+            return SnippetModel(
+                title: "",
+                triggerKeyword: "",
+                replacementText: body,
+                isCaseSensitive: true,
+                isSecret: false
+            )
+        }
+    }
+
     // MARK: - Snippet actions
 
     @objc func addSnippet() {
-        presentEditor(for: nil, draft: nil)
+        presentNewSnippetDraft(nil)
+    }
+
+    /// Opens the editor on `draft` without saving. `nil` is the blank new-snippet path.
+    func presentNewSnippetDraft(_ draft: SnippetModel?) {
+        presentEditor(for: nil, draft: draft)
     }
 
     @objc private func addSnippetFromTemplate() {

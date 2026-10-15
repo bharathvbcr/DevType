@@ -1968,13 +1968,22 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
         if !presented { showFallbackMacroMenu(from: sender) }
     }
 
+    /// The command palette and this menu share one catalogue.
+    private func macros(in category: MacroCategory) -> [MacroDescriptor] {
+        CommandPaletteCatalog.macros(in: category)
+    }
+
+    private func macro(id: String) -> MacroDescriptor? {
+        CommandPaletteCatalog.macros.first { $0.id == id }
+    }
+
     /// Fallback menu, built from the *same* catalogue as the palette so the two
     /// can never drift apart the way the old hardcoded menu drifted from the
     /// engine.
     private func showFallbackMacroMenu(from sender: NSButton) {
         let menu = NSMenu()
         for category in MacroCategory.allCases {
-            let descriptors = MacroCatalog.descriptors(in: category)
+            let descriptors = macros(in: category)
             guard !descriptors.isEmpty else { continue }
             let parent = NSMenuItem(title: loc.s(category.titleKey), action: nil, keyEquivalent: "")
             let submenu = NSMenu()
@@ -1999,7 +2008,7 @@ private final class SnippetEditorController: NSViewController, NSTextViewDelegat
 
     @objc private func insertMacroFromMenu(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
-              let descriptor = MacroCatalog.all.first(where: { $0.id == id }) else { return }
+              let descriptor = macro(id: id) else { return }
         insert(descriptor: descriptor)
     }
 

@@ -109,3 +109,12 @@
 "panel.ai.cancel" = "취소";
 "panel.ai.close" = "닫기";
 "delivery.fail.ownProcess" = "DevType이 앞에 있습니다 — 삽입할 앱으로 전환하세요";
+"url.confirm.copy.title" = "스니펫을 클립보드에 복사할까요?";
+"url.confirm.copy.message" = "확인하면 DevType이 이 스니펫을 복사합니다. 확인하기 전에는 값을 읽지 않습니다.";
+"url.confirm.dictation.title" = "스마트 받아쓰기를 전환할까요?";
+"url.confirm.dictation.message" = "확인하면 DevType이 받아쓰기를 시작하거나 멈춥니다.";
+"url.refuse.secret" = "비밀 스니펫은 링크로 복사할 수 없습니다.";
+"url.refuse.missing" = "그 트리거를 쓰는 스니펫이 없습니다.";
+"url.refuse.unknown" = "DevType이 그 링크를 알아볼 수 없습니다.";
+"url.refuse.ambiguous" = "그 트리거를 쓰는 스니펫이 둘 이상이라 복사하지 않았습니다.";
+"ai.palette.saveSelection" = "선택 영역을 스니펫으로 저장";
