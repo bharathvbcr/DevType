@@ -171,7 +171,7 @@ final class EspansoImportContainmentTests: XCTestCase {
         let outside = root.appendingPathComponent("outside", isDirectory: true)
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
         let leakedPNG = outside.appendingPathComponent("leak.png")
-        try makePNGData().write(to: leakedPNG)
+        try TestPNG.makePNGData().write(to: leakedPNG)
 
         let config = root.appendingPathComponent("config", isDirectory: true)
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
