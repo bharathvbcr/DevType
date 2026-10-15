@@ -1402,6 +1402,7 @@ public final class TextInjectionPipeline {
             }
             self.clipboard.pasteImageViaClipboard(
                 image: image,
+                imagePath: context.snippet.imagePath,
                 bundleID: context.frontBundleID,
                 focus: focus,
                 shouldContinue: canProceedAfterMutation
