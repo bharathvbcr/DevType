@@ -17,29 +17,10 @@ final class ImageSnippetTests: XCTestCase {
         try? FileManager.default.removeItem(at: dir)
     }
 
-    private func makePNGData() throws -> Data {
-        let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: 4,
-            pixelsHigh: 4,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        )
-        guard let rep, let data = rep.representation(using: .png, properties: [:]) else {
-            throw NSError(domain: "tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "PNG encode failed"])
-        }
-        return data
-    }
-
     @discardableResult
     private func writePNG(named name: String, in dir: URL) throws -> URL {
         let url = dir.appendingPathComponent(name)
-        try makePNGData().write(to: url)
+        try TestPNG.makePNGData().write(to: url)
         return url
     }
 
@@ -104,7 +85,7 @@ final class ImageSnippetTests: XCTestCase {
         defer { removeTempDir(dir) }
         let store = ImageAttachmentStore(directory: dir)
 
-        let name = try store.save(data: makePNGData(), preferredExtension: "png")
+        let name = try store.save(data: TestPNG.makePNGData(), preferredExtension: "png")
         XCTAssertNotNil(store.loadImage(path: name))
     }
 

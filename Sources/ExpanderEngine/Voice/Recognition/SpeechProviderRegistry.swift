@@ -68,12 +68,12 @@ public actor SpeechProviderRegistry {
         providers[id]
     }
 
-    public func availableProviders(for privacyRoute: PrivacyRoute) async -> [(descriptor: SpeechProviderDescriptor, readiness: ProviderReadiness)] {
-        var results: [(SpeechProviderDescriptor, ProviderReadiness)] = []
-        for provider in providers.values where privacyRoute.permits(provider.descriptor.privacyRoute) {
-            results.append((provider.descriptor, await provider.probe()))
-        }
-        return results.sorted { $0.0.id < $1.0.id }
+    private static func readiness(of provider: any SpeechRecognizer) async -> ProviderReadiness {
+        await provider.probe()
+    }
+
+    public func availableProviders(for privacyRoute: PrivacyRoute) async -> SpeechProviderProbe {
+        await ProviderAvailability.list(providers.values, privacyRoute, \.descriptor, Self.readiness)
     }
 
 

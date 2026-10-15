@@ -98,10 +98,10 @@ final class MenuBarOptionTests: XCTestCase {
 
     /// A menu that advertises ⌘/ while the hotkey is unregistered is a lie users will report.
     func testDisabledShortcutsAlsoHideTheMenuKeyEquivalent() throws {
-        let source = try appSource("Sources/DevTypeAppCore/AppDelegate.swift")
+        let source = try appSource("Sources/DevTypeAppCore/ShortcutRecorder.swift")
         XCTAssertTrue(
             source.contains("guard !HotkeyPreferences.shortcutsDisabled else { return \"\" }"),
-            "hotkeyMenuKeyEquivalent must stop advertising a chord that no longer fires."
+            "menuKeyEquivalent must stop advertising a chord that no longer fires."
         )
     }
 

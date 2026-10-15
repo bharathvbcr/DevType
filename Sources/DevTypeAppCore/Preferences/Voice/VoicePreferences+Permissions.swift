@@ -107,22 +107,27 @@ extension VoicePreferencesViewController {
     func voicePermissionPresentation(
         for status: DurableVoiceCapture.MicrophonePermissionStatus
     ) -> (text: String, color: NSColor) {
-        switch status {
-        case .authorized: return (loc.s("status.authorized"), DevTypeTheme.statusGreen)
-        case .notDetermined: return (loc.s("status.notRequested"), DevTypeTheme.statusOrange)
-        case .denied: return (loc.s("status.denied"), DevTypeTheme.statusOrange)
-        case .restricted: return (loc.s("status.restricted"), DevTypeTheme.statusOrange)
-        }
+        voicePermissionPresentation(for: status.rawValue)
     }
 
     func voicePermissionPresentation(
         for status: SpeechAuthorization.Status
     ) -> (text: String, color: NSColor) {
-        switch status {
-        case .authorized: return (loc.s("status.authorized"), DevTypeTheme.statusGreen)
-        case .notDetermined: return (loc.s("status.notRequested"), DevTypeTheme.statusOrange)
-        case .denied: return (loc.s("status.denied"), DevTypeTheme.statusOrange)
-        case .restricted: return (loc.s("status.restricted"), DevTypeTheme.statusOrange)
+        voicePermissionPresentation(for: status.diagnosticLabel)
+    }
+
+    /// Microphone and speech authorization use the same four labels. Denied and restricted
+    /// share a color and keep distinct copy.
+    private func voicePermissionPresentation(for statusKey: String) -> (text: String, color: NSColor) {
+        switch statusKey {
+        case DurableVoiceCapture.MicrophonePermissionStatus.authorized.rawValue:
+            return (loc.s("status.authorized"), DevTypeTheme.statusGreen)
+        case DurableVoiceCapture.MicrophonePermissionStatus.denied.rawValue:
+            return (loc.s("status.denied"), DevTypeTheme.statusOrange)
+        case DurableVoiceCapture.MicrophonePermissionStatus.restricted.rawValue:
+            return (loc.s("status.restricted"), DevTypeTheme.statusOrange)
+        default:
+            return (loc.s("status.notRequested"), DevTypeTheme.statusOrange)
         }
     }
 

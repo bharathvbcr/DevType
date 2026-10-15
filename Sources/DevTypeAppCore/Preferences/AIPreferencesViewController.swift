@@ -418,22 +418,7 @@ final class AIPreferencesViewController: PreferencesPaneViewController {
     }
 
     private func applyAIPaletteShortcut(_ shortcut: DevTypeShortcut?) {
-        guard let shortcut else { return }
-        guard let manager = hotkeyManager else {
-            HotkeyPreferences.aiPaletteShortcut = shortcut
-            reload()
-            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
-            return
-        }
-        let status = manager.applyAIPaletteShortcut(shortcut)
-        if status != noErr {
-            DevTypeAlert.warn(
-                title: loc.s("prefs.hotkeys.failed.title"),
-                message: loc.s("prefs.hotkeys.failed.message", shortcut.displayString, Int(status)),
-                window: view.window
-            )
-        }
-        reload()
+        HotkeyBindingApply.apply(shortcut, .aiPalette, hotkeyManager, loc, view.window, reload)
     }
 
     @objc private func resetAIPaletteShortcut() {

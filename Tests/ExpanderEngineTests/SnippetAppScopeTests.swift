@@ -13,10 +13,7 @@ final class SnippetAppScopeTests: XCTestCase {
         include: [String] = [],
         exclude: [String] = []
     ) -> SnippetModel {
-        var s = SnippetModel(title: "Signature", triggerKeyword: trigger, replacementText: "Regards")
-        s.includeApps = include
-        s.excludeApps = exclude
-        return s
+        scopedSnippet(title: "Signature", trigger: trigger, replacement: "Regards", include: include, exclude: exclude)
     }
 
     // MARK: - Unscoped

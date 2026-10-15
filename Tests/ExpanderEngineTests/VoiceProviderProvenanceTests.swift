@@ -135,7 +135,7 @@ final class VoiceProviderProvenanceTests: XCTestCase {
             id: "test.correction.fallback",
             behavior: .returns("Hello world.")
         )
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let coordinator = VoiceSessionCoordinator(
             capture: capture,
             store: store,
@@ -197,7 +197,7 @@ final class VoiceProviderProvenanceTests: XCTestCase {
             id: VoiceSessionSnapshotFactory.ProviderID.appleSpeechLegacy,
             entryLatch: latch
         )
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let coordinator = VoiceSessionCoordinator(
             capture: capture,
             store: store,
@@ -262,7 +262,7 @@ final class VoiceProviderProvenanceTests: XCTestCase {
                 userAction: .retryWithOtherProvider
             ))
         )
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let coordinator = VoiceSessionCoordinator(
             capture: capture,
             store: store,
@@ -319,7 +319,7 @@ final class VoiceProviderProvenanceTests: XCTestCase {
             correctionRegistry: CorrectionProviderRegistry(
                 providers: [DeterministicCorrector()]
             ),
-            diagnosticsRecorder: makeRecorder(in: directory)
+            diagnosticsRecorder: VoiceDiagnosticsFixture.makeRecorder(in: directory)
         )
         let correction = DeterministicCorrector().descriptor
         let old = VoiceSessionSnapshot(
@@ -405,7 +405,7 @@ final class VoiceProviderProvenanceTests: XCTestCase {
             id: VoiceSessionSnapshotFactory.ProviderID.ollamaCorrector,
             entryLatch: correctionEntered
         )
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let coordinator = VoiceSessionCoordinator(
             capture: capture,
             store: store,
@@ -521,13 +521,6 @@ final class VoiceProviderProvenanceTests: XCTestCase {
         )
         temporaryDirectories.append(directory)
         return directory
-    }
-
-    private func makeRecorder(in directory: URL) -> VoiceDiagnosticsRecorder {
-        VoiceDiagnosticsRecorder(
-            traceURL: directory.appendingPathComponent("voice-trace.jsonl"),
-            terminalManifestURL: directory.appendingPathComponent("voice-terminal-manifest.json")
-        )
     }
 
     private func makeSnapshot(

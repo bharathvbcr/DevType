@@ -61,6 +61,44 @@ public enum PrivacyRoute: String, Codable, Sendable {
 
 // MARK: - Provider Descriptors & Evidence
 
+/// Identity a privacy route can be recovered from. Speech and correction descriptors
+/// both carry these two fields; the route lookup uses that and nothing else.
+public protocol PrivacyIdentified: Sendable {
+    var id: String { get }
+    var privacyRoute: PrivacyRoute { get }
+}
+
+/// Probes a set of providers and returns the ones the session route permits, sorted by id.
+///
+/// Speech and correction registries keep their own resolution policy. This is only the
+/// inventory loop they both used to copy.
+public enum ProviderAvailability {
+    public static func available<Provider, Descriptor: PrivacyIdentified>(
+        _ providers: some Collection<Provider>,
+        for privacyRoute: PrivacyRoute,
+        descriptor: (Provider) -> Descriptor,
+        probe: (Provider) async -> ProviderReadiness
+    ) async -> [(descriptor: Descriptor, readiness: ProviderReadiness)] {
+        var results: [(descriptor: Descriptor, readiness: ProviderReadiness)] = []
+        for provider in providers where privacyRoute.permits(descriptor(provider).privacyRoute) {
+            results.append((descriptor(provider), await probe(provider)))
+        }
+        return results.sorted { $0.descriptor.id < $1.descriptor.id }
+    }
+
+    public static func list<Provider, Descriptor: PrivacyIdentified>(
+        _ providers: some Collection<Provider>,
+        _ route: PrivacyRoute,
+        _ descriptor: (Provider) -> Descriptor,
+        _ probe: (Provider) async -> ProviderReadiness
+    ) async -> [(descriptor: Descriptor, readiness: ProviderReadiness)] {
+        await available(providers, for: route, descriptor: descriptor, probe: probe)
+    }
+}
+
+public typealias SpeechProviderProbe = [(descriptor: SpeechProviderDescriptor, readiness: ProviderReadiness)]
+public typealias CorrectionProviderProbe = [(descriptor: CorrectionProviderDescriptor, readiness: ProviderReadiness)]
+
 public struct SpeechProviderDescriptor: Hashable, Codable, Sendable {
     public let id: String
     public let displayName: String
@@ -86,6 +124,8 @@ public struct SpeechProviderDescriptor: Hashable, Codable, Sendable {
     }
 }
 
+extension SpeechProviderDescriptor: PrivacyIdentified {}
+
 public struct CorrectionProviderDescriptor: Hashable, Codable, Sendable {
     public let id: String
     public let displayName: String
@@ -107,6 +147,8 @@ public struct CorrectionProviderDescriptor: Hashable, Codable, Sendable {
         self.supportsStructuredOutput = supportsStructuredOutput
     }
 }
+
+extension CorrectionProviderDescriptor: PrivacyIdentified {}
 
 public struct ProviderEvidence: Hashable, Codable, Sendable {
     public let providerID: String

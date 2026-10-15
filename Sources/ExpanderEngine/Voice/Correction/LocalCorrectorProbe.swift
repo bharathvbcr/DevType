@@ -11,6 +11,27 @@ import Foundation
 /// endpoint must report `temporarilyUnavailable` (retry, keep the preference) while a
 /// malformed one must report `requiresConfiguration` (stop, the user has to fix it). Two
 /// copies is two chances to get that distinction wrong.
+/// A local HTTP corrector whose readiness probe is the shared `LocalCorrectorProbe` loop.
+/// `correct()` stays on the concrete type: the request body and the response parser differ.
+public protocol LocalHTTPCorrector: TranscriptCorrector {
+    var endpointURL: URL { get }
+    var modelName: String { get }
+    static var probeCapabilities: [String] { get }
+    static func probeRequest(endpoint: URL) throws -> URLRequest
+}
+
+extension LocalHTTPCorrector {
+    public func probe() async -> ProviderReadiness {
+        await LocalCorrectorProbe.readiness(
+            endpoint: endpointURL,
+            providerID: descriptor.id,
+            modelVersion: modelName,
+            capabilities: Self.probeCapabilities,
+            makeRequest: Self.probeRequest(endpoint:)
+        )
+    }
+}
+
 enum LocalCorrectorProbe {
     /// Seconds before a readiness retry is worth attempting. A local server that is
     /// starting up is back within seconds; polling faster just burns the main actor.

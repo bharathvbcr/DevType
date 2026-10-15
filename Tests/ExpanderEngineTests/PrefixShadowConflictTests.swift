@@ -13,23 +13,6 @@ import XCTest
 /// longer trigger is never reached to have its own rule evaluated.
 final class PrefixShadowConflictTests: XCTestCase {
 
-    private func snippet(
-        _ trigger: String,
-        caseSensitive: Bool = false,
-        requireWordBoundary: Bool = true,
-        enabled: Bool = true
-    ) -> SnippetModel {
-        var s = SnippetModel(
-            title: trigger,
-            triggerKeyword: trigger,
-            replacementText: "x",
-            isCaseSensitive: caseSensitive,
-            requireWordBoundary: requireWordBoundary
-        )
-        s.enabled = enabled
-        return s
-    }
-
     private func conflicts(_ snippets: [SnippetModel]) -> [SnippetStore.TriggerConflict] {
         SnippetStore.triggerConflicts(in: [SnippetGroup(name: "G", snippets: snippets)])
             .filter { $0.kind == .prefixShadow }
@@ -42,8 +25,8 @@ final class PrefixShadowConflictTests: XCTestCase {
     /// `true` (the default) does not save you.
     func testPunctuationStartedTriggerShadowsLongerOneDespiteWordBoundaryTrue() {
         let found = conflicts([
-            snippet("`slm", requireWordBoundary: true),
-            snippet("`slmabout", requireWordBoundary: true)
+            prefixTriggerSnippet("`slm", requireWordBoundary: true),
+            prefixTriggerSnippet("`slmabout", requireWordBoundary: true)
         ])
 
         XCTAssertEqual(found.count, 1, "Expected `slm to be reported as shadowing `slmabout.")
@@ -56,8 +39,8 @@ final class PrefixShadowConflictTests: XCTestCase {
     /// fires while typing it and there is nothing to report.
     func testWordStartedTriggerWithBoundaryDoesNotShadow() {
         let found = conflicts([
-            snippet("slm", requireWordBoundary: true),
-            snippet("slmabout", requireWordBoundary: true)
+            prefixTriggerSnippet("slm", requireWordBoundary: true),
+            prefixTriggerSnippet("slmabout", requireWordBoundary: true)
         ])
         XCTAssertTrue(
             found.isEmpty,
@@ -68,8 +51,8 @@ final class PrefixShadowConflictTests: XCTestCase {
     /// Rule (2): boundary off means instant fire, so a word-started trigger shadows too.
     func testWordStartedTriggerWithoutBoundaryDoesShadow() {
         let found = conflicts([
-            snippet("slm", requireWordBoundary: false),
-            snippet("slmabout", requireWordBoundary: true)
+            prefixTriggerSnippet("slm", requireWordBoundary: false),
+            prefixTriggerSnippet("slmabout", requireWordBoundary: true)
         ])
         XCTAssertEqual(found.first?.blockedTriggers, ["slmabout"])
     }
@@ -78,9 +61,9 @@ final class PrefixShadowConflictTests: XCTestCase {
 
     func testOneShadowerReportsEveryTriggerItBlocks() {
         let found = conflicts([
-            snippet("`slm"),
-            snippet("`slmabout"),
-            snippet("`slmdocs")
+            prefixTriggerSnippet("`slm"),
+            prefixTriggerSnippet("`slmabout"),
+            prefixTriggerSnippet("`slmdocs")
         ])
         XCTAssertEqual(found.count, 1, "One conflict per shadower, not one per victim.")
         XCTAssertEqual(found.first?.blockedTriggers, ["`slmabout", "`slmdocs"])
@@ -89,7 +72,7 @@ final class PrefixShadowConflictTests: XCTestCase {
     }
 
     func testSummaryNamesTheDeadTriggers() {
-        let found = conflicts([snippet("`asu"), snippet("`asuid")])
+        let found = conflicts([prefixTriggerSnippet("`asu"), prefixTriggerSnippet("`asuid")])
         XCTAssertEqual(
             found.first?.blockedTriggerSummary,
             "`asuid",
@@ -100,24 +83,24 @@ final class PrefixShadowConflictTests: XCTestCase {
     func testNonPrefixTriggersDoNotCollide() {
         // Common real-world shape: shared suffix, different prefixes. Must stay quiet.
         let found = conflicts([
-            snippet("`mail"), snippet("`amail"), snippet("`imail"), snippet("`smail")
+            prefixTriggerSnippet("`mail"), prefixTriggerSnippet("`amail"), prefixTriggerSnippet("`imail"), prefixTriggerSnippet("`smail")
         ])
         XCTAssertTrue(found.isEmpty, "`amail does not start with `mail — no shadowing.")
     }
 
     func testIdenticalTriggersAreNotReportedAsPrefixShadow() {
         // That is `duplicateTrigger`'s job; reporting both would double-warn.
-        let found = conflicts([snippet("`slm"), snippet("`slm")])
+        let found = conflicts([prefixTriggerSnippet("`slm"), prefixTriggerSnippet("`slm")])
         XCTAssertTrue(found.isEmpty, "Equal-length triggers are duplicates, not prefix shadows.")
     }
 
     func testDisabledSnippetsNeitherShadowNorAreShadowed() {
         XCTAssertTrue(
-            conflicts([snippet("`slm", enabled: false), snippet("`slmabout")]).isEmpty,
+            conflicts([prefixTriggerSnippet("`slm", enabled: false), prefixTriggerSnippet("`slmabout")]).isEmpty,
             "A disabled snippet cannot fire, so it cannot shadow."
         )
         XCTAssertTrue(
-            conflicts([snippet("`slm"), snippet("`slmabout", enabled: false)]).isEmpty,
+            conflicts([prefixTriggerSnippet("`slm"), prefixTriggerSnippet("`slmabout", enabled: false)]).isEmpty,
             "A disabled snippet is already unreachable; warning about it is noise."
         )
     }
@@ -126,8 +109,8 @@ final class PrefixShadowConflictTests: XCTestCase {
 
     func testCaseInsensitiveTriggersFoldBeforeComparing() {
         let found = conflicts([
-            snippet("`SLM", caseSensitive: false),
-            snippet("`slmabout", caseSensitive: false)
+            prefixTriggerSnippet("`SLM", caseSensitive: false),
+            prefixTriggerSnippet("`slmabout", caseSensitive: false)
         ])
         XCTAssertEqual(
             found.count, 1,
@@ -137,8 +120,8 @@ final class PrefixShadowConflictTests: XCTestCase {
 
     func testCaseSensitiveTriggerDoesNotShadowDifferentCasing() {
         let found = conflicts([
-            snippet("`SLM", caseSensitive: true),
-            snippet("`slmabout", caseSensitive: true)
+            prefixTriggerSnippet("`SLM", caseSensitive: true),
+            prefixTriggerSnippet("`slmabout", caseSensitive: true)
         ])
         XCTAssertTrue(
             found.isEmpty,
@@ -150,9 +133,9 @@ final class PrefixShadowConflictTests: XCTestCase {
 
     func testReproducesTheReportedLibraryShape() {
         let found = conflicts([
-            snippet("`asu"), snippet("`asuid"),
-            snippet("`slm"), snippet("`slmabout"),
-            snippet("`lslm"), snippet("`scholarlm"), snippet("`srm"), snippet("`ssn")
+            prefixTriggerSnippet("`asu"), prefixTriggerSnippet("`asuid"),
+            prefixTriggerSnippet("`slm"), prefixTriggerSnippet("`slmabout"),
+            prefixTriggerSnippet("`lslm"), prefixTriggerSnippet("`scholarlm"), prefixTriggerSnippet("`srm"), prefixTriggerSnippet("`ssn")
         ])
         let pairs = found
             .map { "\($0.trigger)→\($0.blockedTriggers.joined(separator: ","))" }
@@ -163,8 +146,8 @@ final class PrefixShadowConflictTests: XCTestCase {
     /// Detection must agree with the matcher, not merely with itself: the shadowed trigger
     /// really is unreachable when typed in full.
     func testMatcherConfirmsTheShadowedTriggerNeverFires() {
-        let short = snippet("`slm")
-        let long = snippet("`slmabout")
+        let short = prefixTriggerSnippet("`slm")
+        let long = prefixTriggerSnippet("`slmabout")
         let matcher = AbbreviationMatcher(snippets: [short, long])
 
         // Typing the long trigger: the matcher fires the short one as soon as it completes.

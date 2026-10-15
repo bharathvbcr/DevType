@@ -903,7 +903,9 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         )
 
         if selection < 0 || !rows.indices.contains(selection) || !rows[selection].isSelectable {
-            selection = firstSelectableIndex(from: 0, step: 1) ?? -1
+            selection = PaletteSelection.firstSelectableIndex(
+                from: 0, step: 1, count: rows.count, isSelectable: { rows[$0].isSelectable }
+            ) ?? -1
         }
 
         reloadTableDiff(from: previous, to: rows)
@@ -958,11 +960,17 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             switch Int(event.keyCode) {
-            case kVK_UpArrow:
-                self.moveSelection(-1)
-                return nil
-            case kVK_DownArrow:
-                self.moveSelection(1)
+            case kVK_UpArrow, kVK_DownArrow:
+                let delta = Int(event.keyCode) == kVK_UpArrow ? -1 : 1
+                if let next = PaletteSelection.next(
+                    from: self.selection,
+                    delta: delta,
+                    count: self.rows.count,
+                    isSelectable: { self.rows[$0].isSelectable }
+                ) {
+                    self.selection = next
+                    PaletteSelection.apply(next, to: self.tableView, count: self.rows.count, scroll: true)
+                }
                 return nil
             case kVK_Escape:
                 self.cancel()
@@ -1003,30 +1011,6 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
 
     private static func rowsEqual(_ a: PaletteListRow, _ b: PaletteListRow) -> Bool {
         a == b
-    }
-
-    private func firstSelectableIndex(from start: Int, step: Int) -> Int? {
-        PaletteSelection.firstSelectableIndex(
-            from: start,
-            step: step,
-            count: rows.count,
-            isSelectable: { rows[$0].isSelectable }
-        )
-    }
-
-    private func applySelection(scroll: Bool) {
-        PaletteSelection.apply(selection, to: tableView, count: rows.count, scroll: scroll)
-    }
-
-    private func moveSelection(_ delta: Int) {
-        guard let next = PaletteSelection.next(
-            from: selection,
-            delta: delta,
-            count: rows.count,
-            isSelectable: { rows[$0].isSelectable }
-        ) else { return }
-        selection = next
-        applySelection(scroll: true)
     }
 
     private func pick(at index: Int) -> InlineSearchPanel.Pick? {
@@ -1091,8 +1075,7 @@ private final class InlineSearchController: NSViewController, NSTableViewDataSou
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        guard rows.indices.contains(row) else { return false }
-        return rows[row].isSelectable
+        PaletteSelection.shouldSelect(row: row, count: rows.count) { rows[$0].isSelectable }
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {

@@ -180,8 +180,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         presentOnboardingOrRecoveryIfNeeded()
-        warnIfTextExpanderRunning()
-        warnIfEspansoRunning()
+        warnIfCompetitorExpandersRunning()
         // Tap-failure alert is wired via coordinator `onTapStartFailed` (start + Finish refresh).
         refreshStatusItemUI()
     }
@@ -545,8 +544,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             loc.s("menu.inlineSearch"),
             "magnifyingglass",
             #selector(toggleInlineSearch(_:)),
-            key: hotkeyMenuKeyEquivalent(),
-            modifiers: hotkeyMenuModifiers()
+            key: hotkeyManager.inlineSearchShortcut.menuKeyEquivalent,
+            modifiers: hotkeyManager.inlineSearchShortcut.menuModifierFlags
         )
         menu.addItem(inlineItem)
         inlineSearchMenuItem = inlineItem
@@ -555,8 +554,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             loc.s("menu.smartDictation"),
             "waveform.and.mic",
             #selector(startSmartDictation(_:)),
-            key: voiceMenuKeyEquivalent(),
-            modifiers: voiceMenuModifiers()
+            key: hotkeyManager.voiceShortcut.menuKeyEquivalent,
+            modifiers: hotkeyManager.voiceShortcut.menuModifierFlags
         )
         menu.addItem(dictationItem)
         smartDictationMenuItem = dictationItem
@@ -696,42 +695,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         UpdateFlow.checkManually()
     }
 
-    /// §4.2: the menu hint follows the user's recorded shortcut instead of
-    /// claiming ⌘/ forever. Only single-character keys can be menu equivalents;
-    /// anything else shows no hint (the Carbon hotkey still works).
-    private func hotkeyMenuKeyEquivalent() -> String {
-        // Advertising a chord that will not fire is worse than no hint.
-        guard !HotkeyPreferences.shortcutsDisabled else { return "" }
-        let name = DevTypeShortcut.keyName(for: hotkeyManager.inlineSearchShortcut.keyCode)
-        return name.count == 1 ? name.lowercased() : ""
-    }
-
-    private func hotkeyMenuModifiers() -> NSEvent.ModifierFlags {
-        let carbon = hotkeyManager.inlineSearchShortcut.carbonModifiers
-        var flags: NSEvent.ModifierFlags = []
-        if carbon & UInt32(cmdKey) != 0 { flags.insert(.command) }
-        if carbon & UInt32(optionKey) != 0 { flags.insert(.option) }
-        if carbon & UInt32(controlKey) != 0 { flags.insert(.control) }
-        if carbon & UInt32(shiftKey) != 0 { flags.insert(.shift) }
-        return flags
-    }
-
-    private func voiceMenuKeyEquivalent() -> String {
-        guard !HotkeyPreferences.shortcutsDisabled else { return "" }
-        let name = DevTypeShortcut.keyName(for: hotkeyManager.voiceShortcut.keyCode)
-        return name.count == 1 ? name.lowercased() : ""
-    }
-
-    private func voiceMenuModifiers() -> NSEvent.ModifierFlags {
-        let carbon = hotkeyManager.voiceShortcut.carbonModifiers
-        var flags: NSEvent.ModifierFlags = []
-        if carbon & UInt32(cmdKey) != 0 { flags.insert(.command) }
-        if carbon & UInt32(optionKey) != 0 { flags.insert(.option) }
-        if carbon & UInt32(controlKey) != 0 { flags.insert(.control) }
-        if carbon & UInt32(shiftKey) != 0 { flags.insert(.shift) }
-        return flags
-    }
-
     /// Synchronize all preference-dependent and dynamic menu items.
     func updateDynamicMenuItems() {
         guard Thread.isMainThread else {
@@ -739,11 +702,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         assertMainThread()
-        inlineSearchMenuItem?.keyEquivalent = hotkeyMenuKeyEquivalent()
-        inlineSearchMenuItem?.keyEquivalentModifierMask = hotkeyMenuModifiers()
+        inlineSearchMenuItem?.keyEquivalent = hotkeyManager.inlineSearchShortcut.menuKeyEquivalent
+        inlineSearchMenuItem?.keyEquivalentModifierMask = hotkeyManager.inlineSearchShortcut.menuModifierFlags
 
-        smartDictationMenuItem?.keyEquivalent = voiceMenuKeyEquivalent()
-        smartDictationMenuItem?.keyEquivalentModifierMask = voiceMenuModifiers()
+        smartDictationMenuItem?.keyEquivalent = hotkeyManager.voiceShortcut.menuKeyEquivalent
+        smartDictationMenuItem?.keyEquivalentModifierMask = hotkeyManager.voiceShortcut.menuModifierFlags
 
         shortcutsToggleMenuItem?.state = HotkeyPreferences.shortcutsDisabled ? .off : .on
         conflictsToggleMenuItem?.state = SnippetStore.isConflictDetectionEnabled ? .on : .off
@@ -1951,28 +1914,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         PreferencesWindowController.shared.show(tab: tab, hotkeyManager: hotkeyManager)
     }
 
-    private func warnIfTextExpanderRunning() {
+    private func warnIfCompetitorExpandersRunning() {
         let apps = NSWorkspace.shared.runningApplications
-        let teRunning = apps.contains {
-            RunningAppCheck.isTextExpander(bundleID: $0.bundleIdentifier, name: $0.localizedName)
+        for competitor in RunningAppCheck.warnedAtLaunch {
+            let running = apps.contains {
+                competitor.matches(bundleID: $0.bundleIdentifier, name: $0.localizedName)
+            }
+            guard running else { continue }
+            DevTypeAlert.warn(
+                title: loc.s(competitor.alertTitleKey),
+                message: loc.s(competitor.alertMessageKey)
+            )
         }
-        guard teRunning else { return }
-        DevTypeAlert.warn(
-            title: loc.s("alert.textExpander.title"),
-            message: loc.s("menu.textExpanderWarning")
-        )
-    }
-
-    private func warnIfEspansoRunning() {
-        let apps = NSWorkspace.shared.runningApplications
-        let running = apps.contains {
-            RunningAppCheck.isEspanso(bundleID: $0.bundleIdentifier, name: $0.localizedName)
-        }
-        guard running else { return }
-        DevTypeAlert.warn(
-            title: loc.s("alert.espanso.title"),
-            message: loc.s("menu.espansoWarning")
-        )
     }
 
     /// §0.3: this used to tell the user their library "was replaced with

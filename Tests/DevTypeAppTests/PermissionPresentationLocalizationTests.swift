@@ -16,15 +16,11 @@ final class PermissionPresentationLocalizationTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        previousLanguageValue = UserDefaults.standard.object(forKey: LocalizationManager.deviceKey)
+        previousLanguageValue = LanguageDefaultsFixture.current()
     }
 
     override func tearDown() {
-        if let previousLanguageValue {
-            UserDefaults.standard.set(previousLanguageValue, forKey: LocalizationManager.deviceKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: LocalizationManager.deviceKey)
-        }
+        LanguageDefaultsFixture.restore(previousLanguageValue)
         super.tearDown()
     }
 

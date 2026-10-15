@@ -9,20 +9,6 @@ import XCTest
 /// one question asked after every step — *is the value anywhere it should not be?*
 final class SecretSnippetStressTests: XCTestCase {
 
-    private struct Rng {
-        private var state: UInt64
-        init(seed: UInt64) { state = seed }
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-        mutating func int(_ bound: Int) -> Int { Int(next() % UInt64(max(1, bound))) }
-        mutating func bool() -> Bool { next() & 1 == 0 }
-    }
-
     /// Values a password field actually receives: template-looking text, quotes and backslashes
     /// that a naive redactor would mangle, emoji, RTL, and a very long passphrase.
     private static let hostileValues = [
@@ -64,7 +50,7 @@ final class SecretSnippetStressTests: XCTestCase {
     /// "the redaction ran" but "the bytes do not contain the value" — which is the only form of
     /// the guarantee that cannot be satisfied by a redactor with an off-by-one.
     func testNoSecretValueEverSurvivesEncoding() throws {
-        var rng = Rng(seed: 0x5EC2_E7_10_0000)
+        var rng = RawSplitMix64(seed: 0x5EC2_E7_10_0000)
         let encoder = JSONEncoder()
 
         for iteration in 0..<2_000 {
@@ -233,7 +219,7 @@ final class SecretSnippetStressTests: XCTestCase {
     /// Random libraries into the engine setter. No secret may ever appear in the match snapshot,
     /// and no ordinary snippet may be lost to the filter.
     func testEngineNeverMatchesASecretAcrossRandomLibraries() {
-        var rng = Rng(seed: 0xE461_0E_5E7)
+        var rng = RawSplitMix64(seed: 0xE461_0E_5E7)
         let engine = EventTapEngine()
 
         for round in 0..<500 {
@@ -272,7 +258,7 @@ final class SecretSnippetStressTests: XCTestCase {
         let ids = (0..<16).map { _ in UUID() }
 
         DispatchQueue.concurrentPerform(iterations: 8) { worker in
-            var rng = Rng(seed: UInt64(worker) &+ 991)
+            var rng = RawSplitMix64(seed: UInt64(worker) &+ 991)
             for step in 0..<300 {
                 let id = ids[rng.int(ids.count)]
                 switch rng.int(4) {
@@ -389,7 +375,7 @@ final class SecretSnippetStressTests: XCTestCase {
     /// Randomised: whatever a secret snippet is handed, the three fields that would make it
     /// ambiguous or leaky must come out empty — in memory and after a round trip.
     func testSecretsNeverCarryValueImageOrTransform() throws {
-        var rng = Rng(seed: 0x0A11_B1AB_5EC2)
+        var rng = RawSplitMix64(seed: 0x0A11_B1AB_5EC2)
         let transforms = ["", "proofread", "translate", "promptenhance", "custom"]
 
         for iteration in 0..<3_000 {

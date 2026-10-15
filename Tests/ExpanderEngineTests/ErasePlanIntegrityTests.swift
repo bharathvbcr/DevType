@@ -2,15 +2,6 @@ import XCTest
 @testable import ExpanderEngine
 
 final class ErasePlanIntegrityTests: XCTestCase {
-    private final class Poster: BackspacePosting {
-        var counts: [Int] = []
-        func sendBackspaces(count: Int) -> Int { counts.append(count); return count }
-        func sendBackspacesAsync(count: Int, completion: @escaping (Bool) -> Void) {
-            counts.append(count)
-            completion(true)
-        }
-    }
-
     private var invalidPlans: [ErasePlan] {
         [ErasePlan(expectedText: "abc", utf16Count: 3, backspaceCount: 4),
          ErasePlan(expectedText: "abc", utf16Count: 3, backspaceCount: 0),
@@ -34,7 +25,7 @@ final class ErasePlanIntegrityTests: XCTestCase {
     func testPostingBoundaryCannotTrustAStaleOrForgedPassingResult() {
         for plan in invalidPlans {
             for result: ErasePreconditionResult in [.ok, .unavailable("opaque field")] {
-                let poster = Poster()
+                let poster = CountingBackspacePoster()
                 var completions: [Bool] = []
                 EraseExecutor(hid: poster).finishGuardedErase(
                     plan: plan, afterPossibleWrite: false, result: result,
@@ -48,7 +39,7 @@ final class ErasePlanIntegrityTests: XCTestCase {
 
     func testNoopFastPathCannotApproveContradictoryText() {
         var completions: [Bool] = []
-        EraseExecutor(hid: Poster()).performGuardedErase(
+        EraseExecutor(hid: CountingBackspacePoster()).performGuardedErase(
             plan: ErasePlan(expectedText: "abc", utf16Count: 3, backspaceCount: 0),
             focus: .live,
             completion: { completions.append($0) }

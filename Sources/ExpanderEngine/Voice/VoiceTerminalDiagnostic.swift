@@ -198,9 +198,10 @@ public struct VoiceTerminalDiagnostic: Codable, Equatable, Sendable, Identifiabl
             let providerID = failure.providerID ?? descriptor.id
             return descriptorContext(
                 id: providerID,
-                fallbackRoute: speechRoute(
+                fallbackRoute: providerPrivacyRoute(
                     for: providerID,
-                    snapshot: snapshot,
+                    resolved: snapshot.resolvedSpeechProvider,
+                    requested: snapshot.speechProvider,
                     defaultRoute: descriptor.privacyRoute
                 )
             )
@@ -209,9 +210,10 @@ public struct VoiceTerminalDiagnostic: Codable, Equatable, Sendable, Identifiabl
             let providerID = failure.providerID ?? descriptor.id
             return descriptorContext(
                 id: providerID,
-                fallbackRoute: correctionRoute(
+                fallbackRoute: providerPrivacyRoute(
                     for: providerID,
-                    snapshot: snapshot,
+                    resolved: snapshot.resolvedCorrectionProvider,
+                    requested: snapshot.correctionProvider,
                     defaultRoute: descriptor.privacyRoute
                 )
             )
@@ -224,30 +226,17 @@ public struct VoiceTerminalDiagnostic: Codable, Equatable, Sendable, Identifiabl
         }
     }
 
-    private static func speechRoute(
+    private static func providerPrivacyRoute<Descriptor: PrivacyIdentified>(
         for providerID: String,
-        snapshot: VoiceSessionSnapshot,
+        resolved: Descriptor?,
+        requested: Descriptor,
         defaultRoute: PrivacyRoute
     ) -> PrivacyRoute {
-        if snapshot.resolvedSpeechProvider?.id == providerID {
-            return snapshot.resolvedSpeechProvider?.privacyRoute ?? defaultRoute
+        if resolved?.id == providerID {
+            return resolved?.privacyRoute ?? defaultRoute
         }
-        if snapshot.speechProvider.id == providerID {
-            return snapshot.speechProvider.privacyRoute
-        }
-        return defaultRoute
-    }
-
-    private static func correctionRoute(
-        for providerID: String,
-        snapshot: VoiceSessionSnapshot,
-        defaultRoute: PrivacyRoute
-    ) -> PrivacyRoute {
-        if snapshot.resolvedCorrectionProvider?.id == providerID {
-            return snapshot.resolvedCorrectionProvider?.privacyRoute ?? defaultRoute
-        }
-        if snapshot.correctionProvider.id == providerID {
-            return snapshot.correctionProvider.privacyRoute
+        if requested.id == providerID {
+            return requested.privacyRoute
         }
         return defaultRoute
     }

@@ -13,30 +13,13 @@ import XCTest
 ///      whatever was typed meanwhile, matching what immediate firing would have produced.
 final class PrefixDebounceTests: XCTestCase {
 
-    private func snippet(
-        _ trigger: String,
-        caseSensitive: Bool = false,
-        requireWordBoundary: Bool = true,
-        enabled: Bool = true
-    ) -> SnippetModel {
-        var s = SnippetModel(
-            title: trigger,
-            triggerKeyword: trigger,
-            replacementText: "x",
-            isCaseSensitive: caseSensitive,
-            requireWordBoundary: requireWordBoundary
-        )
-        s.enabled = enabled
-        return s
-    }
-
     /// The library that motivated this.
     private var realLibrary: TriggerPrefixIndex {
         TriggerPrefixIndex(snippets: [
-            snippet("`slm"), snippet("`slmabout"),
-            snippet("`asu"), snippet("`asuid"),
-            snippet("`mail"), snippet("`amail"), snippet("`imail"),
-            snippet("`date"), snippet("`fdate")
+            prefixTriggerSnippet("`slm"), prefixTriggerSnippet("`slmabout"),
+            prefixTriggerSnippet("`asu"), prefixTriggerSnippet("`asuid"),
+            prefixTriggerSnippet("`mail"), prefixTriggerSnippet("`amail"), prefixTriggerSnippet("`imail"),
+            prefixTriggerSnippet("`date"), prefixTriggerSnippet("`fdate")
         ])
     }
 
@@ -61,7 +44,7 @@ final class PrefixDebounceTests: XCTestCase {
 
     func testSharedSuffixIsNotAmbiguity() {
         // `amail ends with `mail but does not start with it — no ambiguity, no delay.
-        let index = TriggerPrefixIndex(snippets: [snippet("`mail"), snippet("`amail")])
+        let index = TriggerPrefixIndex(snippets: [prefixTriggerSnippet("`mail"), prefixTriggerSnippet("`amail")])
         XCTAssertFalse(index.hasAnyAmbiguity)
     }
 
@@ -73,24 +56,24 @@ final class PrefixDebounceTests: XCTestCase {
     /// nothing.
     func testTerminatorRequiringTriggerIsNotAmbiguous() {
         let index = TriggerPrefixIndex(snippets: [
-            snippet("slm", requireWordBoundary: true),
-            snippet("slmabout", requireWordBoundary: true)
+            prefixTriggerSnippet("slm", requireWordBoundary: true),
+            prefixTriggerSnippet("slmabout", requireWordBoundary: true)
         ])
         XCTAssertFalse(index.isAmbiguous(trigger: "slm", caseSensitive: false))
     }
 
     func testWordTriggerWithoutBoundaryIsAmbiguous() {
         let index = TriggerPrefixIndex(snippets: [
-            snippet("slm", requireWordBoundary: false),
-            snippet("slmabout")
+            prefixTriggerSnippet("slm", requireWordBoundary: false),
+            prefixTriggerSnippet("slmabout")
         ])
         XCTAssertTrue(index.isAmbiguous(trigger: "slm", caseSensitive: false))
     }
 
     func testDisabledLongerTriggerCreatesNoAmbiguity() {
         let index = TriggerPrefixIndex(snippets: [
-            snippet("`slm"),
-            snippet("`slmabout", enabled: false)
+            prefixTriggerSnippet("`slm"),
+            prefixTriggerSnippet("`slmabout", enabled: false)
         ])
         XCTAssertFalse(
             index.isAmbiguous(trigger: "`slm", caseSensitive: false),
@@ -99,7 +82,7 @@ final class PrefixDebounceTests: XCTestCase {
     }
 
     func testCaseInsensitiveTriggersFoldWhenDecidingAmbiguity() {
-        let index = TriggerPrefixIndex(snippets: [snippet("`SLM"), snippet("`slmabout")])
+        let index = TriggerPrefixIndex(snippets: [prefixTriggerSnippet("`SLM"), prefixTriggerSnippet("`slmabout")])
         XCTAssertTrue(index.isAmbiguous(trigger: "`slm", caseSensitive: false))
         XCTAssertTrue(index.isAmbiguous(trigger: "`SLM", caseSensitive: false))
     }
@@ -315,9 +298,9 @@ final class PrefixDebounceTests: XCTestCase {
     /// the palette would warn about a dead trigger the engine actually waits for, or vice versa.
     func testAmbiguityMatchesPrefixShadowDetection() {
         let snippets = [
-            snippet("`slm"), snippet("`slmabout"),
-            snippet("`asu"), snippet("`asuid"),
-            snippet("`mail"), snippet("`amail")
+            prefixTriggerSnippet("`slm"), prefixTriggerSnippet("`slmabout"),
+            prefixTriggerSnippet("`asu"), prefixTriggerSnippet("`asuid"),
+            prefixTriggerSnippet("`mail"), prefixTriggerSnippet("`amail")
         ]
         let index = TriggerPrefixIndex(snippets: snippets)
         let shadowers = Set(

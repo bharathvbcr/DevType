@@ -51,6 +51,12 @@ enum PaletteSelection {
     ///
     /// Range is checked against the model's `count`, not `table.numberOfRows`: mid-reload
     /// the two disagree, and the model is the one the caller just decided against.
+    /// Whether a click may select `row`. Headers and out-of-range indexes may not.
+    static func shouldSelect(row: Int, count: Int, isSelectable: (Int) -> Bool) -> Bool {
+        guard (0..<count).contains(row) else { return false }
+        return isSelectable(row)
+    }
+
     static func apply(_ index: Int, to table: NSTableView, count: Int, scroll: Bool) {
         guard (0..<count).contains(index) else {
             table.deselectAll(nil)

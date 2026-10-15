@@ -21,31 +21,11 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         return dir
     }
 
-    /// Mirrors the real-PNG helper in `ImageSnippetTests`.
-    private func makePNGData() throws -> Data {
-        let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: 4,
-            pixelsHigh: 4,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        )
-        guard let rep, let data = rep.representation(using: .png, properties: [:]) else {
-            throw NSError(domain: "tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "PNG encode failed"])
-        }
-        return data
-    }
-
     /// Rewrites only the PNG IHDR dimensions and its CRC. The encoded payload
     /// stays tiny, reproducing a decompression bomb without allocating the
     /// claimed bitmap in the test process.
     private func makePNGData(claimingWidth width: UInt32, height: UInt32) throws -> Data {
-        var bytes = [UInt8](try makePNGData())
+        var bytes = [UInt8](try TestPNG.makePNGData())
         guard bytes.count >= 33, Array(bytes[12 ..< 16]) == Array("IHDR".utf8) else {
             throw NSError(domain: "tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unexpected PNG layout"])
         }
@@ -71,7 +51,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
     }
 
     private func makeJPEGData() throws -> Data {
-        let rep = NSBitmapImageRep(data: try makePNGData())
+        let rep = NSBitmapImageRep(data: try TestPNG.makePNGData())
         guard let data = rep?.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
             throw NSError(domain: "tests", code: 3, userInfo: [NSLocalizedDescriptionKey: "JPEG encode failed"])
         }
@@ -205,7 +185,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
 
         let tooManyPixels = sourceDir.appendingPathComponent("too-many-pixels.png")
         ImageAttachmentStore.maxImportedImagePixels = 15
-        try makePNGData().write(to: tooManyPixels)
+        try TestPNG.makePNGData().write(to: tooManyPixels)
         XCTAssertThrowsError(try store.importImage(from: tooManyPixels)) { error in
             XCTAssertEqual(error as? ImageAttachmentStore.StoreError, .oversizedImageDimensions)
         }
@@ -219,7 +199,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let store = ImageAttachmentStore(directory: storeDir)
 
         let fixtures: [(String, Data)] = [
-            ("normal.png", try makePNGData()),
+            ("normal.png", try TestPNG.makePNGData()),
             ("normal.jpg", try makeJPEGData()),
         ]
         for (name, data) in fixtures {
@@ -240,7 +220,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: sourceDir) }
 
         let pngURL = sourceDir.appendingPathComponent("tiny.png")
-        try makePNGData().write(to: pngURL)
+        try TestPNG.makePNGData().write(to: pngURL)
 
         let store = ImageAttachmentStore(directory: storeDir)
 
@@ -269,7 +249,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
 
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         ImageAttachmentStore.maxImportedImageBytes = 10
         XCTAssertThrowsError(try store.save(data: png)) { error in
             guard case ImageAttachmentStore.StoreError.oversizedImage = error else {
@@ -294,7 +274,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: storeDir) }
 
         let pngURL = root.appendingPathComponent("pic.png")
-        try makePNGData().write(to: pngURL)
+        try TestPNG.makePNGData().write(to: pngURL)
         try """
         matches:
           - trigger: ":big"

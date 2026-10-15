@@ -19,18 +19,7 @@ final class PaletteSearchTests: XCTestCase {
 
     // MARK: Fixtures
 
-    private struct SplitMix64: RandomNumberGenerator {
-        var state: UInt64
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-    }
-
-    private func uuid(_ rng: inout SplitMix64) -> UUID {
+    private func uuid(_ rng: inout RawSplitMix64) -> UUID {
         var bytes: [UInt8] = []
         for _ in 0..<2 { withUnsafeBytes(of: rng.next()) { bytes.append(contentsOf: $0) } }
         return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -39,7 +28,7 @@ final class PaletteSearchTests: XCTestCase {
 
     /// Ties (shared triggers, equal-length triggers), mixed case, CJK and emoji.
     private func randomLibrary(seed: UInt64, count: Int) -> [SnippetGroup] {
-        var rng = SplitMix64(state: seed)
+        var rng = RawSplitMix64(seed: seed)
         let words = ["temp", "Temple", "TEMPLATE", "email", "Email", "sig", "signature", "addr", "地址", "模板",
                      "你好", "😀smile", "🎉party", "café", "Cafe", "résumé", "work", "home", "x", "zz"]
         let sigils = [":", ";", "~", ""]
@@ -260,7 +249,7 @@ final class PaletteSearchTests: XCTestCase {
     // MARK: Digest hex
 
     func testHexStringMatchesStringFormat() {
-        var rng = SplitMix64(state: 99)
+        var rng = RawSplitMix64(seed: 99)
         for length in [0, 1, 32, 33] {
             let bytes = (0..<length).map { _ in UInt8.random(in: 0...255, using: &rng) }
             XCTAssertEqual(SnippetStore.hexString(of: bytes), bytes.map { String(format: "%02x", $0) }.joined())

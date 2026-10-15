@@ -139,23 +139,7 @@ final class HotkeysPreferencesViewController: PreferencesPaneViewController {
     }
 
     private func applyInlineShortcut(_ shortcut: DevTypeShortcut?) {
-        guard let shortcut else { return }
-        guard let manager = hotkeyManager else {
-            HotkeyPreferences.inlineSearchShortcut = shortcut
-            reload()
-            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
-            return
-        }
-        let status = manager.applyInlineSearchShortcut(shortcut)
-        if status != noErr {
-            // §4.2: registration failure is surfaced, not silently logged.
-            DevTypeAlert.warn(
-                title: loc.s("prefs.hotkeys.failed.title"),
-                message: loc.s("prefs.hotkeys.failed.message", shortcut.displayString, Int(status)),
-                window: view.window
-            )
-        }
-        reload()
+        HotkeyBindingApply.apply(shortcut, .inlineSearch, hotkeyManager, loc, view.window, reload)
     }
 
     @objc private func resetInlineShortcut() {

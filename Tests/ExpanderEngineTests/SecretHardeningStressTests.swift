@@ -6,27 +6,13 @@ import XCTest
 /// Deterministic (seeded SplitMix64) so a failure is a failure tomorrow too.
 final class SecretHardeningStressTests: XCTestCase {
 
-    private struct Rng {
-        private var state: UInt64
-        init(seed: UInt64) { state = seed }
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-        mutating func int(_ bound: Int) -> Int { Int(next() % UInt64(max(1, bound))) }
-        mutating func bool() -> Bool { next() & 1 == 0 }
-    }
-
     // MARK: - The read plan under arbitrary statuses
 
     /// Whatever securityd returns — documented, undocumented, or invented by a future macOS —
     /// the plan must stay a straight line: silent → heal → askUser → stop. No step may loop,
     /// and only the healed phase may escalate to the user.
     func testReadPlanNeverLoopsAndOnlyHealedEscalates() {
-        var rng = Rng(seed: 0x8_10)
+        var rng = RawSplitMix64(seed: 0x8_10)
         var statuses: [OSStatus] = [
             errSecSuccess, errSecItemNotFound, errSecAuthFailed,
             errSecInteractionNotAllowed, errSecInvalidOwnerEdit, errSecUserCanceled,
@@ -91,7 +77,7 @@ final class SecretHardeningStressTests: XCTestCase {
     /// repeatedly, map to 40 distinct names and the same name every time.
     func testAliasesAreStableAndUniquePastTheAlphabet() {
         let diagnostics = SecretAccessDiagnostics()
-        var rng = Rng(seed: 0xA11A5)
+        var rng = RawSplitMix64(seed: 0xA11A5)
         let accounts = (0..<40).map { _ in UUID().uuidString }
 
         // First pass in order, then hammered at random.
@@ -146,7 +132,7 @@ final class SecretHardeningStressTests: XCTestCase {
     /// In-memory stores — every test double in the suite — must be inert against the whole
     /// migration surface no matter what is thrown at them.
     func testInMemoryStoreIsInertAcrossTheMigrationSurfaceUnderFuzz() {
-        var rng = Rng(seed: 0x1_0E)
+        var rng = RawSplitMix64(seed: 0x1_0E)
         let store = SecretStore(backing: InMemorySecretBackingStore())
         var live: Set<UUID> = []
 
@@ -183,7 +169,7 @@ final class SecretHardeningStressTests: XCTestCase {
     /// Whatever ends up in the trail, the report's secret section must never carry a UUID —
     /// including one smuggled inside a step string by a future caller.
     func testReportSecretSectionNeverCarriesAnAccountUnderFuzz() {
-        var rng = Rng(seed: 0x5EC_2E7)
+        var rng = RawSplitMix64(seed: 0x5EC_2E7)
         for round in 0..<50 {
             let diagnostics = SecretAccessDiagnostics()
             var accounts: [String] = []

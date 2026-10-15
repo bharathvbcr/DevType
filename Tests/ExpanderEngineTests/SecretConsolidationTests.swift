@@ -239,21 +239,6 @@ final class SecretConsolidationTests: XCTestCase {
     /// process — every launch a new key, every restart losing every secret. The read-back
     /// guard must refuse the key and keep the store on lossless keychain fallback.
     func testWriteOnlyMasterKeyIsRefusedAndNothingIsLost() {
-        final class WriteOnlyMasterTier: SecretBackingStore {
-            let inner = InMemorySecretBackingStore()
-            func set(_ value: String, account: String) -> OSStatus {
-                inner.set(value, account: account)
-            }
-            func value(account: String) -> String? {
-                account == ConsolidatedSecretBackingStore.masterKeyAccount
-                    ? nil // written, never readable — the foreign-ACL shape
-                    : inner.value(account: account)
-            }
-            func contains(account: String) -> Bool { inner.contains(account: account) }
-            func delete(account: String) -> OSStatus { inner.delete(account: account) }
-            func accounts() -> Set<String> { inner.accounts() }
-        }
-
         let tier = WriteOnlyMasterTier()
         let (store, _, url) = makeStore(tier: tier)
         let id = UUID().uuidString
@@ -460,21 +445,6 @@ final class SecretConsolidationTests: XCTestCase {
     /// the top of a bug report. A pass with no usable key has deferred every item, not failed
     /// on any of them.
     func testNoUsableMasterKeyDefersConsolidationRatherThanFailingIt() {
-        final class WriteOnlyMasterTier: SecretBackingStore {
-            let inner = InMemorySecretBackingStore()
-            func set(_ value: String, account: String) -> OSStatus {
-                inner.set(value, account: account)
-            }
-            func value(account: String) -> String? {
-                account == ConsolidatedSecretBackingStore.masterKeyAccount
-                    ? nil // written, never readable — the foreign-ACL shape
-                    : inner.value(account: account)
-            }
-            func contains(account: String) -> Bool { inner.contains(account: account) }
-            func delete(account: String) -> OSStatus { inner.delete(account: account) }
-            func accounts() -> Set<String> { inner.accounts() }
-        }
-
         let tier = WriteOnlyMasterTier()
         let (store, _, _) = makeStore(tier: tier)
         let residents = [UUID().uuidString, UUID().uuidString, UUID().uuidString]

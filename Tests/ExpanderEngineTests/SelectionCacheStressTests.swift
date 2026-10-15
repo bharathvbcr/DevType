@@ -17,29 +17,6 @@ final class SelectionCacheStressTests: XCTestCase {
 
     // MARK: - Deterministic generator
 
-    /// SplitMix64 — small, fast, and identical on every machine and OS version.
-    private struct Rng {
-        private var state: UInt64
-        init(seed: UInt64) { state = seed }
-
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-
-        mutating func int(_ upperBound: Int) -> Int {
-            precondition(upperBound > 0)
-            return Int(next() % UInt64(upperBound))
-        }
-
-        mutating func bool() -> Bool { next() & 1 == 0 }
-
-        mutating func pick<T>(_ values: [T]) -> T { values[int(values.count)] }
-    }
-
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
     private let ownPID = ProcessInfo.processInfo.processIdentifier
 
@@ -79,7 +56,7 @@ final class SelectionCacheStressTests: XCTestCase {
     /// Thousands of randomly ordered refreshes, clears and seeds, compared against the model after
     /// every single step. Any divergence prints the seed and the step index.
     func testCacheFunnelMatchesItsContractUnderRandomEventOrders() {
-        var rng = Rng(seed: 0xDEFA_0117_5E1E_C701)
+        var rng = RawSplitMix64(seed: 0xDEFA_0117_5E1E_C701)
         let foreignElements = [1, 2, 3].map { AXUIElementCreateApplication(pid_t($0)) }
         let ownElement = AXUIElementCreateApplication(ownPID)
 
@@ -89,7 +66,7 @@ final class SelectionCacheStressTests: XCTestCase {
 
             for step in 0..<200 {
                 let context = "round \(round) step \(step)"
-                switch rng.int(10) {
+                switch rng.index(10) {
                 case 0:
                     monitor.clearCache()
                     model = CacheModel()
@@ -107,13 +84,13 @@ final class SelectionCacheStressTests: XCTestCase {
                     monitor.testingApplySelectionRefresh(text: nil, bundleID: bundleID, element: nil)
                     model.apply(text: nil, bundleID: bundleID, element: nil, ownFocus: false)
                 default:
-                    let element = foreignElements[rng.int(foreignElements.count)]
+                    let element = foreignElements[rng.index(foreignElements.count)]
                     let bundleID = rng.pick(Self.apps)
                     let text: String? = {
-                        switch rng.int(4) {
+                        switch rng.index(4) {
                         case 0: return nil
                         case 1: return ""
-                        default: return "selection-\(rng.int(1000))"
+                        default: return "selection-\(rng.index(1000))"
                         }
                     }()
                     monitor.testingApplySelectionRefresh(
@@ -148,13 +125,13 @@ final class SelectionCacheStressTests: XCTestCase {
     /// strictly monotonic across every store — including after clears, which must not let a later
     /// entry reuse an earlier token.
     func testChangeTokenIsStrictlyMonotonicAcrossClears() {
-        var rng = Rng(seed: 0x7112_3ADE_9001)
+        var rng = RawSplitMix64(seed: 0x7112_3ADE_9001)
         let monitor = SelectionMonitor(environment: .fixed())
         let element = AXUIElementCreateApplication(1)
         var lastToken: UInt64 = 0
 
         for step in 0..<500 {
-            if rng.int(5) == 0 { monitor.clearCache() }
+            if rng.index(5) == 0 { monitor.clearCache() }
             monitor.testingApplySelectionRefresh(
                 text: "text-\(step)",
                 bundleID: "com.apple.Safari",
@@ -173,48 +150,48 @@ final class SelectionCacheStressTests: XCTestCase {
     /// Twenty thousand random gate evaluations. Nothing here asserts *which* selection wins — that
     /// is the hand-written suite's job — only that the answers can never violate a safety rule.
     func testGateNeverViolatesItsSafetyInvariantsOnRandomInput() {
-        var rng = Rng(seed: 0xBADC_0FFEE_0DDF00D & 0xFFFF_FFFF_FFFF)
+        var rng = RawSplitMix64(seed: 0xBADC_0FFEE_0DDF00D & 0xFFFF_FFFF_FFFF)
         // A fuzz run that never reaches a state proves nothing about it. Counted and asserted at
         // the end so a future edit to the generator cannot quietly stop covering the cache path.
         var reached: [String: Int] = [:]
 
         for iteration in 0..<20_000 {
-            let axTrusted = rng.int(8) != 0
-            let secureInput = rng.int(8) == 0
-            let frontmostIsOwn = rng.int(4) == 0
+            let axTrusted = rng.index(8) != 0
+            let secureInput = rng.index(8) == 0
+            let frontmostIsOwn = rng.index(4) == 0
             let frontmostBundleID: String? = frontmostIsOwn
                 ? "com.devtype.app"
-                : (rng.int(10) == 0 ? nil : rng.pick(Self.apps))
-            let muted = Set(Self.apps.filter { _ in rng.int(4) == 0 })
+                : (rng.index(10) == 0 ? nil : rng.pick(Self.apps))
+            let muted = Set(Self.apps.filter { _ in rng.index(4) == 0 })
 
             // Candidate texts are unique per (iteration, index) so the winner can be identified
             // exactly. Reusing a small pool made two candidates share a string, and a *foreign*
             // win then read as an own-process one — the invariant below would have reported a
             // gate bug that did not exist.
             var candidates: [SelectionReader.Candidate] = []
-            for index in 0..<rng.int(4) {
-                let own = rng.int(3) == 0
+            for index in 0..<rng.index(4) {
+                let own = rng.index(3) == 0
                 candidates.append(
                     SelectionReader.Candidate(
                         text: {
-                            switch rng.int(5) {
+                            switch rng.index(5) {
                             case 0: return nil
                             case 1: return "   \u{200B}\n "
                             default: return "\(own ? "own" : "foreign")-\(iteration)-\(index)"
                             }
                         }(),
                         isOwnProcess: own,
-                        bundleID: own ? "com.devtype.app" : (rng.int(8) == 0 ? nil : rng.pick(Self.apps))
+                        bundleID: own ? "com.devtype.app" : (rng.index(8) == 0 ? nil : rng.pick(Self.apps))
                     )
                 )
             }
-            let weakAX = Set(Self.apps.filter { _ in rng.int(3) == 0 })
+            let weakAX = Set(Self.apps.filter { _ in rng.index(3) == 0 })
 
-            let cachedAge = TimeInterval(rng.int(400))
-            let cached: SelectionMonitor.CachedSelection? = rng.int(3) == 0
+            let cachedAge = TimeInterval(rng.index(400))
+            let cached: SelectionMonitor.CachedSelection? = rng.index(3) == 0
                 ? nil
                 : SelectionMonitor.CachedSelection(
-                    text: rng.int(6) == 0 ? "  " : "cached-\(rng.int(100))",
+                    text: rng.index(6) == 0 ? "  " : "cached-\(rng.index(100))",
                     bundleID: rng.pick(Self.apps),
                     changeToken: 1,
                     timestamp: now.addingTimeInterval(-cachedAge)
@@ -337,9 +314,9 @@ final class SelectionCacheStressTests: XCTestCase {
         let known = Set((0..<32).map { "text-\($0)" })
 
         DispatchQueue.concurrentPerform(iterations: 12) { worker in
-            var rng = Rng(seed: UInt64(worker) &* 0x9E37_79B9 &+ 1)
+            var rng = RawSplitMix64(seed: UInt64(worker) &* 0x9E37_79B9 &+ 1)
             for step in 0..<400 {
-                switch rng.int(6) {
+                switch rng.index(6) {
                 case 0:
                     monitor.clearCache()
                 case 1:
@@ -349,18 +326,18 @@ final class SelectionCacheStressTests: XCTestCase {
                 case 3:
                     monitor.seedCacheForTesting(
                         SelectionMonitor.CachedSelection(
-                            text: "text-\(rng.int(32))",
+                            text: "text-\(rng.index(32))",
                             bundleID: "com.apple.Safari",
                             changeToken: UInt64(step),
                             timestamp: Date()
                         ),
-                        element: elements[rng.int(elements.count)]
+                        element: elements[rng.index(elements.count)]
                     )
                 default:
                     monitor.testingApplySelectionRefresh(
-                        text: "text-\(rng.int(32))",
+                        text: "text-\(rng.index(32))",
                         bundleID: "com.apple.Safari",
-                        element: elements[rng.int(elements.count)]
+                        element: elements[rng.index(elements.count)]
                     )
                 }
 
@@ -384,10 +361,10 @@ final class SelectionCacheStressTests: XCTestCase {
         checker.resetManualAccessibilityMemoForTesting()
 
         DispatchQueue.concurrentPerform(iterations: 8) { worker in
-            var rng = Rng(seed: UInt64(worker) &+ 0xA11C_E)
+            var rng = RawSplitMix64(seed: UInt64(worker) &+ 0xA11C_E)
             for _ in 0..<300 {
-                let pid = pid_t(rng.int(16) + 1000)
-                switch rng.int(3) {
+                let pid = pid_t(rng.index(16) + 1000)
+                switch rng.index(3) {
                 case 0:
                     checker.seedManualAccessibilityForTesting(
                         pid: pid,
@@ -410,16 +387,16 @@ final class SelectionCacheStressTests: XCTestCase {
     /// stale, negative, past the end, or land inside a surrogate pair. `NSString.substring` traps
     /// on all of those. Fuzz it against strings built from emoji, combining marks and CJK.
     func testSelectionSubstringNeverTrapsOnHostileRanges() {
-        var rng = Rng(seed: 0x5B5_71_6C_ED)
+        var rng = RawSplitMix64(seed: 0x5B5_71_6C_ED)
         let alphabets = ["a", "é", "👩‍👩‍👧‍👦", "が", "\u{0301}", "🇯🇵", "\r\n", "𝄞"]
 
         for _ in 0..<5_000 {
             var string = ""
-            for _ in 0..<rng.int(12) { string += rng.pick(alphabets) }
+            for _ in 0..<rng.index(12) { string += rng.pick(alphabets) }
             let span = string.utf16.count
 
-            let location = rng.int(3) == 0 ? -rng.int(8) : rng.int(max(1, span + 8))
-            let length = rng.int(4) == 0 ? -rng.int(8) : rng.int(max(1, span + 8))
+            let location = rng.index(3) == 0 ? -rng.index(8) : rng.index(max(1, span + 8))
+            let length = rng.index(4) == 0 ? -rng.index(8) : rng.index(max(1, span + 8))
             let range = CFRange(location: location, length: length)
 
             let slice = SelectionReader.substring(of: string, utf16Range: range)
@@ -436,13 +413,13 @@ final class SelectionCacheStressTests: XCTestCase {
     /// whitespace, control characters and the placeholder scalars must read as blank; adding one
     /// real character must flip it.
     func testBlankDetectionIsStableUnderRandomCompositions() {
-        var rng = Rng(seed: 0x8_1A_11_C0DE)
+        var rng = RawSplitMix64(seed: 0x8_1A_11_C0DE)
         let blanks = [" ", "\t", "\n", "\r\n", "\u{200B}", "\u{200C}", "\u{200D}", "\u{2060}",
                       "\u{FEFF}", "\u{FFFC}", "\u{FFFD}", "\u{0000}", "\u{001B}"]
 
         for _ in 0..<5_000 {
             var blank = ""
-            for _ in 0..<rng.int(10) { blank += rng.pick(blanks) }
+            for _ in 0..<rng.index(10) { blank += rng.pick(blanks) }
             XCTAssertTrue(
                 SelectionReader.isBlankSelection(blank),
                 "\(blank.unicodeScalars.map { String($0.value, radix: 16) }) must read as blank."
@@ -459,10 +436,10 @@ final class SelectionCacheStressTests: XCTestCase {
 
     /// The settle poll may never outlive the caller's read budget, whatever the clock does.
     func testSettlePollNeverOutlivesTheReadBudget() {
-        var rng = Rng(seed: 0xB0_1E_7)
+        var rng = RawSplitMix64(seed: 0xB0_1E_7)
         for _ in 0..<2_000 {
-            let start = now.addingTimeInterval(TimeInterval(rng.int(1000)) - 500)
-            let budget = start.addingTimeInterval(TimeInterval(rng.int(4000) - 2000) / 1000)
+            let start = now.addingTimeInterval(TimeInterval(rng.index(1000)) - 500)
+            let budget = start.addingTimeInterval(TimeInterval(rng.index(4000) - 2000) / 1000)
             let deadline = AXContextChecker.settlePollDeadline(now: start, budget: budget)
             XCTAssertLessThanOrEqual(deadline, budget, "The poll ran past the caller's budget.")
             XCTAssertLessThanOrEqual(

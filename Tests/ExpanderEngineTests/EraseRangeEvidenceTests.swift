@@ -4,15 +4,6 @@ import XCTest
 @testable import ExpanderEngine
 
 final class EraseRangeEvidenceTests: XCTestCase {
-    private final class Poster: BackspacePosting {
-        var counts: [Int] = []
-        func sendBackspaces(count: Int) -> Int { counts.append(count); return count }
-        func sendBackspacesAsync(count: Int, completion: @escaping (Bool) -> Void) {
-            counts.append(count)
-            completion(true)
-        }
-    }
-
     private final class Field {
         // Shape from the report: 49 UTF-16 units, a caret at 49, and six whitespace
         // units (three NBSP) where the six-character trigger should have been.
@@ -148,7 +139,7 @@ final class EraseRangeEvidenceTests: XCTestCase {
         XCTAssertTrue(evidence.requiresHID)
         for afterWrite in [false, true] {
             for current in [false, true] {
-                let poster = Poster()
+                let poster = CountingBackspacePoster()
                 let executor = EraseExecutor(hid: poster)
                 var completions: [Bool] = []
                 executor.finishGuardedErase(
@@ -256,7 +247,7 @@ final class EraseRangeEvidenceTests: XCTestCase {
         XCTAssertTrue(evidence.requiresHID)
         for afterWrite in [false, true] {
             for current in [false, true] {
-                let poster = Poster()
+                let poster = CountingBackspacePoster()
                 var completions: [Bool] = []
                 EraseExecutor(hid: poster).finishGuardedErase(
                     plan: plan, afterPossibleWrite: afterWrite, result: evidence,

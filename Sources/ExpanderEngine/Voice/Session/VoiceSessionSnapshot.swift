@@ -9,9 +9,9 @@ public struct VoiceSessionSnapshot: Codable, Sendable, Equatable {
     /// readiness resolution selects a fallback, so recovery can explain both user intent and the
     /// component that actually handled the session.
     public let speechProvider: SpeechProviderDescriptor
-    public let resolvedSpeechProvider: SpeechProviderDescriptor?
+    public var resolvedSpeechProvider: SpeechProviderDescriptor?
     public let correctionProvider: CorrectionProviderDescriptor
-    public let resolvedCorrectionProvider: CorrectionProviderDescriptor?
+    public var resolvedCorrectionProvider: CorrectionProviderDescriptor?
     public let correctionFallbackProviderIDs: [String]
     public let privacyRoute: PrivacyRoute
     public let vocabularySnapshot: VocabularySnapshot
@@ -145,42 +145,21 @@ public struct VoiceSessionSnapshot: Codable, Sendable, Equatable {
     func resolvingSpeechProvider(
         _ descriptor: SpeechProviderDescriptor
     ) -> VoiceSessionSnapshot {
-        VoiceSessionSnapshot(
-            sessionID: sessionID,
-            generation: generation,
-            createdAt: createdAt,
-            localeIdentifier: localeIdentifier,
-            speechProvider: speechProvider,
-            resolvedSpeechProvider: descriptor,
-            correctionProvider: correctionProvider,
-            resolvedCorrectionProvider: resolvedCorrectionProvider,
-            correctionFallbackProviderIDs: correctionFallbackProviderIDs,
-            privacyRoute: privacyRoute,
-            vocabularySnapshot: vocabularySnapshot,
-            correctionPolicy: correctionPolicy,
-            targetLease: targetLease,
-            timeoutSeconds: timeoutSeconds
-        )
+        resolving(descriptor, at: \.resolvedSpeechProvider)
     }
 
     func resolvingCorrectionProvider(
         _ descriptor: CorrectionProviderDescriptor
     ) -> VoiceSessionSnapshot {
-        VoiceSessionSnapshot(
-            sessionID: sessionID,
-            generation: generation,
-            createdAt: createdAt,
-            localeIdentifier: localeIdentifier,
-            speechProvider: speechProvider,
-            resolvedSpeechProvider: resolvedSpeechProvider,
-            correctionProvider: correctionProvider,
-            resolvedCorrectionProvider: descriptor,
-            correctionFallbackProviderIDs: correctionFallbackProviderIDs,
-            privacyRoute: privacyRoute,
-            vocabularySnapshot: vocabularySnapshot,
-            correctionPolicy: correctionPolicy,
-            targetLease: targetLease,
-            timeoutSeconds: timeoutSeconds
-        )
+        resolving(descriptor, at: \.resolvedCorrectionProvider)
+    }
+
+    private func resolving<Descriptor>(
+        _ descriptor: Descriptor,
+        at keyPath: WritableKeyPath<VoiceSessionSnapshot, Descriptor?>
+    ) -> VoiceSessionSnapshot {
+        var copy = self
+        copy[keyPath: keyPath] = descriptor
+        return copy
     }
 }

@@ -57,18 +57,6 @@ public struct SnippetModel: Codable, Identifiable, Hashable {
     /// What the UI may show in place of the value. Never the value itself.
     public var maskedReplacement: String { String(repeating: "•", count: 12) }
 
-    /// §4.4: App-scope test for the matcher / injection layers.
-    /// `nil` or empty `bundleID` means "unknown frontmost app" — such a context only
-    /// satisfies snippets that are not restricted to a specific app list.
-    public func appliesTo(bundleID: String?) -> Bool {
-        guard let bundleID, !bundleID.isEmpty else { return includeApps.isEmpty }
-        if excludeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame }) {
-            return false
-        }
-        if includeApps.isEmpty { return true }
-        return includeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame })
-    }
-
     public init(
         id: UUID = UUID(),
         title: String,
@@ -292,17 +280,6 @@ public struct SnippetGroup: Codable, Identifiable, Hashable {
         self.snippets = snippets
     }
 
-    /// §4.4 at group level — same rule as `SnippetModel.appliesTo(bundleID:)`, so the two
-    /// compose predictably and neither has to explain the other's behaviour.
-    public func appliesTo(bundleID: String?) -> Bool {
-        guard let bundleID, !bundleID.isEmpty else { return includeApps.isEmpty }
-        if excludeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame }) {
-            return false
-        }
-        if includeApps.isEmpty { return true }
-        return includeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame })
-    }
-
     private enum CodingKeys: String, CodingKey {
         case id, name, enabled, symbol, colorHex, includeApps, excludeApps, snippets
     }
@@ -319,3 +296,28 @@ public struct SnippetGroup: Codable, Identifiable, Hashable {
         snippets = try c.decodeIfPresent([SnippetModel].self, forKey: .snippets) ?? []
     }
 }
+
+/// App-scope rule shared by a snippet and the group that contains it.
+///
+/// `nil` or an empty bundle means the frontmost app is unknown, which only
+/// satisfies a scope that is not limited to a list. Exclusions win. An empty
+/// include list means everywhere. The two lists compose outside this check:
+/// a group intersects includes and unions excludes, then each side asks here.
+public protocol AppScoped {
+    var includeApps: [String] { get }
+    var excludeApps: [String] { get }
+}
+
+extension AppScoped {
+    public func appliesTo(bundleID: String?) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else { return includeApps.isEmpty }
+        if excludeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame }) {
+            return false
+        }
+        if includeApps.isEmpty { return true }
+        return includeApps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame })
+    }
+}
+
+extension SnippetModel: AppScoped {}
+extension SnippetGroup: AppScoped {}
