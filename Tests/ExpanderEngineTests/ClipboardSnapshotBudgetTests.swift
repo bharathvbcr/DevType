@@ -240,6 +240,444 @@ final class ClipboardSnapshotBudgetTests: XCTestCase {
         XCTAssertLessThanOrEqual(storedBytes(snapshot), PasteboardBroker.snapshotMaxBytes)
     }
 
+    func testSnapshotConstantsStayLocked() {
+        XCTAssertEqual(PasteboardBroker.snapshotMaxBytes, 4 * 1024 * 1024)
+        XCTAssertEqual(PasteboardBroker.snapshotMaxItems, 8)
+        XCTAssertEqual(
+            PasteboardBroker.snapshotSkippedTypes,
+            [
+                "com.apple.pasteboard.promised-file-content-type",
+                "com.apple.pasteboard.promised-file-url",
+                "com.apple.pasteboard.promised-suggested-file-name",
+                "com.apple.pasteboard.PasteboardName",
+                "NSPromiseContentsPboardType",
+            ]
+        )
+    }
+
+    func testEverySkippedTypeIsNotRead() {
+        let skipped = PasteboardBroker.snapshotSkippedTypes.sorted().map {
+            NSPasteboard.PasteboardType($0)
+        }
+        let kept = NSPasteboard.PasteboardType("devtype.test.kept-beside-promises")
+        let payload = Data([0x10])
+        var reads: [NSPasteboard.PasteboardType] = []
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [skipped + [kept]],
+            budget: 8,
+            read: { _, type in
+                reads.append(type)
+                return payload
+            }
+        )
+        XCTAssertEqual(skipped.count, 5)
+        XCTAssertEqual(reads, [kept])
+        XCTAssertEqual(snapshot, [[kept: payload]])
+    }
+
+    func testNearMissSkippedNamesAreStillRead() {
+        let near = [
+            NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url "),
+            NSPasteboard.PasteboardType("nspromisecontentspboardtype"),
+            NSPasteboard.PasteboardType("com.apple.pasteboard.PasteboardName.extra"),
+            NSPasteboard.PasteboardType("NSPromiseContentsPboardType "),
+        ]
+        for type in near {
+            XCTAssertFalse(PasteboardBroker.snapshotSkippedTypes.contains(type.rawValue))
+        }
+        var reads: [NSPasteboard.PasteboardType] = []
+        let payload = Data([0x21])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [near],
+            budget: 16,
+            read: { _, type in
+                reads.append(type)
+                return payload
+            }
+        )
+        XCTAssertEqual(reads, near)
+        XCTAssertEqual(snapshot.count, 1)
+        XCTAssertEqual(snapshot[0].count, near.count)
+    }
+
+    func testZeroAndNegativeBudgetsReadNothing() {
+        for budget in [0, -1] {
+            var reads = 0
+            let snapshot = PasteboardBroker.snapshotRepresentations(
+                itemTypes: [[.string, .png], [.tiff]],
+                budget: budget,
+                read: { _, _ in
+                    reads += 1
+                    return Data([0x01])
+                }
+            )
+            XCTAssertEqual(reads, 0, "budget \(budget) must not read")
+            XCTAssertEqual(snapshot, [])
+        }
+    }
+
+    func testTwoOverBudgetReadsThenAFittingType() {
+        let first = NSPasteboard.PasteboardType("devtype.test.over.a")
+        let second = NSPasteboard.PasteboardType("devtype.test.over.b")
+        let fit = NSPasteboard.PasteboardType("devtype.test.over.fit")
+        var reads: [NSPasteboard.PasteboardType] = []
+        let fitPayload = Data(repeating: 0x03, count: 3)
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[first, second, fit]],
+            budget: 4,
+            read: { _, type in
+                reads.append(type)
+                return type == fit ? fitPayload : Data(repeating: 0x09, count: 5)
+            }
+        )
+        XCTAssertEqual(reads, [first, second, fit])
+        XCTAssertEqual(reads.filter { $0 == first }.count, 1)
+        XCTAssertEqual(reads.filter { $0 == second }.count, 1)
+        XCTAssertEqual(snapshot, [[fit: fitPayload]])
+        XCTAssertLessThanOrEqual(storedBytes(snapshot), 4)
+    }
+
+    func testLaterItemOverBudgetTypeIsReadOnceThenASmallerTypeIsStored() {
+        let head = NSPasteboard.PasteboardType("devtype.test.partial.head")
+        let over = NSPasteboard.PasteboardType("devtype.test.partial.over")
+        let small = NSPasteboard.PasteboardType("devtype.test.partial.small")
+        var reads: [(Int, NSPasteboard.PasteboardType)] = []
+        let headPayload = Data(repeating: 0x11, count: 6)
+        let smallPayload = Data(repeating: 0x22, count: 3)
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[head], [over, small]],
+            budget: 10,
+            read: { index, type in
+                reads.append((index, type))
+                if type == head { return headPayload }
+                if type == over { return Data(repeating: 0x33, count: 5) }
+                return smallPayload
+            }
+        )
+        XCTAssertEqual(reads.map(\.0), [0, 1, 1])
+        XCTAssertEqual(reads.map(\.1), [head, over, small])
+        XCTAssertEqual(reads.filter { $0.1 == over }.count, 1)
+        XCTAssertEqual(snapshot, [[head: headPayload], [small: smallPayload]])
+        XCTAssertNil(snapshot.last?[over])
+        XCTAssertLessThanOrEqual(storedBytes(snapshot), 10)
+    }
+
+    func testNilOnlyItemIsOmittedAndTheFollowingItemIsKept() {
+        let missing = NSPasteboard.PasteboardType("devtype.test.nil.item")
+        let kept = NSPasteboard.PasteboardType("devtype.test.kept.item")
+        var reads: [Int] = []
+        let payload = Data([0x07, 0x08])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[missing], [kept]],
+            budget: 8,
+            read: { index, _ in
+                reads.append(index)
+                return index == 0 ? nil : payload
+            }
+        )
+        XCTAssertEqual(reads, [0, 1])
+        XCTAssertEqual(snapshot, [[kept: payload]])
+    }
+
+    func testEmptyItemTypesReturnsAnEmptySnapshot() {
+        var reads = 0
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [],
+            budget: 8,
+            read: { _, _ in
+                reads += 1
+                return Data([0x01])
+            }
+        )
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(snapshot, [])
+    }
+
+    func testSkippedOnlyItemIsOmittedAndDoesNotBlockTheNextItem() {
+        let promised = NSPasteboard.PasteboardType("NSPromiseContentsPboardType")
+        var reads: [NSPasteboard.PasteboardType] = []
+        let payload = Data("ok".utf8)
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[promised], [.string]],
+            budget: 8,
+            read: { _, type in
+                reads.append(type)
+                return payload
+            }
+        )
+        XCTAssertEqual(reads, [.string])
+        XCTAssertEqual(snapshot, [[.string: payload]])
+    }
+
+    func testMaxItemsCountsLeadingSkippedItems() {
+        let promised = NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-content-type")
+        var reads = 0
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[promised], [.string]],
+            budget: 16,
+            maxItems: 1,
+            read: { _, _ in
+                reads += 1
+                return Data([0x01])
+            }
+        )
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(snapshot, [])
+    }
+
+    func testMaxItemsZeroReadsNothing() {
+        var reads = 0
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[.string], [.png], [.tiff]],
+            budget: 32,
+            maxItems: 0,
+            read: { _, _ in
+                reads += 1
+                return Data([0x01])
+            }
+        )
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(snapshot, [])
+    }
+
+    func testEmptyDataIsStoredWithoutReducingTheBudget() {
+        let empty = NSPasteboard.PasteboardType("devtype.test.empty")
+        let later = NSPasteboard.PasteboardType("devtype.test.after.empty")
+        var reads: [NSPasteboard.PasteboardType] = []
+        let laterPayload = Data([0x01, 0x02, 0x03])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[empty, later]],
+            budget: 3,
+            read: { _, type in
+                reads.append(type)
+                return type == empty ? Data() : laterPayload
+            }
+        )
+        XCTAssertEqual(reads, [empty, later])
+        XCTAssertEqual(snapshot, [[empty: Data(), later: laterPayload]])
+        XCTAssertEqual(storedBytes(snapshot), laterPayload.count)
+    }
+
+    func testZeroLengthTypeAfterTheBudgetIsSpentIsNotRead() {
+        let fill = NSPasteboard.PasteboardType("devtype.test.fill.exact")
+        let empty = NSPasteboard.PasteboardType("devtype.test.empty.after")
+        var reads: [NSPasteboard.PasteboardType] = []
+        let payload = Data([0x0A, 0x0B])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[fill, empty]],
+            budget: payload.count,
+            read: { _, type in
+                reads.append(type)
+                return type == fill ? payload : Data()
+            }
+        )
+        XCTAssertEqual(reads, [fill])
+        XCTAssertEqual(snapshot, [[fill: payload]])
+    }
+
+    func testTIFFBesidePublicJPEGIsReadBecauseTheMatchIsExact() {
+        let notJPEG = NSPasteboard.PasteboardType("public.JPEG")
+        XCTAssertNotEqual(notJPEG, jpeg)
+        var reads: [NSPasteboard.PasteboardType] = []
+        let tiff = Data([0x4D, 0x4D])
+        let other = Data([0xFF, 0xD8])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[.tiff, notJPEG]],
+            budget: 16,
+            read: { _, type in
+                reads.append(type)
+                return type == .tiff ? tiff : other
+            }
+        )
+        XCTAssertEqual(reads, [.tiff, notJPEG])
+        XCTAssertEqual(snapshot, [[.tiff: tiff, notJPEG: other]])
+    }
+
+    func testNearMissLegacyTIFFBesidePNGIsRead() {
+        let near = NSPasteboard.PasteboardType("NeXT TIFF v4.0 pasteboard type ")
+        XCTAssertNotEqual(near, legacyTIFF)
+        var reads: [NSPasteboard.PasteboardType] = []
+        let payload = Data([0x01, 0x02])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[near, .png]],
+            budget: 16,
+            read: { _, type in
+                reads.append(type)
+                return payload
+            }
+        )
+        XCTAssertEqual(reads, [near, .png])
+        XCTAssertEqual(snapshot[0][near], payload)
+        XCTAssertEqual(snapshot[0][.png], payload)
+    }
+
+    func testTIFFAndPNGOnDifferentItemsAreBothRead() {
+        var reads: [(Int, NSPasteboard.PasteboardType)] = []
+        let tiff = Data([0x49, 0x49])
+        let png = Data([0x89, 0x50])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[.tiff], [.png]],
+            budget: 16,
+            read: { index, type in
+                reads.append((index, type))
+                return type == .tiff ? tiff : png
+            }
+        )
+        XCTAssertEqual(reads.map(\.0), [0, 1])
+        XCTAssertEqual(reads.map(\.1), [.tiff, .png])
+        XCTAssertEqual(snapshot, [[.tiff: tiff], [.png: png]])
+    }
+
+    func testLegacyTIFFBesideGIFIsNotRead() {
+        for types in [[legacyTIFF, gif], [gif, legacyTIFF]] {
+            var reads: [NSPasteboard.PasteboardType] = []
+            let payload = Data([0x47, 0x49])
+            let snapshot = PasteboardBroker.snapshotRepresentations(
+                itemTypes: [types],
+                budget: 16,
+                read: { _, type in
+                    reads.append(type)
+                    return payload
+                }
+            )
+            XCTAssertEqual(reads, [gif], "order \(types.map(\.rawValue))")
+            XCTAssertEqual(snapshot, [[gif: payload]])
+            XCTAssertFalse(snapshot.contains { $0.keys.contains(legacyTIFF) })
+        }
+    }
+
+    func testLegacyTIFFOnlyItemIsRead() {
+        var reads: [NSPasteboard.PasteboardType] = []
+        let payload = Data([0x4D, 0x4D, 0x00])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[legacyTIFF]],
+            budget: 16,
+            read: { _, type in
+                reads.append(type)
+                return payload
+            }
+        )
+        XCTAssertEqual(reads, [legacyTIFF])
+        XCTAssertEqual(snapshot, [[legacyTIFF: payload]])
+    }
+
+    func testTIFFListedAfterPNGIsNotRead() {
+        var reads: [NSPasteboard.PasteboardType] = []
+        let png = Data([0x89, 0x50, 0x4E])
+        let snapshot = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[.png, .tiff]],
+            budget: 16,
+            read: { _, type in
+                reads.append(type)
+                return png
+            }
+        )
+        XCTAssertEqual(reads, [.png])
+        XCTAssertEqual(snapshot, [[.png: png]])
+        XCTAssertFalse(snapshot.contains { $0.keys.contains(.tiff) })
+    }
+
+    func testNilPNGStillSkipsTIFFOnTheSameItem() {
+        let orders: [[NSPasteboard.PasteboardType]] = [[.png, .tiff], [.tiff, .png]]
+        for types in orders {
+            var reads: [NSPasteboard.PasteboardType] = []
+            let snapshot = PasteboardBroker.snapshotRepresentations(
+                itemTypes: [types],
+                budget: 16,
+                read: { _, type in
+                    reads.append(type)
+                    return nil
+                }
+            )
+            XCTAssertEqual(reads, [.png], "order \(types.map(\.rawValue))")
+            XCTAssertEqual(snapshot, [])
+        }
+    }
+
+    func testSequentialCallsDoNotShareRemainingBudget() {
+        let fill = NSPasteboard.PasteboardType("devtype.test.seq.fill")
+        let later = NSPasteboard.PasteboardType("devtype.test.seq.later")
+        let payload = Data(repeating: 0x44, count: 3)
+        var firstReads: [NSPasteboard.PasteboardType] = []
+        let first = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[fill, later]],
+            budget: 3,
+            read: { _, type in
+                firstReads.append(type)
+                return payload
+            }
+        )
+        var secondReads: [NSPasteboard.PasteboardType] = []
+        let second = PasteboardBroker.snapshotRepresentations(
+            itemTypes: [[fill, later]],
+            budget: 6,
+            read: { _, type in
+                secondReads.append(type)
+                return payload
+            }
+        )
+        XCTAssertEqual(firstReads, [fill])
+        XCTAssertEqual(first, [[fill: payload]])
+        XCTAssertEqual(secondReads, [fill, later])
+        XCTAssertEqual(second, [[fill: payload, later: payload]])
+        XCTAssertLessThanOrEqual(storedBytes(second), 6)
+    }
+
+    func testConcurrentCallsWithDifferentBudgetsDoNotCrossResults() {
+        let wide = NSPasteboard.PasteboardType("devtype.test.concurrent.wide")
+        let narrow = NSPasteboard.PasteboardType("devtype.test.concurrent.narrow")
+        let widePayload = Data(repeating: 0xA1, count: 4)
+        let narrowPayload = Data(repeating: 0xB2, count: 2)
+        let iterations = 16
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var wideResults: [PasteboardBroker.PasteboardSnapshot] = []
+        var narrowResults: [PasteboardBroker.PasteboardSnapshot] = []
+        wideResults.reserveCapacity(iterations)
+        narrowResults.reserveCapacity(iterations)
+        let queueA = DispatchQueue(label: "devtype.snapshot.budget.a")
+        let queueB = DispatchQueue(label: "devtype.snapshot.budget.b")
+
+        for _ in 0..<iterations {
+            group.enter()
+            queueA.async {
+                let snapshot = PasteboardBroker.snapshotRepresentations(
+                    itemTypes: [[wide, narrow]],
+                    budget: 4,
+                    read: { _, type in type == wide ? widePayload : narrowPayload }
+                )
+                lock.lock()
+                wideResults.append(snapshot)
+                lock.unlock()
+                group.leave()
+            }
+            group.enter()
+            queueB.async {
+                let snapshot = PasteboardBroker.snapshotRepresentations(
+                    itemTypes: [[wide, narrow]],
+                    budget: 2,
+                    read: { _, type in type == wide ? widePayload : narrowPayload }
+                )
+                lock.lock()
+                narrowResults.append(snapshot)
+                lock.unlock()
+                group.leave()
+            }
+        }
+
+        XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(wideResults.count, iterations)
+        XCTAssertEqual(narrowResults.count, iterations)
+        for snapshot in wideResults {
+            XCTAssertEqual(snapshot, [[wide: widePayload]])
+            XCTAssertLessThanOrEqual(storedBytes(snapshot), 4)
+        }
+        for snapshot in narrowResults {
+            XCTAssertEqual(snapshot, [[narrow: narrowPayload]])
+            XCTAssertLessThanOrEqual(storedBytes(snapshot), 2)
+        }
+    }
+
     private func storedBytes(_ snapshot: PasteboardBroker.PasteboardSnapshot) -> Int {
         snapshot.reduce(0) { total, item in
             total + item.values.reduce(0) { $0 + $1.count }
