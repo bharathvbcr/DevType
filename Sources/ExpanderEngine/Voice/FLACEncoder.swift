@@ -88,7 +88,11 @@ public enum FLACEncoder {
             bufferToWrite = convertedBuffer
         }
         
-        do {
+        return try finishOutputFile(
+            outputURL: outputURL,
+            inputURL: inputURL,
+            startTime: startTime
+        ) {
             let outputFile = try AVAudioFile(
                 forWriting: outputURL,
                 settings: outputSettings,
@@ -96,14 +100,7 @@ public enum FLACEncoder {
                 interleaved: false
             )
             try outputFile.write(from: bufferToWrite)
-            // outputFile goes out of scope and flushes/closes file descriptor
         }
-        
-        let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
-        let byteCount = (attributes[.size] as? Int64) ?? Int64((try? Data(contentsOf: outputURL).count) ?? 0)
-        let encodeSeconds = Date().timeIntervalSince(startTime)
-        
-        return EncodingResult(url: outputURL, byteCount: byteCount, encodeSeconds: encodeSeconds)
     }
     
     /// Encodes raw PCM data to FLAC
@@ -136,7 +133,11 @@ public enum FLACEncoder {
             AVNumberOfChannelsKey: 1
         ]
         
-        do {
+        return try finishOutputFile(
+            outputURL: outputURL,
+            inputURL: nil,
+            startTime: startTime
+        ) {
             let outputFile = try AVAudioFile(
                 forWriting: outputURL,
                 settings: outputSettings,
@@ -144,13 +145,39 @@ public enum FLACEncoder {
                 interleaved: false
             )
             try outputFile.write(from: buffer)
-            // outputFile goes out of scope and flushes/closes file descriptor
         }
-        
-        let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
-        let byteCount = (attributes[.size] as? Int64) ?? Int64((try? Data(contentsOf: outputURL).count) ?? 0)
-        let encodeSeconds = Date().timeIntervalSince(startTime)
-        
-        return EncodingResult(url: outputURL, byteCount: byteCount, encodeSeconds: encodeSeconds)
+    }
+
+    /// Deletes an output file this call created when a later step throws. A throw before the file
+    /// exists leaves a pre-existing path alone, and the input URL is never deleted.
+    private static func finishOutputFile(
+        outputURL: URL,
+        inputURL: URL?,
+        startTime: Date,
+        write: () throws -> Void
+    ) throws -> EncodingResult {
+        let existedBefore = FileManager.default.fileExists(atPath: outputURL.path)
+        do {
+            try write()
+            let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
+            let byteCount = (attributes[.size] as? Int64) ?? Int64((try? Data(contentsOf: outputURL).count) ?? 0)
+            return EncodingResult(
+                url: outputURL,
+                byteCount: byteCount,
+                encodeSeconds: Date().timeIntervalSince(startTime)
+            )
+        } catch {
+            let created = !existedBefore && FileManager.default.fileExists(atPath: outputURL.path)
+            let isInput = inputURL.map { sameFile($0, outputURL) } ?? false
+            if created && !isInput {
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+            throw error
+        }
+    }
+
+    private static func sameFile(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.resolvingSymlinksInPath().standardizedFileURL.path
+            == rhs.resolvingSymlinksInPath().standardizedFileURL.path
     }
 }
