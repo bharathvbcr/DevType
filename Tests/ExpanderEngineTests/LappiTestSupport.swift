@@ -15,7 +15,14 @@ final class LappiFakeAgent: @unchecked Sendable {
 
     /// Binds a short path (`sun_path` is 104 bytes on macOS, so not the temp dir), accepts one
     /// connection on a background thread and hands its descriptor to `handler`.
-    init(tag: String, handler: @escaping @Sendable (Int32, LappiFakeAgent) -> Void) throws {
+    ///
+    /// `socketMode` is applied with `chmod` after bind. The default is `0600` because the client
+    /// refuses any other mode; pass `0o666` to exercise that refusal.
+    init(
+        tag: String,
+        socketMode: mode_t = 0o600,
+        handler: @escaping @Sendable (Int32, LappiFakeAgent) -> Void
+    ) throws {
         directory = "/private/tmp/qdl-\(getpid())-\(tag)"
         try? FileManager.default.removeItem(atPath: directory)
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
@@ -30,6 +37,11 @@ final class LappiFakeAgent: @unchecked Sendable {
             }
         }
         guard bound == 0, listen(listener, 4) == 0 else { throw LappiTestError.setup("bind/listen errno=\(errno)") }
+        guard chmod(path, socketMode) == 0 else { throw LappiTestError.setup("chmod errno=\(errno)") }
+        // A reply written after the client has already closed raises SIGPIPE. Blocking that
+        // signal on the writing thread still killed the process (signal 13), so ignore it
+        // for the rest of this test process. The assertions still require zero request bytes.
+        _ = signal(SIGPIPE, SIG_IGN)
         let listener = self.listener
         Thread.detachNewThread { [self] in
             defer { finished.signal() }
