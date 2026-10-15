@@ -341,7 +341,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
 
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let pngURL = sourceDir.appendingPathComponent("tiny.png")
         try png.write(to: pngURL)
 
@@ -378,7 +378,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
 
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let pngURL = sourceDir.appendingPathComponent("tiny.png")
         try png.write(to: pngURL)
 
@@ -405,7 +405,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let storeDir = try makeTempDir("prepared-cap-store")
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let pngURL = sourceDir.appendingPathComponent("tiny.png")
         try png.write(to: pngURL)
 
@@ -440,7 +440,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let storeDir = try makeTempDir("save-once")
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let counter = AttachmentValidationCounter()
 
         let stored = try store.save(
@@ -462,7 +462,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let storeDir = try makeTempDir("save-cap")
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let counter = AttachmentValidationCounter()
 
         ImageAttachmentStore.maxImportedImageBytes = 10
@@ -489,7 +489,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let storeDir = try makeTempDir("import-cap-store")
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let pngURL = sourceDir.appendingPathComponent("tiny.png")
-        try makePNGData().write(to: pngURL)
+        try TestPNG.makePNGData().write(to: pngURL)
 
         let store = ImageAttachmentStore(directory: storeDir)
         let counter = AttachmentValidationCounter()
@@ -514,7 +514,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let storeDir = try makeTempDir("bad-ext-store")
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
 
         for ext in ["exe", "txt"] {
             let counter = AttachmentValidationCounter()
@@ -556,7 +556,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let storeDir = try makeTempDir("meta-fail-store")
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let pngURL = sourceDir.appendingPathComponent("tiny.png")
         try png.write(to: pngURL)
 
@@ -598,7 +598,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let storeDir = try makeTempDir("nil-decode-store")
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let pngURL = sourceDir.appendingPathComponent("tiny.png")
         try png.write(to: pngURL)
 
@@ -673,7 +673,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
 
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let source = sourceDir.appendingPathComponent("photo.PNG")
         try png.write(to: source)
         XCTAssertEqual(source.pathExtension, "PNG")
@@ -786,7 +786,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
 
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         XCTAssertGreaterThan(png.count, 1)
         ImageAttachmentStore.maxImportedImageBytes = png.count
 
@@ -858,7 +858,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: storeDir) }
         let store = ImageAttachmentStore(directory: storeDir)
 
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let source = sourceDir.appendingPathComponent("tiny.png")
         try png.write(to: source)
 
@@ -895,7 +895,7 @@ final class ImageAttachmentStoreLimitTests: XCTestCase {
         let storeDirB = try makeTempDir("concurrent-b")
         defer { try? FileManager.default.removeItem(at: storeDirB) }
 
-        let png = try makePNGData()
+        let png = try TestPNG.makePNGData()
         let jpeg = try makeJPEGData()
         XCTAssertNotEqual(png, jpeg)
         let pngURL = sourceDir.appendingPathComponent("a.png")
