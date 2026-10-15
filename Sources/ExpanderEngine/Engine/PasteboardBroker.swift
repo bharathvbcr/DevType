@@ -184,6 +184,20 @@ public final class PasteboardBroker {
     private var restoreGeneration: UInt64 = 0
     private var pendingTicket: ClipboardTicket?
 
+    /// Native expansion bytes only. Keyed by standardized path + mtime + size,
+    /// one entry per path, oldest insertion first. Not the TIFF+PNG fallback.
+    private struct NativeImageCacheEntry {
+        let path: String
+        let modifiedAt: Date
+        let byteCount: Int
+        let type: NSPasteboard.PasteboardType
+        let data: Data
+    }
+
+    private let nativeImageCacheLock = UnfairLock()
+    private var nativeImageCache: [NativeImageCacheEntry] = []
+    private static let nativeImageCacheEntryLimit = 4
+
     public init(
         hid: HIDKeyPoster = HIDKeyPoster.shared,
         verifier: DeliveryVerifier = DeliveryVerifier.shared,
@@ -372,6 +386,182 @@ public final class PasteboardBroker {
             representations.append((.png, png))
         }
         return representations
+    }
+
+    /// Stat of a stored attachment. Tests inject this so they never touch Application Support.
+    struct NativeImageFileAttributes: Equatable {
+        var byteCount: Int
+        var modifiedAt: Date
+    }
+
+    /// Image bytes that will be published, without the empty clipboard-manager markers.
+    struct ExpansionImageRepresentations {
+        var items: [(NSPasteboard.PasteboardType, Data)]
+        var payloadBytes: Int
+    }
+
+    /// Expansion paste publishes stored PNG/JPEG/GIF/TIFF bytes under one native type.
+    /// `NSImage` re-encoding flattens animated GIF and replaces the file with TIFF+PNG.
+    /// bmp, webp, heic, unknown extensions, containment failures, and over-cap files
+    /// keep that fallback. The cache holds only native payloads and is not taken across file IO.
+    func expansionImageRepresentations(
+        image: NSImage,
+        imagePath: String?,
+        attributes: ((URL) -> NativeImageFileAttributes?)? = nil,
+        read: ((URL) -> Data?)? = nil
+    ) -> ExpansionImageRepresentations {
+        let attributeOf = attributes ?? { Self.nativeImageFileAttributes(at: $0) }
+        let readBytes = read ?? { Self.readNativeImageFile(at: $0) }
+        guard let imagePath, !imagePath.isEmpty,
+              let pasteboardType = Self.nativeImagePasteboardType(for: imagePath) else {
+            return fallbackExpansionImageRepresentations(image)
+        }
+        guard let url = ImageAttachmentStore.shared.resolvedURL(forImagePath: imagePath) else {
+            return fallbackExpansionImageRepresentations(image)
+        }
+        guard let stat = attributeOf(url),
+              stat.byteCount >= 0,
+              stat.byteCount <= ImageAttachmentStore.maxImportedImageBytes else {
+            return fallbackExpansionImageRepresentations(image)
+        }
+        let cachePath = url.standardizedFileURL.path
+        if let cached = cachedNativeImage(path: cachePath, modifiedAt: stat.modifiedAt, byteCount: stat.byteCount) {
+            return ExpansionImageRepresentations(
+                items: [(cached.type, cached.data)],
+                payloadBytes: cached.data.count
+            )
+        }
+        guard let data = readBytes(url) else {
+            return fallbackExpansionImageRepresentations(image)
+        }
+        guard data.count <= ImageAttachmentStore.maxImportedImageBytes else {
+            return fallbackExpansionImageRepresentations(image)
+        }
+        if data.count == stat.byteCount {
+            storeNativeImage(path: cachePath, modifiedAt: stat.modifiedAt, type: pasteboardType, data: data)
+        }
+        return ExpansionImageRepresentations(items: [(pasteboardType, data)], payloadBytes: data.count)
+    }
+
+    func nativeImagePayloadCacheSnapshot() -> (entryCount: Int, payloadBytes: Int) {
+        nativeImageCacheLock.lock()
+        defer { nativeImageCacheLock.unlock() }
+        return (nativeImageCache.count, nativeImageCache.reduce(0) { $0 + $1.data.count })
+    }
+
+    private func fallbackExpansionImageRepresentations(_ image: NSImage) -> ExpansionImageRepresentations {
+        let items = Self.imageRepresentations(image)
+        return ExpansionImageRepresentations(
+            items: items,
+            payloadBytes: items.reduce(0) { $0 + $1.1.count }
+        )
+    }
+
+    private static func nativeImagePasteboardType(for path: String) -> NSPasteboard.PasteboardType? {
+        switch (path as NSString).pathExtension.lowercased() {
+        case "png":
+            return .png
+        case "jpg", "jpeg":
+            return NSPasteboard.PasteboardType("public.jpeg")
+        case "gif":
+            return NSPasteboard.PasteboardType("public.gif")
+        case "tiff":
+            return .tiff
+        default:
+            return nil
+        }
+    }
+
+    private static func nativeImageFileAttributes(at url: URL) -> NativeImageFileAttributes? {
+        let values: [FileAttributeKey: Any]
+        do {
+            values = try FileManager.default.attributesOfItem(atPath: url.path)
+        } catch {
+            return nil
+        }
+        guard (values[.type] as? FileAttributeType) == .typeRegular,
+              let modifiedAt = values[.modificationDate] as? Date else {
+            return nil
+        }
+        let byteCount: Int64?
+        if let size = values[.size] as? Int64 {
+            byteCount = size
+        } else if let size = values[.size] as? Int {
+            byteCount = Int64(size)
+        } else if let size = values[.size] as? NSNumber {
+            byteCount = size.int64Value
+        } else {
+            byteCount = nil
+        }
+        guard let byteCount, byteCount >= 0, byteCount <= Int64(Int.max) else { return nil }
+        return NativeImageFileAttributes(byteCount: Int(byteCount), modifiedAt: modifiedAt)
+    }
+
+    /// Reads at most one byte past the import cap so an over-cap file is discarded
+    /// without a re-encode and without caching those bytes.
+    private static func readNativeImageFile(at url: URL) -> Data? {
+        let cap = ImageAttachmentStore.maxImportedImageBytes
+        let limit = cap >= Int.max ? Int.max : max(0, cap) + 1
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            return try handle.read(upToCount: limit)
+        } catch {
+            return nil
+        }
+    }
+
+    private func cachedNativeImage(
+        path: String,
+        modifiedAt: Date,
+        byteCount: Int
+    ) -> (type: NSPasteboard.PasteboardType, data: Data)? {
+        nativeImageCacheLock.lock()
+        defer { nativeImageCacheLock.unlock() }
+        guard let entry = nativeImageCache.first(where: {
+            $0.path == path && $0.modifiedAt == modifiedAt && $0.byteCount == byteCount
+        }) else { return nil }
+        return (entry.type, entry.data)
+    }
+
+    private func storeNativeImage(
+        path: String,
+        modifiedAt: Date,
+        type: NSPasteboard.PasteboardType,
+        data: Data
+    ) {
+        nativeImageCacheLock.lock()
+        defer { nativeImageCacheLock.unlock() }
+        nativeImageCache.removeAll { $0.path == path }
+        let cap = ImageAttachmentStore.maxImportedImageBytes
+        guard data.count >= 0, cap >= 0, data.count <= cap else { return }
+        while nativeImageCache.count >= Self.nativeImageCacheEntryLimit
+            || Self.nativeImageCacheExceeds(nativeImageCache, adding: data.count, cap: cap) {
+            guard !nativeImageCache.isEmpty else { break }
+            nativeImageCache.removeFirst()
+        }
+        guard nativeImageCache.count < Self.nativeImageCacheEntryLimit,
+              !Self.nativeImageCacheExceeds(nativeImageCache, adding: data.count, cap: cap) else { return }
+        nativeImageCache.append(NativeImageCacheEntry(
+            path: path,
+            modifiedAt: modifiedAt,
+            byteCount: data.count,
+            type: type,
+            data: data
+        ))
+    }
+
+    private static func nativeImageCacheExceeds(
+        _ entries: [NativeImageCacheEntry],
+        adding: Int,
+        cap: Int
+    ) -> Bool {
+        var used = 0
+        for entry in entries {
+            if entry.data.count < 0 || used > cap - entry.data.count { return true }
+            used += entry.data.count
+        }
+        return adding > cap - used
     }
 
     private func writeUserClipboard(
@@ -1021,8 +1211,9 @@ public final class PasteboardBroker {
 
     // MARK: - Image paste
 
-    /// Clipboard-pastes an image (TIFF + PNG reps) with the same snapshot/restore
-    /// discipline as `pasteViaClipboard`. Used by image snippets only.
+    /// Clipboard-pastes an image with the same snapshot/restore discipline as
+    /// `pasteViaClipboard`. Used by image snippets only. PNG, JPEG, GIF, and TIFF
+    /// attachments publish the stored file bytes; other paths keep TIFF + PNG.
     ///
     /// §3.4: two fixes here. The restore delay no longer runs image bytes through the *text*
     /// formula (a 1 MB image computed 25 s and clamped to 0.45 s, i.e. the number was noise), and
@@ -1035,6 +1226,7 @@ public final class PasteboardBroker {
     /// than reporting `postedUnverified`. Verification here is reporting-only.
     public func pasteImageViaClipboard(
         image: NSImage,
+        imagePath: String? = nil,
         bundleID: String? = nil,
         focus: FocusedElementSource,
         shouldContinue: @escaping () -> Bool = { true },
@@ -1067,13 +1259,14 @@ public final class PasteboardBroker {
             return
         }
 
-        // Encode before acquiring the board: no partially prepared image may clear it.
-        var representations = Self.imageRepresentations(image)
+        // Prepare before acquiring the board: no partially prepared image may clear it.
+        let prepared = expansionImageRepresentations(image: image, imagePath: imagePath)
+        var representations = prepared.items
         guard !representations.isEmpty else {
             completion(.notPosted)
             return
         }
-        let payloadBytes = representations.reduce(0) { $0 + $1.1.count }
+        let payloadBytes = prepared.payloadBytes
         representations.append(contentsOf: [
             (Self.transientType, Data()), (Self.concealedType, Data()), (Self.autoGeneratedType, Data())
         ])
