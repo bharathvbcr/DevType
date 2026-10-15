@@ -106,10 +106,9 @@ LOCAL_NETWORKING="$(/usr/libexec/PlistBuddy -c \
 echo "  Bundle Identifier: $BUNDLE_ID"
 echo "  Stamped Version:   $VER (build $BUILD)"
 
-if [ "$VER" = "1.0.0" ] && [ "$BUILD" = "1" ]; then
-  echo "error: version was not stamped from git (found placeholder 1.0.0 / build 1)" >&2
-  exit 1
-fi
+PLACEHOLDER_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${ROOT}/Resources/Info.plist")"
+PLACEHOLDER_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${ROOT}/Resources/Info.plist")"
+"${ROOT}/Scripts/verify-stamped-version.sh" "$VER" "$BUILD" "$PLACEHOLDER_VER" "$PLACEHOLDER_BUILD"
 
 if [[ "${LOCAL_NETWORKING}" != "true" ]]; then
   echo "error: packaged Info.plist does not allow narrowly scoped local networking" >&2

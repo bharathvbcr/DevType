@@ -134,10 +134,11 @@ jobs:
           VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
           echo "version=$VER build=$BUILD"
-          # §7.6 regression guard: the frozen placeholder must never ship again.
-          if [ "$VER" = "1.0.0" ] && [ "$BUILD" = "1" ]; then
-            echo "error: version was not stamped from git"; exit 1
-          fi
+          # §7.6: reject the source Info.plist pair (0.1.7 / 2). 1.0.0 / 1 is not
+          # the placeholder this repository stamps on a no-git fallback.
+          PLACEHOLDER_VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          PLACEHOLDER_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Resources/Info.plist)
+          ./Scripts/verify-stamped-version.sh "$VER" "$BUILD" "$PLACEHOLDER_VER" "$PLACEHOLDER_BUILD"
           test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "$APP/Contents/Info.plist")" = true
           for ATS_KEY in NSAllowsArbitraryLoads NSAllowsArbitraryLoadsForMedia NSAllowsArbitraryLoadsInWebContent; do
             if /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:${ATS_KEY}" \
