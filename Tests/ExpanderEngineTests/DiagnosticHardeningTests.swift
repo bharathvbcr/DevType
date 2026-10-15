@@ -52,6 +52,130 @@ final class DiagnosticHardeningTests: XCTestCase {
         XCTAssertEqual(calls, 2)
     }
 
+    func testManualAccessibilityFollowUpIsOneShotAfterAFreshTimeout() {
+        XCTAssertEqual(
+            AXContextChecker.manualAccessibilityProbeTimeout(isFollowUp: false),
+            AXContextChecker.messagingTimeoutSeconds
+        )
+        XCTAssertEqual(
+            AXContextChecker.manualAccessibilityProbeTimeout(isFollowUp: true),
+            AXContextChecker.retryMessagingTimeoutSeconds
+        )
+        XCTAssertGreaterThan(
+            AXContextChecker.retryMessagingTimeoutSeconds,
+            AXContextChecker.messagingTimeoutSeconds
+        )
+        let delay = AXContextChecker.manualAccessibilityRetrySeconds
+            + AXContextChecker.manualAccessibilityFollowUpSlackSeconds
+        XCTAssertEqual(
+            AXContextChecker.manualAccessibilityFollowUpDelay(probedFresh: true, state: .failed),
+            delay
+        )
+        XCTAssertNil(
+            AXContextChecker.manualAccessibilityFollowUpDelay(probedFresh: false, state: .failed),
+            "A cooldown hit must not schedule a second wake-up"
+        )
+        for state: AXContextChecker.ManualAccessibilityState in [
+            .activatedNow, .alreadyActive, .unsupported, .invalidPID
+        ] {
+            XCTAssertNil(
+                AXContextChecker.manualAccessibilityFollowUpDelay(probedFresh: true, state: state)
+            )
+        }
+    }
+
+    func testFollowUpProbeIsNotSwallowedByTheFailureCooldown() {
+        let checker = AXContextChecker()
+        var calls = 0
+        XCTAssertEqual(checker.ensureManualAccessibility(pid: 45020, now: { 100 }, activate: { _ in
+            calls += 1
+            return .cannotComplete
+        }), .failed)
+        XCTAssertEqual(checker.ensureManualAccessibility(
+            pid: 45020,
+            now: { 100.05 },
+            activate: { _ in
+                calls += 1
+                return .attributeUnsupported
+            },
+            isFollowUp: true
+        ), .unsupported)
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(checker.ensureManualAccessibility(pid: 45020, now: { 100.1 }, activate: { _ in
+            XCTFail("A settled follow-up must not write again")
+            return .cannotComplete
+        }, isFollowUp: true), .unsupported)
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testCooldownHitDoesNotScheduleAManualAccessibilityFollowUp() {
+        let checker = AXContextChecker()
+        var scheduled: [pid_t] = []
+        XCTAssertEqual(checker.ensureManualAccessibility(pid: 45001, now: { 100 }, activate: { _ in
+            .cannotComplete
+        }, scheduleFollowUp: { scheduled.append($0) }), .failed)
+        XCTAssertEqual(scheduled, [45001])
+        XCTAssertEqual(checker.ensureManualAccessibility(pid: 45001, now: { 100.5 }, activate: { _ in
+            XCTFail("The cooldown must not write the attribute again")
+            return .cannotComplete
+        }, scheduleFollowUp: { scheduled.append($0) }), .failed)
+        XCTAssertEqual(scheduled, [45001])
+    }
+
+    func testEnsureFollowsUpOnceAndTheFollowUpDoesNotReschedule() {
+        var calls = 0
+        let checker = AXContextChecker(
+            settle: .live,
+            focusProbes: { _ in AXContextChecker.FocusProbeRun(candidates: [], summary: "") },
+            manualAccessibilityWrite: { _ in
+                calls += 1
+                return calls == 1 ? .cannotComplete : .attributeUnsupported
+            }
+        )
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        checker.manualAccessibilityFollowUpForTesting = { delay, work in
+            scheduled.append((delay, work))
+        }
+
+        XCTAssertEqual(checker.ensureManualAccessibility(pid: 45010), .failed)
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(scheduled.count, 1)
+        XCTAssertEqual(
+            scheduled[0].0,
+            AXContextChecker.manualAccessibilityRetrySeconds
+                + AXContextChecker.manualAccessibilityFollowUpSlackSeconds
+        )
+
+        scheduled[0].1()
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(scheduled.count, 1, "The follow-up probe must not schedule another")
+        XCTAssertEqual(checker.ensureManualAccessibility(pid: 45010), .unsupported)
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(scheduled.count, 1)
+    }
+
+    func testFollowUpThatStillCannotCompleteDoesNotScheduleAgain() {
+        var calls = 0
+        let checker = AXContextChecker(
+            settle: .live,
+            focusProbes: { _ in AXContextChecker.FocusProbeRun(candidates: [], summary: "") },
+            manualAccessibilityWrite: { _ in
+                calls += 1
+                return .cannotComplete
+            }
+        )
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        checker.manualAccessibilityFollowUpForTesting = { delay, work in
+            scheduled.append((delay, work))
+        }
+
+        XCTAssertEqual(checker.ensureManualAccessibility(pid: 45011), .failed)
+        XCTAssertEqual(scheduled.count, 1)
+        scheduled[0].1()
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(scheduled.count, 1)
+    }
+
     func testAXActivationInFlightDoesNotStartAnotherRequest() {
         let checker = AXContextChecker()
         var nestedCalls = 0

@@ -496,8 +496,9 @@ public final class SelectionMonitor {
         // Ask a Chromium app to publish its accessibility tree *now*, on the app switch, rather
         // than when the user is already waiting on a hotkey. Without the tree there is no
         // focused element and no selection-changed notification to observe — the observer below
-        // would install successfully and then never fire. Once per pid; a non-Chromium app
-        // answers "unsupported" and costs one round-trip per launch.
+        // would install successfully and then never fire. Settled per pid. A cold launch that
+        // answers `.cannotComplete` is probed once more after the cooldown; a non-Chromium app
+        // then answers "unsupported" and is not asked again.
         AXContextChecker.shared.ensureManualAccessibility(pid: pid)
 
         // New app, new element: let the first refresh pay for the full ladder rather than

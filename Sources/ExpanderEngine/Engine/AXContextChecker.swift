@@ -489,8 +489,8 @@ public final class AXContextChecker {
         /// The app does not implement the attribute (any non-Chromium app). Memoized — the
         /// answer cannot change for the life of the process.
         case unsupported
-        /// A transient AX error or an activation already in flight. Retried after a short
-        /// cooldown; never remembered as a permanent answer.
+        /// A transient AX error or an activation already in flight. The owner schedules one
+        /// follow-up after the cooldown; the answer is never remembered as permanent.
         case failed
         /// Not a usable target.
         case invalidPID
@@ -505,11 +505,16 @@ public final class AXContextChecker {
         case settled(ManualAccessibilityState)
         case failed(at: TimeInterval)
     }
-    private static let manualAccessibilityRetrySeconds: TimeInterval = 1
+    static let manualAccessibilityRetrySeconds: TimeInterval = 1
+    /// Extra wait so the follow-up cannot land inside the cooldown and be swallowed.
+    /// `DispatchQueue` delay and `systemUptime` are not the same clock.
+    public static let manualAccessibilityFollowUpSlackSeconds: TimeInterval = 0.05
     private static let manualAccessibilityMemoCapacity = 256
     private var manualAccessibilityPIDs: [pid_t: ManualAccessibilityMemo] = [:]
     private var manualAccessibilityOrder: [pid_t] = []
     private var manualAccessibilityTerminationObserver: NSObjectProtocol?
+    /// Test hook. Production leaves this nil and follows up on the main queue.
+    var manualAccessibilityFollowUpForTesting: ((TimeInterval, @escaping () -> Void) -> Void)?
 
     /// Called only while holding manualAccessibilityLock.
     private func rememberManualAccessibility(_ memo: ManualAccessibilityMemo, pid: pid_t) {
@@ -531,6 +536,31 @@ public final class AXContextChecker {
         alreadyActivated: Set<pid_t>
     ) -> Bool {
         pid > 0 && !alreadyActivated.contains(pid)
+    }
+
+    /// Messaging budget for one `AXManualAccessibility` write.
+    ///
+    /// The first probe keeps the 50 ms gate timeout so a dead process cannot hitch an app
+    /// switch. That budget is what turns "this app is not Chromium" into `.cannotComplete`
+    /// while the accessibility server is still coming up (`ax=-25204` in diagnostics). The
+    /// follow-up pays the longer retry budget once the process has had a second to answer.
+    public static func manualAccessibilityProbeTimeout(isFollowUp: Bool) -> Float {
+        isFollowUp ? retryMessagingTimeoutSeconds : messagingTimeoutSeconds
+    }
+
+    /// Delay before the single automatic retry of a fresh transient failure.
+    ///
+    /// `nil` unless this call itself performed the write and the write failed. A cooldown
+    /// hit, an in-flight probe, and every settled answer must not schedule another wake-up
+    /// — a follow-up that schedules its own follow-up retries a dead pid forever.
+    public static func manualAccessibilityFollowUpDelay(
+        probedFresh: Bool,
+        state: ManualAccessibilityState
+    ) -> TimeInterval? {
+        guard probedFresh, state == .failed else { return nil }
+        let delay = manualAccessibilityRetrySeconds + manualAccessibilityFollowUpSlackSeconds
+        guard delay.isFinite, delay > manualAccessibilityRetrySeconds else { return nil }
+        return delay
     }
 
     /// Pure policy: map the AX status of the `AXManualAccessibility` write to a state.
@@ -586,25 +616,75 @@ public final class AXContextChecker {
     ///
     /// Prefer this over `activateManualAccessibility(pid:)`: callers almost always want to know
     /// whether the tree is *live*, not whether this particular call is the one that switched it on.
+    ///
+    /// A fresh `.cannotComplete` schedules one follow-up. App activation is the only caller, so
+    /// without that follow-up the tree stays off until the user switches away and back — the
+    /// `failed ax=-25204` lines that filled the diagnostic, with `activatedNow` only on a later visit.
     @discardableResult
     public func ensureManualAccessibility(pid: pid_t) -> ManualAccessibilityState {
-        ensureManualAccessibility(pid: pid, now: { ProcessInfo.processInfo.systemUptime }) { targetPID in
-            if let manualAccessibilityWrite { return manualAccessibilityWrite(targetPID) }
-            let appElement = AXUIElementCreateApplication(targetPID)
-            Self.applyMessagingTimeout(to: appElement)
-            return AXUIElementSetAttributeValue(
-                appElement,
-                Self.manualAccessibilityAttribute as CFString,
-                kCFBooleanTrue
+        probeManualAccessibility(
+            pid: pid,
+            timeout: Self.manualAccessibilityProbeTimeout(isFollowUp: false),
+            allowFollowUp: true
+        )
+    }
+
+    private func probeManualAccessibility(
+        pid: pid_t,
+        timeout: Float,
+        allowFollowUp: Bool
+    ) -> ManualAccessibilityState {
+        ensureManualAccessibility(
+            pid: pid,
+            now: { ProcessInfo.processInfo.systemUptime },
+            activate: { targetPID in
+                self.writeManualAccessibility(pid: targetPID, timeout: timeout)
+            },
+            isFollowUp: !allowFollowUp,
+            scheduleFollowUp: allowFollowUp ? { [weak self] failedPID in
+                self?.scheduleManualAccessibilityFollowUp(pid: failedPID)
+            } : nil
+        )
+    }
+
+    private func writeManualAccessibility(pid: pid_t, timeout: Float) -> AXError {
+        if let manualAccessibilityWrite { return manualAccessibilityWrite(pid) }
+        let appElement = AXUIElementCreateApplication(pid)
+        Self.applyMessagingTimeout(to: appElement, seconds: timeout)
+        return AXUIElementSetAttributeValue(
+            appElement,
+            Self.manualAccessibilityAttribute as CFString,
+            kCFBooleanTrue
+        )
+    }
+
+    private func scheduleManualAccessibilityFollowUp(pid: pid_t) {
+        guard let delay = Self.manualAccessibilityFollowUpDelay(probedFresh: true, state: .failed) else {
+            return
+        }
+        let fire = manualAccessibilityFollowUpForTesting ?? { delay, work in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+        fire(delay) { [weak self] in
+            _ = self?.probeManualAccessibility(
+                pid: pid,
+                timeout: Self.manualAccessibilityProbeTimeout(isFollowUp: true),
+                allowFollowUp: false
             )
         }
     }
 
     /// Injectable AX boundary for deterministic retry and process-lifecycle checks.
+    ///
+    /// `scheduleFollowUp` runs only after this call itself wrote the attribute and got a
+    /// transient failure. A cooldown hit returns `.failed` without invoking it.
+    /// `isFollowUp` is that scheduled retry and is not subject to the cooldown.
     func ensureManualAccessibility(
         pid: pid_t,
         now: () -> TimeInterval,
-        activate: (pid_t) -> AXError
+        activate: (pid_t) -> AXError,
+        isFollowUp: Bool = false,
+        scheduleFollowUp: ((pid_t) -> Void)? = nil
     ) -> ManualAccessibilityState {
         guard pid > 0 else { return .invalidPID }
 
@@ -620,10 +700,17 @@ public final class AXContextChecker {
                 manualAccessibilityLock.unlock()
                 return state == .activatedNow ? .alreadyActive : state
             case .failed(let failedAt):
-                let elapsed = timestamp - failedAt
-                if elapsed.isFinite, elapsed >= 0, elapsed < Self.manualAccessibilityRetrySeconds {
-                    manualAccessibilityLock.unlock()
-                    return .failed
+                // The cooldown coalesces the app-switch and selection callers that both
+                // fire on one activation. The follow-up is the retry those callers did
+                // not get; swallowing it puts the tree back to "wait for the next visit".
+                // Dispatch and systemUptime are different clocks, so a follow-up that
+                // lands inside the window must still write.
+                if !isFollowUp {
+                    let elapsed = timestamp - failedAt
+                    if elapsed.isFinite, elapsed >= 0, elapsed < Self.manualAccessibilityRetrySeconds {
+                        manualAccessibilityLock.unlock()
+                        return .failed
+                    }
                 }
             }
         }
@@ -648,12 +735,27 @@ public final class AXContextChecker {
         manualAccessibilityLock.unlock()
         guard isCurrent else { return .failed }
 
-        DevTypeLog.selection.info(
-            """
-            [Selection] AXManualAccessibility pid=\(pid, privacy: .public) \
-            state=\(state.rawValue, privacy: .public) ax=\(status.rawValue, privacy: .public)
-            """
-        )
+        // The first `.cannotComplete` is the 50 ms timeout while an app is still launching.
+        // Logging it at info filled the diagnostic mirror; the follow-up records the settled answer.
+        let followUp = isFollowUp ? " followUp=1" : ""
+        if state == .failed && !isFollowUp {
+            DevTypeLog.selection.debug(
+                """
+                [Selection] AXManualAccessibility pid=\(pid, privacy: .public) \
+                state=\(state.rawValue, privacy: .public) ax=\(status.rawValue, privacy: .public)
+                """
+            )
+        } else {
+            DevTypeLog.selection.info(
+                """
+                [Selection] AXManualAccessibility pid=\(pid, privacy: .public) \
+                state=\(state.rawValue, privacy: .public) ax=\(status.rawValue, privacy: .public)\(followUp, privacy: .public)
+                """
+            )
+        }
+        if state == .failed {
+            scheduleFollowUp?(pid)
+        }
         return state
     }
 

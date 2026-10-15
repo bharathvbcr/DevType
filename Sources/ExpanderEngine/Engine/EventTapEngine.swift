@@ -3147,9 +3147,9 @@ public final class EventTapEngine {
                 // focused element, so the erase precondition cannot verify the field and every
                 // expand in the app degrades to best-effort. `SelectionMonitor` does the same
                 // poke, but only while the AI feature is on — expansion must not depend on that.
-                // Memoized per pid (one AX round-trip per process lifetime; non-Chromium apps
-                // answer once with "unsupported"), and dispatched off this notification thread
-                // so the tap never waits on AX IPC.
+                // Memoized per pid. A cold app often times out the first 50 ms write; one follow-up
+                // then settles "unsupported" or turns the Chromium tree on. Dispatched off this
+                // notification thread so the tap never waits on AX IPC.
                 let pid = app.processIdentifier
                 if pid > 0, pid != ProcessInfo.processInfo.processIdentifier {
                     DispatchQueue.main.async {
