@@ -150,8 +150,7 @@ enum AIPreviewPanel {
         installDismissWatchers(for: panel)
 
         NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        panel.orderFrontRegardless()
+        WindowOrdering.makeKeyAndOrderFront(panel, context: "AIPreview")
         FloatingPanelChrome.animateIn(panel)
         controller.startGeneration()
     }

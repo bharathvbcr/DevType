@@ -186,7 +186,7 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
             vc.attachObserversIfNeeded()
             vc.refreshLocalization()
             vc.reload()
-            existing.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(existing, context: "Activity")
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -204,8 +204,7 @@ final class ActivityCenterViewController: NSViewController, NSTableViewDataSourc
 
         let wc = NSWindowController(window: window)
         windowController = wc
-        wc.showWindow(nil)
-        window.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(window, context: "Activity")
         NSApp.activate(ignoringOtherApps: true)
     }
 

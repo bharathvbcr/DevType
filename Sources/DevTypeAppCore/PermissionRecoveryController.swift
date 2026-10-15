@@ -361,7 +361,7 @@ final class PermissionRecoveryController: NSViewController {
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        view.window?.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(view.window, context: "PermissionRecovery")
         refreshPermissions()
     }
 

@@ -171,8 +171,7 @@ enum AIActionPanel {
         FloatingPanelChrome.positionNearTop(panel)
 
         NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        panel.orderFrontRegardless()
+        WindowOrdering.makeKeyAndOrderFront(panel, context: "AIAction")
         controller.focusSearch()
         FloatingPanelChrome.animateIn(panel)
 

@@ -267,7 +267,52 @@ final class LibraryBackupStoreTests: XCTestCase {
         XCTAssertNil(store.entry(for: elsewhere))
     }
 
-    func testSchedulePruneRunsOffTheCallerAndReports() throws {
+    /// A crash or cancellation between the safety copy and the overwrite must still find the
+/// pre-overwrite bytes at the live path. Moving the file aside fails that: the only name left
+/// is the backup. Spaces and non-ASCII in the library folder are part of the same path.
+func testUnreadablePreserveKeepsTheLiveFileUntilOverwriteCommits() throws {
+    let folder = root.appendingPathComponent("Library Folder 한글", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let file = folder.appendingPathComponent("my snippets.json")
+    let original = Data("raw-bytes-\u{2603}".utf8)
+    try original.write(to: file)
+    defer {
+        try? FilePermissions.setPOSIX(file, 0o600)
+        if let backup = try? FileManager.default.contentsOfDirectory(
+            at: root.appendingPathComponent("Backups", isDirectory: true),
+            includingPropertiesForKeys: nil
+        ) {
+            for url in backup { try? FilePermissions.setPOSIX(url, 0o600) }
+        }
+    }
+    try FilePermissions.setPOSIX(file, 0)
+    if FileManager.default.isReadableFile(atPath: file.path) {
+        throw XCTSkip("this process can read a mode-000 file")
+    }
+
+    let store = LibraryBackupStore(directory: root.appendingPathComponent("Backups", isDirectory: true))
+    let preserved = try XCTUnwrap(try store.preserve(fileAt: file, bytes: nil, kind: .preOverwrite))
+
+    XCTAssertTrue(
+        FileManager.default.fileExists(atPath: file.path),
+        "the live file was removed before the overwrite committed"
+    )
+    XCTAssertFalse(
+        FileManager.default.isReadableFile(atPath: file.path),
+        "preserving the backup changed the live file before the overwrite committed"
+    )
+    try FilePermissions.setPOSIX(file, 0o600)
+    XCTAssertEqual(try Data(contentsOf: file), original)
+
+    let replacement = Data("replaced".utf8)
+    try replacement.write(to: file, options: .atomic)
+    try FilePermissions.setPOSIX(preserved.url, 0o600)
+    XCTAssertEqual(try Data(contentsOf: preserved.url), original,
+                   "replacing the live path rewrote the only copy of the previous bytes")
+    XCTAssertEqual(try Data(contentsOf: file), replacement)
+}
+
+func testSchedulePruneRunsOffTheCallerAndReports() throws {
         let clock = Clock(noon)
         let store = LibraryBackupStore(directory: root, now: { clock.now }, calendar: utc)
         for index in 0..<22 {

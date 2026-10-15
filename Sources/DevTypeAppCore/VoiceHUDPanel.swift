@@ -518,7 +518,7 @@ public final class VoiceHUDPanel: NSPanel {
                 ?? CGSize(width: Self.baseWidth, height: Self.baseHeight)
             applyFrame(size: size, animated: false)
             alphaValue = 0
-            orderFrontRegardless()
+            WindowOrdering.logCaught(DTOrderFrontRegardlessCatchingException(self), context: "VoiceHUD")
             if DevTypeAccessibility.reduceMotion {
                 alphaValue = 1
             } else {
@@ -529,7 +529,7 @@ public final class VoiceHUDPanel: NSPanel {
                 }
             }
         } else {
-            orderFrontRegardless()
+            WindowOrdering.logCaught(DTOrderFrontRegardlessCatchingException(self), context: "VoiceHUD")
         }
     }
 

@@ -1317,12 +1317,42 @@ final class SourceContractTests: XCTestCase {
         XCTAssertTrue(toast.contains("override var canBecomeKey: Bool { false }"))
         XCTAssertTrue(toast.contains("override var canBecomeMain: Bool { false }"))
         XCTAssertTrue(
-            toast.contains("orderFrontRegardless()"),
+            toast.contains("DTOrderFrontRegardlessCatchingException"),
+            "Shown without activating; ordering must go through the non-activating ObjC catch."
+        )
+        XCTAssertFalse(
+            toast.contains("makeKeyAndOrderFront"),
             "Shown without activating; `makeKeyAndOrderFront` would pull focus."
         )
         XCTAssertFalse(
             toast.contains("NSApp.activate"),
             "Activating for a confirmation is exactly the bug the toast replaces."
+        )
+    }
+
+    /// The voice HUD sits over the field receiving dictation. Becoming key or
+    /// activating DevType would steal that field, same as the toast.
+    func testVoiceHUDNeverTakesFocus() throws {
+        let hud = try source("Sources/DevTypeAppCore/VoiceHUDPanel.swift")
+        XCTAssertTrue(
+            hud.contains("override var canBecomeKey: Bool { false }"),
+            "The HUD override must refuse key, or dictation loses the target field."
+        )
+        XCTAssertTrue(
+            hud.contains("override var canBecomeMain: Bool { false }"),
+            "The HUD override must refuse main, or dictation loses the target field."
+        )
+        XCTAssertTrue(
+            hud.contains("DTOrderFrontRegardlessCatchingException"),
+            "Shown without activating; ordering must go through the non-activating ObjC catch."
+        )
+        XCTAssertFalse(
+            hud.contains("makeKeyAndOrderFront"),
+            "Shown without activating; `makeKeyAndOrderFront` would pull focus."
+        )
+        XCTAssertFalse(
+            hud.contains("NSApp.activate"),
+            "Activating for the HUD steals the field that is receiving dictation."
         )
     }
 

@@ -72,7 +72,7 @@ enum GroupEditorSheet {
             hostWindow.beginSheet(panel, completionHandler: nil)
         } else {
             panel.center()
-            panel.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(panel, context: "GroupEditor")
             NSApp.activate(ignoringOtherApps: true)
         }
         controller.focusNameField()

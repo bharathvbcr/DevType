@@ -1,4 +1,5 @@
 import AppKit
+import DevTypeSafety
 import ExpanderEngine
 
 /// A confirmation that goes away on its own.
@@ -146,7 +147,7 @@ enum ToastPanel {
 
         panel.contentView = makeContent(message: message, detail: detail, symbol: symbol)
         position(panel)
-        panel.orderFrontRegardless()
+        WindowOrdering.logCaught(DTOrderFrontRegardlessCatchingException(panel), context: "Toast")
         // The only animation in the app that ignored Reduce Motion; every other animated
         // surface checks it.
         if DevTypeAccessibility.reduceMotion {

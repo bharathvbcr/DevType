@@ -10,6 +10,15 @@ NSException *DTMakeKeyAndOrderFrontCatchingException(NSWindow *window) {
     return nil;
 }
 
+NSException *DTOrderFrontRegardlessCatchingException(NSWindow *window) {
+    @try {
+        [window orderFrontRegardless];
+    } @catch (NSException *exception) {
+        return exception;
+    }
+    return nil;
+}
+
 BOOL DTSetValueForKeyCatching(NSObject *object, id _Nullable value, NSString *key) {
     @try {
         [object setValue:value forKey:key];

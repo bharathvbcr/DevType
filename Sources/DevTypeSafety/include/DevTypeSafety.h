@@ -27,6 +27,21 @@ NS_ASSUME_NONNULL_BEGIN
 /// partially ordered; the caller is expected to log what it caught.
 NSException *_Nullable DTMakeKeyAndOrderFrontCatchingException(NSWindow *window);
 
+/// Orders `window` in front without making it key, returning any `NSException`
+/// raised while it does instead of letting the process abort.
+///
+/// Same constraint as `DTMakeKeyAndOrderFrontCatchingException` (read that
+/// first): the raiser must not cross a Swift frame. A block passed from Swift
+/// into ObjC still aborts — the `@catch` never runs — so this is a sibling C
+/// function, not `DTRunCatching(void (^)(void))`. Its `@try` calls only
+/// `[window orderFrontRegardless]`. It does not call `makeKeyAndOrderFront:`.
+/// Non-activating surfaces (the toast, the voice HUD) must use this function
+/// and not the key-and-order one, which would pull focus.
+///
+/// Returns `nil` on success. A non-nil return means ordering may be only
+/// partial; the caller is expected to log what it caught.
+NSException *_Nullable DTOrderFrontRegardlessCatchingException(NSWindow *window);
+
 /// Key-value-codes `value` onto `object` for `key`, returning whether the write
 /// landed instead of letting the process abort.
 ///

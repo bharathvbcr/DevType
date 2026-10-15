@@ -99,7 +99,7 @@ final class LibraryRollingBackupTests: XCTestCase {
     }
 
     /// A save after the user clears a read failure must not overwrite bytes nobody could read:
-    /// the ordinary save path escalates to a safety copy (the file itself, moved aside).
+    /// the ordinary save path escalates to a safety copy (a hard link, until the write commits).
     func testAnOrdinarySaveOverAnUnreadableFilePreservesIt() throws {
         let original = try SnippetStore.exportLibraryData(groups: groups("mine"))
         try original.write(to: file)

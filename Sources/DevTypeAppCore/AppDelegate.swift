@@ -837,8 +837,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             secretWindowController = NSWindowController(window: window)
         }
         NSApp.activate(ignoringOtherApps: true)
-        secretWindowController?.showWindow(nil)
-        secretWindowController?.window?.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(secretWindowController?.window, context: "Secrets")
     }
 
     /// Copy palette narrowed to secrets, for libraries with more of them than a submenu can hold.
@@ -2306,11 +2305,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let window = snippetWindowController?.window else { return }
-        snippetWindowController?.showWindow(nil)
-        window.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(window, context: "Snippets")
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
-            window.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(window, context: "Snippets")
             NSApp.activate(ignoringOtherApps: true)
         }
     }
@@ -2369,7 +2367,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             DevTypeLog.permission.info(
                 "[Permission] UI → Recovery requested while Setup is open; focusing Setup instead"
             )
-            onboardingWindowController?.window?.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(onboardingWindowController?.window, context: "Onboarding")
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -2388,11 +2386,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let window = permissionWindowController?.window else { return }
-        permissionWindowController?.showWindow(nil)
-        window.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(window, context: "PermissionRecovery")
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
-            window.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(window, context: "PermissionRecovery")
             NSApp.activate(ignoringOtherApps: true)
         }
     }
@@ -2403,7 +2400,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             DevTypeLog.permission.debug("[Permission] UI → onboarding already visible (single-flight)")
             onboardingPresentationInFlight = false
             PermissionRequester.shared.beginSetupActivation()
-            existing.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(existing, context: "Onboarding")
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -2449,8 +2446,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             onboardingWindowController = NSWindowController(window: window)
         }
         PermissionRequester.shared.beginSetupActivation()
-        onboardingWindowController?.showWindow(nil)
-        onboardingWindowController?.window?.makeKeyAndOrderFront(nil)
+        WindowOrdering.makeKeyAndOrderFront(onboardingWindowController?.window, context: "Onboarding")
         NSApp.activate(ignoringOtherApps: true)
         onboardingPresentationInFlight = false
     }

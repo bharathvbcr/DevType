@@ -153,6 +153,28 @@ final class LibrarySafetyBackupTests: XCTestCase {
         XCTAssertEqual(try bytes(of: file), original)
     }
 
+    /// A zero-byte file has nothing worth keeping, but the replacement still has to be a new
+    /// readable library. `Data.write(.atomic)` updates a mode-000 inode in place when it is the
+    /// only link, so the bytes land and the file stays unreadable.
+    func testForceOverwriteOfAnUnreadableZeroByteFilePublishesAReadableLibrary() throws {
+        let support = try dir("support")
+        let file = support.appendingPathComponent("snippets.json")
+        try Data().write(to: file)
+        try makeUnreadable(file)
+        let store = makeStore(file: file, support: support)
+        XCTAssertTrue(store.isLibraryReadFailed, "a mode-000 file must latch the read failure")
+
+        XCTAssertTrue(store.forceOverwriteLibrary(with: defaultGroups).didSave)
+
+        XCTAssertTrue(
+            FileManager.default.isReadableFile(atPath: file.path),
+            "the overwrite wrote the new library into the mode-000 inode, so a relaunch cannot read it"
+        )
+        let reloaded = makeStore(file: file, support: support)
+        XCTAssertFalse(reloaded.isLibraryReadFailed, "relaunch still treats the overwritten library as unreadable")
+        XCTAssertEqual(reloaded.loadSnippets().map(\.triggerKeyword), [":default"])
+    }
+
     // MARK: - Save As
 
     func testSaveSnippetsAsOntoANonEmptyLibraryRefusesWhenTheBackupCannotBeWritten() throws {
@@ -287,6 +309,23 @@ final class LibraryWritePathContractTests: XCTestCase {
         )
         XCTAssertFalse(source.contains("raw.write(to:"), "a hand-rolled relocation write bypasses the backup step")
         XCTAssertFalse(source.contains("copyItem("), "backups belong to LibraryBackupStore")
+        XCTAssertFalse(source.contains(".moveItem("), "moving the live library aside drops it if the process dies before the overwrite")
+        XCTAssertTrue(source.contains("[Store] No local backup before linking"),
+                      "linkToSnippets must log a missing local backup")
+        XCTAssertTrue(source.contains("[Store] Could not encode the library for relocation"),
+                      "a relocation encode failure must be logged")
+        let backupSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/ExpanderEngine/Models/LibraryBackupStore.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(backupSource.contains("[Backup] Could not write library backup"),
+                      "a backup write failure must be logged")
+        XCTAssertTrue(backupSource.contains("[Backup] Could not preserve the library before replacing it"))
+        XCTAssertFalse(backupSource.contains(".moveItem("), "preserve must not rename the live library aside")
         let replace = try XCTUnwrap(source.range(of: "private func coordinatedReplace("))
         let write = try XCTUnwrap(source.range(of: "data.write(to: actualURL, options: .atomic)"))
         let backupStep = try XCTUnwrap(source.range(of: "self.backups.preserve(fileAt: actualURL"))

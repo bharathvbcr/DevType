@@ -390,7 +390,7 @@ final class DevTypeProgressPresentation {
             NSApp.activate(ignoringOtherApps: true)
             alert.window.level = .floating
             alert.window.center()
-            alert.window.makeKeyAndOrderFront(nil)
+            WindowOrdering.makeKeyAndOrderFront(alert.window, context: "Progress")
         }
         return presentation
     }
