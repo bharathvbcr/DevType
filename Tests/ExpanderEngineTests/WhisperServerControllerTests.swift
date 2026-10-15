@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import ExpanderEngine
 
@@ -365,6 +366,632 @@ final class WhisperServerControllerTests: XCTestCase {
         XCTAssertTrue(controller.isManagedByApp)
     }
 
+    /// A saved `localhost` URL is a valid loopback spelling, but the child is bound to
+    /// `127.0.0.1`. The pre-launch probe still uses the saved URL; post-launch probes must not.
+    func testPostLaunchProbeDoesNotTreatLocalhostAsTheBoundAddress() async throws {
+        let port = 28_173
+        let fixture = try makeWhisperLaunchFixture(port: port)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let script = try writeExecutableScript(
+            named: "sleep-brief.sh",
+            in: fixture.directory,
+            body: "#!/bin/sh\nexec sleep 4\n"
+        )
+        let probes = LockedURLList()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: fixture.directory,
+            artifactProvider: { $0 == "fixture" ? fixture.artifact : nil },
+            readinessProbe: { url, _ in
+                let index = probes.append(url)
+                // The first call is the pre-launch check of the saved endpoint. Nothing is
+                // serving yet, so it must be false or start() refuses to spawn. A later
+                // `localhost` answer is the post-launch probe and would hide the bind mismatch.
+                if index == 1 { return false }
+                return url.host?.lowercased() == "localhost"
+            }
+        )
+        defer { controller.stopIfManaged() }
+
+        let result = await controller.start(model: "fixture", endpoint: fixture.endpoint)
+        let urls = probes.values
+        XCTAssertEqual(urls.first?.host?.lowercased(), "localhost")
+        let postLaunch = urls.dropFirst()
+        XCTAssertFalse(postLaunch.isEmpty, "start returned before any post-launch probe: \(result)")
+        for url in postLaunch {
+            XCTAssertNotEqual(url.host?.lowercased(), "localhost")
+            XCTAssertEqual(url.host, "127.0.0.1")
+            XCTAssertEqual(url.port, port)
+            XCTAssertEqual(url.scheme, "http")
+        }
+        guard case .failure = result else {
+            return XCTFail("start succeeded by probing localhost after the child bound 127.0.0.1: \(result)")
+        }
+        XCTAssertFalse(controller.isManagedByApp)
+    }
+
+    /// Post-launch readiness is the bound port on 127.0.0.1. A probe that answers for every
+    /// host must not be able to launch a child for a non-loopback saved endpoint.
+    func testPostLaunchProbeAcceptsBoundIPv4AndRemoteEndpointStaysInvalid() async throws {
+        let port = 28_174
+        let fixture = try makeWhisperLaunchFixture(port: port)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let script = try writeExecutableScript(
+            named: "sleep-ready.sh",
+            in: fixture.directory,
+            body: "#!/bin/sh\nexec sleep 6\n"
+        )
+        let probes = LockedURLList()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: fixture.directory,
+            artifactProvider: { $0 == "fixture" ? fixture.artifact : nil },
+            readinessProbe: { url, _ in
+                _ = probes.append(url)
+                return url.host == "127.0.0.1" && url.port == port
+            }
+        )
+        defer { controller.stopIfManaged() }
+
+        let started = await controller.start(model: "fixture", endpoint: fixture.endpoint)
+        guard case .success = started else {
+            return XCTFail("Bound 127.0.0.1 probe did not become ready: \(started); probes=\(probes.values)")
+        }
+        XCTAssertEqual(probes.values.first?.host?.lowercased(), "localhost")
+        let postLaunch = probes.values.dropFirst()
+        XCTAssertFalse(postLaunch.isEmpty)
+        for url in postLaunch {
+            XCTAssertEqual(url.host, "127.0.0.1")
+            XCTAssertEqual(url.port, port)
+        }
+        XCTAssertTrue(controller.isManagedByApp)
+        controller.stopIfManaged()
+
+        let forced = LockedIntegerCounter()
+        let remote = WhisperServerController(
+            binaryPathProvider: { "/usr/bin/yes" },
+            modelDirectory: fixture.directory,
+            artifactProvider: { $0 == "fixture" ? fixture.artifact : nil },
+            readinessProbe: { _, _ in
+                forced.increment()
+                return true
+            }
+        )
+        defer { remote.stopIfManaged() }
+        let rejected = await remote.start(
+            model: "fixture",
+            endpoint: URL(string: "http://example.local:8080/inference")!
+        )
+        assertStartFailure(rejected, equals: .invalidEndpoint)
+        XCTAssertEqual(forced.value, 0, "invalid endpoint reached the readiness probe")
+        XCTAssertFalse(remote.isManagedByApp)
+    }
+
+    /// Saved loopback spellings, including a custom path and a missing port, still spawn
+    /// `--host 127.0.0.1`. Every post-launch probe is exactly `http://127.0.0.1:<port>/`.
+    func testSavedLoopbackSpellingsSpawnOnIPv4AndProbeOnlyTheBoundRoot() async throws {
+        let cases: [(String, Int, Int)] = [
+            ("http://localhost:28190/custom", 28_190, 1),
+            ("http://[::1]:28191/custom", 28_191, 0),
+            ("http://127.0.0.1/custom", 8080, 0),
+            ("http://127.0.0.1:1/custom", 1, 0),
+            ("http://127.0.0.1:65535/custom", 65_535, 0),
+            ("https://127.0.0.1:28192/custom", 28_192, 0),
+            ("http://LOCALHOST:28193/custom", 28_193, 0),
+        ]
+        for (raw, port, failedPolls) in cases {
+            let endpoint = try XCTUnwrap(URL(string: raw))
+            XCTAssertTrue(
+                LocalEndpointSecurity.isValid(endpoint),
+                "fixture \(raw) is not a loopback endpoint the product accepts"
+            )
+            try await assertChildBindsLoopbackIPv4(
+                endpoint: endpoint,
+                expectedPort: port,
+                postLaunchFailuresBeforeReady: failedPolls
+            )
+        }
+    }
+
+    /// A saved endpoint that is already answering is `portBusy`. The child binary is not started.
+    func testReadySavedEndpointIsPortBusyAndNeverSpawns() async throws {
+        for raw in ["http://localhost:28194/custom", "http://[::1]:28194/custom"] {
+            let endpoint = try XCTUnwrap(URL(string: raw))
+            let launches = LockedIntegerCounter()
+            let probes = LockedURLList()
+            let controller = WhisperServerController(
+                binaryPathProvider: {
+                    launches.increment()
+                    return "/usr/bin/true"
+                },
+                modelDirectory: FileManager.default.temporaryDirectory,
+                artifactProvider: { _ in nil },
+                readinessProbe: { url, _ in
+                    _ = probes.append(url)
+                    return true
+                }
+            )
+            let result = await controller.start(model: "fixture", endpoint: endpoint)
+            assertStartFailure(result, equals: .portBusy)
+            XCTAssertEqual(probes.values.map(\.absoluteString), [endpoint.absoluteString])
+            XCTAssertEqual(launches.value, 0, "portBusy still resolved a binary for \(raw)")
+            XCTAssertFalse(controller.isManagedByApp)
+            XCTAssertFalse(controller.stop())
+        }
+    }
+
+    /// `example.local` stays invalid. No child is spawned, and `stop()` does not signal a foreign pid.
+    func testExampleLocalDoesNotSpawnOrStopAForeignProcess() async throws {
+        let foreign = Process()
+        foreign.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        foreign.arguments = ["30"]
+        try foreign.run()
+        let foreignPID = foreign.processIdentifier
+        defer {
+            if processExists(foreignPID) {
+                foreign.terminate()
+                foreign.waitUntilExit()
+            }
+        }
+
+        let endpoint = try XCTUnwrap(URL(string: "http://example.local:8080/"))
+        XCTAssertFalse(LocalEndpointSecurity.isValid(endpoint))
+        let launches = LockedIntegerCounter()
+        let probes = LockedIntegerCounter()
+        let controller = WhisperServerController(
+            binaryPathProvider: {
+                launches.increment()
+                return "/bin/sleep"
+            },
+            modelDirectory: FileManager.default.temporaryDirectory,
+            artifactProvider: { _ in nil },
+            readinessProbe: { _, _ in
+                probes.increment()
+                return true
+            }
+        )
+        let result = await controller.start(model: "fixture", endpoint: endpoint)
+        assertStartFailure(result, equals: .invalidEndpoint)
+        XCTAssertEqual(probes.value, 0)
+        XCTAssertEqual(launches.value, 0)
+        XCTAssertFalse(controller.isManagedByApp)
+        XCTAssertFalse(controller.stop(), "stop() reported work after an invalid endpoint")
+        XCTAssertTrue(processExists(foreignPID), "stop() signaled foreign pid \(foreignPID)")
+        XCTAssertTrue(commandLine(of: foreignPID).contains("sleep"))
+    }
+
+    /// Port 0 and ports the URL type accepts past 65535 are rejected by `LocalEndpointSecurity`
+    /// before `spawnedChildProbeURL`'s precondition. Calling `start()` is what would trap if
+    /// those URLs were treated as loopback.
+    func testOutOfRangePortsAreRejectedBeforeTheSpawnedProbeCanTrap() async throws {
+        let parsed = [
+            "http://127.0.0.1:0/custom",
+            "http://localhost:0/x",
+            "http://[::1]:0/custom",
+            "http://127.0.0.1:65536/custom",
+            "http://127.0.0.1:99999/custom",
+            "http://127.0.0.1:999999999999/custom",
+        ]
+        for raw in parsed {
+            let endpoint = try XCTUnwrap(URL(string: raw), "URL parser rejected \(raw)")
+            let port = try XCTUnwrap(endpoint.port, "URL parser dropped the port in \(raw)")
+            XCTAssertFalse(
+                (1 ... 65_535).contains(port),
+                "\(raw) is inside the spawnable range; this case would not reach the precondition"
+            )
+            XCTAssertFalse(
+                LocalEndpointSecurity.isValid(endpoint),
+                "LocalEndpointSecurity accepted \(raw); start() would hit spawnedChildProbeURL's trap"
+            )
+            let launches = LockedIntegerCounter()
+            let probes = LockedIntegerCounter()
+            let controller = WhisperServerController(
+                binaryPathProvider: {
+                    launches.increment()
+                    return "/usr/bin/true"
+                },
+                modelDirectory: FileManager.default.temporaryDirectory,
+                artifactProvider: { _ in nil },
+                readinessProbe: { _, _ in
+                    probes.increment()
+                    return false
+                }
+            )
+            let result = await controller.start(model: "fixture", endpoint: endpoint)
+            assertStartFailure(result, equals: .invalidEndpoint)
+            XCTAssertEqual(probes.value, 0, "rejected port \(raw) was probed")
+            XCTAssertEqual(launches.value, 0, "rejected port \(raw) resolved a binary")
+            XCTAssertFalse(controller.isManagedByApp)
+        }
+        XCTAssertNil(URL(string: "http://127.0.0.1:-1/custom"))
+    }
+
+    /// Empty host, userinfo, and a non-HTTP scheme stay invalid and never spawn.
+    func testEmptyHostUserinfoAndNonHTTPSchemesDoNotSpawn() async throws {
+        let rejected = [
+            "http:///custom",
+            "http://:8080/custom",
+            "http://user:pass@127.0.0.1:8080/custom",
+            "http://user@127.0.0.1:8080/custom",
+            "ftp://127.0.0.1:8080/custom",
+            "file://localhost/tmp/whisper",
+            "ws://127.0.0.1:8080/custom",
+        ]
+        for raw in rejected {
+            let endpoint = try XCTUnwrap(URL(string: raw), "URL parser rejected \(raw)")
+            XCTAssertFalse(LocalEndpointSecurity.isValid(endpoint), "accepted \(raw)")
+            let launches = LockedIntegerCounter()
+            let probes = LockedIntegerCounter()
+            let controller = WhisperServerController(
+                binaryPathProvider: {
+                    launches.increment()
+                    return "/usr/bin/true"
+                },
+                modelDirectory: FileManager.default.temporaryDirectory,
+                artifactProvider: { _ in nil },
+                readinessProbe: { _, _ in
+                    probes.increment()
+                    return true
+                }
+            )
+            let result = await controller.start(model: "fixture", endpoint: endpoint)
+            assertStartFailure(result, equals: .invalidEndpoint)
+            XCTAssertEqual(probes.value, 0, raw)
+            XCTAssertEqual(launches.value, 0, raw)
+            XCTAssertFalse(controller.stop())
+        }
+    }
+
+    /// Cancelling during a pre-launch probe that ignores cancellation must not spawn.
+    func testCancellationDuringHungPreLaunchProbeDoesNotSpawn() async throws {
+        let hang = OneShotHang()
+        let launches = LockedIntegerCounter()
+        let controller = WhisperServerController(
+            binaryPathProvider: {
+                launches.increment()
+                return "/usr/bin/yes"
+            },
+            modelDirectory: FileManager.default.temporaryDirectory,
+            artifactProvider: { _ in nil },
+            readinessProbe: { _, _ in await hang.enterAndWait() }
+        )
+        defer {
+            hang.release(returning: false)
+            controller.stopIfManaged()
+        }
+        let task = Task {
+            await controller.start(
+                model: "fixture",
+                endpoint: URL(string: "http://127.0.0.1:28195/custom")!
+            )
+        }
+        try await waitUntil { hang.hasEntered }
+        task.cancel()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(launches.value, 0, "binary was resolved while the pre-launch probe was hung")
+        XCTAssertFalse(controller.isManagedByApp)
+        hang.release(returning: false)
+        assertStartFailure(await task.value, equals: .cancelled)
+        XCTAssertEqual(launches.value, 0)
+        XCTAssertFalse(controller.isManagedByApp)
+    }
+
+    /// Cancelling while model inspection is blocked must surface `.cancelled`, not a later
+    /// model-status error, and must not spawn.
+    func testCancellationDuringBlockedModelInspectionReturnsCancelled() async throws {
+        let directory = try makeFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fifo = directory.appendingPathComponent("ggml-fixture.bin")
+        try FileManager.default.removeItem(at: fifo)
+        let mkfifoResult = fifo.path.withCString { mkfifo($0, S_IRUSR | S_IWUSR) }
+        XCTAssertEqual(mkfifoResult, 0, "mkfifo failed errno \(errno)")
+
+        let marker = directory.appendingPathComponent("spawned")
+        let script = try writeExecutableScript(
+            named: "should-not-run.sh",
+            in: directory,
+            body: "#!/bin/sh\ntouch \(shellSingleQuoted(marker.path))\n"
+        )
+        let probeEntered = LockedIntegerCounter()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? whisperFixtureArtifact() : nil },
+            readinessProbe: { _, _ in
+                probeEntered.increment()
+                return false
+            }
+        )
+        defer { controller.stopIfManaged() }
+        let finished = LockedIntegerCounter()
+        let task = Task {
+            let result = await controller.start(
+                model: "fixture",
+                endpoint: URL(string: "http://127.0.0.1:28196/custom")!
+            )
+            finished.increment()
+            return result
+        }
+        try await waitUntil { probeEntered.value > 0 }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        task.cancel()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(
+            finished.value,
+            0,
+            "inspection returned while the model open was still blocked"
+        )
+        let nudge = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        nudge.schedule(deadline: .now(), repeating: .milliseconds(20))
+        nudge.setEventHandler {
+            guard finished.value == 0 else { return }
+            let fd = fifo.path.withCString { open($0, O_RDWR | O_NONBLOCK) }
+            if fd >= 0 { close(fd) }
+        }
+        nudge.resume()
+        defer { nudge.cancel() }
+        assertStartFailure(await task.value, equals: .cancelled)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: marker.path),
+            "inspection cancellation spawned the binary"
+        )
+        XCTAssertFalse(controller.isManagedByApp)
+    }
+
+    /// The poll's sleep observes cancellation and stops the child it already spawned.
+    func testCancellationDuringPostLaunchSleepStopsTheChild() async throws {
+        let directory = try makeFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("child.pid")
+        let script = try writeSleepScript(named: "sleep-poll.sh", in: directory, pidFile: pidFile)
+        let probes = LockedIntegerCounter()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? whisperFixtureArtifact() : nil },
+            readinessProbe: { _, _ in
+                probes.increment()
+                return false
+            }
+        )
+        var child: pid_t?
+        defer {
+            controller.stopIfManaged()
+            if let child { terminateFixtureSleep(child) }
+        }
+        let task = Task {
+            await controller.start(
+                model: "fixture",
+                endpoint: URL(string: "http://localhost:28197/custom")!
+            )
+        }
+        try await waitUntil { probes.value >= 2 && controller.isManagedByApp }
+        child = try await waitForRecordedPID(at: pidFile)
+        task.cancel()
+        let startedAt = ContinuousClock.now
+        assertStartFailure(await task.value, equals: .cancelled)
+        let elapsed = ContinuousClock.now - startedAt
+        XCTAssertLessThan(elapsed, .milliseconds(500))
+        XCTAssertFalse(controller.isManagedByApp)
+        let pid = try XCTUnwrap(child)
+        try await waitUntil(timeout: 1.0) { !processExists(pid) }
+        XCTAssertFalse(processExists(pid), "cancelled poll left pid \(pid) running")
+    }
+
+    /// Cancelling the start task while the post-launch probe is still hung must stop that
+    /// child without waiting for the probe closure to return.
+    func testCancellationOfHungPostLaunchProbeStopsChildBeforeProbeReturns() async throws {
+        let hung = try await makeHungPostLaunch(
+            endpoint: URL(string: "http://localhost:28198/custom")!
+        )
+        defer { cleanupHung(hung) }
+        hung.task.cancel()
+        let stoppedWhileHung = await becameUnmanaged(hung.controller, within: .milliseconds(500))
+        let childAliveWhileHung = processExists(hung.pid)
+        hung.hang.release(returning: false)
+        assertStartFailure(await hung.task.value, equals: .cancelled)
+        XCTAssertFalse(hung.controller.isManagedByApp)
+        XCTAssertTrue(
+            stoppedWhileHung,
+            "cancellation left the child managed until the hung probe returned (pid \(hung.pid) alive while hung: \(childAliveWhileHung))"
+        )
+    }
+
+    /// The post-launch probe can outlive the child. Readiness must not be reported if that
+    /// process has already exited, even when the probe closure returns true.
+    func testPostLaunchProbeTrueAfterChildExitsDoesNotReportReady() async throws {
+        let directory = try makeFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("child.pid")
+        let script = try writeSleepScript(named: "sleep-die.sh", in: directory, pidFile: pidFile)
+        let probes = LockedIntegerCounter()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? whisperFixtureArtifact() : nil },
+            readinessProbe: { _, _ in
+                probes.increment()
+                if probes.value == 1 { return false }
+                let deadline = Date().addingTimeInterval(2)
+                var pid: pid_t = 0
+                while Date() < deadline && pid == 0 {
+                    if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+                       let recorded = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                        pid = recorded
+                    }
+                }
+                guard pid > 0 else { return false }
+                _ = kill(pid, SIGKILL)
+                let gone = Date().addingTimeInterval(2)
+                while Date() < gone && kill(pid, 0) == 0 {
+                    try? await Task.sleep(nanoseconds: 20_000_000)
+                }
+                return kill(pid, 0) != 0
+            }
+        )
+        defer { controller.stopIfManaged() }
+        let result = await controller.start(
+            model: "fixture",
+            endpoint: URL(string: "http://127.0.0.1:28221/inference")!
+        )
+        guard case .failure = result else {
+            return XCTFail("start reported ready after the spawned child had already exited: \(result)")
+        }
+        XCTAssertFalse(controller.isManagedByApp)
+    }
+
+    /// `stop()` during a hung post-launch probe must return immediately and must not let a
+    /// later probe success report the torn-down child as ready.
+    func testStopDuringHungPostLaunchProbeDoesNotReportReady() async throws {
+        let hung = try await makeHungPostLaunch(
+            endpoint: URL(string: "http://[::1]:28199/custom")!
+        )
+        defer { cleanupHung(hung) }
+        let startedAt = ContinuousClock.now
+        let didStop = hung.controller.stop()
+        let elapsed = ContinuousClock.now - startedAt
+        print("OBSERVED stop() during hung probe elapsed=\(elapsed)")
+        XCTAssertTrue(didStop)
+        XCTAssertLessThan(elapsed, .milliseconds(500))
+        XCTAssertFalse(hung.controller.isManagedByApp)
+        XCTAssertFalse(hung.controller.stop(), "second stop() signaled again")
+        try await waitUntil(timeout: 1.0) { !processExists(hung.pid) }
+        XCTAssertFalse(
+            processExists(hung.pid),
+            "stop() did not SIGTERM the retained child \(hung.pid) before the grace timer"
+        )
+        hung.hang.release(returning: true)
+        let result = await hung.task.value
+        print("OBSERVED start result after stop during hung probe: \(result)")
+        guard case .failure = result else {
+            return XCTFail("start reported success after stop() tore the child down during the probe: \(result)")
+        }
+        XCTAssertFalse(hung.controller.isManagedByApp)
+    }
+
+    /// A child that honors SIGTERM is reaped by that signal, before the grace timer.
+    func testCooperativeChildExitsBeforeGraceTimer() async throws {
+        let directory = try makeFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("child.pid")
+        let script = try writeSleepScript(named: "sleep-term.sh", in: directory, pidFile: pidFile)
+        let probes = LockedIntegerCounter()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? whisperFixtureArtifact() : nil },
+            readinessProbe: { _, _ in
+                probes.increment()
+                return probes.value > 1
+            }
+        )
+        var child: pid_t?
+        defer {
+            controller.stopIfManaged()
+            if let child { terminateFixtureSleep(child) }
+        }
+        let started = await controller.start(
+            model: "fixture",
+            endpoint: URL(string: "http://127.0.0.1:28200/inference")!
+        )
+        guard case .success = started else {
+            return XCTFail("cooperative fixture did not become ready: \(started)")
+        }
+        child = try await waitForRecordedPID(at: pidFile)
+        let pid = try XCTUnwrap(child)
+        let startedAt = ContinuousClock.now
+        XCTAssertTrue(controller.stop())
+        let elapsed = ContinuousClock.now - startedAt
+        print("OBSERVED cooperative stop() elapsed=\(elapsed)")
+        XCTAssertLessThan(elapsed, .milliseconds(500))
+        XCTAssertFalse(controller.isManagedByApp)
+        XCTAssertFalse(controller.stop())
+        try await waitUntil(timeout: 1.0) { !processExists(pid) }
+        let lifetime = ContinuousClock.now - startedAt
+        XCTAssertFalse(processExists(pid), "pid \(pid) still alive \(lifetime) after SIGTERM")
+        XCTAssertLessThan(lifetime, .seconds(2), "cooperative child lived until the SIGKILL grace")
+    }
+
+    /// `stop()` must SIGTERM and return without the caller's 2s grace sleep. A child that
+    /// ignores SIGTERM is SIGKILL'd by the waiter; this fixture must not outlive the test.
+    func testStopReturnsBeforeGraceWhenChildIgnoresSIGTERM() async throws {
+        let port = 28_175
+        let fixture = try makeWhisperLaunchFixture(port: port)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let pidFile = fixture.directory.appendingPathComponent("child.pid")
+        let quotedPidFile = pidFile.path.replacingOccurrences(of: "'", with: "'\\''")
+        let script = try writeExecutableScript(
+            named: "ignore-term.sh",
+            in: fixture.directory,
+            body: """
+            #!/bin/sh
+            echo $$ > '\(quotedPidFile)'
+            trap '' TERM
+            exec sleep 30
+            """
+        )
+        let probes = LockedURLList()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: fixture.directory,
+            artifactProvider: { $0 == "fixture" ? fixture.artifact : nil },
+            readinessProbe: { url, _ in
+                // Ready on the post-launch probe whichever host spelling this build still uses,
+                // so the assertion measures stop() rather than the bind-address fix.
+                let index = probes.append(url)
+                return index > 1 && (url.port == port || url.port == nil)
+            }
+        )
+        var child: pid_t?
+        defer {
+            controller.stopIfManaged()
+            if let child {
+                terminateFixtureSleep(child)
+            }
+        }
+
+        let started = await controller.start(model: "fixture", endpoint: fixture.endpoint)
+        guard case .success = started else {
+            return XCTFail("Fixture did not become ready: \(started)")
+        }
+        child = try await waitForRecordedPID(at: pidFile)
+        let pid = try XCTUnwrap(child)
+        XCTAssertTrue(processExists(pid), "Fixture pid \(pid) was not alive after start")
+
+        let startedAt = ContinuousClock.now
+        let didStop = controller.stop()
+        let elapsed = ContinuousClock.now - startedAt
+        print("OBSERVED stop() elapsed=\(elapsed)")
+        XCTAssertTrue(didStop)
+        XCTAssertFalse(controller.isManagedByApp)
+        XCTAssertLessThan(
+            elapsed,
+            .milliseconds(500),
+            "stop() blocked the caller for \(elapsed); SIGTERM grace must not run on the caller"
+        )
+        XCTAssertTrue(
+            processExists(pid),
+            "Child \(pid) was gone immediately after stop(); it should ignore SIGTERM until the grace waiter"
+        )
+        let secondStop = controller.stop()
+        XCTAssertFalse(secondStop, "second stop() reported that it signaled a process")
+        XCTAssertTrue(
+            processExists(pid),
+            "second stop() killed pid \(pid) while the grace waiter still owns that child"
+        )
+
+        let deadline = startedAt.advanced(by: .milliseconds(2500))
+        var gone = false
+        while ContinuousClock.now < deadline {
+            if !processExists(pid) {
+                gone = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(gone, "pid \(pid) still alive 2.5s after stop(); command=\(commandLine(of: pid))")
+    }
+
     func testConcurrentStartsAreSingleFlightAndCancellationStopsTheOwnedChild() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("devtype-whisper-start-flight-\(UUID().uuidString)", isDirectory: true)
@@ -506,6 +1133,218 @@ final class WhisperServerControllerTests: XCTestCase {
         XCTAssertFalse(stillUp, "Server survived stop()")
     }
 
+    private func makeFixtureDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-adv-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("abc".utf8).write(to: directory.appendingPathComponent("ggml-fixture.bin"))
+        return directory
+    }
+
+    private func shellSingleQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func writeSleepScript(named name: String, in directory: URL, pidFile: URL) throws -> URL {
+        try writeExecutableScript(
+            named: name,
+            in: directory,
+            body: """
+            #!/bin/sh
+            echo $$ > \(shellSingleQuoted(pidFile.path))
+            exec sleep 30
+            """
+        )
+    }
+
+    private func assertChildBindsLoopbackIPv4(
+        endpoint: URL,
+        expectedPort: Int,
+        postLaunchFailuresBeforeReady: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let directory = try makeFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let argsFile = directory.appendingPathComponent("args.txt")
+        let pidFile = directory.appendingPathComponent("child.pid")
+        let script = try writeExecutableScript(
+            named: "capture.sh",
+            in: directory,
+            body: """
+            #!/bin/sh
+            printf '%s\\n' "$@" > \(shellSingleQuoted(argsFile.path))
+            echo $$ > \(shellSingleQuoted(pidFile.path))
+            exec sleep 30
+            """
+        )
+        let probes = LockedURLList()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? whisperFixtureArtifact() : nil },
+            readinessProbe: { url, _ in
+                let index = probes.append(url)
+                return index > 1 + postLaunchFailuresBeforeReady
+            }
+        )
+        var child: pid_t?
+        defer {
+            controller.stopIfManaged()
+            if let child { terminateFixtureSleep(child) }
+        }
+
+        let result = await controller.start(model: "fixture", endpoint: endpoint)
+        guard case .success = result else {
+            return XCTFail(
+                "start failed for \(endpoint.absoluteString): \(result); probes=\(probes.values)",
+                file: file,
+                line: line
+            )
+        }
+        let urls = probes.values
+        XCTAssertEqual(urls.first?.absoluteString, endpoint.absoluteString, file: file, line: line)
+        XCTAssertEqual(
+            urls.filter { $0.absoluteString == endpoint.absoluteString }.count,
+            1,
+            "saved endpoint was probed more than once: \(urls.map(\.absoluteString))",
+            file: file,
+            line: line
+        )
+        let expectedProbe = "http://127.0.0.1:\(expectedPort)/"
+        let postLaunch = urls.dropFirst()
+        XCTAssertGreaterThanOrEqual(postLaunch.count, postLaunchFailuresBeforeReady + 1, file: file, line: line)
+        for url in postLaunch {
+            XCTAssertEqual(url.absoluteString, expectedProbe, file: file, line: line)
+            XCTAssertEqual(url.scheme, "http", file: file, line: line)
+            XCTAssertEqual(url.host, "127.0.0.1", file: file, line: line)
+            XCTAssertEqual(url.port, expectedPort, file: file, line: line)
+            XCTAssertEqual(url.path, "/", file: file, line: line)
+        }
+        child = try await waitForRecordedPID(at: pidFile)
+        let text = try await waitForText(at: argsFile)
+        let args = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        XCTAssertEqual(
+            Array(args.prefix(4)),
+            ["--host", "127.0.0.1", "--port", "\(expectedPort)"],
+            "spawn argv \(args) for \(endpoint.absoluteString)",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(args.filter { $0 == "--host" }.count, 1, file: file, line: line)
+        XCTAssertFalse(args.contains("localhost"), file: file, line: line)
+        XCTAssertFalse(args.contains("::1"), file: file, line: line)
+        XCTAssertFalse(args.contains("[::1]"), file: file, line: line)
+        XCTAssertFalse(args.contains("/custom"), file: file, line: line)
+    }
+
+    private struct HungPostLaunch {
+        let controller: WhisperServerController
+        let hang: OneShotHang
+        let task: Task<Result<Void, WhisperServerController.StartFailure>, Never>
+        let pid: pid_t
+        let directory: URL
+
+    }
+
+    private func cleanupHung(_ hung: HungPostLaunch) {
+        hung.hang.release(returning: false)
+        hung.controller.stopIfManaged()
+        terminateFixtureSleep(hung.pid)
+        try? FileManager.default.removeItem(at: hung.directory)
+    }
+
+    private func makeHungPostLaunch(endpoint: URL) async throws -> HungPostLaunch {
+        let directory = try makeFixtureDirectory()
+        let pidFile = directory.appendingPathComponent("child.pid")
+        let script = try writeSleepScript(named: "sleep-hang.sh", in: directory, pidFile: pidFile)
+        let hang = OneShotHang()
+        let probes = LockedURLList()
+        let controller = WhisperServerController(
+            binaryPathProvider: { script.path },
+            modelDirectory: directory,
+            artifactProvider: { $0 == "fixture" ? whisperFixtureArtifact() : nil },
+            readinessProbe: { url, _ in
+                let index = probes.append(url)
+                if index == 1 { return false }
+                return await hang.enterAndWait()
+            }
+        )
+        let task = Task {
+            await controller.start(model: "fixture", endpoint: endpoint)
+        }
+        do {
+            try await waitUntil { hang.hasEntered && controller.isManagedByApp }
+        } catch {
+            hang.release(returning: false)
+            _ = await task.value
+            controller.stopIfManaged()
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+        let pid: pid_t
+        do {
+            pid = try await waitForRecordedPID(at: pidFile)
+        } catch {
+            hang.release(returning: false)
+            _ = await task.value
+            controller.stopIfManaged()
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+        let postLaunch = probes.values.dropFirst()
+        XCTAssertFalse(postLaunch.isEmpty)
+        for url in postLaunch {
+            XCTAssertEqual(url.absoluteString, "http://127.0.0.1:\(endpoint.port ?? 8080)/")
+        }
+        return HungPostLaunch(
+            controller: controller,
+            hang: hang,
+            task: task,
+            pid: pid,
+            directory: directory
+        )
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 3.0,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("condition was still false after \(timeout)s", file: file, line: line)
+        throw CocoaError(.userCancelled)
+    }
+
+    private func becameUnmanaged(
+        _ controller: WhisperServerController,
+        within budget: Duration
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: budget)
+        while ContinuousClock.now < deadline {
+            if !controller.isManagedByApp { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return !controller.isManagedByApp
+    }
+
+    private func waitForText(at url: URL) async throws -> String {
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if let text = try? String(contentsOf: url, encoding: .utf8), !text.isEmpty {
+                return text
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("Timed out waiting for \(url.path)")
+        throw CocoaError(.fileReadNoSuchFile)
+    }
+
     private func assertStartFailure(
         _ result: Result<Void, WhisperServerController.StartFailure>,
         equals expected: WhisperServerController.StartFailure,
@@ -516,6 +1355,81 @@ final class WhisperServerControllerTests: XCTestCase {
             return XCTFail("Expected start failure \(expected), got success", file: file, line: line)
         }
         XCTAssertEqual(actual, expected, file: file, line: line)
+    }
+
+    private struct WhisperLaunchFixture {
+        let directory: URL
+        let artifact: WhisperModelDownloadPolicy.Artifact
+        let endpoint: URL
+    }
+
+    private func makeWhisperLaunchFixture(port: Int) throws -> WhisperLaunchFixture {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devtype-whisper-probe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("abc".utf8).write(to: directory.appendingPathComponent("ggml-fixture.bin"))
+        let artifact = WhisperModelDownloadPolicy.Artifact(
+            sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+            byteCount: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        return WhisperLaunchFixture(
+            directory: directory,
+            artifact: artifact,
+            endpoint: URL(string: "http://localhost:\(port)/inference")!
+        )
+    }
+
+    private func writeExecutableScript(named name: String, in directory: URL, body: String) throws -> URL {
+        let script = directory.appendingPathComponent(name)
+        try body.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        return script
+    }
+
+    private func waitForRecordedPID(at url: URL) async throws -> pid_t {
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if let text = try? String(contentsOf: url, encoding: .utf8),
+               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+               pid > 0 {
+                return pid
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("Child did not record a pid at \(url.path)")
+        throw CocoaError(.fileReadNoSuchFile)
+    }
+
+    private func processExists(_ pid: pid_t) -> Bool {
+        kill(pid, 0) == 0
+    }
+
+    private func commandLine(of pid: pid_t) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-p", String(pid), "-o", "command="]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return ""
+        }
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    /// Last-resort cleanup. SIGKILL only when this pid is still the sleep fixture, so a recycled
+    /// pid is left alone.
+    private func terminateFixtureSleep(_ pid: pid_t) {
+        guard processExists(pid) else { return }
+        let command = commandLine(of: pid)
+        guard command == "sleep 30" || command.hasSuffix("/sleep 30") else { return }
+        _ = kill(pid, SIGKILL)
     }
 
     private func assertDownloadFailure(
@@ -541,6 +1455,23 @@ private final class ErrorDescriptionRecorder: @unchecked Sendable {
 
     func record(_ error: Error) {
         lock.withLock { storage = error.localizedDescription }
+    }
+}
+
+private final class LockedURLList: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [URL] = []
+
+    var values: [URL] {
+        lock.withLock { storage }
+    }
+
+    @discardableResult
+    func append(_ url: URL) -> Int {
+        lock.withLock {
+            storage.append(url)
+            return storage.count
+        }
     }
 }
 
@@ -578,6 +1509,45 @@ private actor AsyncSuspensionGate {
         let waiting = continuation
         continuation = nil
         waiting?.resume()
+    }
+}
+
+private func whisperFixtureArtifact() -> WhisperModelDownloadPolicy.Artifact {
+    WhisperModelDownloadPolicy.Artifact(
+        sourceURL: URL(string: "https://huggingface.co/example/model.bin")!,
+        byteCount: 3,
+        sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    )
+}
+
+private final class OneShotHang: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var entered = false
+    private var decision: Bool?
+
+    func enterAndWait() async -> Bool {
+        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let already = lock.withLock { () -> Bool? in
+                entered = true
+                if let decision { return decision }
+                continuation = cont
+                return nil
+            }
+            if let already { cont.resume(returning: already) }
+        }
+    }
+
+    var hasEntered: Bool { lock.withLock { entered } }
+
+    func release(returning value: Bool) {
+        let waiter = lock.withLock { () -> CheckedContinuation<Bool, Never>? in
+            decision = value
+            let waiter = continuation
+            continuation = nil
+            return waiter
+        }
+        waiter?.resume(returning: value)
     }
 }
 
