@@ -45,13 +45,28 @@ enum SecretMenuFlow {
                 libraryStore.loadCurrentSecrets()?.first(where: { $0.id == snippet.id }) == selectedSecret)
         }
         guard selectionIsCurrent() else { completion(.failure(.selectionChanged)); return }
-        let resolveCurrent = {
-            guard selectionIsCurrent() else { return Result<String, ResolveFailure>.failure(.selectionChanged) }
-            let result = resolveForCopy(snippet, secretStore: secretStore,
-                                        clipboardText: clipboardText, lookup: lookup)
-            // A backing read may wait for another writer. Do not publish a value if its
-            // metadata was retired while that read was in flight.
-            return selectionIsCurrent() ? result : .failure(.selectionChanged)
+        let deliverIfCurrent = { (result: Result<String, ResolveFailure>) in
+            completion(selectionIsCurrent() ? result : .failure(.selectionChanged))
+        }
+        // A busy archive lock must not be answered as "no secret" before the off-main wait
+        // finishes. Uncontended reads still complete before `resolve` returns.
+        let beginResolve = {
+            guard selectionIsCurrent() else {
+                completion(.failure(.selectionChanged))
+                return
+            }
+            if snippet.isSecret {
+                _ = secretStore.deliverSecret(for: snippet.id) { value in
+                    guard selectionIsCurrent() else {
+                        completion(.failure(.selectionChanged))
+                        return
+                    }
+                    completion(resultForSecretValue(value, secretStore: secretStore))
+                }
+                return
+            }
+            deliverIfCurrent(resolveForCopy(snippet, secretStore: secretStore,
+                                            clipboardText: clipboardText, lookup: lookup))
         }
         // §8.10: a secret still stored the old way cannot be read without a system password
         // dialog, and an ordinary copy is never allowed to surprise the user with one. Fail
@@ -74,7 +89,7 @@ enum SecretMenuFlow {
             preferenceEnabled: enabled,
             availability: availability
         ) else {
-            completion(resolveCurrent())
+            beginResolve()
             return
         }
 
@@ -83,7 +98,7 @@ enum SecretMenuFlow {
         gate.authorize(reason: loc.s("secret.auth.reason", snippet.displayTitle)) { outcome in
             switch outcome {
             case .authorized:
-                completion(resolveCurrent())
+                beginResolve()
             case .cancelled:
                 completion(.failure(.authenticationCancelled))
             case .failed(let reason):
@@ -105,17 +120,9 @@ enum SecretMenuFlow {
         lookup: ((String) -> String?)? = nil
     ) -> Result<String, ResolveFailure> {
         if snippet.isSecret {
-            guard let value = secretStore.secret(for: snippet.id), !value.isEmpty else {
-                // A locked login keychain fails every decrypt while metadata still answers —
-                // reporting that as "no secret stored" is a lie with the wrong fix attached.
-                // Lock state is checked only after the read failed, so the common path costs
-                // nothing extra.
-                if secretStore.isKeychainLocked() {
-                    return .failure(.keychainLocked)
-                }
-                return .failure(.secretUnavailable)
-            }
-            return .success(value)
+            // Synchronous callers (coverage, edit rollback) still read here. The menu path uses
+            // `deliverSecret`, which does not report a busy lock as a missing secret.
+            return resultForSecretValue(secretStore.secret(for: snippet.id), secretStore: secretStore)
         }
         // An image snippet has no text to render. Reporting it as "empty" was wrong twice: it is
         // not empty, and the advice implied there was something to go and fix.
@@ -130,6 +137,22 @@ enum SecretMenuFlow {
         if let failure = rendered.failure { return .failure(.macroFailed(failure.message)) }
         guard !rendered.text.isEmpty else { return .failure(.emptySnippet) }
         return .success(rendered.text)
+    }
+
+    /// A locked login keychain fails every decrypt while metadata still answers — reporting
+    /// that as "no secret stored" is a lie with the wrong fix attached. Lock state is checked
+    /// only after the read failed, so the common path costs nothing extra.
+    private static func resultForSecretValue(
+        _ value: String?,
+        secretStore: SecretStore
+    ) -> Result<String, ResolveFailure> {
+        guard let value, !value.isEmpty else {
+            if secretStore.isKeychainLocked() {
+                return .failure(.keychainLocked)
+            }
+            return .failure(.secretUnavailable)
+        }
+        return .success(value)
     }
 
     enum ResolveFailure: Error, Equatable {
