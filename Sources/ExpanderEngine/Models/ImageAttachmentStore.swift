@@ -79,6 +79,12 @@ public final class ImageAttachmentStore {
     internal struct PreparedImage: Equatable {
         let data: Data
         let preferredExtension: String
+
+        /// Suppresses the memberwise init so unvalidated bytes cannot be wrapped outside this file.
+        fileprivate init(data: Data, preferredExtension: String) {
+            self.data = data
+            self.preferredExtension = preferredExtension
+        }
     }
 
     /// §3.7: returned by `url(forImagePath:)` when the path fails containment
@@ -203,13 +209,42 @@ public final class ImageAttachmentStore {
     /// untrusted `image_path` cannot make the importer read a payload bomb.
     @discardableResult
     public func importImage(from sourceURL: URL) throws -> String {
-        try save(prepared: prepareImage(from: sourceURL))
+        try importImage(
+            from: sourceURL,
+            inspectMetadata: Self.defaultInspectMetadata,
+            decode: Self.defaultDecodeImage
+        )
+    }
+
+    @discardableResult
+    internal func importImage(
+        from sourceURL: URL,
+        inspectMetadata: (Data, String) throws -> Void,
+        decode: (Data) -> NSImage?
+    ) throws -> String {
+        try save(prepared: try prepareImage(
+            from: sourceURL,
+            inspectMetadata: inspectMetadata,
+            decode: decode
+        ))
     }
 
     /// Reads and validates an attachment without touching the persistent image
     /// directory. The bounded read closes the stat/read race in which a source
     /// could grow after the initial size check.
     internal func prepareImage(from sourceURL: URL) throws -> PreparedImage {
+        try prepareImage(
+            from: sourceURL,
+            inspectMetadata: Self.defaultInspectMetadata,
+            decode: Self.defaultDecodeImage
+        )
+    }
+
+    internal func prepareImage(
+        from sourceURL: URL,
+        inspectMetadata: (Data, String) throws -> Void,
+        decode: (Data) -> NSImage?
+    ) throws -> PreparedImage {
         let ext = sourceURL.pathExtension.lowercased()
         guard Self.supportedExtensions.contains(ext) else {
             throw StoreError.unsupportedImageType(ext.isEmpty ? sourceURL.lastPathComponent : ext)
@@ -234,36 +269,89 @@ public final class ImageAttachmentStore {
         guard data.count <= Self.maxImportedImageBytes else {
             throw StoreError.oversizedImage(sourceURL.path)
         }
-        try Self.validateDecodedImageSize(data, sourceDescription: sourceURL.path)
-        guard NSImage(data: data) != nil else {
-            throw StoreError.unreadableImage(sourceURL.path)
-        }
-        return PreparedImage(data: data, preferredExtension: ext)
+        let normalized = try acceptImagePayload(
+            data,
+            preferredExtension: ext,
+            sourceDescription: sourceURL.path,
+            inspectMetadata: inspectMetadata,
+            decode: decode
+        )
+        return PreparedImage(data: data, preferredExtension: normalized)
     }
 
     @discardableResult
     internal func save(prepared: PreparedImage) throws -> String {
-        try save(data: prepared.data, preferredExtension: prepared.preferredExtension)
+        // The ceiling is mutable and can drop between prepare and commit. Refuse the
+        // write without walking metadata or decoding again.
+        guard prepared.data.count <= Self.maxImportedImageBytes else {
+            throw StoreError.oversizedImage("\(prepared.data.count) bytes")
+        }
+        return try writeImageBytes(prepared.data, preferredExtension: prepared.preferredExtension)
     }
 
     /// Writes raw image data into the store. Returns the stored file name.
     @discardableResult
     public func save(data: Data, preferredExtension: String = "png") throws -> String {
+        try save(
+            data: data,
+            preferredExtension: preferredExtension,
+            inspectMetadata: Self.defaultInspectMetadata,
+            decode: Self.defaultDecodeImage
+        )
+    }
+
+    @discardableResult
+    internal func save(
+        data: Data,
+        preferredExtension: String = "png",
+        inspectMetadata: (Data, String) throws -> Void,
+        decode: (Data) -> NSImage?
+    ) throws -> String {
+        let ext = try acceptImagePayload(
+            data,
+            preferredExtension: preferredExtension,
+            sourceDescription: "\(data.count) bytes",
+            inspectMetadata: inspectMetadata,
+            decode: decode
+        )
+        return try writeImageBytes(data, preferredExtension: ext)
+    }
+
+    private static func defaultInspectMetadata(_ data: Data, _ sourceDescription: String) throws {
+        try validateDecodedImageSize(data, sourceDescription: sourceDescription)
+    }
+
+    private static func defaultDecodeImage(_ data: Data) -> NSImage? {
+        NSImage(data: data)
+    }
+
+    /// Extension, byte cap, ImageIO metadata, then AppKit decode. Metadata failure
+    /// throws before `decode` runs.
+    private func acceptImagePayload(
+        _ data: Data,
+        preferredExtension: String,
+        sourceDescription: String,
+        inspectMetadata: (Data, String) throws -> Void,
+        decode: (Data) -> NSImage?
+    ) throws -> String {
         let ext = preferredExtension.lowercased()
         guard Self.supportedExtensions.contains(ext) else {
             throw StoreError.unsupportedImageType(ext)
         }
-        // §hardening: same ceiling as `importImage(from:)` — refuse before decode.
         guard data.count <= Self.maxImportedImageBytes else {
-            throw StoreError.oversizedImage("\(data.count) bytes")
+            throw StoreError.oversizedImage(sourceDescription)
         }
-        try Self.validateDecodedImageSize(data, sourceDescription: "\(data.count) bytes")
-        guard NSImage(data: data) != nil else {
-            throw StoreError.unreadableImage("\(data.count) bytes")
+        try inspectMetadata(data, sourceDescription)
+        guard decode(data) != nil else {
+            throw StoreError.unreadableImage(sourceDescription)
         }
+        return ext
+    }
+
+    private func writeImageBytes(_ data: Data, preferredExtension: String) throws -> String {
         let directory = resolvedDirectory()
         try ensureDirectory(directory)
-        let fileName = "\(UUID().uuidString).\(ext)"
+        let fileName = "\(UUID().uuidString).\(preferredExtension)"
         let target = directory.appendingPathComponent(fileName)
         do {
             try data.write(to: target, options: .atomic)
@@ -400,7 +488,7 @@ public final class ImageAttachmentStore {
     /// AppKit image. A first-frame-only check lets a later TIFF/GIF/HEIC frame
     /// carry the decompression bomb. Division guards attacker-controlled
     /// multiplication, and the aggregate ceiling bounds multi-frame decode work.
-    private static func validateDecodedImageSize(
+    internal static func validateDecodedImageSize(
         _ data: Data,
         sourceDescription: String
     ) throws {
