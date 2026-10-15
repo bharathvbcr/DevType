@@ -56,6 +56,7 @@
 "ai.kind.tohindi" = "힌디어로 번역";
 "ai.kind.removemarkdown" = "마크다운 제거";
 "ai.kind.tomarkdown" = "마크다운으로 변환";
+"ai.kind.totable" = "표로 변환";
 "ai.kind.custom" = "사용자 지정";
 "ai.kind.proofread.description" = "문법, 맞춤법, 오타를 교정합니다";
 "ai.kind.rewrite.description" = "명확성, 흐름, 어조를 개선합니다";
@@ -80,6 +81,7 @@
 "ai.kind.tohindi.description" = "로마자로 표기한 힌디어로 번역합니다";
 "ai.kind.removemarkdown.description" = "Markdown을 일반 텍스트로 바꿉니다";
 "ai.kind.tomarkdown.description" = "일반 텍스트를 Markdown으로 구성합니다";
+"ai.kind.totable.description" = "텍스트를 표로 구성합니다";
 "ai.kind.custom.description" = "사용자 지정 지시를 적용합니다";
 "ai.palette.title" = "AI 변환";
 "ai.palette.subtitle" = "선택한 텍스트에 적용할 동작을 고르세요.";

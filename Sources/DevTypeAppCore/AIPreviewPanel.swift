@@ -5,7 +5,8 @@ import ExpanderEngine
 /// Streaming preview for an AI transform result.
 ///
 /// Spinner until the first non-nil snapshot (~1.4s prefill), then streamed text.
-/// Buttons: Replace / Copy / Retry / Cancel.
+/// Buttons: Replace / Copy / Retry / Diff / Cancel. Diff is one word-level control
+/// for every kind.
 ///
 /// Anything that replaces the request in flight — Cancel, Retry, the tone menu, the kind
 /// menu, or another preview opening — discards it, which now both drops its result and
@@ -259,6 +260,152 @@ final class AIPreviewPartialCoalescer {
     static func appendedTail(from shown: String, to next: String) -> String? {
         guard next.utf8.count >= shown.utf8.count, next.utf8.starts(with: shown.utf8) else { return nil }
         return String(decoding: Array(next.utf8.dropFirst(shown.utf8.count)), as: UTF8.self)
+    }
+}
+
+// MARK: - Word diff
+
+/// One inline diff for the preview, shared by every transform kind.
+///
+/// Tokens are maximal runs of whitespace or non-whitespace, walked by extended
+/// grapheme cluster, so a family emoji, a flag, or a supplementary-plane scalar
+/// is never split across an edit. Adjacent removal and insertion of a token is
+/// one replacement. Unchanged tokens stay in the string, marked only by colour
+/// where the text actually moved.
+enum AIPreviewWordDiff {
+    enum Change: Equatable {
+        case equal(String)
+        case insert(String)
+        case delete(String)
+        case replace(old: String, new: String)
+    }
+
+    /// The preview offers this diff for every kind once the result is non-empty
+    /// and differs from the selection. The kind is part of the call so a test can
+    /// require the same answer for each rewrite-style kind and for the rest.
+    static func offersDiff(kind: AITransformKind, input: String, result: String) -> Bool {
+        AITransformKind.allCases.contains(kind) && !result.isEmpty && result != input
+    }
+
+    static func tokens(in text: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var currentIsWhitespace: Bool?
+        for character in text {
+            let isWhitespace = character.isWhitespace
+            if let currentIsWhitespace, currentIsWhitespace != isWhitespace {
+                tokens.append(current)
+                current = ""
+            }
+            current.append(character)
+            currentIsWhitespace = isWhitespace
+        }
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+        return tokens
+    }
+
+    static func changes(from original: String, to updated: String) -> [Change] {
+        let oldTokens = tokens(in: original)
+        let newTokens = tokens(in: updated)
+        var removed: Set<Int> = []
+        var inserted: Set<Int> = []
+        for change in newTokens.difference(from: oldTokens) {
+            switch change {
+            case .remove(let offset, _, _):
+                removed.insert(offset)
+            case .insert(let offset, _, _):
+                inserted.insert(offset)
+            }
+        }
+
+        var changes: [Change] = []
+        var oldIndex = 0
+        var newIndex = 0
+        while oldIndex < oldTokens.count || newIndex < newTokens.count {
+            let oldRemoved = oldIndex < oldTokens.count && removed.contains(oldIndex)
+            let newInserted = newIndex < newTokens.count && inserted.contains(newIndex)
+            if oldIndex < oldTokens.count, newIndex < newTokens.count, !oldRemoved, !newInserted {
+                if oldTokens[oldIndex] == newTokens[newIndex] {
+                    changes.append(.equal(oldTokens[oldIndex]))
+                } else {
+                    changes.append(.replace(old: oldTokens[oldIndex], new: newTokens[newIndex]))
+                }
+                oldIndex += 1
+                newIndex += 1
+            } else if oldIndex < oldTokens.count, newIndex < newTokens.count, oldRemoved, newInserted {
+                changes.append(.replace(old: oldTokens[oldIndex], new: newTokens[newIndex]))
+                oldIndex += 1
+                newIndex += 1
+            } else if oldRemoved {
+                changes.append(.delete(oldTokens[oldIndex]))
+                oldIndex += 1
+            } else if newInserted {
+                changes.append(.insert(newTokens[newIndex]))
+                newIndex += 1
+            } else if oldIndex < oldTokens.count {
+                changes.append(.delete(oldTokens[oldIndex]))
+                oldIndex += 1
+            } else if newIndex < newTokens.count {
+                changes.append(.insert(newTokens[newIndex]))
+                newIndex += 1
+            }
+        }
+        return changes
+    }
+
+    static func originalText(of changes: [Change]) -> String {
+        changes.map { change in
+            switch change {
+            case .equal(let text), .delete(let text): return text
+            case .insert: return ""
+            case .replace(let old, _): return old
+            }
+        }.joined()
+    }
+
+    static func updatedText(of changes: [Change]) -> String {
+        changes.map { change in
+            switch change {
+            case .equal(let text), .insert(let text): return text
+            case .delete: return ""
+            case .replace(_, let new): return new
+            }
+        }.joined()
+    }
+
+    static func attributed(from original: String, to updated: String) -> NSAttributedString {
+        let base: [NSAttributedString.Key: Any] = [.font: DevTypeTheme.font(12)]
+        let deleted: [NSAttributedString.Key: Any] = [
+            .font: DevTypeTheme.font(12),
+            .foregroundColor: NSColor.systemRed,
+            .backgroundColor: NSColor.systemRed.withAlphaComponent(0.12),
+            .strikethroughStyle: NSUnderlineStyle.single.rawValue
+        ]
+        let inserted: [NSAttributedString.Key: Any] = [
+            .font: DevTypeTheme.font(12),
+            .foregroundColor: NSColor.systemGreen,
+            .backgroundColor: NSColor.systemGreen.withAlphaComponent(0.12)
+        ]
+        let out = NSMutableAttributedString()
+        for change in changes(from: original, to: updated) {
+            switch change {
+            case .equal(let text):
+                out.append(NSAttributedString(string: text, attributes: base))
+            case .delete(let text):
+                out.append(NSAttributedString(string: text, attributes: deleted))
+            case .insert(let text):
+                out.append(NSAttributedString(string: text, attributes: inserted))
+            case .replace(let old, let new):
+                out.append(NSAttributedString(string: old, attributes: deleted))
+                out.append(NSAttributedString(string: new, attributes: inserted))
+            }
+        }
+        if out.length == 0 {
+            out.append(NSAttributedString(string: updated, attributes: base))
+        }
+        return out
     }
 }
 
@@ -540,7 +687,7 @@ private final class AIPreviewController: NSViewController {
             action: #selector(diffTapped)
         )
         diffButton.isEnabled = false
-        diffButton.isHidden = kind != .proofread
+        diffButton.isHidden = false
 
         copyButton = CapsuleButton(
             title: loc.s("ai.preview.copy") + "  ⌘C",
@@ -685,7 +832,7 @@ private final class AIPreviewController: NSViewController {
         copyButton.isEnabled = false
         retryButton.isEnabled = false
         diffButton.isEnabled = false
-        diffButton.isHidden = kind != .proofread
+        diffButton.isHidden = false
         diffButton.title = loc.s("ai.preview.diff")
         titleLabel.stringValue = loc.s(kind.localizationKey)
 
@@ -781,7 +928,7 @@ private final class AIPreviewController: NSViewController {
             replaceButton.isEnabled = true
             replaceAndCopyButton.isEnabled = true
             copyButton.isEnabled = true
-            diffButton.isEnabled = kind == .proofread && text != input
+            diffButton.isEnabled = AIPreviewWordDiff.offersDiff(kind: kind, input: input, result: text)
             errorLabel.isHidden = true
             updateDeltas(for: text)
         case .failure(let error):
@@ -796,7 +943,7 @@ private final class AIPreviewController: NSViewController {
             replaceButton.isEnabled = !resultText.isEmpty
             replaceAndCopyButton.isEnabled = !resultText.isEmpty
             copyButton.isEnabled = !resultText.isEmpty
-            diffButton.isEnabled = kind == .proofread && !resultText.isEmpty && resultText != input
+            diffButton.isEnabled = AIPreviewWordDiff.offersDiff(kind: kind, input: input, result: resultText)
         }
     }
 
@@ -950,34 +1097,7 @@ private final class AIPreviewController: NSViewController {
         onCancel()
     }
 
-    /// Line-oriented red/green diff for proofread review.
     private static func diffAttributed(from original: String, to updated: String) -> NSAttributedString {
-        let oldLines = original.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let newLines = updated.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let out = NSMutableAttributedString()
-        let base = [NSAttributedString.Key.font: DevTypeTheme.font(12)]
-        let del: [NSAttributedString.Key: Any] = [
-            .font: DevTypeTheme.font(12),
-            .foregroundColor: NSColor.systemRed,
-            .backgroundColor: NSColor.systemRed.withAlphaComponent(0.12)
-        ]
-        let add: [NSAttributedString.Key: Any] = [
-            .font: DevTypeTheme.font(12),
-            .foregroundColor: NSColor.systemGreen,
-            .backgroundColor: NSColor.systemGreen.withAlphaComponent(0.12)
-        ]
-        let diff = newLines.difference(from: oldLines)
-        for change in diff {
-            switch change {
-            case .remove(_, let element, _):
-                out.append(NSAttributedString(string: "− \(element)\n", attributes: del))
-            case .insert(_, let element, _):
-                out.append(NSAttributedString(string: "+ \(element)\n", attributes: add))
-            }
-        }
-        if out.length == 0 {
-            out.append(NSAttributedString(string: updated, attributes: base))
-        }
-        return out
+        AIPreviewWordDiff.attributed(from: original, to: updated)
     }
 }

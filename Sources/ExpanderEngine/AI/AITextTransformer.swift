@@ -1508,8 +1508,24 @@ public actor AITextTransformer {
         // guardrails and refuses the sensitive selections this feature exists to
         // transform. The trade is that a refusal may arrive as prose, which
         // AIRefusalProse screens out below instead of surfacing as a result.
+        //
+        // `.toTable` is the one guided call. A table is a shape, and asking for it
+        // in prose came back as fences and commentary. The permissive guardrail does
+        // not apply on that path; a refusal is a failed format, not a table.
         let raw: String
-        if streamPartials {
+        if kind == .toTable {
+            raw = try await generateGuidedTable(
+                session: session,
+                prompt: prompt,
+                markdownPolicy: markdownPolicy,
+                input: input,
+                options: options,
+                streamPartials: streamPartials,
+                onPartial: onPartial,
+                kind: kind,
+                attempt: attempt
+            )
+        } else if streamPartials {
             let stream = session.streamResponse(to: Prompt(prompt), options: options)
             var lastText = ""
             for try await snapshot in stream {
@@ -1576,6 +1592,79 @@ public actor AITextTransformer {
             throw AITransformError.refusal
         }
         return cleaned
+    }
+
+    /// Fills `AITableFormat`'s schema and returns the Markdown rendered from it.
+    ///
+    /// The caller still runs the echo, sanitize, and strip passes on this string,
+    /// so a partial is the stripped preview and the return value is the unstripped
+    /// table. A snapshot that has not decoded both properties yet is skipped. The
+    /// finished snapshot must decode, or the format failed.
+    private func generateGuidedTable(
+        session: LanguageModelSession,
+        prompt: String,
+        markdownPolicy: AIMarkdownPolicy,
+        input: String,
+        options: GenerationOptions,
+        streamPartials: Bool,
+        onPartial: @escaping @Sendable (String?) -> Void,
+        kind: AITransformKind,
+        attempt: Int
+    ) async throws -> String {
+        let schema: GenerationSchema
+        do {
+            schema = try AITableFormat.generationSchema()
+        } catch {
+            record(
+                violation: "tableSchema",
+                detail: "schema construction failed",
+                kind: kind,
+                attempt: attempt
+            )
+            throw AITransformError.decodingFailure
+        }
+        let asked = Prompt(prompt)
+        if streamPartials {
+            let stream = session.streamResponse(
+                to: asked,
+                schema: schema,
+                includeSchemaInPrompt: true,
+                options: options
+            )
+            var lastMarkdown: String?
+            for try await snapshot in stream {
+                try Task.checkCancellation()
+                guard let markdown = AITableFormat.markdown(from: snapshot.rawContent) else { continue }
+                lastMarkdown = markdown
+                onPartial(AIMarkdownStripper.strip(markdown, policy: markdownPolicy, original: input))
+            }
+            guard let lastMarkdown else {
+                record(
+                    violation: "tableDecode",
+                    detail: "guided generation did not decode as a table",
+                    kind: kind,
+                    attempt: attempt
+                )
+                throw AITransformError.decodingFailure
+            }
+            return lastMarkdown
+        }
+        let response = try await session.respond(
+            to: asked,
+            schema: schema,
+            includeSchemaInPrompt: true,
+            options: options
+        )
+        guard let markdown = AITableFormat.markdown(from: response.content) else {
+            record(
+                violation: "tableDecode",
+                detail: "guided generation did not decode as a table",
+                kind: kind,
+                attempt: attempt
+            )
+            throw AITransformError.decodingFailure
+        }
+        return markdown
     }
 
     private func nextSeed() -> UInt64 {

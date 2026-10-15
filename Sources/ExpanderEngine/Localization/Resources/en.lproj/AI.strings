@@ -56,6 +56,7 @@
 "ai.kind.tohindi" = "Translate to Hindi";
 "ai.kind.removemarkdown" = "Remove Markdown";
 "ai.kind.tomarkdown" = "Format as Markdown";
+"ai.kind.totable" = "Format as Table";
 "ai.kind.custom" = "Custom";
 "ai.kind.proofread.description" = "Fix grammar, spelling, and typos";
 "ai.kind.rewrite.description" = "Improve clarity, flow, and tone";
@@ -80,6 +81,7 @@
 "ai.kind.tohindi.description" = "Translate into Romanized Hindi";
 "ai.kind.removemarkdown.description" = "Strip Markdown down to plain text";
 "ai.kind.tomarkdown.description" = "Structure plain text as Markdown";
+"ai.kind.totable.description" = "Turn the text into a table";
 "ai.kind.custom.description" = "Apply custom instructions";
 "ai.palette.title" = "AI Transform";
 "ai.palette.subtitle" = "Choose an action for the selected text.";

@@ -43,6 +43,12 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     case removeMarkdown = "removemarkdown"
     /// Plain prose in, the same text structured as Markdown out.
     case toMarkdown = "tomarkdown"
+    /// Prose, a list, or loose records in — a Markdown table out.
+    ///
+    /// On macOS 26 the model fills a `DynamicGenerationSchema` (columns and rows)
+    /// and `AITableFormat` renders the Markdown. The kind still exists on the
+    /// macOS 14–25 toolchain; only the schema call is compiled out there.
+    case toTable = "totable"
     /// Anything (usually Telugu / Hindi typed in English letters) → English.
     case translate
     /// English → Telugu, written in English letters.
@@ -83,6 +89,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             return "Convert the following into valid formatted JSON:\n\n"
         case .toMarkdown:
             return "Format the text below as Markdown:\n\n"
+        case .toTable:
+            return "Format the text below as a table:\n\n"
         case .generateUnitTests:
             return "Write comprehensive unit tests for the following code:\n\n"
         case .gitCommitMessage:
@@ -313,6 +321,21 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
             Return ONLY the Markdown — no commentary, labels, or preamble, and never
             wrap the whole answer in a code fence.
             """
+        case .toTable:
+            return """
+            You turn the user's text into a table.
+
+            Choose columns the text already supports, and put each record in its
+            own row. Cells are the user's words: do not invent facts, do not
+            translate, and do not add a column the text does not imply.
+
+            A list of similar items is one row per item. Prose becomes columns
+            of the facts it repeats — names, dates, amounts — and one row per
+            thing those facts describe. A passage with no repeated structure is
+            one row whose cells are the passage's own parts, not a summary.
+
+            Leave names, numbers, URLs, and code exactly as written.
+            """
         case .removeMarkdown:
             // Never sent to a model. Kept as the written contract of what the local
             // implementation does, so the two cannot drift silently.
@@ -356,7 +379,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     public var temperature: Double {
         switch self {
         case .proofread, .translate, .translateTelugu, .translateHindi, .toJson,
-             .sqlQuery, .fixCode, .removeMarkdown:
+             .sqlQuery, .fixCode, .removeMarkdown, .toTable:
             return 0.2
         case .promptEnhance, .toMarkdown:
             return 0.35
@@ -375,7 +398,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
     public var isDeterministic: Bool {
         switch self {
         case .proofread, .translate, .translateTelugu, .translateHindi, .toJson,
-             .sqlQuery, .fixCode, .explainRegex, .removeMarkdown:
+             .sqlQuery, .fixCode, .explainRegex, .removeMarkdown, .toTable:
             return true
         case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .formal,
              .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
@@ -397,7 +420,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .formal,
              .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
-             .explainRegex, .sqlQuery, .custom, .toMarkdown:
+             .explainRegex, .sqlQuery, .custom, .toMarkdown, .toTable:
             return .unconstrained
         }
     }
@@ -414,7 +437,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
              .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
              .explainRegex, .sqlQuery, .translate, .translateTelugu,
-             .translateHindi, .custom, .toMarkdown:
+             .translateHindi, .custom, .toMarkdown, .toTable:
             return .unconstrained
         }
     }
@@ -447,7 +470,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         // `.toMarkdown` above all: the automatic pass would otherwise delete the exact
         // formatting this kind was asked to produce.
         case .promptEnhance, .fixCode, .generateDocstring, .toJson,
-             .generateUnitTests, .sqlQuery, .toMarkdown:
+             .generateUnitTests, .sqlQuery, .toMarkdown, .toTable:
             return .preserve
         }
     }
@@ -469,7 +492,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
              .formal, .friendly, .bulletize, .promptEnhance, .explainCode,
              .generateDocstring, .fixCode, .toJson, .generateUnitTests,
              .gitCommitMessage, .explainRegex, .sqlQuery,
-             .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown:
+             .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown,
+             .toTable:
             return true
         }
     }
@@ -485,7 +509,8 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .formal,
              .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage,
-             .explainRegex, .sqlQuery, .custom, .removeMarkdown, .toMarkdown:
+             .explainRegex, .sqlQuery, .custom, .removeMarkdown, .toMarkdown,
+             .toTable:
             return false
         }
     }
@@ -500,7 +525,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
              .friendly, .bulletize, .promptEnhance, .explainCode, .generateDocstring,
              .fixCode, .toJson, .generateUnitTests, .gitCommitMessage, .explainRegex,
              .sqlQuery, .translate, .translateTelugu, .translateHindi, .custom,
-             .toMarkdown:
+             .toMarkdown, .toTable:
             return .preview
         }
     }
@@ -534,6 +559,7 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .translateTelugu, .translateHindi: return 2.0
         case .custom: return 1.5
         case .toMarkdown: return 1.4        // syntax on top of every line it structures
+        case .toTable: return 1.6            // a header and a rule on top of the cells
         case .removeMarkdown: return 1.0     // unused: no generation to budget for
         }
     }
@@ -552,7 +578,25 @@ public enum AITransformKind: String, Sendable, Equatable, CaseIterable {
         case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite, .promptEnhance,
              .explainCode, .generateDocstring, .fixCode, .toJson,
              .generateUnitTests, .gitCommitMessage, .explainRegex,
-             .sqlQuery, .custom, .toMarkdown:
+             .sqlQuery, .custom, .toMarkdown, .toTable:
+            return false
+        }
+    }
+
+    /// Kinds whose job is to rewrite the user's own wording.
+    ///
+    /// The preview diff is word-level for every kind, these included. The set is
+    /// named so a test can require the diff for each of them without guessing
+    /// which cases the framing comment meant.
+    public var isRewriteStyle: Bool {
+        switch self {
+        case .rewrite, .paraphrase, .expand, .condense, .mergeRewrite,
+             .formal, .friendly, .bulletize, .promptEnhance, .custom:
+            return true
+        case .proofread, .explainCode, .generateDocstring, .fixCode, .toJson,
+             .generateUnitTests, .gitCommitMessage, .explainRegex, .sqlQuery,
+             .removeMarkdown, .toMarkdown, .toTable, .translate, .translateTelugu,
+             .translateHindi:
             return false
         }
     }

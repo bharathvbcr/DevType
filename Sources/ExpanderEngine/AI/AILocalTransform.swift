@@ -35,7 +35,7 @@ public enum AILocalTransform {
              .formal, .friendly, .bulletize, .promptEnhance, .explainCode,
              .generateDocstring, .fixCode, .toJson, .generateUnitTests,
              .gitCommitMessage, .explainRegex, .sqlQuery,
-             .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown:
+             .translate, .translateTelugu, .translateHindi, .custom, .toMarkdown, .toTable:
             return nil
         }
     }

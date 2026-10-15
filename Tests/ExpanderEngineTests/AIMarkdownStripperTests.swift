@@ -404,7 +404,7 @@ final class AIMarkdownStripperTests: XCTestCase {
         // Code and structured output: `*`, `_`, `#` and backticks are the program.
         let preserved: [AITransformKind] = [.fixCode, .generateDocstring, .toJson,
                                             .generateUnitTests, .sqlQuery, .promptEnhance,
-                                            .toMarkdown]
+                                            .toMarkdown, .toTable]
         // Kinds that owe the author their layout.
         let layoutPreserving: [AITransformKind] = [.proofread, .translate, .translateTelugu,
                                                    .translateHindi, .bulletize, .mergeRewrite]

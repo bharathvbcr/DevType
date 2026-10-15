@@ -56,6 +56,7 @@
 "ai.kind.tohindi" = "ヒンディー語に翻訳";
 "ai.kind.removemarkdown" = "Markdown を削除";
 "ai.kind.tomarkdown" = "Markdown に整形";
+"ai.kind.totable" = "表に整形";
 "ai.kind.custom" = "カスタム";
 "ai.kind.proofread.description" = "文法・スペル・誤字を修正します";
 "ai.kind.rewrite.description" = "明確さ・流れ・トーンを改善します";
@@ -80,6 +81,7 @@
 "ai.kind.tohindi.description" = "ローマ字表記のヒンディー語に翻訳します";
 "ai.kind.removemarkdown.description" = "Markdown をプレーンテキストにします";
 "ai.kind.tomarkdown.description" = "プレーンテキストを Markdown に整えます";
+"ai.kind.totable.description" = "テキストを表に整えます";
 "ai.kind.custom.description" = "カスタム指示を適用します";
 "ai.palette.title" = "AI 変換";
 "ai.palette.subtitle" = "選択したテキストに対する操作を選んでください。";
