@@ -208,7 +208,7 @@ final class SnippetConflictResolverSheet: NSViewController, NSTableViewDataSourc
     private func confirmDelete(_ item: ConflictResolverSnapshot.Item) {
         DevTypeAlert.confirm(
             title: loc.s("manager.delete.confirm.title"),
-            message: loc.s("manager.delete.confirm.message", displayTitle(for: item.snippet)),
+            message: loc.s("manager.delete.confirm.message", conflictSnippetTitle(item.snippet, loc: loc)),
             confirmTitle: loc.s("common.delete"),
             destructive: true,
             window: view.window
@@ -257,10 +257,6 @@ final class SnippetConflictResolverSheet: NSViewController, NSTableViewDataSourc
         }
     }
 
-    private func displayTitle(for snippet: SnippetModel) -> String {
-        let title = snippet.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title.isEmpty ? loc.s("conflict.resolver.untitled") : title
-    }
 }
 
 /// Exact action identity retained by each row. `NSButton.tag` is an `Int`; narrowing a UUID to
@@ -378,7 +374,7 @@ private final class ConflictRowView: NSView {
 
     private func makeSnippetSummary(_ item: ConflictResolverSnapshot.Item) -> NSView {
         let snippet = item.snippet
-        let title = displayTitle(for: snippet)
+        let title = conflictSnippetTitle(snippet, loc: loc)
         let trigger = snippet.triggerKeyword.isEmpty
             ? loc.s("conflict.resolver.noTrigger")
             : snippet.triggerKeyword
@@ -486,8 +482,9 @@ private final class ConflictRowView: NSView {
         return container
     }
 
-    private func displayTitle(for snippet: SnippetModel) -> String {
-        let title = snippet.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title.isEmpty ? loc.s("conflict.resolver.untitled") : title
-    }
+}
+
+private func conflictSnippetTitle(_ snippet: SnippetModel, loc: LocalizationManager) -> String {
+    let title = snippet.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+    return title.isEmpty ? loc.s("conflict.resolver.untitled") : title
 }

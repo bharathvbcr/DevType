@@ -1,6 +1,7 @@
 import Foundation
 
-public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
+public final class OllamaCorrector: LocalHTTPCorrector, @unchecked Sendable {
+    public static let probeCapabilities = ["ollamaNative", "localInference"]
     public let descriptor: CorrectionProviderDescriptor
     private let endpointOverride: URL?
     private let modelOverride: String?
@@ -23,16 +24,6 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
             modelVersion: "runtime",
             privacyRoute: .localNetworkOnly,
             supportsStructuredOutput: false
-        )
-    }
-
-    public func probe() async -> ProviderReadiness {
-        await LocalCorrectorProbe.readiness(
-            endpoint: endpointURL,
-            providerID: descriptor.id,
-            modelVersion: modelName,
-            capabilities: ["ollamaNative", "localInference"],
-            makeRequest: Self.probeRequest(endpoint:)
         )
     }
 
@@ -91,7 +82,7 @@ public final class OllamaCorrector: TranscriptCorrector, @unchecked Sendable {
 
     public func cancel(sessionID: VoiceSessionID) async {}
 
-    static func probeRequest(endpoint: URL) throws -> URLRequest {
+    public static func probeRequest(endpoint: URL) throws -> URLRequest {
         let route = try LocalCorrectionEndpointRoute.resolve(endpoint)
         guard route.isOllamaNative else {
             throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath

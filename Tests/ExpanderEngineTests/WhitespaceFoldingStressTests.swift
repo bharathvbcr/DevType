@@ -13,19 +13,6 @@ import XCTest
 ///  3. **Bounded** — huge fields never pay a full-value fold on the caret-window path.
 final class WhitespaceFoldingStressTests: XCTestCase {
 
-    /// Deterministic PRNG — every fuzz failure reproduces byte-for-byte from the seed.
-    private struct SplitMix64: RandomNumberGenerator {
-        var state: UInt64
-        init(seed: UInt64) { state = seed }
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-    }
-
     /// Every BMP Zs member, for substitution fuzzing.
     private static let spaceSeparators: [Character] = [
         "\u{00A0}", "\u{1680}", "\u{2000}", "\u{2001}", "\u{2002}", "\u{2003}", "\u{2004}",
@@ -78,7 +65,7 @@ final class WhitespaceFoldingStressTests: XCTestCase {
     // MARK: - 2. Conservation properties under fuzz
 
     func testFoldPreservesUTF16CountAndIsIdempotentUnderFuzz() {
-        var rng = SplitMix64(seed: 0xD3B_7A9E)
+        var rng = RawSplitMix64(seed: 0xD3B_7A9E)
         for _ in 0..<2_000 {
             let length = Int.random(in: 0..<60, using: &rng)
             let s = String((0..<length).map { _ in Self.fuzzAlphabet.randomElement(using: &rng)! })
@@ -99,7 +86,7 @@ final class WhitespaceFoldingStressTests: XCTestCase {
     // MARK: - 3. Precondition fuzz: separator substitutions pass, visible corruption refuses
 
     func testPreconditionAcceptsAnySeparatorSubstitutionUnderFuzz() {
-        var rng = SplitMix64(seed: 0x51AB_1E)
+        var rng = RawSplitMix64(seed: 0x51AB_1E)
         for _ in 0..<1_000 {
             let trigger = "`fz trig x "   // multi-space trigger; backtick keeps it unique
             var mutated = ""
@@ -127,7 +114,7 @@ final class WhitespaceFoldingStressTests: XCTestCase {
     }
 
     func testPreconditionRefusesVisibleCorruptionUnderFuzz() {
-        var rng = SplitMix64(seed: 0xBAD_C0DE)
+        var rng = RawSplitMix64(seed: 0xBAD_C0DE)
         for _ in 0..<1_000 {
             let trigger = "`fz trig "
             // Corrupt one visible (non-space, non-backtick) character.

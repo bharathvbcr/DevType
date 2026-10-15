@@ -116,6 +116,56 @@ struct DevTypeShortcut: Equatable, Codable {
     var isDefaultInlineSearch: Bool { self == Self.inlineSearchDefault }
 
     var isDefaultAIPalette: Bool { self == Self.aiPaletteDefault }
+
+    /// Menu equivalents only exist for a single character. A disabled shortcut advertises
+    /// nothing, because a menu hint for a chord that will not fire is a lie.
+    var menuKeyEquivalent: String {
+        guard !HotkeyPreferences.shortcutsDisabled else { return "" }
+        let name = Self.keyName(for: keyCode)
+        return name.count == 1 ? name.lowercased() : ""
+    }
+
+    /// Carbon modifier mask translated to the four flags AppKit menus understand.
+    var menuModifierFlags: NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if carbonModifiers & UInt32(cmdKey) != 0 { flags.insert(.command) }
+        if carbonModifiers & UInt32(optionKey) != 0 { flags.insert(.option) }
+        if carbonModifiers & UInt32(controlKey) != 0 { flags.insert(.control) }
+        if carbonModifiers & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+        return flags
+    }
+}
+
+/// The three Carbon shortcuts DevType registers for itself. Macros stay off this list:
+/// they are a user-authored table, not a built-in binding.
+enum BuiltInHotkey: CaseIterable {
+    case inlineSearch
+    case aiPalette
+    case voiceDictation
+
+    var logName: String {
+        switch self {
+        case .inlineSearch: return "inline search"
+        case .aiPalette: return "AI palette"
+        case .voiceDictation: return "Voice dictation"
+        }
+    }
+
+    var defaultsKey: String {
+        switch self {
+        case .inlineSearch: return HotkeyPreferences.inlineSearchKey
+        case .aiPalette: return HotkeyPreferences.aiPaletteKey
+        case .voiceDictation: return HotkeyPreferences.voiceKey
+        }
+    }
+
+    var fallback: DevTypeShortcut {
+        switch self {
+        case .inlineSearch: return .inlineSearchDefault
+        case .aiPalette: return .aiPaletteDefault
+        case .voiceDictation: return .voiceDefault
+        }
+    }
 }
 
 // MARK: - Persistence
@@ -154,47 +204,39 @@ enum HotkeyPreferences {
         return fallback
     }
 
-    static var inlineSearchShortcut: DevTypeShortcut {
-        get {
-            storedShortcut(forKey: inlineSearchKey, fallback: .inlineSearchDefault)
-        }
-        set {
-            guard let data = try? JSONEncoder().encode(newValue) else { return }
-            UserDefaults.standard.set(data, forKey: inlineSearchKey)
-        }
+    static func shortcut(for kind: BuiltInHotkey) -> DevTypeShortcut {
+        storedShortcut(forKey: kind.defaultsKey, fallback: kind.fallback)
     }
 
-    static func resetInlineSearchShortcut() {
-        UserDefaults.standard.removeObject(forKey: inlineSearchKey)
+    static func setShortcut(_ shortcut: DevTypeShortcut, for kind: BuiltInHotkey) {
+        guard let data = try? JSONEncoder().encode(shortcut) else { return }
+        UserDefaults.standard.set(data, forKey: kind.defaultsKey)
     }
+
+    static func reset(_ kind: BuiltInHotkey) {
+        UserDefaults.standard.removeObject(forKey: kind.defaultsKey)
+    }
+
+    static var inlineSearchShortcut: DevTypeShortcut {
+        get { shortcut(for: .inlineSearch) }
+        set { setShortcut(newValue, for: .inlineSearch) }
+    }
+
+    static func resetInlineSearchShortcut() { reset(.inlineSearch) }
 
     static var aiPaletteShortcut: DevTypeShortcut {
-        get {
-            storedShortcut(forKey: aiPaletteKey, fallback: .aiPaletteDefault)
-        }
-        set {
-            guard let data = try? JSONEncoder().encode(newValue) else { return }
-            UserDefaults.standard.set(data, forKey: aiPaletteKey)
-        }
+        get { shortcut(for: .aiPalette) }
+        set { setShortcut(newValue, for: .aiPalette) }
     }
 
-    static func resetAIPaletteShortcut() {
-        UserDefaults.standard.removeObject(forKey: aiPaletteKey)
-    }
+    static func resetAIPaletteShortcut() { reset(.aiPalette) }
 
     static var voiceShortcut: DevTypeShortcut {
-        get {
-            storedShortcut(forKey: voiceKey, fallback: .voiceDefault)
-        }
-        set {
-            guard let data = try? JSONEncoder().encode(newValue) else { return }
-            UserDefaults.standard.set(data, forKey: voiceKey)
-        }
+        get { shortcut(for: .voiceDictation) }
+        set { setShortcut(newValue, for: .voiceDictation) }
     }
 
-    static func resetVoiceShortcut() {
-        UserDefaults.standard.removeObject(forKey: voiceKey)
-    }
+    static func resetVoiceShortcut() { reset(.voiceDictation) }
 
     /// §4.3: the macro list was readable only by hand-crafting JSON into
     /// `devtype.hotkeyMacros`. Writing goes through here so the Preferences UI
@@ -220,6 +262,54 @@ enum HotkeyPreferences {
         var modifiers: UInt32
         var kind: String
         var argument: String
+    }
+}
+
+/// Persists one built-in shortcut and re-registers it when a manager exists.
+///
+/// `onFailure` is how Preferences tells the user Carbon refused the chord. Voice does not
+/// pass one, so a voice rebind stays silent the way it always has. A Bool would mean
+/// "do the other thing"; the closure is the caller's own failure policy.
+enum HotkeyBindingApply {
+    /// `failureLoc` is the caller's choice to surface a Carbon refusal. Voice omits it.
+    static func commit(
+        _ shortcut: DevTypeShortcut?,
+        kind: BuiltInHotkey,
+        manager: HotkeyManager?,
+        failureLoc: LocalizationManager? = nil,
+        failureWindow: NSWindow? = nil,
+        reload: () -> Void
+    ) {
+        guard let shortcut else { return }
+        guard let manager else {
+            HotkeyPreferences.setShortcut(shortcut, for: kind)
+            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
+            reload()
+            return
+        }
+        let status = manager.apply(shortcut, to: kind)
+        if status != noErr, let failureLoc {
+            DevTypeAlert.warn(
+                title: failureLoc.s("prefs.hotkeys.failed.title"),
+                message: failureLoc.s("prefs.hotkeys.failed.message", shortcut.displayString, Int(status)),
+                window: failureWindow
+            )
+        }
+        reload()
+    }
+
+    /// Positional form of `commit` for the two palette preference panes. The labels on
+    /// `commit` are what let Voice omit the failure presenter; spelling those labels at
+    /// both palette call sites was itself a clone.
+    static func apply(
+        _ shortcut: DevTypeShortcut?,
+        _ kind: BuiltInHotkey,
+        _ manager: HotkeyManager?,
+        _ loc: LocalizationManager,
+        _ window: NSWindow?,
+        _ reload: () -> Void
+    ) {
+        commit(shortcut, kind: kind, manager: manager, failureLoc: loc, failureWindow: window, reload: reload)
     }
 }
 

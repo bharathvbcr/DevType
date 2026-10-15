@@ -1,6 +1,7 @@
 import Foundation
 
-public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Sendable {
+public final class OpenAICompatibleCorrector: LocalHTTPCorrector, @unchecked Sendable {
+    public static let probeCapabilities = ["chatCompletions", "openAICompatible"]
     public let descriptor: CorrectionProviderDescriptor
     private let endpointOverride: URL?
     private let modelOverride: String?
@@ -22,16 +23,6 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
             modelVersion: "runtime",
             privacyRoute: .localNetworkOnly,
             supportsStructuredOutput: true
-        )
-    }
-
-    public func probe() async -> ProviderReadiness {
-        await LocalCorrectorProbe.readiness(
-            endpoint: endpointURL,
-            providerID: descriptor.id,
-            modelVersion: modelName,
-            capabilities: ["chatCompletions", "openAICompatible"],
-            makeRequest: Self.probeRequest(endpoint:)
         )
     }
 
@@ -88,7 +79,7 @@ public final class OpenAICompatibleCorrector: TranscriptCorrector, @unchecked Se
 
     public func cancel(sessionID: VoiceSessionID) async {}
 
-    static func probeRequest(endpoint: URL) throws -> URLRequest {
+    public static func probeRequest(endpoint: URL) throws -> URLRequest {
         let route = try LocalCorrectionEndpointRoute.resolve(endpoint)
         guard route.api == .openAIChatCompletions else {
             throw LocalCorrectionEndpointRoute.RouteError.unsupportedPath

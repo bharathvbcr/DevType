@@ -10,10 +10,7 @@ import XCTest
 final class GroupAppScopeTests: XCTestCase {
 
     private func snippet(include: [String] = [], exclude: [String] = []) -> SnippetModel {
-        var s = SnippetModel(title: "T", triggerKeyword: ":t", replacementText: "v")
-        s.includeApps = include
-        s.excludeApps = exclude
-        return s
+        scopedSnippet(title: "T", trigger: ":t", replacement: "v", include: include, exclude: exclude)
     }
 
     private func live(

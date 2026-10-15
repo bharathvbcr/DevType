@@ -179,61 +179,67 @@ extension VoicePreferencesViewController {
         return triggersCard
     }
 
-    private func configureVoiceDictionaryTable() {
-        guard let spokenColumn = voiceDictionaryTable.tableColumns.first else { return }
-        spokenColumn.title = loc.s("prefs.voice.dict.column.spoken")
-        spokenColumn.minWidth = 160
-        spokenColumn.width = 250
-        spokenColumn.resizingMask = [.autoresizingMask, .userResizingMask]
+    private struct VoiceColumnSpec {
+        var titleKey: String
+        var minWidth: CGFloat
+        var width: CGFloat
+        var identifier: String
+    }
 
-        let replacementColumn = NSTableColumn(
-            identifier: NSUserInterfaceItemIdentifier("voiceDictReplacement")
-        )
-        replacementColumn.title = loc.s("prefs.voice.dict.column.replacement")
-        replacementColumn.minWidth = 160
-        replacementColumn.width = 250
-        replacementColumn.resizingMask = [.autoresizingMask, .userResizingMask]
-        voiceDictionaryTable.addTableColumn(replacementColumn)
-        voiceDictionaryTable.headerView = NSTableHeaderView()
-        voiceDictionaryTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        voiceDictionaryTable.allowsColumnReordering = false
+    private struct VoiceTableLayout {
+        var first: VoiceColumnSpec
+        var added: VoiceColumnSpec
+        var autoresizing: NSTableView.ColumnAutoresizingStyle
+    }
+
+    private static let dictionaryLayout = VoiceTableLayout(
+        first: VoiceColumnSpec(titleKey: "prefs.voice.dict.column.spoken", minWidth: 160, width: 250, identifier: "voiceDictSpoken"),
+        added: VoiceColumnSpec(titleKey: "prefs.voice.dict.column.replacement", minWidth: 160, width: 250, identifier: "voiceDictReplacement"),
+        autoresizing: .uniformColumnAutoresizingStyle
+    )
+
+    private static let triggerLayout = VoiceTableLayout(
+        first: VoiceColumnSpec(titleKey: "prefs.voice.triggers.column.phrase", minWidth: 180, width: 260, identifier: "voiceTriggerPhrase"),
+        added: VoiceColumnSpec(titleKey: "prefs.voice.triggers.column.action", minWidth: 160, width: 240, identifier: "voiceTriggerAction"),
+        autoresizing: .lastColumnOnlyAutoresizingStyle
+    )
+
+    private func configureVoiceDictionaryTable() {
+        configureVoiceTable(voiceDictionaryTable, layout: Self.dictionaryLayout)
     }
 
     private func configureVoiceTriggersTable() {
-        guard let phraseColumn = voiceTriggersTable.tableColumns.first else { return }
-        phraseColumn.title = loc.s("prefs.voice.triggers.column.phrase")
-        phraseColumn.minWidth = 180
-        phraseColumn.width = 260
-        phraseColumn.resizingMask = [.autoresizingMask, .userResizingMask]
+        configureVoiceTable(voiceTriggersTable, layout: Self.triggerLayout)
+    }
 
-        let actionColumn = NSTableColumn(
-            identifier: NSUserInterfaceItemIdentifier("voiceTriggerAction")
-        )
-        actionColumn.title = loc.s("prefs.voice.triggers.column.action")
-        actionColumn.minWidth = 160
-        actionColumn.width = 240
-        actionColumn.resizingMask = [.autoresizingMask, .userResizingMask]
-        voiceTriggersTable.addTableColumn(actionColumn)
-        voiceTriggersTable.headerView = NSTableHeaderView()
-        voiceTriggersTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        voiceTriggersTable.allowsColumnReordering = false
+    private func configureVoiceTable(_ table: NSTableView, layout: VoiceTableLayout) {
+        guard let firstColumn = table.tableColumns.first else { return }
+        styleVoiceColumn(firstColumn, spec: layout.first)
+        let addedColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(layout.added.identifier))
+        styleVoiceColumn(addedColumn, spec: layout.added)
+        table.addTableColumn(addedColumn)
+        table.headerView = NSTableHeaderView()
+        table.columnAutoresizingStyle = layout.autoresizing
+        table.allowsColumnReordering = false
+    }
+
+    private func styleVoiceColumn(_ column: NSTableColumn, spec: VoiceColumnSpec) {
+        column.title = loc.s(spec.titleKey)
+        column.minWidth = spec.minWidth
+        column.width = spec.width
+        column.resizingMask = [.autoresizingMask, .userResizingMask]
     }
 
     private func applyVoiceShortcut(_ shortcut: DevTypeShortcut?) {
-        guard let shortcut else { return }
-        if let manager = hotkeyManager {
-            manager.applyVoiceShortcut(shortcut)
-        } else {
-            HotkeyPreferences.voiceShortcut = shortcut
-            NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
-        }
-        reload()
+        HotkeyBindingApply.commit(
+            shortcut, kind: .voiceDictation, manager: hotkeyManager
+        ) { [weak self] in self?.reload() }
     }
 
     @objc private func resetVoiceShortcut() {
         HotkeyPreferences.resetVoiceShortcut()
         if let manager = hotkeyManager {
-            manager.applyVoiceShortcut(HotkeyPreferences.voiceShortcut)
+            manager.apply(HotkeyPreferences.voiceShortcut, to: .voiceDictation)
         } else {
             NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         }
@@ -252,11 +258,9 @@ extension VoicePreferencesViewController {
     }
 
     @objc private func voiceDictRemoveEntry() {
-        let row = voiceDictionaryTable.selectedRow
-        guard voiceDictEntries.indices.contains(row) else { return }
-        let entry = voiceDictEntries[row]
-        VoicePreferences.removeDictionaryEntry(spoken: entry.spoken)
-        reload()
+        removeSelectedVoiceRow(in: voiceDictionaryTable, entries: voiceDictEntries) {
+            VoicePreferences.removeDictionaryEntry(spoken: $0.spoken)
+        }
     }
 
     @objc private func voiceTriggerAddEntry() {
@@ -270,10 +274,19 @@ extension VoicePreferencesViewController {
     }
 
     @objc private func voiceTriggerRemoveEntry() {
-        let row = voiceTriggersTable.selectedRow
-        guard voiceTriggerEntries.indices.contains(row) else { return }
-        let entry = voiceTriggerEntries[row]
-        VoicePreferences.removeVoiceTrigger(phrase: entry.phrase)
+        removeSelectedVoiceRow(in: voiceTriggersTable, entries: voiceTriggerEntries) {
+            VoicePreferences.removeVoiceTrigger(phrase: $0.phrase)
+        }
+    }
+
+    private func removeSelectedVoiceRow<Entry>(
+        in table: NSTableView,
+        entries: [Entry],
+        remove: (Entry) -> Void
+    ) {
+        let row = table.selectedRow
+        guard entries.indices.contains(row) else { return }
+        remove(entries[row])
         reload()
     }
 

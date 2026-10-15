@@ -138,9 +138,7 @@ public final class AXContextChecker {
 
     /// Whether this process is trusted for Accessibility (no prompt).
     public func isProcessTrusted() -> Bool {
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        let options = [promptKey: false] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        AccessibilityTrust.isProcessTrusted()
     }
 
     /// Applies `AXUIElementSetMessagingTimeout` so gates/inject fail fast on hung apps.

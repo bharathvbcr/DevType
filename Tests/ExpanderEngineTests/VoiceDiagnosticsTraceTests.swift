@@ -39,13 +39,6 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
         return directory.appendingPathComponent("voice-trace.jsonl")
     }
 
-    private func permissions(at url: URL) throws -> Int {
-        let value = try XCTUnwrap(
-            FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
-        )
-        return value.intValue & 0o777
-    }
-
     // MARK: - Default state
 
     /// The trace records dictated text, so a fresh installation must keep it off until the
@@ -158,8 +151,8 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
         XCTAssertEqual(recorder.record("permission-hardening", note: "dictated secret"), .accepted)
         XCTAssertNotNil(recorder.read())
 
-        XCTAssertEqual(try permissions(at: directory), 0o700)
-        XCTAssertEqual(try permissions(at: url), 0o600)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: directory), 0o700)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: url), 0o600)
         XCTAssertEqual(recorder.ioHealth.write, .succeeded)
     }
 
@@ -176,8 +169,8 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
         XCTAssertEqual(recorder.record("new-permissions", note: "dictated secret"), .accepted)
         XCTAssertNotNil(recorder.read())
 
-        XCTAssertEqual(try permissions(at: directory), 0o700)
-        XCTAssertEqual(try permissions(at: url), 0o600)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: directory), 0o700)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: url), 0o600)
         XCTAssertEqual(recorder.ioHealth.write, .succeeded)
     }
 
@@ -224,8 +217,8 @@ final class VoiceDiagnosticsTraceTests: XCTestCase {
         let recorder = VoiceDiagnosticsRecorder(traceURL: url)
 
         XCTAssertEqual(recorder.read(), "existing dictated trace")
-        XCTAssertEqual(try permissions(at: directory), 0o700)
-        XCTAssertEqual(try permissions(at: url), 0o600)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: directory), 0o700)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: url), 0o600)
         XCTAssertEqual(recorder.ioHealth.read, .succeeded)
     }
 

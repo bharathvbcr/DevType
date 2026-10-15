@@ -186,12 +186,8 @@ public final class UsageStatsStore {
     /// stranded for a whole debounce window.
     public static let defaultFlushRetryDelay: TimeInterval = 5.0
 
-    private let lock = NSLock()
     private let writer: DebouncedSidecarWriter
-
-    private var stats: [UUID: Stat] = [:]
-    private var dirty = false
-    private var _revision: UInt64 = 0
+    private let ledger: KeyedUsageLedger<UUID, Stat>
 
     /// Test seam: when set, replaces the atomic disk write so failure paths are
     /// reachable without a full disk. `nil` (the default) means production I/O.
@@ -200,11 +196,7 @@ public final class UsageStatsStore {
         set { writer.writeInterceptor = newValue }
     }
 
-    public var revision: UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        return _revision
-    }
+    public var revision: UInt64 { ledger.currentRevision }
 
     /// - Parameters:
     ///   - fileURL: override for tests; defaults to the device-local support directory.
@@ -226,11 +218,10 @@ public final class UsageStatsStore {
             failureMessage: "[Store] Failed to write usage stats"
         )
         let loaded = Self.loadFromDisk(fileURL: writer.fileURL)
-        stats = loaded.stats
-        dirty = loaded.needsRewrite
+        ledger = KeyedUsageLedger(stats: loaded.stats, dirty: loaded.needsRewrite)
         writer.source = self
         writer.installTerminateHook()
-        if dirty { scheduleFlush() }
+        if loaded.needsRewrite { scheduleFlush() }
     }
 
     public var storeFileURL: URL { writer.fileURL }
@@ -244,7 +235,7 @@ public final class UsageStatsStore {
         calendar: Calendar = .current
     ) {
         let bucketStart = calendar.dateInterval(of: .hour, for: date)?.start ?? date
-        lock.lock()
+        ledger.update { stats in
         var stat = stats[snippetID] ?? Stat()
         stat.usageCount = Saturating.adding(stat.usageCount, 1)
         if let previous = stat.lastUsedAt {
@@ -273,9 +264,8 @@ public final class UsageStatsStore {
             }
         }
         stats[snippetID] = stat
-        dirty = true
-        _revision &+= 1
-        lock.unlock()
+        return true
+        }
         scheduleFlush()
     }
 
@@ -283,19 +273,16 @@ public final class UsageStatsStore {
     /// Only fills IDs the sidecar has never seen, so it is idempotent and never
     /// resurrects a counter the user has since reset.
     public func seedLegacyCounts(from snippets: [SnippetModel]) {
-        var changed = false
-        lock.lock()
-        for snippet in snippets where snippet.usageCount > 0 {
-            if stats[snippet.id] == nil {
-                stats[snippet.id] = Stat(usageCount: snippet.usageCount, lastUsedAt: nil)
-                changed = true
+        let changed = ledger.update { stats in
+            var changed = false
+            for snippet in snippets where snippet.usageCount > 0 {
+                if stats[snippet.id] == nil {
+                    stats[snippet.id] = Stat(usageCount: snippet.usageCount, lastUsedAt: nil)
+                    changed = true
+                }
             }
+            return changed
         }
-        if changed {
-            dirty = true
-            _revision &+= 1
-        }
-        lock.unlock()
         if changed { scheduleFlush() }
     }
 
@@ -305,30 +292,19 @@ public final class UsageStatsStore {
     }
 
     public func reset(for snippetID: UUID) {
-        lock.lock()
-        if stats.removeValue(forKey: snippetID) != nil {
-            dirty = true
-            _revision &+= 1
-        }
-        lock.unlock()
+        ledger.reset(for: snippetID)
         scheduleFlush()
     }
 
     public func resetAll() {
-        lock.lock()
-        stats.removeAll()
-        dirty = true
-        _revision &+= 1
-        lock.unlock()
+        ledger.resetAll()
         scheduleFlush()
     }
 
     // MARK: - Reading
 
     public func stat(for snippetID: UUID) -> Stat? {
-        lock.lock()
-        defer { lock.unlock() }
-        return stats[snippetID]
+        ledger.stat(for: snippetID)
     }
 
     public func usageCount(for snippetID: UUID) -> Int {
@@ -340,9 +316,7 @@ public final class UsageStatsStore {
     }
 
     public func allStats() -> [UUID: Stat] {
-        lock.lock()
-        defer { lock.unlock() }
-        return stats
+        ledger.allStats()
     }
 
     /// Returns a period-correct snapshot from one locked copy of the sidecar.
@@ -412,9 +386,7 @@ public final class UsageStatsStore {
 
     /// Total recorded expansions across every snippet (§4.5 statistics surface).
     public func totalUsage() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return stats.values.reduce(0) { $0 + $1.usageCount }
+        ledger.totalUsage { $0.usageCount }
     }
 
     /// Most-used snippet IDs, highest first. Ties broken by recency.
@@ -599,14 +571,7 @@ public final class UsageStatsStore {
 
 extension UsageStatsStore: SidecarPayloadSource {
     func takePendingSidecarPayload() throws -> Data? {
-        lock.lock()
-        guard dirty else {
-            lock.unlock()
-            return nil
-        }
-        let snapshot = stats
-        dirty = false
-        lock.unlock()
+        guard let snapshot = ledger.takeDirtySnapshot() else { return nil }
 
         // JSON object keys must be strings; the in-memory map is keyed by UUID.
         var keyed: [String: Stat] = [:]
@@ -619,8 +584,6 @@ extension UsageStatsStore: SidecarPayloadSource {
     }
 
     func reArmPendingSidecarPayload() {
-        lock.lock()
-        dirty = true
-        lock.unlock()
+        ledger.rearm()
     }
 }

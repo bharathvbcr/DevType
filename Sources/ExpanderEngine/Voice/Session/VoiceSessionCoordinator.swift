@@ -486,40 +486,22 @@ public actor VoiceSessionCoordinator {
     /// plan. The generation checks make a late probe from an older session unable to rewrite the
     /// active session's manifest, and persisting before provider entry leaves recovery with the
     /// exact component that was about to handle the durable audio artifact.
-    private func recordResolvedSpeechProvider(
-        _ descriptor: SpeechProviderDescriptor,
-        generation: SessionGeneration
+    /// Commits a resolved descriptor without replacing the requested plan. The generation
+    /// check runs before the descriptor comparison, so a late probe from an older session
+    /// cannot rewrite the active manifest. `current` and `resolving` say which field moves;
+    /// speech and correction do not share a mode flag.
+    private func recordResolvedProvider<Descriptor: Equatable>(
+        _ descriptor: Descriptor,
+        generation: SessionGeneration,
+        current: (VoiceSessionSnapshot) -> Descriptor?,
+        resolving: (VoiceSessionSnapshot) -> VoiceSessionSnapshot
     ) -> Bool {
         guard taskBag?.isCurrentGeneration(generation) == true,
               var state = activeState,
               state.snapshot.generation == generation else { return false }
 
-        if state.snapshot.resolvedSpeechProvider == descriptor { return true }
-        state.snapshot = state.snapshot.resolvingSpeechProvider(descriptor)
-        activeState = state
-
-        do {
-            _ = try store.createSession(snapshot: state.snapshot)
-            return taskBag?.isCurrentGeneration(generation) == true
-        } catch {
-            handlePersistenceFailure(error, generation: generation, artifactState: .partial)
-            return false
-        }
-    }
-
-    /// Correction resolution follows the same durable, generation-scoped provenance contract as
-    /// recognition. A corrector may itself return a candidate attributed to a registered fallback;
-    /// callers can record that descriptor again before the reducer advances to delivery.
-    private func recordResolvedCorrectionProvider(
-        _ descriptor: CorrectionProviderDescriptor,
-        generation: SessionGeneration
-    ) -> Bool {
-        guard taskBag?.isCurrentGeneration(generation) == true,
-              var state = activeState,
-              state.snapshot.generation == generation else { return false }
-
-        if state.snapshot.resolvedCorrectionProvider == descriptor { return true }
-        state.snapshot = state.snapshot.resolvingCorrectionProvider(descriptor)
+        if current(state.snapshot) == descriptor { return true }
+        state.snapshot = resolving(state.snapshot)
         activeState = state
 
         do {
@@ -918,9 +900,11 @@ public actor VoiceSessionCoordinator {
                         _ = await self.processEvent(.failureOccurred(failure), generation: generation)
                         return
                     }
-                    guard await self.recordResolvedSpeechProvider(
+                    guard await self.recordResolvedProvider(
                         recognizer.descriptor,
-                        generation: generation
+                        generation: generation,
+                        current: { $0.resolvedSpeechProvider },
+                        resolving: { $0.resolvingSpeechProvider(recognizer.descriptor) }
                     ) else { return }
 
                     let speechRequest = SpeechRequest(
@@ -1009,9 +993,11 @@ public actor VoiceSessionCoordinator {
                         )
                         return
                     }
-                    guard await self.recordResolvedCorrectionProvider(
+                    guard await self.recordResolvedProvider(
                         corrector.descriptor,
-                        generation: generation
+                        generation: generation,
+                        current: { $0.resolvedCorrectionProvider },
+                        resolving: { $0.resolvingCorrectionProvider(corrector.descriptor) }
                     ) else { return }
 
                     let final = await CorrectionPipeline.execute(
@@ -1034,9 +1020,11 @@ public actor VoiceSessionCoordinator {
                        let candidateCorrector = await self.correctionRegistry.corrector(
                            for: candidateID
                        ) {
-                        guard await self.recordResolvedCorrectionProvider(
+                        guard await self.recordResolvedProvider(
                             candidateCorrector.descriptor,
-                            generation: generation
+                            generation: generation,
+                            current: { $0.resolvedCorrectionProvider },
+                            resolving: { $0.resolvingCorrectionProvider(candidateCorrector.descriptor) }
                         ) else { return }
                     }
 

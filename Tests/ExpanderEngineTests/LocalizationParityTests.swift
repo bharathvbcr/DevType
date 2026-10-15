@@ -18,19 +18,15 @@ final class LocalizationParityTests: XCTestCase {
 
     /// Setting `LocalizationManager.language` persists to `UserDefaults.standard`; restore it so
     /// the tests leave no trace.
-    private var savedLanguage: String?
+    private var savedLanguage: Any?
 
     override func setUp() {
         super.setUp()
-        savedLanguage = UserDefaults.standard.string(forKey: LocalizationManager.deviceKey)
+        savedLanguage = LanguageDefaultsFixture.current()
     }
 
     override func tearDown() {
-        if let savedLanguage {
-            UserDefaults.standard.set(savedLanguage, forKey: LocalizationManager.deviceKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: LocalizationManager.deviceKey)
-        }
+        LanguageDefaultsFixture.restore(savedLanguage)
         super.tearDown()
     }
 

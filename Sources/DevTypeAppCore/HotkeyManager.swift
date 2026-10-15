@@ -18,9 +18,8 @@ final class HotkeyManager {
     private var refs: [UInt32: EventHotKeyRef] = [:]
     private var nextID: UInt32 = 1
     private var handlerInstalled = false
-    private var inlineSearchHotkeyID: UInt32?
-    private var aiPaletteHotkeyID: UInt32?
-    private var voiceDictationHotkeyID: UInt32?
+    private var builtInHotkeyIDs: [BuiltInHotkey: UInt32] = [:]
+    private var builtInRegistrationStatus: [BuiltInHotkey: OSStatus] = [:]
     private var macroByID: [UInt32: HotkeyMacroAction] = [:]
 
     var onInlineSearch: (() -> Void)?
@@ -57,47 +56,29 @@ final class HotkeyManager {
             DevTypeLog.app.info("[App] hotkeys disabled by preference — nothing registered")
             return
         }
-        registerInlineSearch()
-        registerAIPalette()
-        registerVoiceDictation()
+        for kind in BuiltInHotkey.allCases {
+            register(kind)
+        }
         for macro in macros where macro.keyCode != 0 {
             registerMacro(macro)
         }
     }
 
-    /// §4.2: rebinds the palette shortcut, persists it, and re-registers.
+    /// Rebinds one built-in shortcut, persists it, and re-registers.
     /// Returns `noErr` on success so Preferences can surface the failure inline
     /// as well as through `onRegistrationFailed`.
     @discardableResult
-    func applyInlineSearchShortcut(_ shortcut: DevTypeShortcut) -> OSStatus {
-        HotkeyPreferences.inlineSearchShortcut = shortcut
-        inlineSearchShortcut = shortcut
-        lastRegistrationStatus = noErr
+    func apply(_ shortcut: DevTypeShortcut, to kind: BuiltInHotkey) -> OSStatus {
+        HotkeyPreferences.setShortcut(shortcut, for: kind)
+        switch kind {
+        case .inlineSearch: inlineSearchShortcut = shortcut
+        case .aiPalette: aiPaletteShortcut = shortcut
+        case .voiceDictation: voiceShortcut = shortcut
+        }
+        builtInRegistrationStatus[kind] = noErr
         registerAll()
         NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
-        return lastRegistrationStatus
-    }
-
-    /// Rebinds the AI action-palette shortcut, persists it, and re-registers.
-    @discardableResult
-    func applyAIPaletteShortcut(_ shortcut: DevTypeShortcut) -> OSStatus {
-        HotkeyPreferences.aiPaletteShortcut = shortcut
-        aiPaletteShortcut = shortcut
-        lastAIPaletteRegistrationStatus = noErr
-        registerAll()
-        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
-        return lastAIPaletteRegistrationStatus
-    }
-
-    /// Rebinds the Voice Dictation shortcut, persists it, and re-registers.
-    @discardableResult
-    func applyVoiceShortcut(_ shortcut: DevTypeShortcut) -> OSStatus {
-        HotkeyPreferences.voiceShortcut = shortcut
-        voiceShortcut = shortcut
-        lastVoiceRegistrationStatus = noErr
-        registerAll()
-        NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
-        return lastVoiceRegistrationStatus
+        return builtInRegistrationStatus[kind] ?? noErr
     }
 
     /// §4.3: replaces the macro list, persists it, and re-registers.
@@ -115,15 +96,6 @@ final class HotkeyManager {
         NotificationCenter.default.post(name: .devTypePreferencesChanged, object: nil)
         return lastMacroRegistrationFailures
     }
-
-    /// Status from the most recent inline-search registration attempt.
-    private(set) var lastRegistrationStatus: OSStatus = noErr
-
-    /// Status from the most recent AI-palette registration attempt.
-    private(set) var lastAIPaletteRegistrationStatus: OSStatus = noErr
-
-    /// Status from the most recent Voice Dictation registration attempt.
-    private(set) var lastVoiceRegistrationStatus: OSStatus = noErr
 
     /// Failures from the most recent macro re-registration, surfaced by
     /// Preferences after `applyMacros(_:)`.
@@ -197,32 +169,26 @@ final class HotkeyManager {
         return (claim.id, claim.status)
     }
 
-    private func registerInlineSearch() {
-        // §4.2: was `kVK_ANSI_Slash` + `cmdKey`, hardcoded. Now read from
+    private func shortcut(for kind: BuiltInHotkey) -> DevTypeShortcut {
+        switch kind {
+        case .inlineSearch: return inlineSearchShortcut
+        case .aiPalette: return aiPaletteShortcut
+        case .voiceDictation: return voiceShortcut
+        }
+    }
+
+    private func register(_ kind: BuiltInHotkey) {
+        // §4.2: inline search was `kVK_ANSI_Slash` + `cmdKey`, hardcoded. Now read from
         // `HotkeyPreferences` so the Preferences recorder can rebind it.
-        let result = registerBuiltIn(inlineSearchShortcut, named: "inline search")
-        lastRegistrationStatus = result.status
-        if let id = result.id { inlineSearchHotkeyID = id }
-    }
-
-    private func registerAIPalette() {
-        let result = registerBuiltIn(aiPaletteShortcut, named: "AI palette")
-        lastAIPaletteRegistrationStatus = result.status
-        if let id = result.id { aiPaletteHotkeyID = id }
-    }
-
-    private func registerVoiceDictation() {
-        let result = registerBuiltIn(voiceShortcut, named: "Voice dictation")
-        lastVoiceRegistrationStatus = result.status
-        if let id = result.id { voiceDictationHotkeyID = id }
+        let result = registerBuiltIn(shortcut(for: kind), named: kind.logName)
+        builtInRegistrationStatus[kind] = result.status
+        if let id = result.id { builtInHotkeyIDs[kind] = id }
     }
 
     private func unregisterAll() {
         for (_, ref) in refs { UnregisterEventHotKey(ref) }
         refs.removeAll()
-        inlineSearchHotkeyID = nil
-        aiPaletteHotkeyID = nil
-        voiceDictationHotkeyID = nil
+        builtInHotkeyIDs.removeAll()
         // §4.3: re-registering after an edit reuses fresh IDs; stale entries here
         // would keep firing removed macros.
         macroByID.removeAll()
@@ -295,21 +261,13 @@ final class HotkeyManager {
     }
 
     private func fire(id: UInt32) {
-        if id == inlineSearchHotkeyID {
+        if let kind = builtInHotkeyIDs.first(where: { $0.value == id })?.key {
             DispatchQueue.main.async { [weak self] in
-                self?.onInlineSearch?()
-            }
-            return
-        }
-        if id == aiPaletteHotkeyID {
-            DispatchQueue.main.async { [weak self] in
-                self?.onAIPalette?()
-            }
-            return
-        }
-        if id == voiceDictationHotkeyID {
-            DispatchQueue.main.async { [weak self] in
-                self?.onVoiceDictation?()
+                switch kind {
+                case .inlineSearch: self?.onInlineSearch?()
+                case .aiPalette: self?.onAIPalette?()
+                case .voiceDictation: self?.onVoiceDictation?()
+                }
             }
             return
         }

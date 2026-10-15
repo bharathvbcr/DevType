@@ -54,14 +54,12 @@ public actor CorrectionProviderRegistry {
     }
 
     /// Probes every corrector the session's privacy route permits.
-    public func availableProviders(
-        for privacyRoute: PrivacyRoute
-    ) async -> [(descriptor: CorrectionProviderDescriptor, readiness: ProviderReadiness)] {
-        var results: [(CorrectionProviderDescriptor, ProviderReadiness)] = []
-        for provider in providers.values where privacyRoute.permits(provider.descriptor.privacyRoute) {
-            results.append((provider.descriptor, await provider.probe()))
-        }
-        return results.sorted { $0.0.id < $1.0.id }
+    private static func readiness(of provider: any TranscriptCorrector) async -> ProviderReadiness {
+        await provider.probe()
+    }
+
+    public func availableProviders(for privacyRoute: PrivacyRoute) async -> CorrectionProviderProbe {
+        await ProviderAvailability.list(providers.values, privacyRoute, \.descriptor, Self.readiness)
     }
 
     /// Returns the corrector to use, or `nil` when correction is disabled for this session.

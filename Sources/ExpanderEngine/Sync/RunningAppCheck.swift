@@ -2,16 +2,40 @@
 
 import Foundation
 
-public enum RunningAppCheck {
-    public static func isTextExpander(bundleID: String?, name: String?) -> Bool {
-        if let b = bundleID?.lowercased(), b.contains("textexpander") { return true }
-        if let n = name?.lowercased(), n.contains("textexpander") { return true }
+/// One other expander we recognise by a substring of its bundle id or process name.
+public struct CompetitorApp: Sendable, Equatable {
+    public let needle: String
+    public let alertTitleKey: String
+    public let alertMessageKey: String
+
+    public func matches(bundleID: String?, name: String?) -> Bool {
+        if let bundleID, bundleID.lowercased().contains(needle) { return true }
+        if let name, name.lowercased().contains(needle) { return true }
         return false
+    }
+}
+
+public enum RunningAppCheck {
+    public static let textExpander = CompetitorApp(
+        needle: "textexpander",
+        alertTitleKey: "alert.textExpander.title",
+        alertMessageKey: "menu.textExpanderWarning"
+    )
+    public static let espanso = CompetitorApp(
+        needle: "espanso",
+        alertTitleKey: "alert.espanso.title",
+        alertMessageKey: "menu.espansoWarning"
+    )
+
+    /// The expanders `AppDelegate` warns about at launch. Add a row here rather than
+    /// another `isX` / `warnIfX` pair.
+    public static let warnedAtLaunch: [CompetitorApp] = [textExpander, espanso]
+
+    public static func isTextExpander(bundleID: String?, name: String?) -> Bool {
+        textExpander.matches(bundleID: bundleID, name: name)
     }
 
     public static func isEspanso(bundleID: String?, name: String?) -> Bool {
-        if let b = bundleID?.lowercased(), b.contains("espanso") { return true }
-        if let n = name?.lowercased(), n.contains("espanso") { return true }
-        return false
+        espanso.matches(bundleID: bundleID, name: name)
     }
 }

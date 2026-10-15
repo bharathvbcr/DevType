@@ -46,12 +46,8 @@ public final class CommandUsageStatsStore {
     /// stranded for a whole debounce window.
     public static let defaultFlushRetryDelay: TimeInterval = 5.0
 
-    private let lock = NSLock()
     private let writer: DebouncedSidecarWriter
-
-    private var stats: [String: Stat] = [:]
-    private var dirty = false
-    private var _revision: UInt64 = 0
+    private let ledger: KeyedUsageLedger<String, Stat>
 
     /// Test seam: when set, replaces the atomic disk write so failure paths are
     /// reachable without a full disk. `nil` (the default) means production I/O.
@@ -60,11 +56,7 @@ public final class CommandUsageStatsStore {
         set { writer.writeInterceptor = newValue }
     }
 
-    public var revision: UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        return _revision
-    }
+    public var revision: UInt64 { ledger.currentRevision }
 
     public init(
         fileURL: URL? = nil,
@@ -80,7 +72,7 @@ public final class CommandUsageStatsStore {
             queueLabel: "devtype.commandusagestats",
             failureMessage: "[Store] Failed to write command usage stats"
         )
-        stats = Self.loadFromDisk(fileURL: writer.fileURL)
+        ledger = KeyedUsageLedger(stats: Self.loadFromDisk(fileURL: writer.fileURL))
         writer.source = self
         writer.installTerminateHook()
     }
@@ -90,21 +82,18 @@ public final class CommandUsageStatsStore {
     public func recordUsage(for commandID: String, at date: Date = Date()) {
         let key = commandID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
-        lock.lock()
-        var stat = stats[key] ?? Stat()
-        stat.usageCount += 1
-        stat.lastUsedAt = date
-        stats[key] = stat
-        dirty = true
-        _revision &+= 1
-        lock.unlock()
+        ledger.update { stats in
+            var stat = stats[key] ?? Stat()
+            stat.usageCount += 1
+            stat.lastUsedAt = date
+            stats[key] = stat
+            return true
+        }
         scheduleFlush()
     }
 
     public func stat(for commandID: String) -> Stat? {
-        lock.lock()
-        defer { lock.unlock() }
-        return stats[commandID]
+        ledger.stat(for: commandID)
     }
 
     public func usageCount(for commandID: String) -> Int {
@@ -116,33 +105,20 @@ public final class CommandUsageStatsStore {
     }
 
     public func allStats() -> [String: Stat] {
-        lock.lock()
-        defer { lock.unlock() }
-        return stats
+        ledger.allStats()
     }
 
     public func totalUsage() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return stats.values.reduce(0) { $0 + $1.usageCount }
+        ledger.totalUsage { $0.usageCount }
     }
 
     public func reset(for commandID: String) {
-        lock.lock()
-        if stats.removeValue(forKey: commandID) != nil {
-            dirty = true
-            _revision &+= 1
-        }
-        lock.unlock()
+        ledger.reset(for: commandID)
         scheduleFlush()
     }
 
     public func resetAll() {
-        lock.lock()
-        stats.removeAll()
-        dirty = true
-        _revision &+= 1
-        lock.unlock()
+        ledger.resetAll()
         scheduleFlush()
     }
 
@@ -156,10 +132,7 @@ public final class CommandUsageStatsStore {
     public static let maximumRankBoost = 24
 
     public func rankBoost(for commandID: String) -> Int {
-        lock.lock()
-        let stat = stats[commandID]
-        lock.unlock()
-        guard let stat, stat.usageCount > 0 else { return 0 }
+        guard let stat = stat(for: commandID), stat.usageCount > 0 else { return 0 }
         var boost = 0
         var remaining = stat.usageCount
         while remaining > 0 && boost < 20 {
@@ -175,10 +148,7 @@ public final class CommandUsageStatsStore {
     /// Most-used command IDs, highest first. Ties broken by recency.
     public func topCommandIDs(limit: Int = 10) -> [String] {
         guard limit > 0 else { return [] }
-        lock.lock()
-        let snapshot = stats
-        lock.unlock()
-        let ordered = snapshot
+        let ordered = allStats()
             .filter { $0.value.usageCount > 0 }
             .sorted { lhs, rhs in
                 if lhs.value.usageCount != rhs.value.usageCount {
@@ -195,10 +165,7 @@ public final class CommandUsageStatsStore {
     /// Most-recently-used command IDs, newest first.
     public func recentCommandIDs(limit: Int = 12) -> [String] {
         guard limit > 0 else { return [] }
-        lock.lock()
-        let snapshot = stats
-        lock.unlock()
-        let ordered = snapshot
+        let ordered = allStats()
             .filter { $0.value.lastUsedAt != nil }
             .sorted {
                 ($0.value.lastUsedAt ?? .distantPast) > ($1.value.lastUsedAt ?? .distantPast)
@@ -219,23 +186,13 @@ public final class CommandUsageStatsStore {
 
 extension CommandUsageStatsStore: SidecarPayloadSource {
     func takePendingSidecarPayload() throws -> Data? {
-        lock.lock()
-        guard dirty else {
-            lock.unlock()
-            return nil
-        }
-        let snapshot = stats
-        dirty = false
-        lock.unlock()
-
+        guard let snapshot = ledger.takeDirtySnapshot() else { return nil }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(Document(stats: snapshot))
     }
 
     func reArmPendingSidecarPayload() {
-        lock.lock()
-        dirty = true
-        lock.unlock()
+        ledger.rearm()
     }
 }

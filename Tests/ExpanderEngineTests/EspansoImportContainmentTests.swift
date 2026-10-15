@@ -21,27 +21,6 @@ final class EspansoImportContainmentTests: XCTestCase {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    /// Mirrors the real-PNG helper in `ImageSnippetTests` so refusals cannot be
-    /// explained away as "the payload was not an image anyway".
-    private func makePNGData() throws -> Data {
-        let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: 4,
-            pixelsHigh: 4,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        )
-        guard let rep, let data = rep.representation(using: .png, properties: [:]) else {
-            throw NSError(domain: "tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "PNG encode failed"])
-        }
-        return data
-    }
-
     // MARK: - `imports:` confinement
 
     /// Absolute and `..`-escaping `imports:` targets must never be read, even
@@ -126,7 +105,7 @@ final class EspansoImportContainmentTests: XCTestCase {
         let outside = root.appendingPathComponent("outside", isDirectory: true)
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
         let leakedPNG = outside.appendingPathComponent("leak.png")
-        try makePNGData().write(to: leakedPNG)
+        try TestPNG.makePNGData().write(to: leakedPNG)
 
         let config = root.appendingPathComponent("config", isDirectory: true)
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
@@ -157,11 +136,11 @@ final class EspansoImportContainmentTests: XCTestCase {
 
         let outside = root.appendingPathComponent("outside", isDirectory: true)
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
-        try makePNGData().write(to: outside.appendingPathComponent("escape.png"))
+        try TestPNG.makePNGData().write(to: outside.appendingPathComponent("escape.png"))
 
         let config = root.appendingPathComponent("config", isDirectory: true)
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
-        try makePNGData().write(to: config.appendingPathComponent("local.png"))
+        try TestPNG.makePNGData().write(to: config.appendingPathComponent("local.png"))
         try """
         matches:
           - trigger: ":escape"

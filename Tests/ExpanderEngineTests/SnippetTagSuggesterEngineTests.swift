@@ -12,20 +12,15 @@ final class SnippetTagSuggesterEngineTests: XCTestCase {
 
     // MARK: - Preferences
 
-    private var savedMaster: Any?
-    private var savedOwn: Any?
+    private var taggerPreferences = TaggerPreferenceGuard()
 
     override func setUp() {
         super.setUp()
-        savedMaster = UserDefaults.standard.object(forKey: AIPreferences.enabledKey)
-        savedOwn = UserDefaults.standard.object(forKey: SnippetTagSuggester.enabledKey)
-        UserDefaults.standard.set(true, forKey: AIPreferences.enabledKey)
-        UserDefaults.standard.set(true, forKey: SnippetTagSuggester.enabledKey)
+        taggerPreferences.enableBoth()
     }
 
     override func tearDown() {
-        UserDefaults.standard.set(savedMaster, forKey: AIPreferences.enabledKey)
-        UserDefaults.standard.set(savedOwn, forKey: SnippetTagSuggester.enabledKey)
+        taggerPreferences.restore()
         super.tearDown()
     }
 

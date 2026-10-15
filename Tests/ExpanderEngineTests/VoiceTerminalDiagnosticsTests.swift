@@ -20,20 +20,6 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
         return directory
     }
 
-    private func makeRecorder(in directory: URL) -> VoiceDiagnosticsRecorder {
-        VoiceDiagnosticsRecorder(
-            traceURL: directory.appendingPathComponent("voice-trace.jsonl"),
-            terminalManifestURL: directory.appendingPathComponent("voice-terminal-manifest.json")
-        )
-    }
-
-    private func permissions(at url: URL) throws -> Int {
-        let value = try XCTUnwrap(
-            FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
-        )
-        return value.intValue & 0o777
-    }
-
     private func makeSnapshot(
         generation: UInt64 = 1,
         speechProviderID: String = VoiceSessionSnapshotFactory.ProviderID.whisperServer,
@@ -60,7 +46,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
 
     func testFailureSummaryWhitelistsProviderAndDropsEveryFreeFormPayload() throws {
         let directory = try makeDirectory()
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let secret = "private transcript /Users/person/recordings/voice.caf bearer-token"
         let snapshot = makeSnapshot(speechProviderID: secret, route: .cloudPermitted)
         let failure = VoiceFailure(
@@ -166,7 +152,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
 
     func testTerminalManifestIsBoundedAndCarriesObservedAndRetainedCounts() throws {
         let directory = try makeDirectory()
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let snapshot = makeSnapshot()
 
         for offset in 0..<(VoiceDiagnosticsRecorder.maxTerminalEntries + 19) {
@@ -201,7 +187,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
         let directory = try makeDirectory()
         let manifestURL = directory.appendingPathComponent("voice-terminal-manifest.json")
         try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: directory.path)
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let diagnostic = VoiceTerminalDiagnostic(
             outcome: .cancelled,
             code: .cancelled,
@@ -213,8 +199,8 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
 
         XCTAssertEqual(recorder.recordTerminal(diagnostic), .persisted)
 
-        XCTAssertEqual(try permissions(at: directory), 0o700)
-        XCTAssertEqual(try permissions(at: manifestURL), 0o600)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: directory), 0o700)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: manifestURL), 0o600)
         XCTAssertEqual(recorder.ioHealth.terminalWrite, .succeeded)
     }
 
@@ -253,7 +239,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
     func testTerminalReloadTightensPreexistingDirectoryAndManifestPermissions() throws {
         let directory = try makeDirectory()
         let manifestURL = directory.appendingPathComponent("voice-terminal-manifest.json")
-        let seed = makeRecorder(in: directory)
+        let seed = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let diagnostic = VoiceTerminalDiagnostic(
             outcome: .cancelled,
             code: .cancelled,
@@ -266,18 +252,18 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: directory.path)
         try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: manifestURL.path)
 
-        let reloaded = makeRecorder(in: directory)
+        let reloaded = VoiceDiagnosticsFixture.makeRecorder(in: directory)
 
         XCTAssertEqual(reloaded.recentTerminalDiagnostics(), [diagnostic])
-        XCTAssertEqual(try permissions(at: directory), 0o700)
-        XCTAssertEqual(try permissions(at: manifestURL), 0o600)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: directory), 0o700)
+        XCTAssertEqual(try VoiceDiagnosticsFixture.posixPermissions(at: manifestURL), 0o600)
         XCTAssertEqual(reloaded.ioHealth.terminalRead, .succeeded)
     }
 
     func testTerminalReloadPermissionFailureIsTypedAndReturnsNoUncheckedEntries() throws {
         let directory = try makeDirectory()
         let manifestURL = directory.appendingPathComponent("voice-terminal-manifest.json")
-        let seed = makeRecorder(in: directory)
+        let seed = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let diagnostic = VoiceTerminalDiagnostic(
             outcome: .cancelled,
             code: .cancelled,
@@ -307,7 +293,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
     func testTransientInitialManifestReadFailureRetriesBeforeTheNextRecord() throws {
         let directory = try makeDirectory()
         let manifestURL = directory.appendingPathComponent("voice-terminal-manifest.json")
-        let seed = makeRecorder(in: directory)
+        let seed = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let retained = VoiceTerminalDiagnostic(
             recordedAt: Date(timeIntervalSince1970: 1),
             outcome: .cancelled,
@@ -349,7 +335,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
         )
         XCTAssertEqual(reloaded.recordTerminal(newest), .persisted)
 
-        let verified = makeRecorder(in: directory)
+        let verified = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         XCTAssertEqual(
             verified.recentTerminalDiagnostics(limit: Int.max),
             [retained, newest],
@@ -360,7 +346,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
     func testTerminalManifestGrowthAfterSizeCheckIsRejectedByTheBoundedReader() throws {
         let directory = try makeDirectory()
         let manifestURL = directory.appendingPathComponent("voice-terminal-manifest.json")
-        let seed = makeRecorder(in: directory)
+        let seed = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let diagnostic = VoiceTerminalDiagnostic(
             outcome: .cancelled,
             code: .cancelled,
@@ -517,7 +503,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
 
     func testCloudConsentRefusalPersistsTypedDiagnosticAndPreservesPublicErrorContract() async throws {
         let directory = try makeDirectory()
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let coordinator = VoiceSessionCoordinator(
             capture: CaptureStub(),
             store: VoiceSessionStore(baseDirectory: directory.appendingPathComponent("sessions")),
@@ -557,7 +543,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
 
     func testDependencyDownReachesRecorderAndObserverEndToEnd() async throws {
         let directory = try makeDirectory()
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let capture = CaptureStub()
         let failure = VoiceFailure(
             stage: .recognition,
@@ -604,7 +590,7 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
 
     func testCancellationAndSupersessionHaveDistinctStableCodes() async throws {
         let directory = try makeDirectory()
-        let recorder = makeRecorder(in: directory)
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
         let capture = CaptureStub()
         let coordinator = VoiceSessionCoordinator(
             capture: capture,

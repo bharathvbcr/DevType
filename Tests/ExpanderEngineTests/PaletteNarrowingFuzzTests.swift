@@ -5,17 +5,6 @@ import XCTest
 /// cache live) must return exactly what a from-scratch scan of the same query returns.
 final class PaletteNarrowingFuzzTests: XCTestCase {
 
-    private struct SplitMix64: RandomNumberGenerator {
-        var state: UInt64
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-    }
-
     /// Single keystrokes: ASCII, query syntax, accents, combining marks, ß/ligatures/fullwidth,
     /// Hangul (precomposed, compatibility and conjoining jamo), CJK and emoji incl. modifiers/ZWJ.
     private static let keys: [String] = [
@@ -35,13 +24,13 @@ final class PaletteNarrowingFuzzTests: XCTestCase {
         "中文", "地址", "😀smile", "👍🏽ok", "👩‍💻dev", "🇺🇸us", "e\u{301}cole", "école", "x", "zz", "a-b", "a:b",
     ]
 
-    private func uuid(_ rng: inout SplitMix64) -> UUID {
+    private func uuid(_ rng: inout RawSplitMix64) -> UUID {
         var b: [UInt8] = []
         for _ in 0..<2 { withUnsafeBytes(of: rng.next()) { b.append(contentsOf: $0) } }
         return UUID(uuid: (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]))
     }
 
-    private func library(_ rng: inout SplitMix64, count: Int) -> [SnippetGroup] {
+    private func library(_ rng: inout RawSplitMix64, count: Int) -> [SnippetGroup] {
         func w() -> String { Self.words.randomElement(using: &rng)! }
         var groups: [SnippetGroup] = []
         for g in 0..<3 {
@@ -62,7 +51,7 @@ final class PaletteNarrowingFuzzTests: XCTestCase {
         return groups
     }
 
-    private func keystrokes(_ rng: inout SplitMix64) -> [String] {
+    private func keystrokes(_ rng: inout RawSplitMix64) -> [String] {
         var text = ""
         var states: [String] = []
         for _ in 0..<Int.random(in: 4...14, using: &rng) {
@@ -110,7 +99,7 @@ final class PaletteNarrowingFuzzTests: XCTestCase {
     }
 
     func testTypedQueriesMatchAFreshScanAtEveryKeystroke() {
-        var rng = SplitMix64(state: 0xD1FF)
+        var rng = RawSplitMix64(seed: 0xD1FF)
         var narrowedSteps = 0
         var totalSteps = 0
         var failures = 0
