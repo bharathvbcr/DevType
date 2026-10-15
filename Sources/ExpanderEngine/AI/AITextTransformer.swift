@@ -134,6 +134,15 @@ public final class AITransformDiscardHandle: @unchecked Sendable {
         guard let task = lock.withLock({ self.task }) else { return }
         await task.value
     }
+
+    /// A handle with no generation behind it. The preview can discard it the same way it
+    /// discards a real request; `settled()` returns immediately because nothing is running.
+    /// Stand-in runners return one so a test can deliver snapshots without a model session.
+    public static func unattached() -> AITransformDiscardHandle {
+        AITransformDiscardHandle(
+            once: AITransformOnceCompletion(queue: .main, handler: { _ in })
+        )
+    }
 }
 
 /// Ensures a transform completion handler runs at most once, on a chosen queue.
@@ -935,6 +944,19 @@ public enum AIRefusalProse {
     }
 }
 
+/// Whether a streamed snapshot may be handed to the preview.
+///
+/// `stripped` is the text `AIMarkdownStripper.strip` would show — the same string
+/// `onPartial` receives — not the raw snapshot and not the sanitized final answer.
+/// Refusal prose is withheld so Replace cannot inject it. The finished screen still
+/// runs after `AITransformText.sanitize` and the strip, and that is what throws
+/// `.refusal`, including when a fence hid the refusal until the markers came off.
+public enum AIStreamedPartial {
+    public static func isPublishable(_ stripped: String, input: String) -> Bool {
+        !AIRefusalProse.detected(output: stripped, input: input)
+    }
+}
+
 /// Counts consecutive identical requests so a Retry can re-roll sampling.
 public struct AIRepeatTracker: Sendable {
     private var lastSignature: String?
@@ -1534,11 +1556,20 @@ public actor AITextTransformer {
                 // discarded generation would keep the latch for its full natural length.
                 try Task.checkCancellation()
                 lastText = snapshot.content
-                // A partial is not decoration: `AIPreviewPanel` keeps the last one as its
-                // result, and Replace stays enabled on it when generation then fails. So
-                // the preview shows — and can inject — the same stripped text the finished
-                // answer would produce, instead of Markdown that vanishes at the end.
-                onPartial(AIMarkdownStripper.strip(lastText, policy: markdownPolicy, original: input))
+                // A useful partial is what the preview keeps, and Replace stays enabled
+                // on it when generation then fails for a reason other than refusal. A
+                // snapshot that already reads as refusal prose is not one of those:
+                // publishing it would let Replace inject the refusal. Withhold it (`nil`
+                // is ignored) and leave whatever is already on screen; the completion
+                // path clears a refusal. The gate sees the same stripped text the
+                // preview would show. It does not replace the screen below, which still
+                // runs after sanitize and strip so a fenced refusal still throws.
+                let shown = AIMarkdownStripper.strip(
+                    lastText,
+                    policy: markdownPolicy,
+                    original: input
+                )
+                onPartial(AIStreamedPartial.isPublishable(shown, input: input) ? shown : nil)
             }
             raw = lastText
         } else {

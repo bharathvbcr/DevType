@@ -42,6 +42,9 @@ enum AIPreviewPanel {
 
     /// Shared entry used by the hotkey path (after action pick) and the typed engine path.
     /// `restoreOnCancel` re-injects the erased typed trigger when the user dismisses without Replace.
+    ///
+    /// `generationRunner` replaces `AITextTransformer.transformStreaming` when set, and is
+    /// invoked with the same partial and completion callbacks. Nil keeps today's call.
     static func present(
         input: String,
         kind: AITransformKind,
@@ -52,7 +55,8 @@ enum AIPreviewPanel {
         clipboardWriter: @escaping (String) -> Bool = {
             PasteboardBroker.shared.writeUserClipboardString($0)
         },
-        onReplace: @escaping (String, NSRunningApplication?) -> Void
+        onReplace: @escaping (String, NSRunningApplication?) -> Void,
+        generationRunner: AIPreviewGenerationRunner? = nil
     ) {
         if isOpen { close() }
         open(
@@ -63,7 +67,8 @@ enum AIPreviewPanel {
             restoreOnCancel: restoreOnCancel,
             loc: loc,
             clipboardWriter: clipboardWriter,
-            onReplace: onReplace
+            onReplace: onReplace,
+            generationRunner: generationRunner
         )
     }
 
@@ -96,7 +101,8 @@ enum AIPreviewPanel {
         restoreOnCancel: String?,
         loc: LocalizationManager,
         clipboardWriter: @escaping (String) -> Bool,
-        onReplace: @escaping (String, NSRunningApplication?) -> Void
+        onReplace: @escaping (String, NSRunningApplication?) -> Void,
+        generationRunner: AIPreviewGenerationRunner?
     ) {
         suspension = EventTapEngine.shared.suspendMatching(reason: "AIPreviewPanel")
         let token = UUID()
@@ -138,7 +144,8 @@ enum AIPreviewPanel {
             },
             onCancel: {
                 restoreErasedTriggerAndClose()
-            }
+            },
+            generationRunner: generationRunner
         )
         panel.contentView = controller.view
         FloatingPanelChrome.positionNearTop(panel)
@@ -408,6 +415,18 @@ enum AIPreviewWordDiff {
     }
 }
 
+/// Stand-in for `AITextTransformer.transformStreaming`. Production passes nil and the
+/// panel calls the real method with these same arguments.
+typealias AIPreviewGenerationRunner = (
+    _ kind: AITransformKind,
+    _ input: String,
+    _ customInstructions: String?,
+    _ after: AITransformDiscardHandle?,
+    _ onPartial: @escaping @Sendable (String?) -> Void,
+    _ completionQueue: DispatchQueue,
+    _ completion: @escaping @Sendable (Result<String, AITransformError>) -> Void
+) -> AITransformDiscardHandle
+
 // MARK: - Controller
 
 private final class AIPreviewController: NSViewController {
@@ -421,6 +440,9 @@ private final class AIPreviewController: NSViewController {
     )
     /// The request whose partials the coalescer is currently carrying.
     private var partialGeneration: UInt64 = 0
+    /// Set when this generation failed as a refusal, so a partial that arrives after
+    /// the completion cannot put the refusal back on screen. Other failures do not set it.
+    private var refusalGeneration: UInt64?
     private var kind: AITransformKind
     private let sourceApp: NSRunningApplication?
     /// The user's own instruction, fixed for the life of the panel.
@@ -437,6 +459,8 @@ private final class AIPreviewController: NSViewController {
     private let clipboardWriter: (String) -> Bool
     private let onReplace: (String, NSRunningApplication?) -> Void
     private let onCancel: () -> Void
+    /// Nil in production. A test supplies one so the panel can be driven without a model.
+    private let generationRunner: AIPreviewGenerationRunner?
 
     private var discardHandle: AITransformDiscardHandle?
     /// Identifies which request a partial or completion belongs to.
@@ -481,7 +505,8 @@ private final class AIPreviewController: NSViewController {
         isCurrent: @escaping () -> Bool,
         clipboardWriter: @escaping (String) -> Bool,
         onReplace: @escaping (String, NSRunningApplication?) -> Void,
-        onCancel: @escaping () -> Void
+        onCancel: @escaping () -> Void,
+        generationRunner: AIPreviewGenerationRunner?
     ) {
         self.input = input
         self.kind = kind
@@ -493,6 +518,7 @@ private final class AIPreviewController: NSViewController {
         self.clipboardWriter = clipboardWriter
         self.onReplace = onReplace
         self.onCancel = onCancel
+        self.generationRunner = generationRunner
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -840,6 +866,28 @@ private final class AIPreviewController: NSViewController {
             return
         }
 
+        let publishPartial: @Sendable (String?) -> Void = { [weak self] partial in
+            Task { @MainActor in
+                self?.applyPartial(partial, generation: generation)
+            }
+        }
+        let publishCompletion: @Sendable (Result<String, AITransformError>) -> Void = { [weak self] result in
+            Task { @MainActor in
+                self?.applyCompletion(result, generation: generation)
+            }
+        }
+        if let generationRunner {
+            discardHandle = generationRunner(
+                kind,
+                input,
+                customInstructions,
+                superseded,
+                publishPartial,
+                .main,
+                publishCompletion
+            )
+            return
+        }
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
             discardHandle = AITextTransformer.shared.transformStreaming(
@@ -847,17 +895,10 @@ private final class AIPreviewController: NSViewController {
                 input: input,
                 customInstructions: customInstructions,
                 after: superseded,
-                onPartial: { [weak self] partial in
-                    Task { @MainActor in
-                        self?.applyPartial(partial, generation: generation)
-                    }
-                },
-                completionQueue: .main
-            ) { [weak self] result in
-                Task { @MainActor in
-                    self?.applyCompletion(result, generation: generation)
-                }
-            }
+                onPartial: publishPartial,
+                completionQueue: .main,
+                completion: publishCompletion
+            )
             return
         }
         #endif
@@ -873,6 +914,9 @@ private final class AIPreviewController: NSViewController {
 
     private func applyPartial(_ partial: String?, generation: UInt64) {
         guard isLive(generation), let partial else { return }
+        // A refusal completion already cleared this generation. A later snapshot must
+        // not put the refusal back; other failures still accept a late partial.
+        guard refusalGeneration != generation else { return }
         partialGeneration = generation
         partialCoalescer.offer(partial)
     }
@@ -880,7 +924,7 @@ private final class AIPreviewController: NSViewController {
     /// Applies the newest queued partial. Growth is appended to the text storage, which lays
     /// out only the new tail; a revision of earlier text replaces the view.
     private func showPartial(_ partial: String) {
-        guard isLive(partialGeneration) else { return }
+        guard isLive(partialGeneration), refusalGeneration != partialGeneration else { return }
         if scrollView.isHidden {
             spinner.stopAnimation(nil)
             spinner.isHidden = true
@@ -908,8 +952,10 @@ private final class AIPreviewController: NSViewController {
         // with no text, no spinner and nothing on the way.
         guard isLive(generation) else { return }
         // A success replaces the text with its exact result, so a queued partial is dropped.
-        // A failure keeps the streamed text for Replace/Copy — and the newest partial may
-        // still be queued when the completion task overtakes the coalescer's turn.
+        // A failure other than refusal keeps the streamed text for Replace/Copy — and the
+        // newest partial may still be queued when the completion task overtakes the
+        // coalescer's turn. A refusal is not insertable: that partial is not shown, and
+        // anything already on screen is cleared. The error label stays.
         let unshownPartial = partialCoalescer.takePending()
         stopPresentingWork()
 
@@ -931,7 +977,15 @@ private final class AIPreviewController: NSViewController {
             errorLabel.isHidden = true
             updateDeltas(for: text)
         case .failure(let error):
-            if let unshownPartial, partialGeneration == generation {
+            if error == .refusal {
+                refusalGeneration = generation
+                resultText = ""
+                textView.string = ""
+                scrollView.isHidden = true
+                showingDiff = false
+                wordsDeltaPill.isHidden = true
+                charsDeltaPill.isHidden = true
+            } else if let unshownPartial, partialGeneration == generation {
                 showPartial(unshownPartial)
             }
             errorLabel.stringValue = AITransformFlow.localizedError(error, loc: loc)
