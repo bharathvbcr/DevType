@@ -41,6 +41,9 @@ elif a[:2] == ["release", "edit"]:
     if "--draft=false" in a:
         if mode == "publish_failure": fail("publish failed")
         s["draft"] = False
+    elif "--draft=true" in a:
+        if mode == "redraft_failure": fail("could not redraft")
+        s["draft"] = True
     else:
         s["body"] = pathlib.Path(option("--notes-file")).read_text()
 elif a[:2] == ["release", "upload"]:
@@ -74,7 +77,8 @@ elif a[:2] == ["release", "download"]:
     if mode == "download_failure" or (mode == "transient_download" and s["downloads"] < 3):
         fail("download failed")
     data = b"valid fixture DMG"
-    if mode == "corrupt_download" or (mode == "corrupt_public_download" and not s["draft"]):
+    if mode == "corrupt_download" or (
+            mode in ("corrupt_public_download", "redraft_failure") and not s["draft"]):
         data = b"corrupt download"
     pathlib.Path(option("--dir"), option("--pattern")).write_bytes(data)
 else:
@@ -298,9 +302,17 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.state.get("uploads"), 3)
         self.assertFalse(self.state["draft"])
 
-    def test_public_verification_failure_is_not_success(self):
-        self.publish("corrupt_public_download", success=False)
+    def test_public_verification_failure_returns_the_release_to_draft(self):
+        """A public download that does not match must not stay on /releases/latest."""
+        output = self.publish("corrupt_public_download", success=False)
+        self.assertTrue(self.state["draft"])
+        self.assertTrue(any("--draft=true" in c for c in self.state["calls"]))
+        self.assertIn("draft again", output)
+
+    def test_public_verification_failure_stays_failed_when_redraft_fails(self):
+        output = self.publish("redraft_failure", success=False)
         self.assertFalse(self.state["draft"])
+        self.assertIn("could not be returned to draft", output)
 
     def test_missing_remote_tag_cannot_be_created_by_publication(self):
         self.git("--git-dir", str(self.remote), "update-ref", "-d", f"refs/tags/{TAG}")

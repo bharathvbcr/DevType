@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Publish only a verified draft. Failed uploads remain drafts and can be retried;
 # an already-public release is immutable and must never be clobbered by a rerun.
+# Once this script undrafts a release, a failed public download check returns it
+# to draft. Otherwise /releases/latest would offer a release whose bytes did not
+# match the built DMG. Replacing an already-public release (DEVTYPE_ALLOW_REPUBLISH)
+# does not re-draft: that release was public before this script ran.
 #
 # DEVTYPE_ALLOW_REPUBLISH=1 is the one deliberate exception, for a hot patch that has to
 # keep its version. It replaces the notes and the DMG on an already-public release and
@@ -191,6 +195,24 @@ else
     sleep "$((attempt * 2))"
   done
   [[ "${undraft_ok}" -eq 1 ]] || die "could not undraft release ${TAG} after bounded retries"
-  verify_release false
+  # verify_release exits on failure. Run it in a subshell so this script can
+  # put the release back into draft before giving up. `die` inside the
+  # subshell does not exit this process.
+  if ! ( verify_release false ); then
+    echo "error: public verification of ${TAG} failed; returning the release to draft" >&2
+    redrafted=0
+    for attempt in 1 2 3 4 5; do
+      if gh release edit "${TAG}" --draft=true --verify-tag; then
+        redrafted=1
+        break
+      fi
+      [[ "${attempt}" -lt 5 ]] || break
+      sleep "$((attempt * 2))"
+    done
+    if [[ "${redrafted}" -eq 1 ]]; then
+      die "public verification of ${TAG} failed; the release is a draft again and is not offered"
+    fi
+    die "public verification of ${TAG} failed and the release could not be returned to draft; delete or re-draft it by hand so clients are not offered it"
+  fi
 fi
 echo "verified GitHub release ${TAG}: curated notes and ${EXPECTED_DMG} match"
