@@ -51,7 +51,9 @@ flowchart TD
 
 ## Version history and engineering records
 
-- [Release notes](releases/) — version-specific changes; the [published releases](https://github.com/bharathvbcr/DevType/releases) determine availability.
+- [Release notes](releases/) — version-specific changes; the [published releases](https://github.com/bharathvbcr/DevType/releases) determine availability. [CHANGELOG.md](../CHANGELOG.md) mirrors the curated notes.
+- [1.3.0 notes](releases/v1.3.0.md) — image-snippet bytes, Espanso image round-trip, library restore, `devtype://`, and table formatting in the preview.
+- [1.2.1 notes](releases/v1.2.1.md) — case-matching expansions, off-main selection reads, local Lappi routing, and string tables.
 - [1.2.0 notes](releases/v1.2.0.md) — structured refusals, honest recovery, voice remedies, a preview that answers, Recent Activity, Electron paste fallback, and on-device AI deferral handling.
 - [1.1.0 notes](releases/v1.1.0.md) — independent Secrets, Backspace undo, delivery, and diagnostics changes.
 - [Audits](audits/) — dated observations and remaining verification gates, not ongoing guarantees.
