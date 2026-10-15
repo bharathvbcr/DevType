@@ -358,7 +358,7 @@ final class VoiceStreamingLinearityTests: XCTestCase {
         _ = ProtectedSpanExtractor.extract(from: "see ~/a/b --flag v1.2.3 5 ms $4.00 https://example.com")
         let second = ProtectedSpanExtractor.patterns.map { ObjectIdentifier($0.regex) }
         let secondDetector = ProtectedSpanExtractor.linkDetector.map(ObjectIdentifier.init)
-        XCTAssertEqual(first.count, 6)
+        XCTAssertEqual(first.count, 5)
         XCTAssertEqual(first, second)
         XCTAssertNotNil(firstDetector)
         XCTAssertEqual(firstDetector, secondDetector, "The link detector is built once, not per extract")

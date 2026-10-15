@@ -12,6 +12,17 @@ public enum CorrectionPipeline {
         generation: SessionGeneration,
         validator: ((CorrectionCandidate, RawTranscript, CorrectionPolicy, [ProtectedSpan]) -> ValidationOutcome)? = nil
     ) async -> FinalTranscript {
+        // A transcript past the span ceiling is not scanned and not sent to a model.
+        // The same outcome as skipping correction: deliver the raw text.
+        if (rawTranscript.text as NSString).length > ProtectedSpanExtractor.maximumUTF16Length {
+            return FinalTranscript(
+                text: rawTranscript.text,
+                rawTranscript: rawTranscript,
+                correctionCandidate: nil,
+                validationOutcome: .notApplicable
+            )
+        }
+
         let spans = ProtectedSpanExtractor.extract(from: rawTranscript.text, dictionaryTerms: vocabulary.terms)
 
         let request = CorrectionRequest(
