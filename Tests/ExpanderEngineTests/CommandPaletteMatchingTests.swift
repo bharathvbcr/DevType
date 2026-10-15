@@ -510,6 +510,83 @@ final class CommandPaletteMatchingTests: XCTestCase {
         CommandPaletteCatalog.invalidateCache()
     }
 
+    /// Usage-boost closures are cacheable only when the caller names their source and revision.
+    /// A repeated identical query with both closures supplied must hit; a revision bump must miss.
+    func testRowCacheHitsWhenUsageBoostsAreSupplied() {
+        CommandPaletteCatalog.invalidateCache()
+        let group = SnippetGroup(
+            name: "Work",
+            snippets: [
+                SnippetModel(title: "Boosted", triggerKeyword: ":boost", replacementText: "x")
+            ]
+        )
+        let source = ObjectIdentifier(UsageStatsStore.shared)
+        let usageBoost: (UUID) -> Int = { _ in 3 }
+        let commandBoost: (String) -> Int = { _ in 2 }
+
+        _ = CommandPaletteCatalog.buildRows(
+            query: "boost", groups: [group], loc: .shared,
+            usageBoost: usageBoost, commandUsageBoost: commandBoost,
+            boostRevision: 1, boostSource: source
+        )
+        XCTAssertEqual(CommandPaletteCatalog.rowCacheHitCount, 0, "First build must compute.")
+
+        _ = CommandPaletteCatalog.buildRows(
+            query: "boost", groups: [group], loc: .shared,
+            usageBoost: usageBoost, commandUsageBoost: commandBoost,
+            boostRevision: 1, boostSource: source
+        )
+        XCTAssertEqual(CommandPaletteCatalog.rowCacheHitCount, 1, "Same boosts and revision must hit.")
+
+        _ = CommandPaletteCatalog.buildRows(
+            query: "boost", groups: [group], loc: .shared,
+            usageBoost: usageBoost, commandUsageBoost: commandBoost,
+            boostRevision: 2, boostSource: source
+        )
+        XCTAssertEqual(CommandPaletteCatalog.rowCacheHitCount, 1, "A moved boost revision must miss.")
+        CommandPaletteCatalog.invalidateCache()
+    }
+
+    func testClipboardPreviewIsThePrefixWindow() {
+        let body = String(repeating: "ab\n", count: 100_000)
+        XCTAssertEqual(
+            CommandPaletteCatalog.clippedClipboardPreview(body),
+            CommandPaletteCatalog.clippedClipboardPreview(String(body.prefix(81)))
+        )
+        XCTAssertTrue(CommandPaletteCatalog.clippedClipboardPreview(body).hasSuffix("…"))
+        XCTAssertEqual(CommandPaletteCatalog.clippedClipboardPreview("hi\nthere"), "hi there")
+        XCTAssertEqual(CommandPaletteCatalog.clippedClipboardPreview(""), "")
+    }
+
+    func testCountSummaryIsCachedPerClipboardChange() {
+        CommandPaletteCatalog.invalidateCache()
+        let text = String(repeating: "word ", count: 4_000)
+        let first = CommandPaletteCatalog.matchCommands(
+            query: "count", clipboardPreview: text, clipboardChangeCount: 41, limit: 8
+        )
+        let firstPreview = first.first { $0.command.id == "tool.count" }?.preview
+        XCTAssertNotNil(firstPreview)
+        XCTAssertEqual(CommandPaletteCatalog.countSummaryCacheHitCount, 0)
+
+        let second = CommandPaletteCatalog.matchCommands(
+            query: "word count", clipboardPreview: text, clipboardChangeCount: 41, limit: 8
+        )
+        XCTAssertEqual(second.first { $0.command.id == "tool.count" }?.preview, firstPreview)
+        XCTAssertGreaterThanOrEqual(CommandPaletteCatalog.countSummaryCacheHitCount, 1)
+
+        let hits = CommandPaletteCatalog.countSummaryCacheHitCount
+        _ = CommandPaletteCatalog.matchCommands(
+            query: "count", clipboardPreview: text, clipboardChangeCount: 42, limit: 8
+        )
+        XCTAssertEqual(CommandPaletteCatalog.countSummaryCacheHitCount, hits, "A new change count recomputes.")
+        _ = CommandPaletteCatalog.matchCommands(
+            query: "char count", clipboardPreview: text, clipboardChangeCount: 42, limit: 8
+        )
+        XCTAssertEqual(CommandPaletteCatalog.countSummaryCacheHitCount, hits + 1)
+        CommandPaletteCatalog.invalidateCache()
+        XCTAssertEqual(CommandPaletteCatalog.countSummaryCacheHitCount, 0)
+    }
+
     func testCommandUsageStatsStoreMethodsAndRevisions() {
         let store = CommandUsageStatsStore(fileURL: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("test-cmd-stats-\(UUID()).json"), flushInterval: 0)
         XCTAssertEqual(store.totalUsage(), 0)

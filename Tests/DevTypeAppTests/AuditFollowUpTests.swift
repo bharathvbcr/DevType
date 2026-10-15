@@ -178,7 +178,7 @@ final class AuditFollowUpTests: XCTestCase {
         )
         XCTAssertTrue(manager.contains("cachedConflictRevision"))
         XCTAssertTrue(
-            manager.contains("SnippetStore.shared.usageCountsByID()"),
+            manager.contains("let counts = library.usageCountsByID()"),
             "the unused chip must read the usage map once, not once per snippet"
         )
         XCTAssertFalse(

@@ -1177,7 +1177,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func bindSnippetStore() {
         SnippetStore.shared.addGroupListener { [weak self] groups in
             let snippets = SnippetStore.expandableSnippets(in: groups)
-            EventTapEngine.shared.snippets = snippets
+            EventTapEngine.shared.applySnippetSnapshot(snippets)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.recentSnippetIDs = RecentSnippetResolver.reconcile(

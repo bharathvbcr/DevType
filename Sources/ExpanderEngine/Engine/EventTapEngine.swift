@@ -243,6 +243,10 @@ public final class EventTapEngine {
     private let matchStateLock = UnfairLock()
     private var _matchSnapshot: SnippetMatchSnapshot = .empty
     private var _snapshotRevision: UInt64 = 0
+    /// Serializes matcher builds started on the main thread. The `snippets` setter stays
+    /// synchronous; only `applySnippetSnapshot` hops, and only when the caller is main.
+    private let snapshotQueue = DispatchQueue(label: "com.devtype.snippet-snapshot", qos: .userInitiated)
+    private var _lastSnippetSnapshotBuiltOnMain = false
 
     /// The library **before** secrets are filtered out, for diagnostics only — see
     /// `silentNoExpandDiagnostics()`. Never read by the matcher or the keystroke path.
@@ -336,6 +340,10 @@ public final class EventTapEngine {
     private var healthTimer: DispatchSourceTimer?
     /// How often to probe `CGEvent.tapIsEnabled` for silent inert taps (macOS TCC/re-sign class).
     private let healthCheckInterval: TimeInterval = 2.0
+    /// Kernel coalescing window for the health timer. The permission poll uses its own timer:
+    /// a fully capable process can still lose the event tap, so the health check must keep
+    /// running when the permission poll backs off.
+    public static let healthCheckLeeway: DispatchTimeInterval = .milliseconds(500)
 
     /// Invoked on the main queue when health monitor clears / reinstalls a dead tap.
     public var onTapHealthChanged: (() -> Void)?
@@ -442,6 +450,36 @@ public final class EventTapEngine {
             matchStateLock.unlock()
 
             logOverlongTriggers(in: snapshot)
+        }
+    }
+
+    /// Thread that last ran `applySnippetSnapshot`'s build. Direct `snippets` assignment
+    /// does not update this; tests that assign the setter stay synchronous on purpose.
+    public var lastSnippetSnapshotBuiltOnMain: Bool {
+        matchStateLock.lock()
+        defer { matchStateLock.unlock() }
+        return _lastSnippetSnapshotBuiltOnMain
+    }
+
+    /// Rebuilds the matcher. A main-thread caller (the library listener during a UI save)
+    /// queues the build so the snapshot is not constructed on the main thread. A caller
+    /// that is already off main runs inline and may wait. The setter stays synchronous.
+    public func applySnippetSnapshot(_ snippets: [SnippetModel], completion: (() -> Void)? = nil) {
+        let build = { [weak self] in
+            guard let self else {
+                completion?()
+                return
+            }
+            self.matchStateLock.lock()
+            self._lastSnippetSnapshotBuiltOnMain = Thread.isMainThread
+            self.matchStateLock.unlock()
+            self.snippets = snippets
+            completion?()
+        }
+        if Thread.isMainThread {
+            snapshotQueue.async(execute: build)
+        } else {
+            build()
         }
     }
 
@@ -1144,34 +1182,48 @@ public final class EventTapEngine {
             TextInjectionPipeline.shared.noteInputAfterExpansion()
         }
 
-        lock.lock()
-        if keyAction == .deleteLast {
-            ringBuffer.removeLast()
-            layoutBuffer.deleteLast()
-            lastEventUTF16Count = 1
-        } else if length > 0 {
-            // §2.3: the ring evicts its own oldest entry — no O(n) `removeFirst` memmove per key.
-            ringBuffer.append(contentsOf: unicodeStr)
-            if let physicalChar {
-                layoutBuffer.appendLiteral(composed: unicodeStr, physical: physicalChar)
-            }
-            // AX ranges are UTF-16; keep erase math in the same units.
-            lastEventUTF16Count = max(1, unicodeStr.utf16.count)
-        }
-        // §2.3: hand the matcher `[Character]` directly. The old path built a `String` here that
-        // `AbbreviationMatcher.match` immediately undid with `Array(buffer)`.
-        let bufferCharacters = ringBuffer.makeArray()
-        let layoutSnapshot = layoutBuffer
-        let lastUTF16Count = lastEventUTF16Count
-        lock.unlock()
-
-        // §2.3: cached frontmost facts. The mute lookup (NSWorkspace + `AppMuteStore.isMuted`),
-        // `TISCopyCurrentKeyboardInputSource` and `isFrontmostAppTerminal()` all used to run per
-        // key; with §1.1 they would also be AppKit/Carbon calls off the main thread.
+        // §2.3: cached frontmost facts, read before the layout buffer is touched. The mute
+        // lookup, TIS, and the terminal check used to run per key. The physical-layout buffer
+        // is Korean 2-Set only: updating or copying it on every other keystroke did work the
+        // matcher ignores (`LayoutAwareMatcher` returns before reading it). The two locks are
+        // never held together.
         contextLock.lock()
         let context = _frontmostContext
         let allowPhysical = _allowPhysicalFallback
         contextLock.unlock()
+
+        lock.lock()
+        if keyAction == .deleteLast {
+            ringBuffer.removeLast()
+            lastEventUTF16Count = 1
+        } else if length > 0 {
+            // §2.3: the ring evicts its own oldest entry — no O(n) `removeFirst` memmove per key.
+            ringBuffer.append(contentsOf: unicodeStr)
+            // AX ranges are UTF-16; keep erase math in the same units.
+            lastEventUTF16Count = max(1, unicodeStr.utf16.count)
+        }
+        if allowPhysical {
+            if keyAction == .deleteLast {
+                layoutBuffer.recordKeystroke(allowPhysicalFallback: true, delete: true)
+            } else if length > 0, let physicalChar {
+                layoutBuffer.recordKeystroke(
+                    allowPhysicalFallback: true,
+                    delete: false,
+                    composed: unicodeStr,
+                    physical: physicalChar
+                )
+            }
+        } else if !layoutBuffer.isEmpty {
+            // Drop stale 2-Set keystrokes once, when the input source leaves that layout.
+            // Steady-state non-Korean keys see an empty buffer and do not walk it.
+            layoutBuffer.clear()
+        }
+        // §2.3: hand the matcher `[Character]` directly. The old path built a `String` here that
+        // `AbbreviationMatcher.match` immediately undid with `Array(buffer)`.
+        let bufferCharacters = ringBuffer.makeArray()
+        let layoutSnapshot = allowPhysical ? layoutBuffer : LayoutBuffer.idle
+        let lastUTF16Count = lastEventUTF16Count
+        lock.unlock()
 
         // Hot path: muted check + matcher + sync-safe planner gate only.
         // Heavy AX (secure/IME/focus) stays off-callback; refuse there reinjects the swallow.
@@ -1635,7 +1687,11 @@ public final class EventTapEngine {
     public func startHealthMonitor() {
         stopHealthMonitor()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + healthCheckInterval, repeating: healthCheckInterval)
+        timer.schedule(
+            deadline: .now() + healthCheckInterval,
+            repeating: healthCheckInterval,
+            leeway: EventTapEngine.healthCheckLeeway
+        )
         timer.setEventHandler { [weak self] in
             self?.checkTapHealth()
         }

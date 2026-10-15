@@ -8,18 +8,15 @@ import Foundation
 public final class ActivityHistoryStore {
     public static let shared = ActivityHistoryStore()
 
-    /// Subsystems may report from worker actors/queues. The finite typed signal is what reaches
-    /// disk; localization is deferred until presentation. Centralizing the main-thread hop keeps
-    /// notification delivery deterministic and LocalizationManager's mutable language state off
-    /// worker queues while deriving the signal's routing metadata.
+    /// Disk writes for published signals. `record` / `recordBatch` stay synchronous for callers
+    /// that already hold the result. `publish` only enqueues, so a library save's activity line
+    /// does not encode JSON on the main thread. `LocalizationManager` guards its tables with
+    /// its own lock, and `publishMutation` still delivers the notification on main.
+    static let persistQueue = DispatchQueue(label: "com.devtype.activity-history", qos: .utility)
+
     public static func publish(_ signal: ActivitySignal) {
-        let work = {
+        persistQueue.async {
             _ = ActivityHistoryStore.shared.record(signal)
-        }
-        if Thread.isMainThread {
-            work()
-        } else {
-            DispatchQueue.main.async(execute: work)
         }
     }
 
@@ -333,6 +330,9 @@ public final class ActivityHistoryStore {
     private let lock = NSLock()
     private var events: [ActivityEvent] = []
     private var lastPersistenceFailureKind: String?
+    /// Set inside `persistLocked`, which runs while `lock` is held. A test that waits until
+    /// `record` returns can read this without a second lock.
+    public private(set) var lastPersistWasOnMain = false
     private let fileURL: URL
 
     /// Finite public-log vocabulary. Keeping the operation typed prevents a future caller from
@@ -508,6 +508,7 @@ public final class ActivityHistoryStore {
     /// Must be called while `lock` is held. A write that did not happen never becomes the visible
     /// in-memory snapshot, so callers cannot mistake an undurable mutation for success.
     private func persistLocked(_ candidate: [ActivityEvent]) -> MutationResult {
+        lastPersistWasOnMain = Thread.isMainThread
         do {
             try Self.save(candidate, to: fileURL)
             events = candidate

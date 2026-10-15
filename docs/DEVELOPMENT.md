@@ -266,12 +266,12 @@ An Apple Development signature supports local installation; it does not establis
 
 ```sh
 # Release configuration (the one the ceilings are derived from)
-DEVTYPE_BENCH=1 swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests'
+DEVTYPE_BENCH=1 swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests|FollowThroughBenchmark'
 ```
 
 `-DDEBUG` is required because other test files use `#if DEBUG` hooks that a plain release test build drops.
 
-**Why it is local-only.** `.github/workflows/ci.yml` does not run it. Hosted macOS runners are shared VMs with variable CPU allocation and throttling, and a release test build adds several minutes to a 30-minute job. A wall-clock gate that flakes gets disabled, which is worse than a gate that runs reliably on one machine. `Scripts/ci-local.sh` step 2b runs the release gate when `DEVTYPE_BENCH=1` (the documented release gate) and fails the script on any exceeded ceiling; without the variable it prints that the gate was skipped. The structural guarantee that does run in hosted CI is `BenchmarkGateSelfTests` plus `TriggerPrefixScanTests` (exhaustive parity with the naive algorithm).
+**Why it is local-only.** `.github/workflows/ci.yml` does not run it. Hosted macOS runners are shared VMs with variable CPU allocation and throttling, and a release test build adds several minutes to a 30-minute job. A wall-clock gate that flakes gets disabled, which is worse than a gate that runs reliably on one machine. `Scripts/ci-local.sh` step 2 strips `DEVTYPE_BENCH` before the debug suite, so a debug timing run cannot fail that suite. Step 2b still sees the variable: it runs the release gate when `DEVTYPE_BENCH=1` and fails the script on any exceeded ceiling; without the variable it prints that the gate was skipped. The structural guarantee that does run in hosted CI is `BenchmarkGateSelfTests` plus `TriggerPrefixScanTests` (exhaustive parity with the naive algorithm).
 
 ## Productivity release stress checks
 
