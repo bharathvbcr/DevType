@@ -342,13 +342,22 @@ public enum SelectionReader {
                 )
                 if read.timedOut { stalling = true }
                 candidates.append(
-                    makeCandidate(text: read.text, via: read.via, element: element, ownPID: ownPID)
+                    makeCandidate(
+                        text: read.text,
+                        via: read.via,
+                        element: element,
+                        ownPID: ownPID,
+                        oversizedCharacterCount: read.oversizedCharacterCount
+                    )
                 )
                 // Deliberately no early exit on the first non-blank read. Whether a candidate is
                 // *usable* is `evaluate`'s call, not ours: mid app-switch the system-wide probe
                 // resolves into the app the user just left, and stopping there would hand the
                 // gate a muted app's text as the only option — walking straight around a mute,
                 // or refusing while the real selection sat unread on the next probe.
+                // An over-cap body is already released. Reading a later, smaller selection and
+                // transforming that would hide the refusal.
+                if read.oversizedCharacterCount != nil { break }
             }
 
             // Nothing on any focused element. Widen before giving up: the focused node is often
@@ -362,7 +371,9 @@ public enum SelectionReader {
             if !budgetExhausted,
                !stalling,
                !frontmostIsOwnProcess,
-               candidates.allSatisfy({ isBlankSelection($0.text) }),
+               candidates.allSatisfy({
+                   isBlankSelection($0.text) && $0.oversizedCharacterCount == nil
+               }),
                Date() < deadline {
                 let widened = readFromRelatedElements(
                     of: elements,
@@ -375,7 +386,8 @@ public enum SelectionReader {
                             text: widened.text,
                             via: widened.via,
                             element: widened.element,
-                            ownPID: ownPID
+                            ownPID: ownPID,
+                            oversizedCharacterCount: widened.oversizedCharacterCount
                         )
                     )
                     focusAvailable = true
@@ -491,7 +503,8 @@ public enum SelectionReader {
         text: String?,
         via: ReadVia,
         element: AXUIElement,
-        ownPID: pid_t
+        ownPID: pid_t,
+        oversizedCharacterCount: Int? = nil
     ) -> Candidate {
         var pid: pid_t = 0
         let pidStatus = AXUIElementGetPid(element, &pid)
@@ -505,14 +518,16 @@ public enum SelectionReader {
             // selection" this whole path exists to remove.
             isOwnProcess: pidStatus == .success && pid == ownPID,
             bundleID: elementBundleID,
-            via: via
+            via: via,
+            oversizedCharacterCount: oversizedCharacterCount
         )
     }
 
     // MARK: - Widening past the focused element
 
     struct WidenedRead {
-        let text: String
+        let text: String?
+        let oversizedCharacterCount: Int?
         let via: ReadVia
         let element: AXUIElement
     }
@@ -535,8 +550,8 @@ public enum SelectionReader {
                     allowFallbackAttributes: true,
                     deadline: deadline
                 )
-                if let text = read.text, !isBlankSelection(text) {
-                    return WidenedRead(text: text, via: .ancestor(hop + 1), element: ancestor)
+                if let widened = widenedRead(from: read, via: .ancestor(hop + 1), element: ancestor) {
+                    return widened
                 }
             }
         }
@@ -553,8 +568,19 @@ public enum SelectionReader {
             allowFallbackAttributes: true,
             deadline: deadline
         )
-        guard let text = read.text, !isBlankSelection(text) else { return nil }
-        return WidenedRead(text: text, via: .applicationElement, element: appElement)
+        return widenedRead(from: read, via: .applicationElement, element: appElement)
+    }
+
+    /// A non-blank selection, or an over-cap count with the body already released.
+    /// Blank over-cap reads stay nil so the walk can continue; they are not too-large.
+    private static func widenedRead(from read: ElementRead, via: ReadVia, element: AXUIElement) -> WidenedRead? {
+        guard read.oversizedCharacterCount != nil || !isBlankSelection(read.text) else { return nil }
+        return WidenedRead(
+            text: read.text,
+            oversizedCharacterCount: read.oversizedCharacterCount,
+            via: via,
+            element: element
+        )
     }
 
     /// Up to `limit` `AXParent` hops, with a cycle guard.
@@ -597,12 +623,58 @@ public enum SelectionReader {
         public let text: String?
         public let timedOut: Bool
         public let via: ReadVia
+        /// Set only when a non-blank body was over `maxSelectionCharacters` and released.
+        public let oversizedCharacterCount: Int?
 
-        public init(text: String?, timedOut: Bool, via: ReadVia = .unknown) {
-            self.text = text
+        public init(
+            text: String?,
+            timedOut: Bool,
+            via: ReadVia = .unknown,
+            oversizedCharacterCount: Int? = nil
+        ) {
+            // A count means the body was released. Never keep both.
+            self.text = oversizedCharacterCount == nil ? text : nil
             self.timedOut = timedOut
             self.via = via
+            self.oversizedCharacterCount = oversizedCharacterCount
         }
+    }
+
+    /// A string after the character ceiling. `text` is nil when the body was released.
+    struct BoundedSelection: Equatable {
+        var text: String?
+        var oversizedCharacterCount: Int?
+
+        static let unavailable = BoundedSelection(text: nil, oversizedCharacterCount: nil)
+    }
+
+    /// Count, then keep or release. `String.count` is Characters, the same unit `evaluate` uses.
+    ///
+    /// Over the cap the body is not truncated and not returned. Non-blank text becomes a count
+    /// only. Blank text (the existing blank set) becomes neither, so it is not "too large".
+    static func boundSelectionBody(_ text: String) -> BoundedSelection {
+        let count = text.count
+        guard count > maxSelectionCharacters else {
+            return BoundedSelection(text: text, oversizedCharacterCount: nil)
+        }
+        guard !isBlankSelection(text) else {
+            return .unavailable
+        }
+        return BoundedSelection(text: nil, oversizedCharacterCount: count)
+    }
+
+    /// `nil` means the body is under the cap but blank, so the ladder should try the next rung.
+    /// Any other result stops the ladder: a usable body, a too-large count, or a blank over-cap drop.
+    private static func elementRead(bounding body: String, via: ReadVia, timedOut: Bool) -> ElementRead? {
+        let bound = boundSelectionBody(body)
+        if let count = bound.oversizedCharacterCount {
+            return ElementRead(text: nil, timedOut: false, via: via, oversizedCharacterCount: count)
+        }
+        if let kept = bound.text {
+            guard !isBlankSelection(kept) else { return nil }
+            return ElementRead(text: kept, timedOut: false, via: via)
+        }
+        return ElementRead(text: nil, timedOut: timedOut, via: via)
     }
 
     /// Shared AX attribute read used by `SelectionMonitor` and the explicit command paths.
@@ -640,8 +712,8 @@ public enum SelectionReader {
         AXContextChecker.applyMessagingTimeout(to: element)
 
         let (text, status) = copyAttributeString(element, kAXSelectedTextAttribute as String)
-        if let text, !isBlankSelection(text) {
-            return ElementRead(text: text, timedOut: false, via: .selectedText)
+        if let text, let read = elementRead(bounding: text, via: .selectedText, timedOut: false) {
+            return read
         }
 
         var timedOut = status == .cannotComplete
@@ -655,8 +727,8 @@ public enum SelectionReader {
             let (retry, retryStatus) = copyAttributeString(element, kAXSelectedTextAttribute as String)
             AXContextChecker.applyMessagingTimeout(to: element)
             timedOut = retryStatus == .cannotComplete
-            if let retry, !isBlankSelection(retry) {
-                return ElementRead(text: retry, timedOut: false, via: .selectedTextSlow)
+            if let retry, let read = elementRead(bounding: retry, via: .selectedTextSlow, timedOut: timedOut) {
+                return read
             }
         }
 
@@ -668,8 +740,8 @@ public enum SelectionReader {
         // that does not implement it drops out of all three after a single round-trip.
         if let rangeValue = copySelectedRangeValue(element) {
             if let ranged = copyStringForRange(element, rangeValue, attributed: false),
-               !isBlankSelection(ranged) {
-                return ElementRead(text: ranged, timedOut: false, via: .stringForRange)
+               let read = elementRead(bounding: ranged, via: .stringForRange, timedOut: timedOut) {
+                return read
             }
             guard deadline.map({ Date() < $0 }) ?? true else {
                 return ElementRead(text: nil, timedOut: timedOut, via: .unknown)
@@ -678,16 +750,17 @@ public enum SelectionReader {
             // `accessibilityString(for:)`, and rich-text views (Mail, Notes, TextEdit RTF)
             // routinely implement only the attributed one.
             if let attributed = copyStringForRange(element, rangeValue, attributed: true),
-               !isBlankSelection(attributed) {
-                return ElementRead(text: attributed, timedOut: false, via: .attributedStringForRange)
+               let read = elementRead(bounding: attributed, via: .attributedStringForRange, timedOut: timedOut) {
+                return read
             }
             // Neither parameterized form implemented, but the element still exposes its whole
             // value: slice it with the selected range. UTF-16 offsets, so this goes through
             // NSString — `String.Index` arithmetic would corrupt any selection containing an
             // emoji or a combining mark.
             if allowValueSlice,
-               let sliced = copyValueSubstring(element, rangeValue), !isBlankSelection(sliced) {
-                return ElementRead(text: sliced, timedOut: false, via: .valueSubstring)
+               let sliced = copyValueSubstring(element, rangeValue),
+               let read = elementRead(bounding: sliced, via: .valueSubstring, timedOut: timedOut) {
+                return read
             }
         }
 
@@ -695,17 +768,37 @@ public enum SelectionReader {
             return ElementRead(text: nil, timedOut: timedOut, via: .unknown)
         }
 
-        if let plural = copySelectedTextByRanges(element, deadline: deadline, allowValueSlice: allowValueSlice),
-           !isBlankSelection(plural) {
-            return ElementRead(text: plural, timedOut: false, via: .selectedTextRanges)
+        if let plural = copySelectedTextByRanges(element, deadline: deadline, allowValueSlice: allowValueSlice) {
+            if let count = plural.oversizedCharacterCount {
+                return ElementRead(
+                    text: nil,
+                    timedOut: false,
+                    via: .selectedTextRanges,
+                    oversizedCharacterCount: count
+                )
+            }
+            if let text = plural.text,
+               let read = elementRead(bounding: text, via: .selectedTextRanges, timedOut: timedOut) {
+                return read
+            }
         }
 
         guard deadline.map({ Date() < $0 }) ?? true else {
             return ElementRead(text: nil, timedOut: timedOut, via: .unknown)
         }
 
-        if let marked = copySelectedTextByTextMarker(element), !isBlankSelection(marked) {
-            return ElementRead(text: marked, timedOut: false, via: .textMarker)
+        if let marked = copySelectedTextByTextMarker(element) {
+            if let count = marked.oversizedCharacterCount {
+                return ElementRead(text: nil, timedOut: false, via: .textMarker, oversizedCharacterCount: count)
+            }
+            if let text = marked.text,
+               let read = elementRead(bounding: text, via: .textMarker, timedOut: timedOut) {
+                return read
+            }
+            if marked.text == nil {
+                // Blank and over the cap: the body is gone, and later rungs do not exist.
+                return ElementRead(text: nil, timedOut: timedOut, via: .textMarker)
+            }
         }
         return ElementRead(text: nil, timedOut: timedOut, via: .unknown)
     }
@@ -842,7 +935,7 @@ public enum SelectionReader {
         _ element: AXUIElement,
         deadline: Date?,
         allowValueSlice: Bool
-    ) -> String? {
+    ) -> BoundedSelection? {
         var rangesRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             element,
@@ -853,7 +946,7 @@ public enum SelectionReader {
             return nil
         }
 
-        return gatherSelectionPieces(values, deadline: deadline) { value in
+        let gathered = gatherSelectionPieces(values, deadline: deadline) { value in
             guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
             let axValue = unsafeBitCast(value, to: AXValue.self)
             guard isUsableSelectedRange(axValue) else { return nil }
@@ -861,6 +954,8 @@ public enum SelectionReader {
                 ?? copyStringForRange(element, axValue, attributed: true)
                 ?? (allowValueSlice ? copyValueSubstring(element, axValue) : nil)
         }
+        guard gathered.text != nil || gathered.oversizedCharacterCount != nil else { return nil }
+        return gathered
     }
 
     /// Owns aggregation separately from AX I/O so partial reads and stalled hosts can be tested.
@@ -869,8 +964,8 @@ public enum SelectionReader {
     static func gatherSelectionPieces<Element>(
         _ values: [Element], deadline: Date?, now: () -> Date = { Date() },
         readPiece: (Element) -> String?
-    ) -> String? {
-        guard !values.isEmpty, values.count <= maxDiscontinuousSelectionRanges else { return nil }
+    ) -> BoundedSelection {
+        guard !values.isEmpty, values.count <= maxDiscontinuousSelectionRanges else { return .unavailable }
         // Notification-driven cache refreshes have no enclosing explicit-action deadline.
         // They still need a time bound, independent of the range-count ceiling.
         let effectiveDeadline = deadline ?? now().addingTimeInterval(readBudgetSeconds)
@@ -881,22 +976,35 @@ public enum SelectionReader {
         var pieces: [String] = []
         var total = 0
         for value in values {
-            guard withinBudget(), let piece = readPiece(value), !piece.isEmpty, withinBudget() else { return nil }
+            guard withinBudget(), let piece = readPiece(value), !piece.isEmpty, withinBudget() else {
+                return .unavailable
+            }
+            let bound = boundSelectionBody(piece)
+            if let count = bound.oversizedCharacterCount {
+                // One non-blank piece over the cap. Do not read or join anything after it.
+                return BoundedSelection(text: nil, oversizedCharacterCount: count)
+            }
+            // Blank and over the cap: drop the spaces. Same unavailable result as a failed piece,
+            // not a too-large signal, and not a partial join.
+            guard let kept = bound.text else { return .unavailable }
             let separator = pieces.isEmpty ? 0 : 1
-            let count = piece.count
+            let count = kept.count
             guard separator <= maxSelectionCharacters - total,
-                  count <= maxSelectionCharacters - total - separator else { return nil }
+                  count <= maxSelectionCharacters - total - separator else { return .unavailable }
             total += count + separator
-            pieces.append(piece)
+            pieces.append(kept)
         }
-        return pieces.isEmpty ? nil : pieces.joined(separator: "\n")
+        return BoundedSelection(
+            text: pieces.isEmpty ? nil : pieces.joined(separator: "\n"),
+            oversizedCharacterCount: nil
+        )
     }
 
     /// WebKit / Chromium text-marker selection (Safari, Chrome, Electron web content).
     ///
     /// Chromium does not implement `AXStringForRange` at all, so for the entire Electron
     /// ecosystem this rung is not a fallback — it is the only one that ever answers.
-    private static func copySelectedTextByTextMarker(_ element: AXUIElement) -> String? {
+    private static func copySelectedTextByTextMarker(_ element: AXUIElement) -> BoundedSelection? {
         var markerRange: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             element,
@@ -914,7 +1022,14 @@ public enum SelectionReader {
         ) == .success else {
             return nil
         }
-        if let plain = stringRef as? String { return plain }
-        return (stringRef as? NSAttributedString)?.string
+        let raw: String?
+        if let plain = stringRef as? String {
+            raw = plain
+        } else {
+            raw = (stringRef as? NSAttributedString)?.string
+        }
+        guard let raw else { return nil }
+        // The marker API has already copied the whole string. Count it and drop it if over cap.
+        return boundSelectionBody(raw)
     }
 }

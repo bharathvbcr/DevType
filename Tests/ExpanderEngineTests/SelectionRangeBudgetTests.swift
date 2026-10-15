@@ -8,14 +8,17 @@ final class SelectionRangeBudgetTests: XCTestCase {
             reads += 1
             return "x"
         }
-        XCTAssertNil(result)
+        XCTAssertNil(result.text)
+        XCTAssertNil(result.oversizedCharacterCount)
         XCTAssertEqual(reads, 0)
     }
 
     func testFailedPieceCannotReturnAPartialSelection() {
-        XCTAssertNil(SelectionReader.gatherSelectionPieces(["first", "missing", "last"], deadline: nil) {
+        let result = SelectionReader.gatherSelectionPieces(["first", "missing", "last"], deadline: nil) {
             $0 == "missing" ? nil : $0
-        })
+        }
+        XCTAssertNil(result.text)
+        XCTAssertNil(result.oversizedCharacterCount)
     }
 
     func testExpiredDeadlineNeverReads() {
@@ -24,7 +27,8 @@ final class SelectionRangeBudgetTests: XCTestCase {
             XCTFail("An exhausted read budget must not start another AX operation")
             return "text"
         }
-        XCTAssertNil(result)
+        XCTAssertNil(result.text)
+        XCTAssertNil(result.oversizedCharacterCount)
     }
 
     func testOneStalledPieceCannotLaunchMoreReadsOrReturnPartialText() {
@@ -36,7 +40,8 @@ final class SelectionRangeBudgetTests: XCTestCase {
             now = now.addingTimeInterval(2)
             return "late text"
         }
-        XCTAssertNil(result)
+        XCTAssertNil(result.text)
+        XCTAssertNil(result.oversizedCharacterCount)
         XCTAssertEqual(reads, 1)
     }
 
@@ -48,22 +53,42 @@ final class SelectionRangeBudgetTests: XCTestCase {
             now = now.addingTimeInterval(1)
             return "piece"
         }
-        XCTAssertNil(result)
+        XCTAssertNil(result.text)
+        XCTAssertNil(result.oversizedCharacterCount)
         XCTAssertEqual(reads, 2, "Background cache reads must not run all 64 potentially stalled pieces")
     }
 
     func testSeparatorsCountTowardTheAggregateLimit() {
         let exact = String(repeating: "x", count: SelectionReader.maxSelectionCharacters - 2)
-        XCTAssertEqual(SelectionReader.gatherSelectionPieces([exact, "y"], deadline: nil) { $0 }?.count,
-                       SelectionReader.maxSelectionCharacters)
+        XCTAssertEqual(
+            SelectionReader.gatherSelectionPieces([exact, "y"], deadline: nil) { $0 }.text?.count,
+            SelectionReader.maxSelectionCharacters
+        )
         let oversized = SelectionReader.gatherSelectionPieces([exact + "x", "y"], deadline: nil) { $0 }
-        XCTAssertTrue(oversized == nil, "Aggregate length must include separators")
+        XCTAssertNil(oversized.text, "Aggregate length must include separators")
+        XCTAssertNil(oversized.oversizedCharacterCount, "Two under-cap pieces are unavailable, not too large")
+    }
+
+    /// A piece that already fills the cap leaves no room for a separator or another piece.
+    /// The result is unavailable, not the first piece kept as a truncated join.
+    func testPieceExactlyAtTheCapThenAnotherIsUnavailable() {
+        let exact = String(repeating: "x", count: SelectionReader.maxSelectionCharacters)
+        let gathered = SelectionReader.gatherSelectionPieces([exact, "y"], deadline: nil) { $0 }
+        XCTAssertNil(gathered.text)
+        XCTAssertNil(gathered.oversizedCharacterCount)
+        XCTAssertFalse(gathered.text?.contains("y") ?? false)
+        XCTAssertNotEqual(gathered.text, exact)
     }
 
     func testAcceptedRangeOrderWhitespaceAndUnicodeArePreserved() {
         let pieces = ["  first  ", "👩‍👩‍👧‍👧", "العربية", "e\u{301}"]
-        XCTAssertEqual(SelectionReader.gatherSelectionPieces(pieces, deadline: nil) { $0 },
-                       pieces.joined(separator: "\n"))
-        XCTAssertEqual(SelectionReader.gatherSelectionPieces(Array(repeating: "x", count: 64), deadline: nil) { $0 }?.count, 127)
+        XCTAssertEqual(
+            SelectionReader.gatherSelectionPieces(pieces, deadline: nil) { $0 }.text,
+            pieces.joined(separator: "\n")
+        )
+        XCTAssertEqual(
+            SelectionReader.gatherSelectionPieces(Array(repeating: "x", count: 64), deadline: nil) { $0 }.text?.count,
+            127
+        )
     }
 }
