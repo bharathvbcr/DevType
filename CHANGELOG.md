@@ -8,7 +8,7 @@ Curated notes for each tag live in `docs/releases/<tag>.md`. The publisher reads
 
 The GitHub artifact follows the project's existing ad-hoc signed, unnotarized distribution policy. Gatekeeper may reject it. Notarization stays off (9c73c04). Local packages use the available Apple Development identity.
 
-These notes cover the work after 1.2.1. The 1.2.1 tag exists on this clone and was not pushed to origin; its commit is already on the published branch. 1.2.1's own notes are in `docs/releases/v1.2.1.md`.
+These notes cover unpublished 1.2.1 and the work after it. The 1.2.1 tag exists on this clone and was not pushed to origin; its commit is already on the published branch. The original write-up remains in `docs/releases/v1.2.1.md`.
 
 ### Highlights
 
@@ -17,6 +17,36 @@ These notes cover the work after 1.2.1. The 1.2.1 tag exists on this clone and w
 - **Restore from Backup.** Snippet saves keep the 20 newest library copies plus the newest per day for 30 days. Replace with Defaults, Restore from Backup, Save As / Move Library, and Stop Syncing write a safety backup first and fail closed when that backup cannot be written. Preferences → Snippets gains Restore from Backup…, with the date, snippet count, and trigger kind (a101f73).
 - **`devtype://` opens a closed set of screens.** The allowlist is new, palette, preferences, dictation/toggle, and copy. Those URLs do not expand text and do not read a secret. The macro catalog used by the palette now lives in the engine (7f8ed1e).
 - **Preview can format a table and show a word diff.** A bounded column-and-row result becomes Markdown. `toTable` is available to the local transform and the palette. Every transform kind uses one grapheme-safe word diff (7a434d0).
+
+### Match Trigger Case (sig / Sig / SIG)
+
+- **New snippet option:** case-insensitive snippets gain a **Match Trigger Case** switch in the editor (shown only while Case Sensitive is off). Typing the trigger Capitalized or in ALL CAPS shapes the expansion the same way (6ad2094).
+- **Espanso-compatible shape rules:** only the first two letters of the typed trigger are read and non-letters are skipped. Upper+Upper or a lone capital means ALL CAPS, Upper+lower means first letter upper, and anything that starts lowercase (including mixed `sIG`) or has no letter stays as written.
+- **Narrower than Espanso, on purpose:** only text written in the snippet template is reshaped. Fill-in values, clipboard text, dates and generated values keep their own case, as do spans an explicit `{{upper:…}}`-style transform already shaped. Cursor markers are remapped when uppercasing changes length (`ß` → `SS`).
+- **Importer:** Espanso `propagate_case` matches now import with the option on. The old "output case adaptation is unavailable" note is gone; a new note counts matches that use `uppercase_style: capitalize | capitalize_words`, which DevType imports with the default case shapes.
+
+### Selection reads no longer block the main thread
+
+- **No beachball on AI hotkey, palette, or voice command:** selection reads run on a dedicated serial queue and hand their result back on main (e77b5bf).
+- **Latest press wins:** the AI hotkey, palette AI actions, and the inline search panel only act on the most recent press. A second palette press while the first is still reading closes it instead of queueing a second panel, and a stale read cannot raise a stale alert.
+- **AX retries never sleep on main:** focus-query retries and the Chromium accessibility rescue use one bounded policy (`AXSettleRetry`) that waits only off main and reports when a poll was skipped rather than passing it off as zero polls (c7e1400).
+- **One focused element per expansion:** an expansion resolves the focused element once and threads it through the entry re-check, IME probe, erase guard, AX writes, delivery check, caret placement and trigger restore. No collaborator inside an inject queries focus through a default argument (68d4412).
+
+### Local Lappi routing (opt-in, off by default)
+
+- **Ask Lappi which tool fits:** when on-device palette routing runs, DevType can also ask a local Lappi agent over a Unix socket on this Mac (300 ms limit). An answer only annotates the routed row as agreeing or differing; it never inserts text or runs anything (24cc8d8).
+- **Local routing records:** optionally records which tool routing chose and which row you picked, to `Application Support/Lappi/heldout` — the phrase's length and shape, never its text. Records are bounded per day and in total, stay on this Mac, and are never used for training. `LAPPI_COLLECT=0` disables collection.
+- Nothing is sent or written while secure input is on. Both switches live in Preferences → AI and default off.
+
+### UI strings move to resource tables
+
+- English, Korean and Japanese UI strings ship as `.strings` resource tables (`Sources/ExpanderEngine/Localization/Resources/<lang>.lproj/`, eight tables per language) instead of Swift dictionary literals (3c50ecd).
+- The user-chosen UI language still wins over the system language. Malformed tables, missing languages and keys defined twice are reported at load.
+- **Pseudolocale for layout checks:** `DEVTYPE_PSEUDOLOCALE=1` (or `-devtype.debug.pseudolocale YES`) accents, brackets and pads every string by about 40%, keeping format specifiers intact.
+
+### Engine internals
+
+- Text injection's undo policy, route choice, entry-gate refusals, swallowed-key and completion-guard types, the image-snippet path and text resolution each have their own owner. The inject/undo ledger owns its single lock (93a21d1).
 
 ### Fixes
 
@@ -41,7 +71,7 @@ These notes cover the work after 1.2.1. The 1.2.1 tag exists on this clone and w
 
 ### Breaking changes
 
-- A library that already opens is unchanged, and there is no settings migration.
+- A library that already opens is unchanged, and there is no settings migration. 1.2.1 adds no dependency, cloud service, permission grant, secret migration, or authentication change.
 - A corrupt typed-path allowlist now denies every app. It used to decode as an empty list, which meant every app (8951428).
 - An undecodable or newer-schema timing or capability file is moved aside and kept, rather than overwritten (8951428).
 
