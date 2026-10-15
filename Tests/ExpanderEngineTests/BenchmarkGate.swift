@@ -35,18 +35,29 @@ enum BenchmarkGate {
         }
     }
 
-    private static func elapsedMs(_ body: () -> Void) -> Double {
-        let start = DispatchTime.now().uptimeNanoseconds
+    private static func elapsedMs(
+        now: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        _ body: () -> Void
+    ) -> Double {
+        let start = now()
         body()
-        return Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        return Double(now() &- start) / 1_000_000
     }
 
     /// Minimum of `runs` timed executions after `warmup` untimed ones.
-    static func measure(warmup: Int = 1, runs: Int = 5, _ body: () -> Void) -> Double {
+    ///
+    /// `now` is the clock. Tests pass a counter so a loaded machine cannot turn a one
+    /// millisecond sleep into a failure of the min-of-N rule.
+    static func measure(
+        warmup: Int = 1,
+        runs: Int = 5,
+        now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        _ body: () -> Void
+    ) -> Double {
         precondition(runs > 0 && warmup >= 0, "runs must be positive")
         for _ in 0..<warmup { body() }
         var best = Double.infinity
-        for _ in 0..<runs { best = min(best, elapsedMs(body)) }
+        for _ in 0..<runs { best = min(best, elapsedMs(now: now, body)) }
         return best
     }
 
@@ -137,13 +148,17 @@ final class BenchmarkGateSelfTests: XCTestCase {
 
     func testMeasureReturnsMinimumAndRunsWarmup() {
         var calls = 0
-        var durations: [UInt32] = [30_000, 1_000, 20_000, 40_000]   // warmup first, then 3 runs
-        let best = BenchmarkGate.measure(warmup: 1, runs: 3) {
+        var cursor: UInt64 = 0
+        // Warmup is the fastest sample. Folding it into the minimum would report 0.1 ms.
+        let advancesNs: [UInt64] = [100_000, 20_000_000, 30_000_000, 40_000_000]
+        var index = 0
+        let best = BenchmarkGate.measure(warmup: 1, runs: 3, now: { cursor }) {
             calls += 1
-            usleep(durations.removeFirst())
+            cursor &+= advancesNs[index]
+            index += 1
         }
         XCTAssertEqual(calls, 4)
-        XCTAssertLessThan(best, 15, "min-of-N must ignore the slow warmup and slow runs")
+        XCTAssertEqual(best, 20, accuracy: 0.0001, "min-of-N must ignore the warmup sample")
     }
 
     func testVerdictBoundary() {
