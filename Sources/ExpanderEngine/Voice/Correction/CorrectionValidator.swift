@@ -25,6 +25,13 @@ public enum CorrectionValidator {
         let candidateText = candidate.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let rawText = raw.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // A length cap, omitted reason, or other non-stop finish is not a correction.
+        // Checked before the empty-body and ratio rules so a truncated body is not
+        // accepted just because the deletion ratio is still under the ceiling.
+        if !candidate.modelStopIsComplete {
+            return .fallbackToRaw(reason: .correctionUnsupportedEdit)
+        }
+
         // 1. Non-empty check
         if candidateText.isEmpty {
             if rawText.isEmpty {

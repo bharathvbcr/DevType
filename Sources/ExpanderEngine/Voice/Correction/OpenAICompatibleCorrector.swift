@@ -1,5 +1,68 @@
 import Foundation
 
+/// How the HTTP body said generation ended. Only `finished` may be inserted.
+enum CorrectionGenerationStop: Equatable, Sendable {
+    case finished
+    case length
+    case omitted
+    case notFinished
+
+    var isComplete: Bool { self == .finished }
+
+    /// `done == false` is never finished. A length reason stays length even then.
+    /// Nil, blank, or whitespace-only reasons are omitted, not an implied stop.
+    static func classify(reason: String?, done: Bool? = nil) -> CorrectionGenerationStop {
+        let normalized: String?
+        if let reason {
+            let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            normalized = trimmed.isEmpty ? nil : trimmed.lowercased()
+        } else {
+            normalized = nil
+        }
+        if normalized == "length" {
+            return .length
+        }
+        if done == false {
+            return .notFinished
+        }
+        switch normalized {
+        case nil:
+            return .omitted
+        case "stop":
+            return .finished
+        default:
+            return .notFinished
+        }
+    }
+}
+
+struct DecodedCorrectionText: Equatable, Sendable {
+    let text: String
+    let stop: CorrectionGenerationStop
+
+    var modelStopIsComplete: Bool { stop.isComplete }
+
+    /// Missing content throws unless the body already says generation did not finish.
+    /// A present non-stop reason must still fall back, including when content is absent.
+    static func resolve(content: String?, stop: CorrectionGenerationStop) throws -> DecodedCorrectionText {
+        if let content {
+            return DecodedCorrectionText(text: content, stop: stop)
+        }
+        switch stop {
+        case .length, .notFinished:
+            return DecodedCorrectionText(text: "", stop: stop)
+        case .finished, .omitted:
+            throw DecodingError.valueNotFound(
+                String.self,
+                DecodingError.Context(
+                    codingPath: [],
+                    debugDescription: "Correction response omitted content and has no non-stop finish reason"
+                )
+            )
+        }
+    }
+}
+
 public final class OpenAICompatibleCorrector: LocalHTTPCorrector, @unchecked Sendable {
     public static let probeCapabilities = ["chatCompletions", "openAICompatible"]
     public let descriptor: CorrectionProviderDescriptor
@@ -55,7 +118,8 @@ public final class OpenAICompatibleCorrector: LocalHTTPCorrector, @unchecked Sen
             )
         }
 
-        var cleaned = try Self.responseText(from: data)
+        let decoded = try Self.responseText(from: data)
+        var cleaned = decoded.text
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"") && cleaned.count >= 2 {
             cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -73,7 +137,8 @@ public final class OpenAICompatibleCorrector: LocalHTTPCorrector, @unchecked Sen
             edits: [],
             latencyMs: latency,
             promptVersion: CorrectionPromptBuilder.version,
-            refusalDetected: false
+            refusalDetected: false,
+            modelStopIsComplete: decoded.modelStopIsComplete
         )
     }
 
@@ -120,11 +185,17 @@ public final class OpenAICompatibleCorrector: LocalHTTPCorrector, @unchecked Sen
         return urlRequest
     }
 
-    static func responseText(from data: Data) throws -> String {
+    static func responseText(from data: Data) throws -> DecodedCorrectionText {
         struct ChatCompletionResponse: Decodable {
             struct Choice: Decodable {
-                struct Message: Decodable { let content: String }
-                let message: Message
+                struct Message: Decodable { let content: String? }
+                let message: Message?
+                let finishReason: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case message
+                    case finishReason = "finish_reason"
+                }
             }
             let choices: [Choice]
         }
@@ -138,6 +209,7 @@ public final class OpenAICompatibleCorrector: LocalHTTPCorrector, @unchecked Sen
                 redactedDetail: "No completion choices returned"
             )
         }
-        return firstChoice.message.content
+        let stop = CorrectionGenerationStop.classify(reason: firstChoice.finishReason)
+        return try DecodedCorrectionText.resolve(content: firstChoice.message?.content, stop: stop)
     }
 }

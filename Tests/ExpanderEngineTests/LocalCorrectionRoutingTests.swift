@@ -95,7 +95,7 @@ final class LocalCorrectionRoutingTests: XCTestCase {
 
         let data = Data(#"{"message":{"role":"assistant","content":"Clean output"},"done":true}"#.utf8)
         XCTAssertEqual(
-            try OllamaCorrector.responseText(from: data, endpoint: endpoint),
+            try OllamaCorrector.responseText(from: data, endpoint: endpoint).text,
             "Clean output"
         )
     }
@@ -120,7 +120,7 @@ final class LocalCorrectionRoutingTests: XCTestCase {
         XCTAssertNil(body["prompt"])
 
         let data = Data(#"{"choices":[{"message":{"content":"Compatible output"}}]}"#.utf8)
-        XCTAssertEqual(try OpenAICompatibleCorrector.responseText(from: data), "Compatible output")
+        XCTAssertEqual(try OpenAICompatibleCorrector.responseText(from: data).text, "Compatible output")
     }
 
     private func makeCorrectionRequest() -> CorrectionRequest {

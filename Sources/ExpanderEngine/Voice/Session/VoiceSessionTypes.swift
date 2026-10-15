@@ -739,6 +739,10 @@ public struct CorrectionCandidate: Codable, Sendable, Equatable {
     public let latencyMs: Double
     public let promptVersion: String
     public let refusalDetected: Bool
+    /// False when the provider stopped for a reason other than a finished `stop`
+    /// (length cap, omitted reason, filter, or Ollama `done: false`).
+    /// Missing on older payloads, which were stored before this was observed.
+    public let modelStopIsComplete: Bool
 
     public init(
         text: String,
@@ -747,7 +751,8 @@ public struct CorrectionCandidate: Codable, Sendable, Equatable {
         edits: [CorrectionEdit] = [],
         latencyMs: Double = 0,
         promptVersion: String = "1.0",
-        refusalDetected: Bool = false
+        refusalDetected: Bool = false,
+        modelStopIsComplete: Bool = true
     ) {
         self.text = text
         self.providerID = providerID
@@ -756,6 +761,42 @@ public struct CorrectionCandidate: Codable, Sendable, Equatable {
         self.latencyMs = latencyMs
         self.promptVersion = promptVersion
         self.refusalDetected = refusalDetected
+        self.modelStopIsComplete = modelStopIsComplete
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case providerID
+        case modelVersion
+        case edits
+        case latencyMs
+        case promptVersion
+        case refusalDetected
+        case modelStopIsComplete
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decode(String.self, forKey: .text)
+        providerID = try container.decode(String.self, forKey: .providerID)
+        modelVersion = try container.decode(String.self, forKey: .modelVersion)
+        edits = try container.decode([CorrectionEdit].self, forKey: .edits)
+        latencyMs = try container.decode(Double.self, forKey: .latencyMs)
+        promptVersion = try container.decode(String.self, forKey: .promptVersion)
+        refusalDetected = try container.decode(Bool.self, forKey: .refusalDetected)
+        modelStopIsComplete = try container.decodeIfPresent(Bool.self, forKey: .modelStopIsComplete) ?? true
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        try container.encode(providerID, forKey: .providerID)
+        try container.encode(modelVersion, forKey: .modelVersion)
+        try container.encode(edits, forKey: .edits)
+        try container.encode(latencyMs, forKey: .latencyMs)
+        try container.encode(promptVersion, forKey: .promptVersion)
+        try container.encode(refusalDetected, forKey: .refusalDetected)
+        try container.encode(modelStopIsComplete, forKey: .modelStopIsComplete)
     }
 }
 
