@@ -36,8 +36,10 @@ public enum ProtectedSpanExtractor {
         // bounded. A hit overlaps when any unit in its range is claimed.
         var occupied = [Bool](repeating: false, count: nsString.length)
 
-        // 1. URLs and Emails via NSDataDetector
-        if let urlDetector = linkDetector {
+        // 1. URLs via the shared detector. A link or mailto needs `.`, `@`, `:`, or `/`.
+        // Skipping the detector when none of those units appear keeps a long run of
+        // other characters off NSDataDetector without dropping a real URL or email.
+        if containsLinkCandidate(nsString), let urlDetector = linkDetector {
             let matches = urlDetector.matches(in: text, options: [], range: fullRange)
             for match in matches {
                 guard claim(match.range, occupied: &occupied) else { continue }
@@ -102,6 +104,20 @@ public enum ProtectedSpanExtractor {
 
         // Sort by start location
         return spans.sorted { $0.utf16RangeStart < $1.utf16RangeStart }
+    }
+
+    /// True when `text` can contain a link or mailto. `NSTextCheckingType.link`
+    /// matches URLs and email addresses, and both use one of these ASCII units.
+    private static func containsLinkCandidate(_ text: NSString) -> Bool {
+        for index in 0..<text.length {
+            switch text.character(at: index) {
+            case 46, 64, 58, 47: // . @ : /
+                return true
+            default:
+                continue
+            }
+        }
+        return false
     }
 
     /// Claim `range` only when every unit is free. Returns false when any unit
