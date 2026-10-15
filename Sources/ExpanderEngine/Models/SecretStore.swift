@@ -1238,13 +1238,12 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
             return satisfied(attemptArchiveTransaction(allowWait: false, deadline: 0, body))
         }
         let deadline = automaticConsolidationClock() + Self.archiveLockWaitSeconds
-        // The queue block returns before this scope does, so the body is not called late.
-        return withoutActuallyEscaping(body) { escapingBody in
-            let waited = runOnArchiveWaitQueue {
-                self.attemptArchiveTransaction(allowWait: true, deadline: deadline, escapingBody)
-            }
-            return satisfied(waited)
-        }
+        // `sync` runs the body before returning, so the closure stays non-escaping.
+        // An `async` hop copies it into a block that is still retained when
+        // `withoutActuallyEscaping` returns, and that traps under contention.
+        return satisfied(runOnArchiveWaitQueue {
+            self.attemptArchiveTransaction(allowWait: true, deadline: deadline, body)
+        })
     }
 
     private enum ArchiveLockOutcome<T> {
@@ -1270,19 +1269,13 @@ public final class ConsolidatedSecretBackingStore: SecretBackingStore {
     }
 
     /// Blocks the calling thread until `work` finishes on `archiveWaitQueue`.
-    /// Main must never call this: that would be `semaphore.wait` on the UI thread, and
-    /// `sync` onto this queue from main can deadlock a waiter that hops back to main.
-    private func runOnArchiveWaitQueue<T>(_ work: @escaping () -> T) -> T {
+    /// Main must never call this: `sync` onto this queue from main can deadlock a waiter
+    /// that hops back to main. The closure is non-escaping because `sync` returns only
+    /// after `work` returns.
+    private func runOnArchiveWaitQueue<T>(_ work: () -> T) -> T {
         precondition(!Thread.isMainThread)
         precondition(!onArchiveWaitQueue())
-        var output: T?
-        let done = DispatchSemaphore(value: 0)
-        archiveWaitQueue.async {
-            output = work()
-            done.signal()
-        }
-        done.wait()
-        return output!
+        return archiveWaitQueue.sync(execute: work)
     }
 
     /// `allowWait` is false on the main thread. It may sleep or `lock(before:)` only after

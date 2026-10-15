@@ -225,6 +225,37 @@ final class SecretArchiveLockTests: XCTestCase {
         XCTAssertLessThan(waited, 1.0, "the waiter starved for \(waited)s behind back-to-back holders")
     }
 
+    /// Background waiters used to hop with `async` inside `withoutActuallyEscaping`.
+    /// The queue block was still alive when that scope returned, so a burst of
+    /// off-main transactions trapped the process.
+    func testConcurrentOffMainArchiveTransactionsDoNotTrap() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ConsolidatedSecretBackingStore(
+            fileURL: directory.appendingPathComponent("synthetic.enc"),
+            tier: InMemorySecretBackingStore(), diagnostics: SecretAccessDiagnostics()
+        )
+        let group = DispatchGroup()
+        let failures = NSLock()
+        var refused = 0
+        for _ in 0..<32 {
+            group.enter()
+            DispatchQueue.global().async {
+                for _ in 0..<40 {
+                    if !store.performExclusiveTransaction({}) {
+                        failures.lock()
+                        refused += 1
+                        failures.unlock()
+                    }
+                }
+                group.leave()
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 10), .success)
+        XCTAssertEqual(refused, 0, "an off-main transaction was refused while the lease was free")
+    }
+
     func testWithArchiveLockDoesNotSleepAndMainRefusesAHeldFileLock() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
