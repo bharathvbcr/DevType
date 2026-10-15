@@ -31,8 +31,9 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           # package-app.sh derives the version from `git describe`; a shallow
           # clone has no tags and would stamp every build 0.0.0.
           fetch-depth: 0
@@ -45,7 +46,7 @@ jobs:
         run: swift --version && xcodebuild -version
 
       - name: Cache SwiftPM
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .build
           key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
@@ -70,8 +71,9 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Select Xcode
@@ -81,7 +83,7 @@ jobs:
         run: swift --version && xcodebuild -version
 
       - name: Cache SwiftPM
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .build
           # Distinct from macos-14: SDK/ABI differ when FoundationModels is present.
@@ -103,12 +105,13 @@ jobs:
     timeout-minutes: 30
     needs: [test, test-macos26]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Cache SwiftPM
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .build
           # Distinct from macos-14: SDK/ABI differ when FoundationModels is present.
@@ -162,7 +165,7 @@ jobs:
         run: ./Scripts/verify-release-capabilities.sh .build/DevType.app
 
       - name: Upload bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: DevType-app-unsigned
           path: .build/DevType.app
@@ -173,7 +176,9 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Shell script syntax
         run: for f in Scripts/*.sh; do bash -n "$f" || exit 1; done

@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
@@ -25,6 +25,8 @@ jobs:
   release:
     name: Build & Publish Release
     needs: [ci]
+    permissions:
+      contents: write
     # Every step below assumes a strict tag ref (release name, notes file,
     # version assertion); a manual dispatch from a branch must skip instead of
     # publishing a garbage-named release.
@@ -32,12 +34,13 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Cache SwiftPM
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .build
           # Distinct from macos-14: SDK/ABI differ when FoundationModels is present.
