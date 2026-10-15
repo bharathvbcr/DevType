@@ -104,7 +104,11 @@ enum MacroPaletteRanking {
         var entries: [FoldedEntry] = []
         for category in MacroCategory.allCases {
             let title = loc.s(category.titleKey).lowercased()
-            for descriptor in MacroCatalog.descriptors(in: category) {
+            // One catalogue: the editor inserts `CommandPaletteCatalog.macros`, and
+            // this ranking walks that same table. A private copy here would let the
+            // rows a person picks drift from the tokens that land in the snippet.
+            // `macros(in:)` is the section order the palette already shows.
+            for descriptor in CommandPaletteCatalog.macros(in: category) {
                 entries.append(FoldedEntry(
                     descriptor: descriptor,
                     category: category,

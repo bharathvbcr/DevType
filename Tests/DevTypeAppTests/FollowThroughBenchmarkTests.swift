@@ -53,7 +53,7 @@ final class FollowThroughBenchmarkTests: XCTestCase {
                 let terms = ["tomorrow", "uuid"]
                 for category in categories {
                     let title = loc.s(category.titleKey)
-                    for descriptor in MacroCatalog.descriptors(in: category) {
+                    for descriptor in CommandPaletteCatalog.macros(in: category) {
                         _ = MacroPaletteRanking.termScores(
                             descriptor, terms: terms, categoryTitle: title, loc: loc
                         )

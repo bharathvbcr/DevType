@@ -107,3 +107,12 @@
 "panel.ai.cancel" = "キャンセル";
 "panel.ai.close" = "閉じる";
 "delivery.fail.ownProcess" = "DevType が前面にあります — 挿入先のアプリに切り替えてください";
+"url.confirm.copy.title" = "スニペットをクリップボードにコピーしますか？";
+"url.confirm.copy.message" = "確認すると DevType がこのスニペットをコピーします。確認するまで値は読みません。";
+"url.confirm.dictation.title" = "スマートディクテーションを切り替えますか？";
+"url.confirm.dictation.message" = "確認すると DevType がディクテーションを開始または停止します。";
+"url.refuse.secret" = "シークレットのスニペットはリンクからコピーできません。";
+"url.refuse.missing" = "そのトリガーのスニペットはありません。";
+"url.refuse.unknown" = "DevType はそのリンクを認識できません。";
+"url.refuse.ambiguous" = "そのトリガーのスニペットが複数あるため、コピーしませんでした。";
+"ai.palette.saveSelection" = "選択範囲をスニペットとして保存";

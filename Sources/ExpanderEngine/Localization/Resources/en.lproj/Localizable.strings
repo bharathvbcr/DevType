@@ -129,3 +129,12 @@
 "panel.ai.cancel" = "Cancel";
 "panel.ai.close" = "Close";
 "delivery.fail.ownProcess" = "DevType is in front — switch to the app you want to insert into";
+"url.confirm.copy.title" = "Copy snippet to the clipboard?";
+"url.confirm.copy.message" = "DevType will copy this snippet after you confirm. The value is not read until you confirm.";
+"url.confirm.dictation.title" = "Toggle Smart Dictation?";
+"url.confirm.dictation.message" = "DevType will start or stop dictation after you confirm.";
+"url.refuse.secret" = "That snippet is a secret, so a link cannot copy it.";
+"url.refuse.missing" = "No snippet uses that trigger.";
+"url.refuse.unknown" = "DevType does not recognize that link.";
+"url.refuse.ambiguous" = "More than one snippet uses that trigger, so nothing was copied.";
+"ai.palette.saveSelection" = "Save selection as snippet";

@@ -1,6 +1,3 @@
-import AppKit
-import ExpanderEngine
-
 // MARK: - §2: the macro catalogue
 //
 // The old `showMacroMenu` hardcoded nine `(title, rawToken)` tuples in a flat
@@ -36,15 +33,15 @@ import ExpanderEngine
 /// §2: this is *data on the descriptor*, computed once when the catalogue is
 /// built, so smart insertion never has to re-parse the inserted string to work
 /// out what to select.
-struct MacroPlaceholder: Equatable {
+public struct MacroPlaceholder: Equatable {
     /// UTF-16 offset from the start of `MacroDescriptor.token`.
-    let offset: Int
+    public let offset: Int
     /// UTF-16 length. Zero means "put the caret here" (used for paired tokens).
-    let length: Int
+    public let length: Int
 }
 
 /// Palette sections, in display order.
-enum MacroCategory: String, CaseIterable {
+public enum MacroCategory: String, CaseIterable {
     case dateTime
     case cursorInput
     case fillIns
@@ -53,7 +50,7 @@ enum MacroCategory: String, CaseIterable {
     case keys
     case nested
 
-    var titleKey: String {
+    public var titleKey: String {
         switch self {
         case .dateTime: return "macro.category.date"
         case .cursorInput: return "macro.category.cursor"
@@ -67,7 +64,7 @@ enum MacroCategory: String, CaseIterable {
 }
 
 /// One row of the macro palette.
-struct MacroDescriptor {
+public struct MacroDescriptor {
 
     /// Template markers. `⟦` / `⟧` (U+27E6 / U+27E7) appear in no macro syntax
     /// DevType understands, so a template can mark its editable spans inline and
@@ -75,20 +72,20 @@ struct MacroDescriptor {
     static let placeholderOpen: Character = "\u{27E6}"
     static let placeholderClose: Character = "\u{27E7}"
 
-    let id: String
-    let category: MacroCategory
+    public let id: String
+    public let category: MacroCategory
     /// Localization key for the display name (ignored when `literalName` is set).
-    let nameKey: String
+    public let nameKey: String
     /// Name that comes from the engine rather than the string table (date presets).
-    let literalName: String?
-    let detailKey: String
+    public let literalName: String?
+    public let detailKey: String
     /// Optional single argument substituted into the localized detail string.
-    let detailArgument: String?
+    public let detailArgument: String?
     /// The text actually inserted into the snippet body.
-    let token: String
-    let placeholders: [MacroPlaceholder]
+    public let token: String
+    public let placeholders: [MacroPlaceholder]
     /// Extra untranslated search terms (syntax aliases, engine spec names).
-    let keywords: String
+    public let keywords: String
 
     private let exampleProvider: (String) -> String
 
@@ -117,16 +114,16 @@ struct MacroDescriptor {
     }
 
     /// Rendered by the real engine at display time; never a hardcoded string.
-    var example: String {
+    public var example: String {
         exampleProvider(token).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func name(using loc: LocalizationManager) -> String {
+    public func name(using loc: LocalizationManager) -> String {
         if let literalName { return literalName }
         return loc.s(nameKey)
     }
 
-    func detail(using loc: LocalizationManager) -> String {
+    public func detail(using loc: LocalizationManager) -> String {
         if let detailArgument { return loc.s(detailKey, detailArgument) }
         return loc.s(detailKey)
     }
@@ -156,7 +153,7 @@ struct MacroDescriptor {
 
 // MARK: - Catalogue
 
-enum MacroCatalog {
+enum PaletteMacroTable {
 
     /// Every macro the palette can insert, grouped by category in display order.
     static let all: [MacroDescriptor] = buildAll()
@@ -218,7 +215,7 @@ enum MacroCatalog {
                 detailArgument: preset.title,
                 template: "%date:\(preset.id)%",
                 keywords: "date time \(preset.id) \(preset.title)",
-                example: { MacroCatalog.teExample($0) }
+                example: { PaletteMacroTable.teExample($0) }
             )
         }
 
@@ -231,7 +228,7 @@ enum MacroCatalog {
             // as the offset, so `iso:+1d` is preset `iso` shifted by one day.
             template: "%date:⟦iso⟧:⟦+1d⟧%",
             keywords: "date offset arithmetic tomorrow yesterday relative +1d -2w +1y -3M",
-            example: { MacroCatalog.teExample($0) }
+            example: { PaletteMacroTable.teExample($0) }
         ))
         result.append(MacroDescriptor(
             id: "date.teOffset",
@@ -241,7 +238,7 @@ enum MacroCatalog {
             // `%@<offset>%` — TextExpander writes the unit uppercase.
             template: "%@⟦+1D⟧%",
             keywords: "date offset textexpander tomorrow relative",
-            example: { MacroCatalog.teExample($0) }
+            example: { PaletteMacroTable.teExample($0) }
         ))
         result.append(MacroDescriptor(
             id: "date.pattern",
@@ -250,7 +247,7 @@ enum MacroCatalog {
             detailKey: "macro.date.pattern.detail",
             template: "%date:⟦yyyy-MM-dd⟧%",
             keywords: "date custom pattern dateformatter unicode",
-            example: { MacroCatalog.teExample($0) }
+            example: { PaletteMacroTable.teExample($0) }
         ))
         result.append(MacroDescriptor(
             id: "date.mustache",
@@ -259,7 +256,7 @@ enum MacroCatalog {
             detailKey: "macro.date.mustache.detail",
             template: "{{date}}",
             keywords: "date mustache",
-            example: { MacroCatalog.mustacheExample($0) }
+            example: { PaletteMacroTable.mustacheExample($0) }
         ))
         result.append(MacroDescriptor(
             id: "date.mustacheFormat",
@@ -268,7 +265,7 @@ enum MacroCatalog {
             detailKey: "macro.date.mustacheFormat.detail",
             template: "{{date:⟦iso⟧}}",
             keywords: "date mustache preset iso us eu full",
-            example: { MacroCatalog.mustacheExample($0) }
+            example: { PaletteMacroTable.mustacheExample($0) }
         ))
         result.append(MacroDescriptor(
             id: "date.mustacheOffset",
@@ -277,7 +274,7 @@ enum MacroCatalog {
             detailKey: "macro.date.mustacheOffset.detail",
             template: "{{date:⟦iso⟧:⟦+1d⟧}}",
             keywords: "date mustache offset arithmetic tomorrow",
-            example: { MacroCatalog.mustacheExample($0) }
+            example: { PaletteMacroTable.mustacheExample($0) }
         ))
         result.append(MacroDescriptor(
             id: "time.mustache",
@@ -286,7 +283,7 @@ enum MacroCatalog {
             detailKey: "macro.time.mustache.detail",
             template: "{{time}}",
             keywords: "time clock mustache",
-            example: { MacroCatalog.mustacheExample($0) }
+            example: { PaletteMacroTable.mustacheExample($0) }
         ))
         return result
     }
@@ -320,7 +317,7 @@ enum MacroCatalog {
                 // Also no closing delimiter (documented TextExpander quirk).
                 template: "%clipboard",
                 keywords: "clipboard paste pasteboard textexpander",
-                example: { MacroCatalog.teExample($0) }
+                example: { PaletteMacroTable.teExample($0) }
             ),
             MacroDescriptor(
                 id: "clipboard.mustache",
@@ -344,7 +341,7 @@ enum MacroCatalog {
                 detailKey: "macro.filltext.detail",
                 template: FillInBuilder.fillText(name: "⟦Field⟧", defaultValue: ""),
                 keywords: "fill filltext input single line prompt",
-                example: { MacroCatalog.teExample($0) }
+                example: { PaletteMacroTable.teExample($0) }
             ),
             MacroDescriptor(
                 id: "fill.textDefault",
@@ -353,7 +350,7 @@ enum MacroCatalog {
                 detailKey: "macro.filltextDefault.detail",
                 template: FillInBuilder.fillText(name: "⟦Field⟧", defaultValue: "⟦Value⟧"),
                 keywords: "fill filltext default prefilled input",
-                example: { MacroCatalog.teExample($0) }
+                example: { PaletteMacroTable.teExample($0) }
             ),
             MacroDescriptor(
                 id: "fill.area",
@@ -362,7 +359,7 @@ enum MacroCatalog {
                 detailKey: "macro.fillarea.detail",
                 template: FillInBuilder.fillArea(name: "⟦Details⟧", defaultValue: ""),
                 keywords: "fill fillarea multiline textarea input",
-                example: { MacroCatalog.teExample($0) }
+                example: { PaletteMacroTable.teExample($0) }
             ),
             MacroDescriptor(
                 id: "fill.popup",
@@ -377,7 +374,7 @@ enum MacroCatalog {
                     defaultValue: "⟦Option A⟧"
                 ),
                 keywords: "fill fillpopup menu choice options select",
-                example: { MacroCatalog.teExample($0) }
+                example: { PaletteMacroTable.teExample($0) }
             ),
             MacroDescriptor(
                 id: "fill.part",
@@ -432,7 +429,7 @@ enum MacroCatalog {
                 detailKey: "macro.case.detail",
                 template: "%case:\(transform.rawValue)%⟦\(sample)⟧%caseend%",
                 keywords: "case \(transform.rawValue) transform textexpander caseend",
-                example: { MacroCatalog.teExample($0) }
+                example: { PaletteMacroTable.teExample($0) }
             ))
         }
         for (transform, nameKey) in transforms {
@@ -444,7 +441,7 @@ enum MacroCatalog {
                 detailKey: "macro.mustacheCase.detail",
                 template: "{{\(transform.rawValue):⟦\(sample)⟧}}",
                 keywords: "case \(transform.rawValue) transform mustache",
-                example: { MacroCatalog.mustacheExample($0) }
+                example: { PaletteMacroTable.mustacheExample($0) }
             ))
         }
         return result
@@ -524,7 +521,7 @@ enum MacroCatalog {
                 detailKey: "macro.counter.detail",
                 template: "%counter:⟦invoice⟧%",
                 keywords: "counter increment sequence number invoice",
-                example: { _ in MacroCatalog.counterExample("invoice") }
+                example: { _ in PaletteMacroTable.counterExample("invoice") }
             ),
             MacroDescriptor(
                 id: "counter.step",
@@ -534,7 +531,7 @@ enum MacroCatalog {
                 // `MacroCounterSpec.parse` reads a trailing `:+N` / `:-N` as the step.
                 template: "%counter:⟦invoice⟧:⟦+5⟧%",
                 keywords: "counter step increment sequence",
-                example: { _ in MacroCatalog.counterExample("invoice") }
+                example: { _ in PaletteMacroTable.counterExample("invoice") }
             ),
             MacroDescriptor(
                 id: "counter.mustache",
@@ -543,7 +540,7 @@ enum MacroCatalog {
                 detailKey: "macro.counter.detail",
                 template: "{{counter:⟦invoice⟧}}",
                 keywords: "counter increment sequence mustache",
-                example: { _ in MacroCatalog.counterExample("invoice") }
+                example: { _ in PaletteMacroTable.counterExample("invoice") }
             ),
             MacroDescriptor(
                 id: "calc.mustache",
@@ -552,7 +549,7 @@ enum MacroCatalog {
                 detailKey: "macro.calc.detail",
                 template: "{{calc: ⟦12 * 4⟧}}",
                 keywords: "calc calculate math arithmetic sum mustache",
-                example: { MacroCatalog.mustacheExample($0) }
+                example: { PaletteMacroTable.mustacheExample($0) }
             )
         ]
     }
@@ -608,7 +605,7 @@ enum MacroCatalog {
                 detailKey: "macro.nested.detail",
                 template: "%snippet:⟦TRIGGER⟧%",
                 keywords: "snippet nested include reference trigger",
-                example: { MacroCatalog.teExample($0) }
+                example: { PaletteMacroTable.teExample($0) }
             ),
             MacroDescriptor(
                 id: "snippet.mustache",
@@ -619,5 +616,15 @@ enum MacroCatalog {
                 keywords: "snippet nested include reference mustache"
             )
         ]
+    }
+}
+
+extension CommandPaletteCatalog {
+    /// Macro rows the snippet editor inserts. Command rows live on this same type,
+    /// so the editor menu and the ⌘/ palette are not two catalogues that can drift.
+    public static var macros: [MacroDescriptor] { PaletteMacroTable.all }
+
+    public static func macros(in category: MacroCategory) -> [MacroDescriptor] {
+        PaletteMacroTable.descriptors(in: category)
     }
 }
