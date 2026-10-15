@@ -1557,33 +1557,61 @@ public final class PasteboardBroker {
     }
 
     /// §1.7: bounded pasteboard snapshot. See `snapshotMaxItems` for the tradeoff.
-    private static func snapshotPasteboard(_ pasteboard: NSPasteboard) -> PasteboardSnapshot? {
+    ///
+    /// Representations that cannot be restored are not materialized. AppKit has no size
+    /// query, so the first type that exceeds the remaining budget can still be read once.
+    static func snapshotPasteboard(_ pasteboard: NSPasteboard) -> PasteboardSnapshot? {
         guard let items = pasteboard.pasteboardItems else { return nil }
+        return snapshotRepresentations(itemTypes: items.map(\.types)) { index, type in
+            items[index].data(forType: type)
+        }
+    }
+
+    /// Per item, then per type: skip promised types, skip a TIFF that sits beside PNG, JPEG,
+    /// or GIF, and once the budget is already spent do not read this type or any later one.
+    static func snapshotRepresentations(
+        itemTypes: [[NSPasteboard.PasteboardType]],
+        budget: Int = snapshotMaxBytes,
+        maxItems: Int = snapshotMaxItems,
+        read: (Int, NSPasteboard.PasteboardType) -> Data?
+    ) -> PasteboardSnapshot {
+        let jpeg = NSPasteboard.PasteboardType("public.jpeg")
+        let gif = NSPasteboard.PasteboardType("public.gif")
+        let legacyTIFF = NSPasteboard.PasteboardType("NeXT TIFF v4.0 pasteboard type")
         var result: PasteboardSnapshot = []
-        var budget = snapshotMaxBytes
+        var remaining = budget
         var skipped = 0
 
-        for item in items.prefix(snapshotMaxItems) {
+        for (index, types) in itemTypes.enumerated() where index < maxItems {
+            let hasCompressedImage = types.contains { $0 == .png || $0 == jpeg || $0 == gif }
             var dict = [NSPasteboard.PasteboardType: Data]()
-            for type in item.types {
+            for type in types {
                 if snapshotSkippedTypes.contains(type.rawValue) {
                     skipped += 1
                     continue
                 }
-                guard let data = item.data(forType: type) else { continue }
-                if data.count > budget {
+                if hasCompressedImage && (type == .tiff || type == legacyTIFF) {
                     skipped += 1
                     continue
                 }
-                budget -= data.count
+                if remaining <= 0 {
+                    skipped += 1
+                    continue
+                }
+                guard let data = read(index, type) else { continue }
+                if data.count > remaining {
+                    skipped += 1
+                    continue
+                }
+                remaining -= data.count
                 dict[type] = data
             }
             if !dict.isEmpty {
                 result.append(dict)
             }
         }
-        if items.count > snapshotMaxItems {
-            skipped += items.count - snapshotMaxItems
+        if itemTypes.count > maxItems {
+            skipped += itemTypes.count - maxItems
         }
         if skipped > 0 {
             DevTypeLog.inject.notice(
