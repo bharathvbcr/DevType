@@ -239,17 +239,136 @@ final class VoiceStreamingLinearityTests: XCTestCase {
         XCTAssertGreaterThan(LiquidBlobGeometry.hudSize(forText: medium, font: font).height, 68)
     }
 
+    /// Once the HUD is at maximum height and the wrap limit, a longer partial must not run
+    /// `boundingRect` again. A shorter one measures, so a revision that deletes text can
+    /// leave the maximum. A tall column of short lines is not full: its width is still the
+    /// base, and the next wide line has to be measured.
+    func testStreamingHUDSizeIsNotMeasuredAgainOnceAtMaximum() {
+        let font = NSFont.systemFont(ofSize: 14.5)
+        let maximum = CGSize(width: 500, height: 188)
+        let sentence = "The quick brown fox jumps over the lazy dog and keeps on dictating. "
+        let long = String(repeating: sentence, count: 80)
+        var memory: LiquidBlobGeometry.StreamingHUDMemory? = nil
+
+        let first = LiquidBlobGeometry.streamingHUDSize(
+            forText: long, font: font, maximum: maximum, memory: &memory
+        )
+        XCTAssertTrue(first.didMeasure)
+        XCTAssertEqual(first.size.height, maximum.height)
+        XCTAssertGreaterThanOrEqual(first.size.width + LiquidBlobGeometry.maximumWidthSlack, maximum.width)
+        XCTAssertEqual(memory?.filledAtUTF8Count, long.utf8.count)
+        XCTAssertEqual(memory?.size, first.size)
+
+        let grown = long + sentence
+        let second = LiquidBlobGeometry.streamingHUDSize(
+            forText: grown, font: font, maximum: maximum, memory: &memory
+        )
+        XCTAssertFalse(second.didMeasure, "Growth past the clamp must not measure again")
+        XCTAssertEqual(second.size, first.size)
+        XCTAssertEqual(memory?.filledAtUTF8Count, long.utf8.count,
+                       "The threshold stays at the text that first filled the HUD")
+
+        let sameLength = String(repeating: "y", count: long.utf8.count)
+        let third = LiquidBlobGeometry.streamingHUDSize(
+            forText: sameLength, font: font, maximum: maximum, memory: &memory
+        )
+        XCTAssertFalse(third.didMeasure)
+        XCTAssertEqual(third.size, first.size)
+
+        let shrunk = "Hello"
+        let fourth = LiquidBlobGeometry.streamingHUDSize(
+            forText: shrunk, font: font, maximum: maximum, memory: &memory
+        )
+        XCTAssertTrue(fourth.didMeasure, "A shorter transcript has to be measured so the HUD can shrink")
+        XCTAssertLessThan(fourth.size.height, maximum.height)
+        XCTAssertNil(memory)
+
+        let column = String(repeating: "a\n", count: 40)
+        let tallNarrow = LiquidBlobGeometry.streamingHUDSize(
+            forText: column, font: font, maximum: maximum, memory: &memory
+        )
+        XCTAssertTrue(tallNarrow.didMeasure)
+        XCTAssertEqual(tallNarrow.size.height, maximum.height)
+        XCTAssertLessThan(tallNarrow.size.width + LiquidBlobGeometry.maximumWidthSlack, maximum.width)
+        XCTAssertNil(memory, "A tall column of short lines has not filled the width")
+        let afterColumn = LiquidBlobGeometry.streamingHUDSize(
+            forText: column + sentence, font: font, maximum: maximum, memory: &memory
+        )
+        XCTAssertTrue(afterColumn.didMeasure, "Widening a short column still measures")
+
+        let placeholder = LiquidBlobGeometry.streamingHUDSize(
+            forText: "Listening…", font: font, maximum: maximum, memory: &memory
+        )
+        XCTAssertFalse(placeholder.didMeasure)
+        XCTAssertEqual(placeholder.size, CGSize(width: 304, height: 68))
+        XCTAssertNil(memory)
+    }
+
+    /// A full HUD that is already on screen at the remembered size must not schedule another
+    /// resize. A hidden panel, a shorter transcript, a frame that has not caught up, and a
+    /// change past the 2 pt slack still do.
+    func testFilledHUDSkipsResizeOnceTheFrameMatches() {
+        let memory = LiquidBlobGeometry.StreamingHUDMemory(
+            filledAtUTF8Count: 100,
+            size: CGSize(width: 496, height: 188)
+        )
+        let frame = memory.size
+        XCTAssertTrue(LiquidBlobGeometry.shouldSkipFilledStreamingResize(
+            isVisible: true, textUTF8Count: 100, frame: frame, memory: memory
+        ))
+        XCTAssertTrue(LiquidBlobGeometry.shouldSkipFilledStreamingResize(
+            isVisible: true, textUTF8Count: 180, frame: frame, memory: memory
+        ))
+        XCTAssertFalse(LiquidBlobGeometry.shouldSkipFilledStreamingResize(
+            isVisible: true, textUTF8Count: 99, frame: frame, memory: memory
+        ), "A shorter transcript can shrink the HUD")
+        XCTAssertFalse(LiquidBlobGeometry.shouldSkipFilledStreamingResize(
+            isVisible: false, textUTF8Count: 180, frame: frame, memory: memory
+        ), "The first show still has to place the window")
+        XCTAssertFalse(LiquidBlobGeometry.shouldSkipFilledStreamingResize(
+            isVisible: true, textUTF8Count: 180, frame: CGSize(width: 340, height: 68), memory: memory
+        ), "A frame that has not reached the filled size still resizes")
+        XCTAssertFalse(LiquidBlobGeometry.shouldSkipFilledStreamingResize(
+            isVisible: true, textUTF8Count: 180, frame: frame, memory: nil
+        ))
+
+        XCTAssertFalse(LiquidBlobGeometry.streamingFrameNeedsPlacement(
+            current: frame, target: frame, isVisible: true
+        ))
+        XCTAssertFalse(LiquidBlobGeometry.streamingFrameNeedsPlacement(
+            current: frame,
+            target: CGSize(width: frame.width + LiquidBlobGeometry.streamingFrameSlack, height: frame.height),
+            isVisible: true
+        ))
+        XCTAssertTrue(LiquidBlobGeometry.streamingFrameNeedsPlacement(
+            current: frame, target: frame, isVisible: false
+        ), "A hidden window is placed even when the size already matches")
+        XCTAssertTrue(LiquidBlobGeometry.streamingFrameNeedsPlacement(
+            current: frame,
+            target: CGSize(width: frame.width + LiquidBlobGeometry.streamingFrameSlack + 1, height: frame.height),
+            isVisible: true
+        ))
+    }
+
     // MARK: - Compiled once
 
     func testProtectedSpanPatternsAreCompiledOnceAndStillMatch() {
         let first = ProtectedSpanExtractor.patterns.map { ObjectIdentifier($0.regex) }
-        _ = ProtectedSpanExtractor.extract(from: "see ~/a/b --flag v1.2.3 5 ms $4.00")
+        let firstDetector = ProtectedSpanExtractor.linkDetector.map(ObjectIdentifier.init)
+        _ = ProtectedSpanExtractor.extract(from: "see ~/a/b --flag v1.2.3 5 ms $4.00 https://example.com")
         let second = ProtectedSpanExtractor.patterns.map { ObjectIdentifier($0.regex) }
+        let secondDetector = ProtectedSpanExtractor.linkDetector.map(ObjectIdentifier.init)
         XCTAssertEqual(first.count, 6)
         XCTAssertEqual(first, second)
-        let spans = ProtectedSpanExtractor.extract(from: "mail a@b.co at ~/x/y with --verbose on v1.2.3")
+        XCTAssertNotNil(firstDetector)
+        XCTAssertEqual(firstDetector, secondDetector, "The link detector is built once, not per extract")
+        let spans = ProtectedSpanExtractor.extract(
+            from: "mail a@b.co at ~/x/y with --verbose on v1.2.3 and https://example.com/docs"
+        )
         let kinds = Set(spans.map(\.kind))
-        XCTAssertTrue(kinds.isSuperset(of: [.filePath, .shellFlag, .versionNumber]))
+        XCTAssertTrue(kinds.isSuperset(of: [.filePath, .shellFlag, .versionNumber, .url, .email]))
+        XCTAssertTrue(spans.contains { $0.kind == .url && $0.originalText == "https://example.com/docs" })
+        XCTAssertTrue(spans.contains { $0.kind == .email && $0.originalText == "a@b.co" })
     }
 
     func testDeterministicCorrectorOutputUnchangedByCachedRules() async throws {
