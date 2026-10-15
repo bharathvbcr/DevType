@@ -40,8 +40,42 @@ final class InputBufferBoundaryTests: XCTestCase {
         for capacity in [-1, Int.min, 0] {
             var buffer = LayoutBuffer(maxCount: capacity)
             buffer.appendLiteral(composed: "a", physical: "a")
+            buffer.recordKeystroke(allowPhysicalFallback: true, delete: false, composed: "b", physical: "b")
             XCTAssertTrue(buffer.isEmpty)
             XCTAssertEqual(buffer.physical, "")
+            XCTAssertEqual(buffer.composed, "")
+            XCTAssertEqual(buffer.count, 0)
         }
+    }
+
+    func testLayoutRingKeepsOldestToNewestOrderAcrossWrap() {
+        var buffer = LayoutBuffer(maxCount: 3)
+        for character in ["a", "b", "c", "d"] {
+            buffer.appendLiteral(composed: String(character), physical: Character(character))
+        }
+        XCTAssertEqual(buffer.count, 3)
+        XCTAssertEqual(buffer.physical, "bcd")
+        XCTAssertEqual(buffer.physicalCharacters, ["b", "c", "d"])
+        XCTAssertEqual(buffer.composed, "bcd")
+        XCTAssertEqual(buffer.lastComposed(), "d")
+        buffer.deleteLast()
+        XCTAssertEqual(buffer.physical, "bc")
+        buffer.appendLiteral(composed: "e", physical: "e")
+        XCTAssertEqual(buffer.physical, "bce")
+        XCTAssertEqual(buffer.composed, "bce")
+    }
+
+    func testRecordKeystrokeDoesNoWorkWhenPhysicalFallbackIsOff() {
+        var buffer = LayoutBuffer(maxCount: 8)
+        buffer.appendLiteral(composed: "a", physical: "a")
+        buffer.recordKeystroke(allowPhysicalFallback: false, delete: false, composed: "b", physical: "b")
+        buffer.recordKeystroke(allowPhysicalFallback: false, delete: true)
+        XCTAssertEqual(buffer.count, 1)
+        XCTAssertEqual(buffer.physical, "a")
+        XCTAssertEqual(buffer.composed, "a")
+        XCTAssertTrue(LayoutBuffer.idle.isEmpty)
+        var idle = LayoutBuffer.idle
+        idle.appendLiteral(composed: "z", physical: "z")
+        XCTAssertTrue(LayoutBuffer.idle.isEmpty)
     }
 }

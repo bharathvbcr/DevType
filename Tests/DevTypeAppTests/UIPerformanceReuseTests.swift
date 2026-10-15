@@ -292,6 +292,67 @@ final class UIPerformanceReuseTests: XCTestCase {
         XCTAssertFalse(body.contains("window.center()"))
     }
 
+    func testSidebarOutlineRowsAreDequeued() throws {
+        let text = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        let range = try XCTUnwrap(text.range(of: "func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any)"))
+        let body = String(text[range.lowerBound...].prefix(500))
+        XCTAssertTrue(body.contains("RoundedSelectionRowView.dequeue(from: outlineView, owner: self)"))
+        XCTAssertTrue(body.contains("selectionRadius = 7"))
+        XCTAssertTrue(body.contains("top: 1, left: 6, bottom: 1, right: 6"))
+        XCTAssertFalse(body.contains("RoundedSelectionRowView()"))
+    }
+
+    func testSnippetPreviewStopsAtTheFirstNewline() throws {
+        XCTAssertEqual(SnippetOneLinePreview.text("hello\nworld"), "hello ↵")
+        XCTAssertEqual(SnippetOneLinePreview.text("\nhello"), "")
+        XCTAssertEqual(
+            SnippetOneLinePreview.text("ab\n" + String(repeating: "c", count: 2_000_000)),
+            "ab ↵"
+        )
+        let long = String(repeating: "a", count: 500)
+        XCTAssertEqual(SnippetOneLinePreview.text(long).count, 160)
+        let text = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        XCTAssertTrue(text.contains("SnippetOneLinePreview.text(snippet.replacementText)"))
+        XCTAssertFalse(text.contains("replacementText.replacingOccurrences(of: \"\\n\", with: \" ↵ \")"))
+    }
+
+    func testLibraryListenerAppliesTheMatcherSnapshotOffMain() throws {
+        let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
+        let range = try XCTUnwrap(text.range(of: "private func bindSnippetStore()"))
+        let body = String(text[range.lowerBound...].prefix(800))
+        XCTAssertTrue(body.contains("applySnippetSnapshot(snippets)"))
+        XCTAssertFalse(body.contains("EventTapEngine.shared.snippets = snippets"))
+    }
+
+    func testOneLibraryToggleReloadsTheOutlineOnce() throws {
+        _ = NSApplication.shared
+        let (store, directory) = try makeStore([":toggle"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        SnippetManagerViewController.libraryOverride = store
+        var controller: SnippetManagerViewController? = SnippetManagerViewController()
+        defer {
+            controller = nil
+            SnippetManagerViewController.libraryOverride = nil
+        }
+        _ = controller?.view
+        drainMainQueue()
+        XCTAssertEqual(controller?.appliedReloadCount, 1, "appearing applies the library once")
+        guard case .saved = controller?.performLibraryToggleForTesting() else {
+            XCTFail("toggle must save")
+            return
+        }
+        drainMainQueue()
+        XCTAssertEqual(controller?.appliedReloadCount, 2, "one toggle must not reload twice")
+        drainMainQueue()
+        XCTAssertEqual(controller?.appliedReloadCount, 2, "a later drain must not apply the same revision again")
+    }
+
+    private func drainMainQueue() {
+        let drained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 2)
+    }
+
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }

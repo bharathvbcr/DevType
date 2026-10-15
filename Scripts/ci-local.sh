@@ -63,7 +63,10 @@ done
 "${ROOT}/Scripts/ci-release-fixtures.sh"
 
 echo "==> 2. Running SwiftPM Unit Tests"
-"${ROOT}/Scripts/test.sh" -v
+# Debug timings are not the gate. Step 2b is the release ceiling, and only when
+# DEVTYPE_BENCH=1 was set for this script. Strip it here so a debug run cannot
+# fail the suite on a wall-clock number the ceilings were not derived from.
+env -u DEVTYPE_BENCH "${ROOT}/Scripts/test.sh" -v
 
 echo "==> 2b. Benchmark regression gate (release)"
 # Ceilings in Tests/ExpanderEngineTests/AuditBenchmarkTests.swift are ~10x the release numbers, so
@@ -72,7 +75,7 @@ echo "==> 2b. Benchmark regression gate (release)"
 # fails this script; skipping is announced, never silent. -DDEBUG is needed because other test
 # files use `#if DEBUG` hooks that a release test build would otherwise drop.
 if [[ "${DEVTYPE_BENCH:-}" == "1" ]]; then
-  swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests|VoiceStreamingBenchmark'
+  swift test -c release -Xswiftc -enable-testing -Xswiftc -DDEBUG --filter 'AuditBenchmark|BenchmarkGateSelfTests|FollowThroughBenchmark|VoiceStreamingBenchmark'
 else
   echo "  SKIPPED: DEVTYPE_BENCH=1 is not set, so the performance gate did NOT run."
   echo "  The release gate is DEVTYPE_BENCH=1 ./Scripts/ci-local.sh."

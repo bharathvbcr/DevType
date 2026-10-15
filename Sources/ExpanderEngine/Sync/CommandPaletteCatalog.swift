@@ -474,6 +474,10 @@ public enum CommandPaletteCatalog {
     /// Without it a caching test can only compare two identical computations, which is true
     /// whether or not a cache exists — it proves determinism, not caching.
     private(set) static var rowCacheHitCount = 0
+    /// Hits of the per-`changeCount` count-summary cache. A query change used to rescan the
+    /// whole clipboard for `.count` even when the pasteboard had not changed.
+    private(set) static var countSummaryCacheHitCount = 0
+    private static var cachedCountSummary: (changeCount: Int, summary: String)?
 
     private static var rowQueryCache: [PaletteQueryCacheKey: [PaletteListRow]] = [:]
     private static var rowQueryCacheKeys: [PaletteQueryCacheKey] = []
@@ -531,6 +535,8 @@ public enum CommandPaletteCatalog {
         cachedCommandIndex = nil
         cachedCommandsByID = nil
         rowCacheHitCount = 0
+        countSummaryCacheHitCount = 0
+        cachedCountSummary = nil
         paletteCacheLock.unlock()
         PaletteSemanticIndex.invalidateCache()
     }
@@ -707,6 +713,7 @@ public enum CommandPaletteCatalog {
         commandUsageBoost: ((String) -> Int)? = nil,
         aiDisabledReason: String? = nil,
         context: PaletteContext = .none,
+        clipboardChangeCount: Int? = nil,
         limit: Int = 40
     ) -> [PaletteCommandHit] {
         guard limit > 0 else { return [] }
@@ -765,7 +772,8 @@ public enum CommandPaletteCatalog {
                     locale: locale,
                     timeZone: timeZone,
                     clipboardPreview: clipboardPreview,
-                    aiDisabledReason: aiDisabledReason
+                    aiDisabledReason: aiDisabledReason,
+                    clipboardChangeCount: clipboardChangeCount
                 ))
             }
             hits.sort { a, b in
@@ -836,7 +844,8 @@ public enum CommandPaletteCatalog {
                 locale: locale,
                 timeZone: timeZone,
                 clipboardPreview: clipboardPreview,
-                aiDisabledReason: aiDisabledReason
+                aiDisabledReason: aiDisabledReason,
+                clipboardChangeCount: clipboardChangeCount
             ))
         }
 
@@ -874,7 +883,8 @@ public enum CommandPaletteCatalog {
                     locale: locale,
                     timeZone: timeZone,
                     clipboardPreview: clipboardPreview,
-                    aiDisabledReason: aiDisabledReason
+                    aiDisabledReason: aiDisabledReason,
+                    clipboardChangeCount: clipboardChangeCount
                 ))
             }
         }
@@ -974,6 +984,7 @@ public enum CommandPaletteCatalog {
             commandUsageBoost: commandUsageBoost,
             aiDisabledReason: aiDisabledReason,
             context: context,
+            clipboardChangeCount: clipboardChangeCount,
             limit: isExplicitCommandQuery ? max(commandLimit, 50) : commandLimit
         )
 
@@ -1357,6 +1368,41 @@ public enum CommandPaletteCatalog {
         }
     }
 
+    /// Preview window only. Folding newlines on the whole clipboard, then taking 80 characters,
+    /// scans a megabyte paste on every palette keystroke. Newline and space are both one
+    /// character, so the first 80 of the folded string are the first 80 of this window.
+    /// `insertText` stays the full clipboard string.
+    static func clippedClipboardPreview(_ text: String) -> String {
+        let head = text.prefix(81)
+        let folded = String(head).replacingOccurrences(of: "\n", with: " ")
+        if head.count > 80 {
+            return String(folded.prefix(77)) + "…"
+        }
+        return folded
+    }
+
+    /// Full `countSummary` once per pasteboard change. A nil change count always scans `text`,
+    /// so tests that pass a string without a change count stay honest. The same change count
+    /// with different text is a stale read; production updates both together.
+    private static func countSummary(for text: String, changeCount: Int?) -> String {
+        if let changeCount, !text.isEmpty {
+            paletteCacheLock.lock()
+            if let cached = cachedCountSummary, cached.changeCount == changeCount {
+                countSummaryCacheHitCount &+= 1
+                paletteCacheLock.unlock()
+                return cached.summary
+            }
+            paletteCacheLock.unlock()
+        }
+        let summary = PaletteTextOps.countSummary(for: text)
+        if let changeCount, !text.isEmpty {
+            paletteCacheLock.lock()
+            cachedCountSummary = (changeCount, summary)
+            paletteCacheLock.unlock()
+        }
+        return summary
+    }
+
     private static func makeHit(
         _ command: PaletteCommand,
         score: Int,
@@ -1365,7 +1411,8 @@ public enum CommandPaletteCatalog {
         locale: Locale,
         timeZone: TimeZone,
         clipboardPreview: String?,
-        aiDisabledReason: String?
+        aiDisabledReason: String?,
+        clipboardChangeCount: Int? = nil
     ) -> PaletteCommandHit {
         switch command.action {
         case .date(let tool):
@@ -1375,9 +1422,8 @@ public enum CommandPaletteCatalog {
             let text = clipboardPreview ?? ""
             let preview = text.isEmpty
                 ? loc.s("palette.tool.clipboard.empty")
-                : text.replacingOccurrences(of: "\n", with: " ")
-            let clipped = preview.count > 80 ? String(preview.prefix(77)) + "…" : preview
-            return PaletteCommandHit(command: command, score: score, insertText: text, preview: clipped)
+                : clippedClipboardPreview(text)
+            return PaletteCommandHit(command: command, score: score, insertText: text, preview: preview)
         case .generate(let op):
             let text = PaletteTextOps.generate(op)
             return PaletteCommandHit(command: command, score: score, insertText: text, preview: text)
@@ -1392,7 +1438,7 @@ public enum CommandPaletteCatalog {
             let source = clipboardPreview ?? ""
             let summary = source.isEmpty
                 ? loc.s("palette.tool.count.empty")
-                : PaletteTextOps.countSummary(for: source)
+                : countSummary(for: source, changeCount: clipboardChangeCount)
             return PaletteCommandHit(command: command, score: score, insertText: "", preview: summary)
         case .undoAI:
             let preview = AIUndoStore.preview ?? loc.s("palette.ai.undo.detail")

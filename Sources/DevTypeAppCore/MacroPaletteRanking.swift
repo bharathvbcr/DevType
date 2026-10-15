@@ -40,13 +40,27 @@ enum MacroPaletteRanking {
         categoryTitle: String,
         loc: LocalizationManager
     ) -> [Int?] {
-        let name = descriptor.name(using: loc).lowercased()
-        let token = descriptor.token.lowercased()
-        let keywords = descriptor.keywords.lowercased()
-        let detail = descriptor.detail(using: loc).lowercased()
-        let category = categoryTitle.lowercased()
+        fieldScores(
+            name: descriptor.name(using: loc).lowercased(),
+            token: descriptor.token.lowercased(),
+            keywords: descriptor.keywords.lowercased(),
+            detail: descriptor.detail(using: loc).lowercased(),
+            category: categoryTitle.lowercased(),
+            terms: terms
+        )
+    }
 
-        return terms.map { term -> Int? in
+    /// Already-folded fields. `rank` serves these from the per-language index; `termScores`
+    /// folds on the way in so the two paths cannot drift.
+    private static func fieldScores(
+        name: String,
+        token: String,
+        keywords: String,
+        detail: String,
+        category: String,
+        terms: [String]
+    ) -> [Int?] {
+        terms.map { term -> Int? in
             if name == term || token == term { return 1000 }
             if token.contains(term) { return 920 }
             if name.hasPrefix(term) { return 900 }
@@ -60,6 +74,55 @@ enum MacroPaletteRanking {
             if category.contains(term) { return 400 }
             return nil
         }
+    }
+
+    private struct FoldedEntry {
+        let descriptor: MacroDescriptor
+        let category: MacroCategory
+        let name: String
+        let token: String
+        let keywords: String
+        let detail: String
+        let categoryTitle: String
+    }
+
+    private static let foldedLock = NSLock()
+    private static var foldedCache: (language: AppLanguage, entries: [FoldedEntry])?
+
+    /// One lowercasing of the catalogue per UI language. `rank` used to fold every field of
+    /// every macro on every keystroke. The catalogue itself is static.
+    private static func foldedEntries(loc: LocalizationManager) -> [FoldedEntry] {
+        let language = loc.language
+        foldedLock.lock()
+        if let foldedCache, foldedCache.language == language {
+            let entries = foldedCache.entries
+            foldedLock.unlock()
+            return entries
+        }
+        foldedLock.unlock()
+
+        var entries: [FoldedEntry] = []
+        for category in MacroCategory.allCases {
+            let title = loc.s(category.titleKey).lowercased()
+            for descriptor in MacroCatalog.descriptors(in: category) {
+                entries.append(FoldedEntry(
+                    descriptor: descriptor,
+                    category: category,
+                    name: descriptor.name(using: loc).lowercased(),
+                    token: descriptor.token.lowercased(),
+                    keywords: descriptor.keywords.lowercased(),
+                    detail: descriptor.detail(using: loc).lowercased(),
+                    categoryTitle: title
+                ))
+            }
+        }
+
+        foldedLock.lock()
+        if loc.language == language {
+            foldedCache = (language, entries)
+        }
+        foldedLock.unlock()
+        return entries
     }
 
     /// Ranked sections for a query.
@@ -79,26 +142,25 @@ enum MacroPaletteRanking {
         let scoredTerms = CommandPaletteCatalog.contentTerms(terms)
         let browsing = scoredTerms.isEmpty
 
-        let titles = Dictionary(
-            uniqueKeysWithValues: MacroCategory.allCases.map { ($0, loc.s($0.titleKey)) }
-        )
-
         // Score everything first: whether an unmatched word is forgivable depends on whether
         // any macro in the catalogue understands it, which is not knowable one macro at a time.
+        // Fields are already folded for this language; see `foldedEntries`.
         var perMacro: [(descriptor: MacroDescriptor, category: MacroCategory, scores: [Int?])] = []
         var discriminating = [Bool](repeating: false, count: scoredTerms.count)
-        for category in MacroCategory.allCases {
-            let title = titles[category] ?? ""
-            for descriptor in MacroCatalog.descriptors(in: category) {
-                let scores = termScores(
-                    descriptor, terms: scoredTerms, categoryTitle: title, loc: loc
-                )
-                for (index, value) in scores.enumerated()
-                where (value ?? 0) >= CommandPaletteCatalog.minimumDiscriminatingTermScore {
-                    discriminating[index] = true
-                }
-                perMacro.append((descriptor, category, scores))
+        for entry in foldedEntries(loc: loc) {
+            let scores = fieldScores(
+                name: entry.name,
+                token: entry.token,
+                keywords: entry.keywords,
+                detail: entry.detail,
+                category: entry.categoryTitle,
+                terms: scoredTerms
+            )
+            for (index, value) in scores.enumerated()
+            where (value ?? 0) >= CommandPaletteCatalog.minimumDiscriminatingTermScore {
+                discriminating[index] = true
             }
+            perMacro.append((entry.descriptor, entry.category, scores))
         }
 
         var ranked: [MacroCategory: [Match]] = [:]

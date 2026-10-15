@@ -14,12 +14,20 @@ public final class PermissionObserver {
     public static let shared = PermissionObserver()
 
     public static let pollInterval: TimeInterval = 2.0
+    /// While every capability is already granted, a 2s TCC preflight is wasted main-thread work.
+    /// The event-tap health timer stays separate and keeps its own 2s cadence: a fully capable
+    /// process can still lose the tap.
+    public static let capablePollInterval: TimeInterval = 30
+    public static let pollLeeway: DispatchTimeInterval = .milliseconds(500)
 
     private let probe = PermissionProbe()
     private var workspaceObserver: NSObjectProtocol?
     private var permissionPollTimer: DispatchSourceTimer?
     private var lastObservedSnapshot: PermissionSnapshot?
     private var onChanged: ((PermissionSnapshot) -> Void)?
+    private var pollingWhileCapable = false
+    /// Interval the live poll timer was scheduled with. Tests read this after `refreshNow(with:)`.
+    public private(set) var currentPollInterval: TimeInterval = PermissionObserver.pollInterval
 
     public init() {}
 
@@ -44,17 +52,10 @@ public final class PermissionObserver {
             self?.emitIfChanged()
         }
 
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(
-            deadline: .now() + Self.pollInterval,
-            repeating: Self.pollInterval,
-            leeway: .milliseconds(200)
-        )
-        timer.setEventHandler { [weak self] in
-            self?.emitIfChanged()
-        }
-        timer.resume()
-        permissionPollTimer = timer
+        // `stop()` cleared the cadence flag. Seed it to the opposite of the initial snapshot
+        // so the first schedule always installs a timer.
+        pollingWhileCapable = !initial.isFullyCapable
+        adoptPollCadence(fullyCapable: initial.isFullyCapable)
     }
 
     public func stop() {
@@ -66,6 +67,8 @@ public final class PermissionObserver {
         permissionPollTimer = nil
         lastObservedSnapshot = nil
         onChanged = nil
+        pollingWhileCapable = false
+        currentPollInterval = Self.pollInterval
         DevTypeLog.permission.debug("[Permission] observer stopped")
     }
 
@@ -83,8 +86,27 @@ public final class PermissionObserver {
         emitIfChanged(force: true, snapshot: snapshot)
     }
 
+    /// Reschedules only when the fully-capable bit changes, or when no timer is installed.
+    /// Cancelling a timer from its own handler is safe: the handler returns, then the source
+    /// is cancelled, and the replacement is a different source.
+    private func adoptPollCadence(fullyCapable: Bool) {
+        guard fullyCapable != pollingWhileCapable || permissionPollTimer == nil else { return }
+        pollingWhileCapable = fullyCapable
+        let interval = fullyCapable ? Self.capablePollInterval : Self.pollInterval
+        currentPollInterval = interval
+        permissionPollTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: Self.pollLeeway)
+        timer.setEventHandler { [weak self] in
+            self?.emitIfChanged()
+        }
+        timer.resume()
+        permissionPollTimer = timer
+    }
+
     private func emitIfChanged(force: Bool = false, snapshot probed: PermissionSnapshot? = nil) {
         let snapshot = probed ?? probe.snapshot()
+        adoptPollCadence(fullyCapable: snapshot.isFullyCapable)
         // While any capability is denied, log full preflight each poll so Console matches Settings confusion.
         if !snapshot.isFullyCapable {
             DevTypeLog.permission.debug(

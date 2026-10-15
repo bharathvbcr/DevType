@@ -412,6 +412,8 @@ public final class DevLogMirror {
         countLimit: Int,
         byteLimit: Int
     ) throws -> FetchedBatch {
+        // New store per poll. OSLogStore is a point-in-time view, so a cached store can miss
+        // entries written after it was opened. This runs every 60s, not on a keystroke path.
         let store = try OSLogStore(scope: .currentProcessIdentifier)
         let position = store.position(date: since)
         let predicate = NSPredicate(format: "subsystem == %@", DevTypeLog.subsystem)

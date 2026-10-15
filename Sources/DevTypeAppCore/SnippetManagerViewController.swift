@@ -87,6 +87,27 @@ enum SnippetSortMode: Int, CaseIterable {
 
 // MARK: - Snippet row cell
 
+/// One-line preview of a replacement. Stops at the first newline or at `limit` characters so a
+/// multi-megabyte body is not scanned once per visible row. The row tooltip still has the full text.
+enum SnippetOneLinePreview {
+    static func text(_ body: String, limit: Int = 160) -> String {
+        guard limit > 0, !body.isEmpty else { return "" }
+        var out = ""
+        out.reserveCapacity(min(limit + 2, 162))
+        var seen = 0
+        for character in body {
+            if character == "\n" || character == "\r" {
+                if !out.isEmpty { out += " ↵" }
+                return out
+            }
+            if seen >= limit { return out }
+            out.append(character)
+            seen += 1
+        }
+        return out
+    }
+}
+
 /// One snippet row: enable switch, title + preview, trigger pill, usage count.
 private final class SnippetRowView: NSView {
     /// Longest trigger the pill may show before it truncates. Past this the row's
@@ -307,7 +328,7 @@ private final class SnippetRowView: NSView {
         // and the editor.
         previewLabel.stringValue = snippet.isImageSnippet
             ? loc.s("manager.preview.image")
-            : snippet.replacementText.replacingOccurrences(of: "\n", with: " ↵ ")
+            : SnippetOneLinePreview.text(snippet.replacementText)
         previewLabel.textColor = snippet.enabled ? DevTypeTheme.textSecondary : DevTypeTheme.textTertiary
         previewLabel.isHidden = isCompact
         // Recycled cells inherit whatever the pointer is doing to *this* row now,
@@ -787,6 +808,16 @@ final class SnippetManagerUndoTarget: NSObject {
 // MARK: - Snippet Manager (Crimson Glass)
 
 final class SnippetManagerViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
+    /// Tests point the manager at a temporary library. Production leaves this nil.
+    static var libraryOverride: SnippetStore?
+    private var library: SnippetStore { Self.libraryOverride ?? .shared }
+    /// The store the group listener was registered on. `defer` in a test can clear
+    /// `libraryOverride` before this controller deinits, and removal has to hit the same store.
+    private var listenerStore: SnippetStore?
+    /// Reloads that actually applied a new library revision. A second call with the same
+    /// revision is the listener echoing a save `finishMutation` already drew.
+    private(set) var appliedReloadCount = 0
+
     private var groupOutline = KeyCommandOutlineView()
     private var groupScroll = NSScrollView()
     private var tableView = KeyCommandTableView()
@@ -1380,7 +1411,8 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     override func viewDidLoad() {
         super.viewDidLoad()
         if listenerToken == nil {
-            listenerToken = SnippetStore.shared.addGroupListener { [weak self] _ in
+            listenerStore = library
+            listenerToken = library.addGroupListener { [weak self] _ in
                 DispatchQueue.main.async { self?.reloadGroups() }
             }
         }
@@ -1406,7 +1438,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     deinit {
         filterDebounce?.cancel()
         if let token = listenerToken {
-            SnippetStore.shared.removeListener(token: token)
+            listenerStore?.removeListener(token: token)
         }
         if let healthToken {
             LibraryHealthMonitor.shared.removeObserver(healthToken)
@@ -1557,7 +1589,10 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     private func reloadGroups() {
-        let snapshot = SnippetStore.shared.loadGroupsWithRevision()
+        let snapshot = library.loadGroupsWithRevision()
+        // `groups` didSet clears `groupsRevision`, so the equality check has to run first.
+        guard snapshot.revision != groupsRevision else { return }
+        appliedReloadCount += 1
         groups = SnippetDocument(groups: snapshot.groups).groups
         groupsRevision = snapshot.revision
         if !hasResolvedInitialGroupSelection, let first = groups.first {
@@ -1607,7 +1642,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             filtered = filtered.filter { conflicting.contains($0.id) }
         case .unused:
             // One dictionary read rather than one locked store call per snippet.
-            let counts = SnippetStore.shared.usageCountsByID()
+            let counts = library.usageCountsByID()
             filtered = filtered.filter { max($0.usageCount, counts[$0.id] ?? 0) == 0 }
         case .tagged:
             filtered = filtered.filter { !$0.tags.isEmpty }
@@ -1684,11 +1719,11 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
     /// Snippet IDs in a trigger conflict, cached against the library revision.
     private func conflictSnippetIDs() -> Set<UUID> {
-        let revision = SnippetStore.shared.libraryRevision
+        let revision = library.libraryRevision
         if let cached = cachedConflictIDs, cachedConflictRevision == revision {
             return cached
         }
-        let ids = Set(SnippetStore.shared.triggerConflicts().flatMap(\.snippetIDs))
+        let ids = Set(library.triggerConflicts().flatMap(\.snippetIDs))
         cachedConflictIDs = ids
         cachedConflictRevision = revision
         return ids
@@ -1732,10 +1767,10 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
             }
         case .usage:
             // §4.5: usage lives in the sidecar, not on the model.
-            let counts = SnippetStore.shared.usageCountsByID()
+            let counts = library.usageCountsByID()
             return sortedByKey(input, key: { max($0.usageCount, counts[$0.id] ?? 0) }, by: >)
         case .recentlyUsed:
-            let lastUsed = SnippetStore.shared.lastUsedByID()
+            let lastUsed = library.lastUsedByID()
             return sortedByKey(input, key: { lastUsed[$0.id] ?? Date.distantPast }, by: >)
         case .recentlyEdited:
             return sortedByKey(input, key: \.updatedAt, by: >)
@@ -1766,6 +1801,15 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     // never erased by an old undo closure. Resource-changing edits deliberately do not enter this
     // model-only undo stack.
 
+    /// Flips the first snippet through `mutate`, the same path a toolbar toggle uses.
+    /// A test that only calls `store.mutateGroups` never reaches `finishMutation`.
+    func performLibraryToggleForTesting() -> SnippetStore.GroupMutationResult {
+        mutate("test-toggle") { groups in
+            guard !groups.isEmpty, !groups[0].snippets.isEmpty else { return }
+            groups[0].snippets[0].enabled.toggle()
+        }
+    }
+
     @discardableResult
     private func mutate(
         _ actionName: String,
@@ -1790,7 +1834,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         onCommit: (() -> Void)? = nil,
         _ body: (inout [SnippetGroup]) -> Bool
     ) -> SnippetStore.GroupMutationResult {
-        let result = SnippetStore.shared.mutateGroups(body)
+        let result = library.mutateGroups(body)
         finishMutation(
             result,
             actionName: actionName,
@@ -1854,7 +1898,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     private func deleteManagedImage(_ path: String) -> Bool {
-        let result = SnippetStore.shared.deleteImageIfUnreferenced(path) { candidate in
+        let result = library.deleteImageIfUnreferenced(path) { candidate in
             if case .success = SnippetEditResourceAccess.live.deleteImage(candidate) { return true }
             return false
         }
@@ -1883,7 +1927,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     ) {
         snippetUndoManager.registerUndo(withTarget: snippetUndoTarget) { target in
             guard let owner = target.owner else { return }
-            let result = SnippetStore.shared.replaceGroups(
+            let result = owner.library.replaceGroups(
                 ifCurrent: expectedCurrent,
                 with: snapshot
             )
@@ -1936,7 +1980,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
                 let isEdit = existing != nil
                 let actionName = self.loc.s(isEdit ? "manager.undo.edit" : "manager.undo.add")
                 return .mutating(
-                    store: .shared,
+                    store: self.library,
                     mutation: { latest in
                         if let existing {
                             guard latest.flatMap(\.snippets).first(where: { $0.id == existing.id }) == existing else {
@@ -2008,7 +2052,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         let renderedSource = snippets[row]
         var stagedImagePaths: [String] = []
         var duplicationError: Error?
-        let result = SnippetStore.shared.mutateGroups { latest in
+        let result = library.mutateGroups { latest in
             guard let target = SnippetDuplicationPlanner.validatedTargets(
                 for: [renderedSource],
                 in: latest
@@ -2263,7 +2307,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         ) { [weak self] in
             guard let self else { return }
             self.finishMutation(
-                SnippetStore.shared.resetToDefaults(),
+                library.resetToDefaults(),
                 actionName: self.loc.s("manager.undo.reset")
             )
         }
@@ -2534,7 +2578,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        let rowView = RoundedSelectionRowView()
+        let rowView = RoundedSelectionRowView.dequeue(from: outlineView, owner: self)
         rowView.selectionRadius = 7
         rowView.selectionInset = NSEdgeInsets(top: 1, left: 6, bottom: 1, right: 6)
         return rowView
@@ -2673,7 +2717,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
         // §4.5: usage read from the store, not the legacy model field.
         cell.configure(
             with: snippets[row],
-            usageCount: SnippetStore.shared.usageCount(for: snippets[row]),
+            usageCount: library.usageCount(for: snippets[row]),
             isCompact: isCompactDensity
         )
         return cell
@@ -2789,7 +2833,7 @@ final class SnippetManagerViewController: NSViewController, NSTableViewDataSourc
 
         var stagedImagePaths: [String] = []
         var duplicationError: Error?
-        let result = SnippetStore.shared.mutateGroups { latest in
+        let result = library.mutateGroups { latest in
             guard let targets = SnippetDuplicationPlanner.validatedTargets(
                 for: selectedSnippets,
                 in: latest
