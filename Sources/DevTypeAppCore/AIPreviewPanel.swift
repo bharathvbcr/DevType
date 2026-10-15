@@ -866,13 +866,16 @@ private final class AIPreviewController: NSViewController {
             return
         }
 
+        // `RunLoop` drains `DispatchQueue.main`. A `Task { @MainActor }` does not run
+        // during that spin, so a partial published just before completion never reached
+        // the text view under a busy suite. Stay on the main queue, in call order.
         let publishPartial: @Sendable (String?) -> Void = { [weak self] partial in
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 self?.applyPartial(partial, generation: generation)
             }
         }
         let publishCompletion: @Sendable (Result<String, AITransformError>) -> Void = { [weak self] result in
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 self?.applyCompletion(result, generation: generation)
             }
         }
