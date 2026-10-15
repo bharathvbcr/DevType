@@ -28,6 +28,44 @@ public enum PaletteTextOp: String, Sendable, Equatable, CaseIterable {
     case jsonCompact
     case sha256
     case md5
+
+    /// Model-supplied id, trimmed and ASCII-case-folded, drawn only from this enum.
+    /// English case-names (`uppercase`) alias the short raw values. Interior characters
+    /// are kept, so punctuation or NUL cannot collapse onto a real id.
+    static func resolved(from id: String) -> PaletteTextOp? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Longer than any raw value or alias. Reject before copying a hostile payload.
+        guard !trimmed.isEmpty, trimmed.count <= 64 else { return nil }
+        let folded = asciiCaseFold(trimmed)
+        if let match = allCases.first(where: { asciiCaseFold($0.rawValue) == folded }) {
+            return match
+        }
+        switch folded {
+        case "uppercase": return .upper
+        case "lowercase": return .lower
+        case "titlecase": return .title
+        case "sentencecase": return .sentence
+        case "snakecase": return .snake
+        case "kebabcase": return .kebab
+        case "camelcase": return .camel
+        case "pascalcase": return .pascal
+        default: return nil
+        }
+    }
+
+    /// A-Z only. Other scalars, including NUL, punctuation, and emoji, stay in the id.
+    private static func asciiCaseFold(_ raw: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        scalars.reserveCapacity(raw.unicodeScalars.count)
+        for scalar in raw.unicodeScalars {
+            if scalar.value >= 65, scalar.value <= 90, let lower = UnicodeScalar(scalar.value + 32) {
+                scalars.append(lower)
+            } else {
+                scalars.append(scalar)
+            }
+        }
+        return String(scalars)
+    }
 }
 
 public enum PaletteGenerateOp: String, Sendable, Equatable, CaseIterable {
