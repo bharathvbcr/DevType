@@ -179,15 +179,21 @@ enum LibraryExporter {
         }
     }
 
-    /// Writes one Espanso match file per group into `directory`.
+    /// Writes one Espanso match file per group into `directory`, plus each image at the
+    /// relative `image_path` those files name.
     ///
     /// The whole export is staged in a sibling temporary directory and moved into place at
     /// the end, so a failure part-way through cannot leave the user with a directory holding
     /// half their library — the same all-or-nothing contract the single-file formats get from
     /// an atomic write. An existing directory at `url` is replaced only once the new one is
-    /// complete.
-    static func writeEspansoDirectory(groups: [SnippetGroup], to directory: URL) throws {
-        let files = try SnippetExporter.espansoYAMLFiles(from: groups)
+    /// complete. `writingImage` is the test seam for a copy that fails after staging has started.
+    static func writeEspansoDirectory(
+        groups: [SnippetGroup],
+        to directory: URL,
+        options: SnippetExporter.Options = .default,
+        writingImage: ((URL, Data) throws -> Void)? = nil
+    ) throws {
+        let document = try SnippetExporter.espansoDirectoryDocument(from: groups, options: options)
         let fm = FileManager.default
         let staging = directory
             .deletingLastPathComponent()
@@ -195,11 +201,24 @@ enum LibraryExporter {
 
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         do {
-            for file in files {
+            for file in document.files {
                 try Data(file.contents.utf8).write(
                     to: staging.appendingPathComponent(file.fileName),
                     options: .atomic
                 )
+            }
+            if !document.images.isEmpty {
+                let write = writingImage ?? { url, data in
+                    try data.write(to: url, options: .atomic)
+                }
+                let imagesDir = staging.appendingPathComponent(
+                    SnippetExporter.espansoImageDirectoryName,
+                    isDirectory: true
+                )
+                try fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+                for image in document.images {
+                    try write(try stagedImageURL(image.relativePath, staging: staging), image.data)
+                }
             }
             if fm.fileExists(atPath: directory.path) {
                 _ = try fm.replaceItemAt(directory, withItemAt: staging)
@@ -210,6 +229,25 @@ enum LibraryExporter {
             try? fm.removeItem(at: staging)
             throw error
         }
+    }
+
+    /// Destination for one exported image. Refuses a relative path that would leave `staging`.
+    private static func stagedImageURL(_ relativePath: String, staging: URL) throws -> URL {
+        guard SnippetExporter.isSafeImageRelativePath(relativePath) else {
+            throw SnippetExporter.ExportError.imageUnavailable("image")
+        }
+        let name = (relativePath as NSString).lastPathComponent
+        let imagesDir = staging.appendingPathComponent(SnippetExporter.espansoImageDirectoryName, isDirectory: true)
+        let destination = imagesDir.appendingPathComponent(name)
+        let root = imagesDir.standardizedFileURL.resolvingSymlinksInPath()
+        let resolved = destination.standardizedFileURL.resolvingSymlinksInPath()
+        let rootParts = (root.path as NSString).pathComponents
+        let resolvedParts = (resolved.path as NSString).pathComponents
+        guard resolvedParts.count > rootParts.count,
+              Array(resolvedParts.prefix(rootParts.count)) == rootParts else {
+            throw SnippetExporter.ExportError.imageUnavailable("image")
+        }
+        return destination
     }
 
     private static func beginWrite(
