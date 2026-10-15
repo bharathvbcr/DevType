@@ -83,7 +83,10 @@ final class UpdateStatusRefreshTests: XCTestCase {
             close.performClick(nil)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            guard NSApp.modalWindow === presentation.alert.window else { return }
+            // Close hides the alert before this runs. If the alert is still visible,
+            // Close did not end the modal; stop it as the first button so the
+            // assertion fails in one second instead of hanging.
+            guard presentation.alert.window.isVisible else { return }
             NSApp.stopModal(withCode: .alertFirstButtonReturn)
         }
         presentation.present(window: nil) {

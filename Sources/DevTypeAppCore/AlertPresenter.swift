@@ -12,6 +12,9 @@ final class DevTypeScrollableAlert: NSObject {
     static let accessorySize = NSSize(width: 520, height: 310)
 
     let alert: NSAlert
+    /// True only while `runModal` is on the stack. Close can run on the first
+    /// modal-loop pass, before AppKit publishes `NSApp.modalWindow`.
+    private var presentingAppModal = false
 
     init(
         title: String,
@@ -58,6 +61,8 @@ final class DevTypeScrollableAlert: NSObject {
                 _ = self
             }
         } else {
+            presentingAppModal = true
+            defer { presentingAppModal = false }
             let response = alert.runModal()
             alert.window.orderOut(nil)
             handler?(resolve(response))
@@ -150,7 +155,7 @@ final class DevTypeScrollableAlert: NSObject {
         let alertWindow = alert.window
         if let parent = alertWindow.sheetParent {
             parent.endSheet(alertWindow, returnCode: response)
-        } else if NSApp.modalWindow === alertWindow {
+        } else if presentingAppModal || NSApp.modalWindow === alertWindow {
             NSApp.stopModal(withCode: response)
         } else {
             alertWindow.orderOut(nil)
