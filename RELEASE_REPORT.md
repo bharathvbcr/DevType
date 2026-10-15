@@ -1,6 +1,8 @@
 # DevType v1.3.0 release report
 
-PUSH was no. Nothing was pushed, no tag was created, and the app was not published. HEAD is `a62df2f1a186fdbc3507f19b33ea04fdebf305f4` on `main`, 91 commits ahead of `origin/main`. This file and `BRANCH_REPORT.md` are untracked on purpose: the green `ci:local` ran on `a62df2f`, and a later commit would make that run stale.
+PUSH is still no. Nothing was pushed, and the GitHub Release was not published. A local annotated tag `v1.3.0` exists. After this report is committed, that tag points at the commit that contains this file. `main` is 94 commits ahead of `origin/main` (`31773e8eb4416d2fc486a86631c6f98f6f16ccfe`).
+
+`./ci:local` passed on `a62df2f1a186fdbc3507f19b33ea04fdebf305f4`. The commits after that are documentation. They were not followed by another `./ci:local`. `BRANCH_REPORT.md` and this file were committed in `187d160`.
 
 The four release-pipeline auditors were read-only code-reader subagents. This session cannot pin Sonnet, Opus, or Fable. Findings were checked against the files before anything was changed.
 
@@ -16,10 +18,14 @@ The four release-pipeline auditors were read-only code-reader subagents. This se
 | `9915186` | fix(ci): reject a bundle that still has the source version |
 | `9c73c04` | ci: pin actions and narrow the release token |
 | `a62df2f` | docs(release): add v1.3.0 notes and a changelog |
+| `187d160` | docs: record the branch and v1.3.0 release reports |
+| `f3511a4` | docs(release): include unpublished 1.2.1 notes in 1.3.0 |
+
+This report's refresh is the commit after `f3511a4`. The local tag `v1.3.0` is moved onto that commit. It has not been pushed. An earlier local tag object on `187d160` was deleted before `f3511a4` was tagged. Neither object was pushed.
 
 No GitPulse task id is in those messages. The accessibility, alert, preview, and benchmark follow-ups are not named by a board card. `9c73c04` is the release-free workflow commit: it does not change the app.
 
-`v1.3.0` does not exist locally or on origin. The local tag `v1.2.1` is an ancestor of HEAD. Its commit is on origin. The tag ref is not.
+`v1.2.1` (`c1b0a7ff7b87d3a6194d8140b2cfccb20098a33a`) is an ancestor of `v1.3.0`. Its commit is on `origin/main`. The `v1.2.1` tag ref is not on origin. `v1.3.0` is not on origin. `git log v1.3.0..v1.2.1` is empty, so there is no 1.2.1 commit left to merge. The 1.2.1 notes were copied into `docs/releases/v1.3.0.md` because 1.2.1 was never published. Two figures from `docs/releases/v1.2.1.md` were left out: `LocalizationManager.swift` is 287 lines, and `TextInjectionPipeline.swift` is 1,951.
 
 ## ci:local
 
@@ -38,14 +44,14 @@ SwiftPM tests, all three bundles, zero failures:
 
 Publication fixtures inside the same run: `test-release-publication.py` 24 tests, `test-stress-productivity.py` 7 tests, and the shell fixture scripts (signing identity 11, install-app 15, release signing preflight 9, DMG select 8, asset list 7, version match 5, stamped version 9, preflight 9, capabilities 8, LCOV 18). All passed.
 
-The packaged bundle is `com.devtype.app`, executable `DevType`, and `Contents/MacOS` contains only `DevType`. Stamped version `1.2.1-132-ga62df2f` (build 367). The source placeholder `0.1.7` / `2` was rejected by the new check; this stamp passed. The bundle says `1.3.0` only after `v1.3.0` is tagged on a clean tree.
+The packaged bundle in that run is `com.devtype.app`, executable `DevType`, and `Contents/MacOS` contains only `DevType`. Stamped version `1.2.1-132-ga62df2f` (build 367). The source placeholder `0.1.7` / `2` was rejected by the new check; this stamp passed.
 
 Not run, and announced rather than passed:
 
 - Step 2b, the release benchmark gate. `DEVTYPE_BENCH` was unset. `AuditBenchmarkTests` recorded 10 skips inside the debug suite for the same reason. The gate is `DEVTYPE_BENCH=1 ./ci:local`.
 - Foundation Models linkage. `DEVTYPE_REQUIRE_FOUNDATION_MODELS` was unset. The tagged release workflow sets it.
 
-This full suite was run once, on the final HEAD, after every commit above. The stamp script (9 tests) and the publication script (24 tests) had already passed on the uncommitted pipeline edits. There was not a separate full `ci:local` between `9652c98`, `9915186`, and `9c73c04`.
+This full suite was run once, on `a62df2f`, after the product and CI commits through that commit. The stamp script (9 tests) and the publication script (24 tests) had already passed on the uncommitted pipeline edits. There was not a separate full `ci:local` between `9652c98`, `9915186`, and `9c73c04`. The docs commits after `a62df2f` did not re-run it.
 
 DevMap could not name callers for the reliability edits. `devmap_status` generation 613 had `source_freshness` true and `analyzer_freshness` false (`stored extraction payload is obsolete`). `devmap_affected_tests` failed closed with all three targets unmatched. The gap is `release-v1.3.0-reliability-blast`. Call sites were then read from the tree: `BenchmarkGate.measure` has one call, in its self-test, and the full suite compiled the other `BenchmarkGate` callers.
 
@@ -83,7 +89,7 @@ Already on `ft-3ca735f221ea890cbd7b033c1a8595af` (inbox, revision 2). That card 
 
 `ft-aa3086e6` is not on the board (`gitpulse_get_task` returned `not_found`) and it is not in the repository markdown.
 
-Push order for this task, from the request itself: when you say yes, push `main`, then push only `v1.3.0`. Never `--tags`. Never force. Never move an existing tag.
+Push order for this task, from the request itself: when you say yes, push `main`, then push only `v1.3.0`. Never `--tags`. Never force. The unpublished local tag was moved onto `f3511a4`, then onto this report. Do not move `v1.3.0` after it has been pushed.
 
 `DEVTYPE_ALLOW_REPUBLISH=1` still replaces a public release in place and does not re-draft it. That path is unchanged on purpose.
 
@@ -93,13 +99,13 @@ Clients learn about an update from `GET /repos/bharathvbcr/DevType/releases/late
 
 ## Release notes
 
-Publisher body: `docs/releases/v1.3.0.md`. `CHANGELOG.md` has the same claims; its section headings are one level deeper, and older tags are links. `docs/README.md` links 1.3.0 and 1.2.1.
+Publisher body: `docs/releases/v1.3.0.md` at `f3511a4`. `CHANGELOG.md` has the same claims; its section headings are one level deeper, and older tags are links. `docs/README.md` links 1.3.0, says that file includes the unpublished 1.2.1 changes, and still links 1.2.1. The paste below is that file.
 
 # DevType 1.3.0 — Image snippets, library restore, and a stricter preview
 
 The GitHub artifact follows the project's existing ad-hoc signed, unnotarized distribution policy. Gatekeeper may reject it. Notarization stays off (9c73c04). Local packages use the available Apple Development identity.
 
-These notes cover the work after 1.2.1. The 1.2.1 tag exists on this clone and was not pushed to origin; its commit is already on the published branch. 1.2.1's own notes are in `docs/releases/v1.2.1.md`.
+These notes cover unpublished 1.2.1 and the work after it. The 1.2.1 tag exists on this clone and was not pushed to origin; its commit is already on the published branch. The original write-up remains in `docs/releases/v1.2.1.md`.
 
 ## Highlights
 
@@ -108,6 +114,36 @@ These notes cover the work after 1.2.1. The 1.2.1 tag exists on this clone and w
 - **Restore from Backup.** Snippet saves keep the 20 newest library copies plus the newest per day for 30 days. Replace with Defaults, Restore from Backup, Save As / Move Library, and Stop Syncing write a safety backup first and fail closed when that backup cannot be written. Preferences → Snippets gains Restore from Backup…, with the date, snippet count, and trigger kind (a101f73).
 - **`devtype://` opens a closed set of screens.** The allowlist is new, palette, preferences, dictation/toggle, and copy. Those URLs do not expand text and do not read a secret. The macro catalog used by the palette now lives in the engine (7f8ed1e).
 - **Preview can format a table and show a word diff.** A bounded column-and-row result becomes Markdown. `toTable` is available to the local transform and the palette. Every transform kind uses one grapheme-safe word diff (7a434d0).
+
+## Match Trigger Case (sig / Sig / SIG)
+
+- **New snippet option:** case-insensitive snippets gain a **Match Trigger Case** switch in the editor (shown only while Case Sensitive is off). Typing the trigger Capitalized or in ALL CAPS shapes the expansion the same way (6ad2094).
+- **Espanso-compatible shape rules:** only the first two letters of the typed trigger are read and non-letters are skipped. Upper+Upper or a lone capital means ALL CAPS, Upper+lower means first letter upper, and anything that starts lowercase (including mixed `sIG`) or has no letter stays as written.
+- **Narrower than Espanso, on purpose:** only text written in the snippet template is reshaped. Fill-in values, clipboard text, dates and generated values keep their own case, as do spans an explicit `{{upper:…}}`-style transform already shaped. Cursor markers are remapped when uppercasing changes length (`ß` → `SS`).
+- **Importer:** Espanso `propagate_case` matches now import with the option on. The old "output case adaptation is unavailable" note is gone; a new note counts matches that use `uppercase_style: capitalize | capitalize_words`, which DevType imports with the default case shapes.
+
+## Selection reads no longer block the main thread
+
+- **No beachball on AI hotkey, palette, or voice command:** selection reads run on a dedicated serial queue and hand their result back on main (e77b5bf).
+- **Latest press wins:** the AI hotkey, palette AI actions, and the inline search panel only act on the most recent press. A second palette press while the first is still reading closes it instead of queueing a second panel, and a stale read cannot raise a stale alert.
+- **AX retries never sleep on main:** focus-query retries and the Chromium accessibility rescue use one bounded policy (`AXSettleRetry`) that waits only off main and reports when a poll was skipped rather than passing it off as zero polls (c7e1400).
+- **One focused element per expansion:** an expansion resolves the focused element once and threads it through the entry re-check, IME probe, erase guard, AX writes, delivery check, caret placement and trigger restore. No collaborator inside an inject queries focus through a default argument (68d4412).
+
+## Local Lappi routing (opt-in, off by default)
+
+- **Ask Lappi which tool fits:** when on-device palette routing runs, DevType can also ask a local Lappi agent over a Unix socket on this Mac (300 ms limit). An answer only annotates the routed row as agreeing or differing; it never inserts text or runs anything (24cc8d8).
+- **Local routing records:** optionally records which tool routing chose and which row you picked, to `Application Support/Lappi/heldout` — the phrase's length and shape, never its text. Records are bounded per day and in total, stay on this Mac, and are never used for training. `LAPPI_COLLECT=0` disables collection.
+- Nothing is sent or written while secure input is on. Both switches live in Preferences → AI and default off.
+
+## UI strings move to resource tables
+
+- English, Korean and Japanese UI strings ship as `.strings` resource tables (`Sources/ExpanderEngine/Localization/Resources/<lang>.lproj/`, eight tables per language) instead of Swift dictionary literals (3c50ecd).
+- The user-chosen UI language still wins over the system language. Malformed tables, missing languages and keys defined twice are reported at load.
+- **Pseudolocale for layout checks:** `DEVTYPE_PSEUDOLOCALE=1` (or `-devtype.debug.pseudolocale YES`) accents, brackets and pads every string by about 40%, keeping format specifiers intact.
+
+## Engine internals
+
+- Text injection's undo policy, route choice, entry-gate refusals, swallowed-key and completion-guard types, the image-snippet path and text resolution each have their own owner. The inject/undo ledger owns its single lock (93a21d1).
 
 ## Fixes
 
@@ -132,7 +168,7 @@ These notes cover the work after 1.2.1. The 1.2.1 tag exists on this clone and w
 
 ## Breaking changes
 
-- A library that already opens is unchanged, and there is no settings migration.
+- A library that already opens is unchanged, and there is no settings migration. 1.2.1 adds no dependency, cloud service, permission grant, secret migration, or authentication change.
 - A corrupt typed-path allowlist now denies every app. It used to decode as an empty list, which meant every app (8951428).
 - An undecodable or newer-schema timing or capability file is moved aside and kept, rather than overwritten (8951428).
 
@@ -141,12 +177,15 @@ These notes cover the work after 1.2.1. The 1.2.1 tag exists on this clone and w
 - The published DMG is ad-hoc signed and not notarized. Gatekeeper may reject it (9c73c04). Developer ID signing is an open maintainer decision.
 - The version string on an untagged build is still `git describe`, not 1.3.0. The bundle says 1.3.0 only when this commit is tagged `v1.3.0` on a clean tree.
 
-## Commands to push and tag
+## Local install
 
-Run these from this clone when you want `v1.3.0` published. Pushing the tag starts `.github/workflows/release.yml`. Do not push `v1.2.1` with these commands.
+`./Scripts/install-app.sh release` installed `/Applications/DevType.app` as 1.3.0. The package is signed `Apple Development: bharath.vbcr@gmail.com (SV7KQ26548)`. Hardened Runtime is disabled. The designated requirement is the certificate, so the version restamp did not reset TCC. Source sha256 of the Mach-O before signing is `6270fdd8ae6c12a8c00d029967067bcf06403cf6790a3b101b4a2608c6bcbdac`, the same binary `./ci:local` packaged. `Scripts/verify-release-version.sh` accepted `v1.3.0` → `1.3.0` on that bundle. The build number is the commit count of the tagged commit. The `./ci:local` package remains `1.2.1-132-ga62df2f` (build 367).
+
+## Commands to push
+
+The local tag already exists. Do not create it again, and do not point it at `a62df2f`. Pushing the tag starts `.github/workflows/release.yml`. Do not push `v1.2.1`.
 
 ```bash
-git tag -a v1.3.0 a62df2f1a186fdbc3507f19b33ea04fdebf305f4 -m "DevType 1.3.0"
 git push origin main
 git push origin refs/tags/v1.3.0
 ```
