@@ -267,6 +267,9 @@ public enum DiagnosticReport {
         /// Counts of what the library keeps for recovery: conflict-recovery folders retained by
         /// the last prune pass, and library backups on disk. Counts only — never a path or name.
         public var libraryRecoveryLine: String? = nil
+        /// Previous-process exit facts from `UncleanExitSentinel`. Empty when this launch did
+        /// not find a surviving sentinel. Lines are already path-free and bounded.
+        public var uncleanExitLines: [String] = []
 
         /// Production capture fills these at the subsystem boundary. Public/test callers keep the
         /// array initializer and are projected during formatting for source compatibility.
@@ -316,7 +319,8 @@ public enum DiagnosticReport {
             voiceTerminalLines: [String] = [],
             voicePermissions: VoicePermissionContext? = nil,
             activityHistoryLine: String? = nil,
-            debugTraceHealth: DebugTrace.Health? = nil
+            debugTraceHealth: DebugTrace.Health? = nil,
+            uncleanExitLines: [String] = []
         ) {
             self.generatedAt = generatedAt
             self.bundleID = bundleID
@@ -356,6 +360,7 @@ public enum DiagnosticReport {
             self.voicePermissions = voicePermissions
             self.activityHistoryLine = activityHistoryLine
             self.debugTraceHealth = debugTraceHealth
+            self.uncleanExitLines = uncleanExitLines
             self.mutedAppsProjection = nil
             self.siblingPathsProjection = nil
             self.injectTelemetryProjection = nil
@@ -564,6 +569,7 @@ public enum DiagnosticReport {
         context.overlongTriggerProjection = overlongTriggerProjection
         context.axWriteVerdictProjection = axWriteVerdictProjection
         context.unreachableSnippetProjection = unreachableSnippetProjection
+        context.uncleanExitLines = UncleanExitSentinel.lastDiagnosticLines()
         return context
     }
 
@@ -941,6 +947,18 @@ public enum DiagnosticReport {
             "macOS: \(boundedScalar(context.macOSVersion, label: "macOS", domain: "macos-version"))",
             "App version: \(boundedOptionalScalar(context.appVersion, label: "appVersion", domain: "app-version", nilValue: "unknown"))",
             context.buildToolchain ?? formatToolchain(xcode: nil, sdk: nil),
+        ]
+        if !context.uncleanExitLines.isEmpty {
+            lines.append("")
+            lines.append("-- Previous exit --")
+            appendBoundedHeaderProjection(
+                boundedHeaderProjection(context.uncleanExitLines),
+                label: "previous-exit",
+                emptyLine: "(not captured)",
+                to: &lines
+            )
+        }
+        lines.append(contentsOf: [
             "",
             "-- Identity --",
             "Bundle ID: \(boundedScalar(context.bundleID, label: "bundleID", domain: "process-bundle-id"))",
@@ -957,7 +975,7 @@ public enum DiagnosticReport {
             "Secure Input active: \(context.secureInputActive)",
             "Display status: \(boundedScalar(context.displayStatus, label: "displayStatus", domain: "display-status"))",
             "Last inject: \(boundedOptionalScalar(context.lastInjectOutcome, label: "injectOutcome", domain: "inject-outcome", nilValue: "(none)"))",
-        ]
+        ])
         lines.append("")
         lines.append("-- Voice permissions --")
         if let voice = context.voicePermissions {

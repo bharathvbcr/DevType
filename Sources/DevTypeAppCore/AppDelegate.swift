@@ -74,6 +74,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activityTransitionTracker = ActivityTransitionTracker()
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        UncleanExitSentinel.noteLaunch()
         NSApp.setActivationPolicy(.accessory)
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
@@ -2610,6 +2611,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             LibraryHealthMonitor.shared.removeObserver(libraryHealthToken)
         }
         DevTypeLog.app.info("[App] terminate — usage stats flushed")
+        UncleanExitSentinel.noteCleanTermination()
     }
 }
 
