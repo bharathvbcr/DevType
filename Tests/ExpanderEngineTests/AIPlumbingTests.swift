@@ -814,7 +814,19 @@ final class AIPlumbingTests: XCTestCase {
             )
         }
         #else
-        throw XCTSkip("toolchain has no FoundationModels")
+        let expected = AITextTransformSupport.unavailableReason(
+            hasFoundationModels: false,
+            isCompatibleOS: AITextTransformSupport.isRunningOnCompatibleOS
+        )
+        guard case .unavailable(let reason) = AITextTransformSupport.availability else {
+            XCTFail("a toolchain without Foundation Models must report unavailable")
+            return
+        }
+        XCTAssertEqual(
+            reason,
+            expected,
+            "macOS 14 blames the OS; a newer Mac built without the module blames the build."
+        )
         #endif
     }
 }

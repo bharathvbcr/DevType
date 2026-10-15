@@ -1839,6 +1839,11 @@ public enum CommandPaletteCatalog {
                 "markdown format", "md format", "structure as markdown", "prettify",
                 "add headings", "add bullets"
             ]
+        case .toTable:
+            return [
+                "to table", "format as table", "make a table", "markdown table",
+                "convert to table", "table", "tabular", "as a table", "rows and columns"
+            ]
         case .removeMarkdown:
             return [
                 "remove markdown", "markdown removal", "strip markdown", "markdown",

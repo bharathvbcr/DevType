@@ -59,6 +59,7 @@ final class RuntimeLocalizationUXTests: XCTestCase {
             .sqlQuery: .rewrites,
             .removeMarkdown: .shortens,
             .toMarkdown: .rewrites,
+            .toTable: .rewrites,
             .translate: .preserves,
             .translateTelugu: .preserves,
             .translateHindi: .preserves,

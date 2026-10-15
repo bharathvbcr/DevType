@@ -260,6 +260,34 @@ Inventory old builds before packaging; the packager removes known legacy bundles
 
 An Apple Development signature supports local installation; it does not establish notarized distribution. Run Gatekeeper assessment separately from `codesign` and report the actual outcome.
 
+## Semantic routing default
+
+Stage-2 palette routing (`PaletteToolRouter`) stays **off** unless the user turns it on. The switch is **Preferences → AI → Semantic Search Routing**. The key is `devtype.ai.semanticRoutingEnabled`. `UserDefaults.bool(forKey:)` is false when that key is unset, and the master AI switch (`AIPreferences.isEnabled`) also defaults off. Routing runs only when both are on, the query is 4…`CommandPaletteCatalog.maximumQueryCharacters` characters, and it does not start with `=` or `>`.
+
+Expansion does not call the router. The production caller is the command palette: `InlineSearchPanel.controlTextDidChange` paints offline rows in `refreshHits()` and only then calls `scheduleRouting()`. That method returns immediately when the gate is closed. When the gate is open it still returns immediately, and the model work happens on a task that first sleeps `PaletteToolRouter.debounceMilliseconds` (250) and then may run for up to `timeoutSeconds` (8). A late answer is dropped unless the search field still holds the same query. Routing can add one row. It does not hold the palette's first paint, and it is not on the expansion path.
+
+Default-on would start that model session for every paused palette query of four or more characters. On this machine a cold call sits on the 8 second deadline and returns nothing. One later sample did return a sanitized row before the deadline, and the run after that returned nothing again (numbers below). That spends battery and holds the routing latch for a search the offline ranker has already answered, which fights the product promise that expansion never waits on a model and that the palette does not either.
+
+Measured 2026-10-14 on an Apple M5 Pro (Mac17,8, 64 GB), macOS 27.0.1 (26A434), Xcode 27.0 (27A266a), Swift 6.4. Debug build via `./Scripts/test.sh`, not a release build. Min of 7 interleaved samples after one warmup, 40 snippets, query `format this note`:
+
+| Path | Minimum |
+| --- | --- |
+| `CommandPaletteCatalog.buildRows`, routing flag off | 0.0260 ms |
+| `CommandPaletteCatalog.buildRows`, routing flag on | 0.0298 ms |
+| `PaletteToolRouter.route`, flag off, stub engine | 0.0006 ms, engine not called |
+
+`buildRows` does not read the flag (`routedResult` is an argument the panel fills in later). The 0.004 ms gap is noise on a small library, not a cost of turning routing on. These are not release-build ceilings.
+
+`foundationModelsEngine()` was non-nil (the general model reported available and supported the current locale). The router deadline is 8 seconds. The latch returns nil when that deadline wins, and every `route` call is also capped at 60 seconds inside the latch, so a longer `timeout:` cannot wait out a slow session. These calls used `route(query: "date next friday")` unless noted. Debug build, same machine and date.
+
+First on-path samples, each returned nil: 8143.5 ms (warmup), 8084.3 ms, and 8098.0 ms. They sit on the deadline. They are the cutoff, not a finished tool answer.
+
+A second run called the engine closure directly, outside `route`, with a 180 second probe limit. It finished in 123255.8 ms and failed. The recorded error starts `ToolCallError(tool: ExpanderEngine.PaletteToolRouter.RunMacroTool(name: "runMacro", ...` and the log truncated the rest at 180 characters. That is a completed tool failure, not a date and not a latency for a successful answer. After it, the product `route` path returned nil at 8144.7 ms (warmup), then a sanitized row at 3032.4 ms and 2299.3 ms. The test printed `text` for those two rows and did not record the row string. Minimum of the two non-nil samples is 2299.3 ms.
+
+A third run, which prints the row string, did not reproduce that. The direct engine call was still unfinished at the 180 second probe limit (180072.0 ms). The three product `route` calls then returned nil at 8075.2 ms, 8130.4 ms, and 8131.6 ms. No row text exists for this run.
+
+The 2299.3 ms sample is one warm sanitized row after a two-minute failed call. It is not a reliable model time, and it is not a reason to turn routing on by default. Re-run with `DEVTYPE_MEASURE_ROUTING=1 ./Scripts/test.sh --filter testLiveRoutingRoundTripWhenRequested`. A skip of that test is not a pass.
+
 ## Benchmark regression gate
 
 `Tests/ExpanderEngineTests/AuditBenchmarkTests.swift` (P1-P6 plus B1, library save to snapshot rebuild at 2,000 snippets) asserts a documented ceiling per benchmark through `Tests/ExpanderEngineTests/BenchmarkGate.swift`: warmup, min-of-N timing, `XCTFail` with measured vs ceiling. Ceilings are about 10x the release-build numbers, so they catch algorithmic regressions (O(n²), main-thread I/O), not drift. `BenchmarkGateSelfTests` always runs and proves the gate flags a deliberately quadratic reference. New benchmarks should use `BenchmarkGate` (`requireBenchMode`, `measure`, `interleaved`, `assertWithin`) rather than local timers.

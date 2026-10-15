@@ -37,7 +37,7 @@ struct AIActionPresentation: Equatable {
         case .expand, .generateDocstring, .generateUnitTests, .explainCode, .explainRegex:
             return .expands
         case .rewrite, .paraphrase, .formal, .friendly, .bulletize, .promptEnhance,
-             .toJson, .sqlQuery, .fixCode, .custom, .toMarkdown:
+             .toJson, .sqlQuery, .fixCode, .custom, .toMarkdown, .toTable:
             return .rewrites
         }
     }
