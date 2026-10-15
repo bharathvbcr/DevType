@@ -69,8 +69,6 @@ final class PaletteToolRoutingTestsHostile: XCTestCase {
             "next\u{2028}friday",
             "2026-10-13",
             "2026-10-13\n",
-            "in 3 days",
-            "in 3\ndays",
             "3rd of October",
             "ngày mai",
             "Ngày Mai",
@@ -137,6 +135,10 @@ final class PaletteToolRoutingTestsHostile: XCTestCase {
         let dayShifting = [
             "+3d",
             "+1d",
+            // Natural offsets are the same day count as +3d. A newline between the
+            // number and the unit is whitespace, the same way `+\n3d` is a hit.
+            "in 3 days",
+            "in 3\ndays",
             "  +3d  ",
             "\n+3d\n",
             "+3D",
