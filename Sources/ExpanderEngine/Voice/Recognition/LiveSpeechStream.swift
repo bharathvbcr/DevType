@@ -78,6 +78,11 @@ public final class LiveSpeechStream: @unchecked Sendable {
 
     // MARK: - Audio
 
+    /// Buffers retained while no recognition request is active. Test-only; production state stays private.
+    func pendingPCMBuffersForTesting() -> [AVAudioPCMBuffer] {
+        lock.withLock { pendingBuffers }
+    }
+
     /// Feeds a microphone buffer into the active recognition request.
     public func append(_ buffer: AVAudioPCMBuffer) {
         lock.withLock {
@@ -85,9 +90,34 @@ public final class LiveSpeechStream: @unchecked Sendable {
             if let request = activeRequest {
                 request.append(buffer)
             } else if pendingBuffers.count < Self.maxPendingBuffers {
-                pendingBuffers.append(buffer)
+                guard let owned = Self.ownedCopy(of: buffer) else { return }
+                pendingBuffers.append(owned)
             }
         }
+    }
+
+    /// Independent storage for the pending path. A failed allocation must not keep the caller's buffer.
+    private static func ownedCopy(of buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let frames = buffer.frameLength
+        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: max(frames, 1)) else {
+            return nil
+        }
+        copy.frameLength = frames
+        let source = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let destination = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+        guard source.count == destination.count else { return nil }
+        for (sourceBuffer, destinationBuffer) in zip(source, destination) {
+            let count = Int(sourceBuffer.mDataByteSize)
+            if count == 0 { continue }
+            guard count <= Int(destinationBuffer.mDataByteSize),
+                  let sourcePointer = sourceBuffer.mData,
+                  let destinationPointer = destinationBuffer.mData
+            else {
+                return nil
+            }
+            destinationPointer.copyMemory(from: sourcePointer, byteCount: count)
+        }
+        return copy
     }
 
     /// Ends audio input. Any in-flight utterance is emitted as `.final`.
