@@ -42,13 +42,16 @@ final class LappiFakeAgent: @unchecked Sendable {
         // signal on the writing thread still killed the process (signal 13), so ignore it
         // for the rest of this test process. The assertions still require zero request bytes.
         _ = signal(SIGPIPE, SIG_IGN)
-        let listener = self.listener
+        // Swift 6.3 treats a later `let listener` as the binding captured by the
+        // bind closure above, and rejects that capture as use before declaration.
+        // The hosted macOS 26 job is Swift 6.3.3. Keep the fd under another name.
+        let boundListener = listener
         Thread.detachNewThread { [self] in
             defer { finished.signal() }
-            var descriptor = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+            var descriptor = pollfd(fd: boundListener, events: Int16(POLLIN), revents: 0)
             // Bounded: a test whose client never connects must not leave this thread behind.
             guard poll(&descriptor, 1, 5_000) > 0 else { return }
-            let client = accept(listener, nil, nil)
+            let client = accept(boundListener, nil, nil)
             guard client >= 0 else { return }
             var one: Int32 = 1
             _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))

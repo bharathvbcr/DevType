@@ -1,6 +1,6 @@
 # DevType v1.3.0 release report
 
-PUSH is still no. Nothing was pushed, and the GitHub Release was not published. A local annotated tag `v1.3.0` exists. After this report is committed, that tag points at the commit that contains this file. `main` is 94 commits ahead of `origin/main` (`31773e8eb4416d2fc486a86631c6f98f6f16ccfe`).
+PUSH is still no. Nothing was pushed, and the GitHub Release was not published. A local annotated tag `v1.3.0` exists and is moved onto the commit that contains this paragraph before that tag is pushed. `main` is 95 commits ahead of `origin/main` (`31773e8eb4416d2fc486a86631c6f98f6f16ccfe`) once this paragraph is committed.
 
 `./ci:local` passed on `a62df2f1a186fdbc3507f19b33ea04fdebf305f4`. The commits after that are documentation. They were not followed by another `./ci:local`. `BRANCH_REPORT.md` and this file were committed in `187d160`.
 
@@ -21,7 +21,7 @@ The four release-pipeline auditors were read-only code-reader subagents. This se
 | `187d160` | docs: record the branch and v1.3.0 release reports |
 | `f3511a4` | docs(release): include unpublished 1.2.1 notes in 1.3.0 |
 
-This report's refresh is the commit after `f3511a4`. The local tag `v1.3.0` is moved onto that commit. It has not been pushed. An earlier local tag object on `187d160` was deleted before `f3511a4` was tagged. Neither object was pushed.
+The refresh at `e440b44` followed `f3511a4`. This commit is the compiler fix described below, and the local tag `v1.3.0` is moved onto it before it is pushed. It has not been pushed. An earlier local tag object on `187d160` was deleted before `f3511a4` was tagged. Neither object was pushed.
 
 No GitPulse task id is in those messages. The accessibility, alert, preview, and benchmark follow-ups are not named by a board card. `9c73c04` is the release-free workflow commit: it does not change the app.
 
@@ -63,6 +63,7 @@ DevMap could not name callers for the reliability edits. `devmap_status` generat
 - If the download after undraft does not match the built DMG, `publish-release.sh` puts the release back into draft. `/releases/latest` does not keep offering it. `9652c98`, covered by `test_public_verification_failure_returns_the_release_to_draft`. If the re-draft itself fails, the command still fails and the release stays public.
 - `actions/checkout`, `actions/cache`, and `actions/upload-artifact` are pinned to the v4 commits resolved on 2026-10-15. Every checkout sets `persist-credentials: false`. Workflow `contents` is read, and only the publish job has `contents: write`. `9c73c04`. The repository is public, so `git ls-remote` in the publisher does not need the checkout token.
 - The update alert Close path, preview main-queue order, benchmark clock, and one AXManualAccessibility retry. See the commits above.
+- Hosted CI does not use this machine's Swift 6.4. Run 38434325302 (2026-10-13, `origin/main`) failed to compile: Swift 5.10 / Xcode 15.4 on `macos-14` could not type-check the backup retention tables in `LibraryBackupStoreTests`, and Swift 6.3.3 / Xcode 26.6 on `macos-26` rejected `LappiFakeAgent.init` because the bind closure captured a `listener` local declared later in that initializer. Local `./ci:local` on Swift 6.4 did not report either diagnostic. The tables are now separate expressions, and the accepted socket fd is `boundListener`, so those two runner compilers can build the tag.
 
 The release job does not run a remote install script. `seed-good-first-issues.sh` mentions `brew install gh` and is not a release step. Notarization was not turned on.
 

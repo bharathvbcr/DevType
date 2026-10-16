@@ -71,18 +71,25 @@ final class LibraryBackupStoreTests: XCTestCase {
             let offsets: [TimeInterval]
             let kept: Set<Int>
         }
-        let rows = [
+        // Named pieces: Swift 5.10 on the macOS 14 runner cannot type-check
+        // this table as one literal (run 38434325302).
+        let twentyOld: [TimeInterval] = (0..<20).map { -Double(100 + $0) * day }
+        let twentyOneOld: [TimeInterval] = (0..<21).map { -Double(100 + $0) * day }
+        let twentyRecent: [TimeInterval] = (0..<20).map { -Double($0) * minute }
+        let dailyOffsets = twentyRecent + [-2 * day - hour, -2 * day - 2 * hour]
+        let insideWindow = twentyRecent + [-30 * day + 1]
+        let onWindowEdge = twentyRecent + [-30 * day]
+        let firstTwenty = Set(0..<20)
+        let firstTwentyOne = Set(0..<21)
+        let dailyKept = firstTwenty.union([20])
+        let rows: [Row] = [
             Row(name: "empty", offsets: [], kept: []),
             Row(name: "one", offsets: [-hour], kept: [0]),
-            Row(name: "exactly twenty, all old", offsets: (0..<20).map { -Double(100 + $0) * day }, kept: Set(0..<20)),
-            Row(name: "twenty-one old: the oldest goes", offsets: (0..<21).map { -Double(100 + $0) * day }, kept: Set(0..<20)),
-            Row(name: "daily newest survives past the count",
-                offsets: (0..<20).map { -Double($0) * minute } + [-2 * day - hour, -2 * day - 2 * hour],
-                kept: Set(0..<20).union([20])),
-            Row(name: "one second inside the window", offsets: (0..<20).map { -Double($0) * minute } + [-30 * day + 1],
-                kept: Set(0..<21)),
-            Row(name: "exactly thirty days is outside", offsets: (0..<20).map { -Double($0) * minute } + [-30 * day],
-                kept: Set(0..<20)),
+            Row(name: "exactly twenty, all old", offsets: twentyOld, kept: firstTwenty),
+            Row(name: "twenty-one old: the oldest goes", offsets: twentyOneOld, kept: firstTwenty),
+            Row(name: "daily newest survives past the count", offsets: dailyOffsets, kept: dailyKept),
+            Row(name: "one second inside the window", offsets: insideWindow, kept: firstTwentyOne),
+            Row(name: "exactly thirty days is outside", offsets: onWindowEdge, kept: firstTwenty),
         ]
         for row in rows {
             let entries = row.offsets.enumerated().map { entry(.save, $0.element, "\($0.offset)") }
@@ -135,15 +142,19 @@ final class LibraryBackupStoreTests: XCTestCase {
             let offsets: [TimeInterval]
             let kept: Set<Int>
         }
-        let rows = [
+        let twelveAncient: [TimeInterval] = (0..<12).map { -Double(400 + $0) * day }
+        let twelveRecent: [TimeInterval] = (0..<12).map { -Double($0) * hour }
+        let tenRecent: [TimeInterval] = (0..<10).map { -Double($0) * hour }
+        let windowEdge = tenRecent + [-30 * day + 1, -30 * day]
+        let tenNewest = Set(0..<10)
+        let allTwelve = Set(0..<12)
+        let throughEdge = Set(0..<11)
+        let rows: [Row] = [
             Row(name: "empty", offsets: [], kept: []),
             Row(name: "ancient newest of a kind is kept", offsets: [-400 * day], kept: [0]),
-            Row(name: "twelve ancient: the ten newest stay",
-                offsets: (0..<12).map { -Double(400 + $0) * day }, kept: Set(0..<10)),
-            Row(name: "twelve recent are all inside the window",
-                offsets: (0..<12).map { -Double($0) * hour }, kept: Set(0..<12)),
-            Row(name: "window edge: 30 days is outside",
-                offsets: (0..<10).map { -Double($0) * hour } + [-30 * day + 1, -30 * day], kept: Set(0..<11)),
+            Row(name: "twelve ancient: the ten newest stay", offsets: twelveAncient, kept: tenNewest),
+            Row(name: "twelve recent are all inside the window", offsets: twelveRecent, kept: allTwelve),
+            Row(name: "window edge: 30 days is outside", offsets: windowEdge, kept: throughEdge),
         ]
         for kind in LibraryBackupStore.Kind.allCases where kind.isCappedSafety {
             for row in rows {
