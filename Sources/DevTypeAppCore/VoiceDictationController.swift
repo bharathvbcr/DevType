@@ -845,6 +845,8 @@ public final class VoiceDictationController: @unchecked Sendable {
         let erasedFromDocument = rolledBack.erasedFromDocument
 
         let input: String
+        // Only a selection target overwrites anything; the others insert at the caret.
+        var replacing: SelectionReplacement?
         switch command.target {
         case .spoken(let text):
             input = text
@@ -864,6 +866,7 @@ public final class VoiceDictationController: @unchecked Sendable {
             switch outcome {
             case .selection(let resolved):
                 input = resolved.text
+                replacing = resolved.replacement
             case .failure(let failure):
                 await MainActor.run {
                     VoiceHUDPanel.shared.updateState(.error(message: failure.message(loc: .shared)))
@@ -872,7 +875,7 @@ public final class VoiceDictationController: @unchecked Sendable {
             }
         }
 
-        return await MainActor.run {
+        return await MainActor.run { [replacing] in
             guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 VoiceHUDPanel.shared.updateState(
                     .error(message: self.emptyTargetMessage(for: command))
@@ -886,6 +889,7 @@ public final class VoiceDictationController: @unchecked Sendable {
             self.runAITransform(
                 command,
                 input: input,
+                replacing: replacing,
                 restoringOnFailure: command.target == .lastInsertion && !erasedFromDocument.isEmpty
                     ? erasedFromDocument
                     : nil
@@ -911,6 +915,7 @@ public final class VoiceDictationController: @unchecked Sendable {
     private func runAITransform(
         _ command: VoiceAICommand,
         input: String,
+        replacing: SelectionReplacement? = nil,
         restoringOnFailure fallback: String? = nil
     ) {
         let action = LocalizationManager.shared.s(command.kind.localizationKey)
@@ -934,7 +939,7 @@ public final class VoiceDictationController: @unchecked Sendable {
                     switch result {
                     case .success(let output) where !output.isEmpty:
                         VoiceHUDPanel.shared.updateState(.success(text: output))
-                        self.deliverAIText(output, to: destination)
+                        self.deliverAIText(output, to: destination, replacing: replacing)
                     case .success:
                         VoiceHUDPanel.shared.updateState(.error(
                             message: LocalizationManager.shared.s("voice.ai.emptyOutput")
@@ -1041,8 +1046,16 @@ public final class VoiceDictationController: @unchecked Sendable {
     /// `SourceAppDelivery` reactivates the original process, refuses to deliver if a third app
     /// has taken over, and carries a predicate that keeps the pipeline's own later stages — the
     /// clipboard wait, the paste, the restore — bound to that same process.
+    ///
+    /// `replacing` is the selection a `.selection` command's result must overwrite; the pipeline
+    /// confirms it is still selected (or puts it back) before writing, and refuses rather than
+    /// landing the result beside it. Rollback restores and the other targets insert, so `nil`.
     @MainActor
-    private func deliverAIText(_ text: String, to destination: NSRunningApplication?) {
+    private func deliverAIText(
+        _ text: String,
+        to destination: NSRunningApplication?,
+        replacing: SelectionReplacement? = nil
+    ) {
         guard !text.isEmpty else { return }
         SourceAppDelivery.perform(sourceApp: destination, onUnavailable: { _ in
             VoiceHUDPanel.shared.updateState(.error(
@@ -1056,7 +1069,8 @@ public final class VoiceDictationController: @unchecked Sendable {
                 eraseCountOverride: 0,
                 preResolvedText: text,
                 secureClipboardPaste: false,
-                shouldContinue: shouldContinue
+                shouldContinue: shouldContinue,
+                replacingSelection: replacing
             )
         }
     }

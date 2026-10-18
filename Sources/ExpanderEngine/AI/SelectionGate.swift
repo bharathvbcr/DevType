@@ -138,7 +138,9 @@ public extension SelectionReader {
         }
     }
 
-    /// Where the text came from. Recorded for diagnostics; never changes what is injected.
+    /// Where the text came from. Never changes what is injected; it does decide whether a replace
+    /// can be confirmed through AX before the paste (`Result.replacement`) — a `.clipboard`
+    /// capture means AX could not see this app's selection, so there is nothing to confirm.
     enum Source: String, Equatable, Sendable {
         /// Read live from a focused AX element at command time.
         case live

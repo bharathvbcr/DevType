@@ -309,6 +309,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.refreshStatusItemUI()
             }
         }
+        // A replace refused because its selection was gone. The pipeline already put the result on
+        // the clipboard; without this toast the user would see nothing happen and assume the
+        // transform failed.
+        TextInjectionPipeline.shared.onSelectionReplaceRefused = { copied in
+            let key = copied
+                ? TextInjectionPipeline.selectionReplaceRefusedHintKey
+                : TextInjectionPipeline.selectionReplaceRefusedNoCopyHintKey
+            ToastPanel.show(
+                LocalizationManager.shared.s(key),
+                symbol: copied ? "doc.on.clipboard.fill" : "exclamationmark.triangle.fill",
+                preempt: true
+            )
+        }
     }
 
     private func handleCoordinatorStatus(_ status: PermissionCoordinator.Status) {
@@ -1242,8 +1255,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 sourceApp: sourceApp,
                 customInstructions: customInstructions,
                 restoreOnCancel: restoreOnCancel
-            ) { text, app in
-                self?.injectAIReplacement(text: text, sourceApp: app)
+            ) { text, app, replacing in
+                self?.injectAIReplacement(text: text, sourceApp: app, replacing: replacing)
             }
         }
         EventTapEngine.shared.presentAITransformHint = { [weak self] titleKey, messageKey in
@@ -1591,9 +1604,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             sourceApp: sourceApp,
             customInstructions: picked.customInstructions,
             forcePreview: picked.requiresPreview,
+            replacing: resolved.replacement,
             loc: loc
-        ) { [weak self] text, app in
-            self?.injectAIReplacement(text: text, sourceApp: app)
+        ) { [weak self] text, app, replacing in
+            self?.injectAIReplacement(text: text, sourceApp: app, replacing: replacing)
         }
     }
 
@@ -1676,8 +1690,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func presentAIPalette() {
-        AITransformFlow.presentFromHotkey { [weak self] text, sourceApp in
-            self?.injectAIReplacement(text: text, sourceApp: sourceApp)
+        AITransformFlow.presentFromHotkey { [weak self] text, sourceApp, replacing in
+            self?.injectAIReplacement(text: text, sourceApp: sourceApp, replacing: replacing)
         }
     }
 
@@ -1692,7 +1706,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// typed or pasted into a document. The stashed source selection exempts clauses
     /// the author's own text contains; refusal costs one alert and leaves the field
     /// untouched — never data loss.
-    private func injectAIReplacement(text: String, sourceApp: NSRunningApplication?) {
+    private func injectAIReplacement(
+        text: String,
+        sourceApp: NSRunningApplication?,
+        replacing: SelectionReplacement?
+    ) {
         let verdict = AIPromptLeakGuard.injectionVerdict(
             payload: text,
             exempting: AIUndoStore.stashedOriginal()
@@ -1756,6 +1774,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 preResolvedText: text,
                 secureClipboardPaste: true,
                 shouldContinue: shouldContinue,
+                replacingSelection: replacing,
                 completion: { _ in
                     suspension.release()
                     self.refreshStatusItemUI()

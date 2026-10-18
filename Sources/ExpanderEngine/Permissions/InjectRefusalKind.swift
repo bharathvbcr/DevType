@@ -71,6 +71,10 @@ public enum InjectRefusalKind: String, Equatable, Sendable, CaseIterable {
 
     // Panel-driven delivery (AI result, palette value, inline search expansion)
     case selectionSourceUnavailable
+    /// A replace-the-selection delivery found the selection no longer holding the text it was
+    /// meant to replace, and could not put it back. Pasting anyway would have landed the result
+    /// beside the original — the duplicate this refusal exists to prevent.
+    case selectionReplaceUnconfirmed
 
     case unknown
 
@@ -121,6 +125,8 @@ public enum InjectRefusalKind: String, Equatable, Sendable, CaseIterable {
             return "recovery.refuse.undo"
         case .selectionSourceUnavailable:
             return "recovery.refuse.selectionSource"
+        case .selectionReplaceUnconfirmed:
+            return "recovery.refuse.selectionReplace"
         case .unknown:
             return "recovery.refuse.generic"
         }
@@ -243,6 +249,14 @@ extension InjectRefusalKind {
             return InjectRefusal(
                 kind: .selectionSourceUnavailable,
                 sentence: known ? reason : SelectionReader.SourceUnavailability.focusNeverReturned.reason
+            )
+        case SelectionReplacementGuard.refusalPath:
+            // `SelectionReplacementGuard.Refusal` owns this vocabulary; its sentences carry no
+            // field content, so they pass through. Anything else on this path is internal prose.
+            let known = SelectionReplacementGuard.Refusal.allCases.contains { $0.reason == reason }
+            return InjectRefusal(
+                kind: .selectionReplaceUnconfirmed,
+                sentence: known ? reason : SelectionReplacementGuard.Refusal.selectionChanged.reason
             )
         case "aiResultPlanRefused", "searchExpansionPlanRefused":
             return reason.localizedCaseInsensitiveContains("post events")

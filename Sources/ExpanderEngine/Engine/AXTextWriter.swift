@@ -467,4 +467,19 @@ public final class AXTextWriter {
             caretValue
         ) == .success
     }
+
+    /// Selects `range` (UTF-16) in `element`. A range set moves no text, so a host that ignores it
+    /// leaves the field untouched — the caller must still read the selection back before relying
+    /// on it, because some hosts answer `.success` and keep their old selection.
+    @discardableResult
+    public func selectRange(_ range: NSRange, in element: AXUIElement) -> Bool {
+        var cfRange = CFRange(location: range.location, length: range.length)
+        guard Self.isUsableAXRange(cfRange),
+              let value = AXValueCreate(.cfRange, &cfRange) else { return false }
+        return AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            value
+        ) == .success
+    }
 }

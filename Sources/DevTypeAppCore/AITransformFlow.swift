@@ -6,10 +6,15 @@ import ExpanderEngine
 /// Keeps model work off the expansion pipeline: panels own focus, then inject via
 /// `erasePlan: .empty` + `secureClipboardPaste: true` (same shape as inline search).
 enum AITransformFlow {
+    /// Hands a finished result to delivery. `replacing` is the selection the result must
+    /// overwrite, or `nil` for an insert at the caret (the typed path, whose selection the
+    /// trigger's own keystrokes already replaced).
+    typealias Inject = (_ text: String, _ sourceApp: NSRunningApplication?, _ replacing: SelectionReplacement?) -> Void
+
     /// Hotkey path: gate on prefs / OS / selection, then show the action picker.
     static func presentFromHotkey(
         loc: LocalizationManager = .shared,
-        onInject: @escaping (String, NSRunningApplication?) -> Void
+        onInject: @escaping Inject
     ) {
         guard AIPreferences.isEnabled else {
             softAlert(
@@ -104,6 +109,7 @@ enum AITransformFlow {
                     sourceApp: sourceApp,
                     customInstructions: picked.customInstructions,
                     forcePreview: picked.requiresPreview,
+                    replacing: selection.replacement,
                     loc: loc,
                     onInject: onInject
                 )
@@ -124,8 +130,11 @@ enum AITransformFlow {
         customInstructions: String? = nil,
         restoreOnCancel: String? = nil,
         loc: LocalizationManager = .shared,
-        onInject: @escaping (String, NSRunningApplication?) -> Void
+        onInject: @escaping Inject
     ) {
+        // `replacing: nil` on purpose: typing the trigger already replaced the selection, and the
+        // erase removed the trigger, so the result is an insert at the caret — there is no
+        // selection left for it to overwrite.
         run(
             input: input,
             kind: kind,
@@ -133,12 +142,16 @@ enum AITransformFlow {
             customInstructions: customInstructions,
             forcePreview: true,
             restoreOnCancel: restoreOnCancel,
+            replacing: nil,
             loc: loc,
             onInject: onInject
         )
     }
 
     /// Shared transform entry: resolves output mode, then direct-inject or preview panel.
+    ///
+    /// `replacing` travels with the result rather than being looked up at delivery: delivery
+    /// reactivates the source app, which resigns DevType, which clears `AIUndoStore`.
     static func run(
         input: String,
         kind: AITransformKind,
@@ -146,8 +159,9 @@ enum AITransformFlow {
         customInstructions: String?,
         forcePreview: Bool,
         restoreOnCancel: String? = nil,
+        replacing: SelectionReplacement?,
         loc: LocalizationManager = .shared,
-        onInject: @escaping (String, NSRunningApplication?) -> Void
+        onInject: @escaping Inject
     ) {
         let mode: AIOutputMode = forcePreview
             ? .preview
@@ -162,7 +176,7 @@ enum AITransformFlow {
                 customInstructions: customInstructions,
                 restoreOnCancel: restoreOnCancel,
                 loc: loc,
-                onReplace: onInject
+                onReplace: { text, app in onInject(text, app, replacing) }
             )
         case .direct:
             runDirect(
@@ -171,7 +185,7 @@ enum AITransformFlow {
                 sourceApp: sourceApp,
                 customInstructions: customInstructions,
                 loc: loc,
-                onInject: onInject
+                onInject: { text, app in onInject(text, app, replacing) }
             )
         }
     }

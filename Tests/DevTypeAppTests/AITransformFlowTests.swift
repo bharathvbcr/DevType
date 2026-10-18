@@ -168,20 +168,36 @@ final class AITransformFlowTests: XCTestCase {
 
         let input = "**hello**"
         var injected: String?
+        var replaced: SelectionReplacement?
         AITransformFlow.run(
             input: input,
             kind: .removeMarkdown,
             sourceApp: nil,
             customInstructions: nil,
             forcePreview: false,
-            onInject: { text, _ in
+            replacing: SelectionReplacement(original: input),
+            onInject: { text, _, replacing in
                 injected = text
+                replaced = replacing
             }
         )
 
         XCTAssertEqual(injected, "hello")
         XCTAssertTrue(AIUndoStore.hasUndo)
         XCTAssertEqual(AIUndoStore.stashedOriginal(), input)
+        // The selection the result must overwrite reaches delivery with it. Without it the
+        // pipeline cannot tell a lost selection from a live one, and pastes beside the original.
+        XCTAssertEqual(replaced?.original, input)
+        XCTAssertEqual(replaced?.requiresEvidence, true)
+    }
+
+    func testOnlyAClipboardCaptureDeliversWithoutRequiringEvidence() {
+        let live = SelectionReader.Result(text: "hi", bundleID: "com.apple.MobileSMS", isWeakAX: true, source: .live)
+        let cached = SelectionReader.Result(text: "hi", bundleID: "com.apple.MobileSMS", isWeakAX: true, source: .cached)
+        let copied = SelectionReader.Result(text: "hi", bundleID: "com.example", isWeakAX: true, source: .clipboard)
+        XCTAssertEqual(live.replacement?.requiresEvidence, true)
+        XCTAssertEqual(cached.replacement?.requiresEvidence, true)
+        XCTAssertEqual(copied.replacement?.requiresEvidence, false)
     }
 
     func testPresentFromHotkeyWhenAIDisabled() {
@@ -195,7 +211,7 @@ final class AITransformFlowTests: XCTestCase {
         }
         defer { DevTypeAlert.presenterOverride = nil }
 
-        AITransformFlow.presentFromHotkey { _, _ in }
+        AITransformFlow.presentFromHotkey { _, _, _ in }
         XCTAssertTrue(alertShown)
     }
 
@@ -205,7 +221,7 @@ final class AITransformFlowTests: XCTestCase {
             kind: .removeMarkdown,
             sourceApp: nil,
             customInstructions: nil
-        ) { _, _ in }
+        ) { _, _, _ in }
     }
 
     func testRunDirectWithEmptyTextAlert() {
@@ -223,8 +239,9 @@ final class AITransformFlowTests: XCTestCase {
             kind: .removeMarkdown,
             sourceApp: nil,
             customInstructions: nil,
-            forcePreview: false
-        ) { _, _ in }
+            forcePreview: false,
+            replacing: nil
+        ) { _, _, _ in }
         XCTAssertTrue(alertShown)
     }
 
@@ -243,8 +260,9 @@ final class AITransformFlowTests: XCTestCase {
             kind: .custom,
             sourceApp: nil,
             customInstructions: nil,
-            forcePreview: false
-        ) { _, _ in }
+            forcePreview: false,
+            replacing: nil
+        ) { _, _, _ in }
         waitForExpectations(timeout: 5.0)
     }
 }

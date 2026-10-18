@@ -128,7 +128,21 @@ public final class TextInjectionPipeline {
         }
     }
 
-    public init(defaults: UserDefaults = .standard) {
+    public convenience init(defaults: UserDefaults = .standard) {
+        self.init(
+            defaults: defaults,
+            selectionConfirmer: SelectionReplacementGuard.Confirmer(),
+            keepRefusedReplacement: { PasteboardBroker.shared.writeUserClipboardString($0) }
+        )
+    }
+
+    /// Tests supply the selection confirmer (so a lost selection can be scripted without a live
+    /// field) and where a refused replace's payload goes (so a test never writes the real clipboard).
+    init(
+        defaults: UserDefaults,
+        selectionConfirmer: SelectionReplacementGuard.Confirmer,
+        keepRefusedReplacement: @escaping (String) -> Bool
+    ) {
         ledger = ExpansionLedger(defaults: defaults)
         hid = HIDKeyPoster.shared
         ax = AXTextWriter.shared
@@ -136,6 +150,8 @@ public final class TextInjectionPipeline {
         clipboard = PasteboardBroker.shared
         eraser = EraseExecutor.shared
         timing = InjectTimingStore.shared
+        self.selectionConfirmer = selectionConfirmer
+        self.keepRefusedReplacement = keepRefusedReplacement
     }
 
     /// Localization key (Permissions.strings) of the hint shown when secure clipboard paste cannot
@@ -145,6 +161,19 @@ public final class TextInjectionPipeline {
 
     /// Optional UI hook when secure clipboard paste leaves the payload for manual ⌘V.
     public var onSecureClipboardManualPasteHint: (() -> Void)?
+
+    /// Localization keys (Permissions.strings) of the toast shown when a replace is refused
+    /// because its selection was gone: with the result copied to the clipboard, and without.
+    public static let selectionReplaceRefusedHintKey = "inject.selectionReplaceRefused"
+    public static let selectionReplaceRefusedNoCopyHintKey = "inject.selectionReplaceRefusedNoCopy"
+
+    /// Optional UI hook when a replace was refused rather than pasted beside the original.
+    /// `copied` says whether the payload made it onto the clipboard.
+    public var onSelectionReplaceRefused: ((_ copied: Bool) -> Void)?
+
+    private let selectionConfirmer: SelectionReplacementGuard.Confirmer
+    /// Where a refused replace's already-generated payload is kept. Returns whether it was kept.
+    private let keepRefusedReplacement: (String) -> Bool
 
     // MARK: - Entry points
 
@@ -174,6 +203,10 @@ public final class TextInjectionPipeline {
         /// §2.2: where the target identity comes from. A typed expansion hands over the element its
         /// expand gate already resolved; explicit inserts resolve it here.
         targetFocus: FocusedElementSource = .live,
+        /// Set when this delivery must *replace* a selection read earlier rather than insert at
+        /// the caret. The selection is confirmed (or put back) on the live field before anything
+        /// is posted, and the delivery is refused rather than pasted beside the original.
+        replacingSelection: SelectionReplacement? = nil,
         completion: InjectionCompletion? = nil
     ) {
         enqueueInjection(
@@ -184,6 +217,7 @@ public final class TextInjectionPipeline {
             preResolvedCursorOffset: preResolvedCursorOffset, trailingKeys: trailingKeys,
             snippetLookup: snippetLookup, secureClipboardPaste: secureClipboardPaste,
             eraseCaretVouched: eraseCaretVouched, shouldContinue: shouldContinue, targetFocus: targetFocus,
+            replacingSelection: replacingSelection,
             completion: completion
         )
     }
@@ -207,6 +241,7 @@ public final class TextInjectionPipeline {
         shouldContinue: @escaping @Sendable () -> Bool = { true },
         targetFocus: FocusedElementSource = .live,
         purpose: InjectionPurpose = .expansion,
+        replacingSelection: SelectionReplacement? = nil,
         completion: InjectionCompletion? = nil
     ) {
         let operation = InjectCompletionGuard(shouldContinue: shouldContinue)
@@ -257,7 +292,8 @@ public final class TextInjectionPipeline {
                 snippetLookup: snippetLookup,
                 secureClipboardPaste: secureClipboardPaste,
                 eraseCaretVouched: eraseCaretVouched,
-                operation: operation, inputRevision: revision, target: target, purpose: purpose
+                operation: operation, inputRevision: revision, target: target, purpose: purpose,
+                replacing: replacingSelection
             )
             DispatchQueue.main.async {
                 self.injectOnMain(request) { outcome in
@@ -557,6 +593,24 @@ public final class TextInjectionPipeline {
         let inputRevision: UInt64
         let target: PasteboardBroker.PasteTarget
         let purpose: InjectionPurpose
+        /// Non-nil until `injectWithFocus` has confirmed the selection; the confirmed request is
+        /// re-entered with this cleared, so the check runs exactly once per inject.
+        let replacing: SelectionReplacement?
+
+        /// The request after its selection was confirmed. `target` is recaptured when the guard
+        /// had to re-select: the range moved on purpose, and a range-gated host would otherwise
+        /// refuse the paste as "selection changed" against the collapsed caret captured earlier.
+        func selectionConfirmed(target newTarget: PasteboardBroker.PasteTarget? = nil) -> InjectRequest {
+            InjectRequest(
+                snippet: snippet, erasePlan: erasePlan, clipboardOverride: clipboardOverride,
+                plan: plan, swallowed: swallowed, preResolvedText: preResolvedText,
+                preResolvedCursorOffset: preResolvedCursorOffset, trailingKeys: trailingKeys,
+                snippetLookup: snippetLookup, secureClipboardPaste: secureClipboardPaste,
+                eraseCaretVouched: eraseCaretVouched, operation: operation,
+                inputRevision: inputRevision, target: newTarget ?? target, purpose: purpose,
+                replacing: nil
+            )
+        }
     }
 
     /// Everything the main-thread inject needs after the gates have passed. §8.2: bundling these
@@ -662,6 +716,17 @@ public final class TextInjectionPipeline {
                 allowSecureInput: request.secureClipboardPaste,
                 swallowed: swallowed,
                 completion: completion
+            )
+            return
+        }
+        // A replace pastes over whatever is selected *now*. The entry gate above only proves the
+        // target has not moved since it was captured — and it was captured after the source app
+        // came back to the front, by which time a host like Messages has already collapsed the
+        // selection. So the selection itself is checked against the text that was read, here,
+        // before any branch below can post ⌘V.
+        if let replacement = request.replacing {
+            confirmReplacementSelection(
+                replacement, request: request, focus: focus, element: element, completion: completion
             )
             return
         }
@@ -837,6 +902,55 @@ public final class TextInjectionPipeline {
                 return
             }
             self.performInject(context: context, eraseCheck: eraseCheck, completion: completion)
+        }
+    }
+
+    /// Confirms a replace's selection on the live field, then re-enters `injectWithFocus` with the
+    /// check cleared so every later gate runs exactly as it does for an insert. Re-entering also
+    /// re-runs the entry gate, which is what covers the time a re-select's read-back waited.
+    private func confirmReplacementSelection(
+        _ replacement: SelectionReplacement,
+        request: InjectRequest,
+        focus: AXContextChecker.FocusQueryResult,
+        element: AXUIElement?,
+        completion: @escaping InjectionCompletion
+    ) {
+        selectionConfirmer.confirm(replacement, element: element) { verdict in
+            switch verdict {
+            case .confirmed(let reselected):
+                var confirmed = request.selectionConfirmed()
+                if reselected {
+                    DevTypeLog.inject.notice(
+                        "[Inject] replace: selection was lost on return to the source app — re-selected the original before pasting"
+                    )
+                    confirmed = request.selectionConfirmed(
+                        target: PasteboardBroker.PasteTarget.capture(focus: .resolved(element))
+                    )
+                }
+                self.injectWithFocus(confirmed, focus: focus, completion: completion)
+            case .unverified:
+                DevTypeLog.inject.info(
+                    "[Inject] replace: selection unreadable in an app read by copy — delivering unverified"
+                )
+                self.injectWithFocus(request.selectionConfirmed(), focus: focus, completion: completion)
+            case .refused(let refusal):
+                let payload = request.preResolvedText ?? request.snippet.replacementText
+                // The payload is already generated — an AI result, a dictated rewrite. Refusing
+                // must not cost the user that work, so it goes to the clipboard for a manual ⌘V
+                // into a selection they can see.
+                let copied = self.keepRefusedReplacement(payload)
+                DevTypeLog.inject.notice(
+                    "[Inject] replace refused — \(refusal.rawValue, privacy: .public); result copied=\(copied, privacy: .public)"
+                )
+                self.refuseInject(
+                    refusal.reason,
+                    path: SelectionReplacementGuard.refusalPath,
+                    swallowed: request.swallowed,
+                    allowKeyReplay: false,
+                    completion: completion
+                )
+                self.onSelectionReplaceRefused?(copied)
+            }
         }
     }
 

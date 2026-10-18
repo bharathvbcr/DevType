@@ -100,6 +100,12 @@ public enum SelectionReader {
             self.source = source
             self.via = via
         }
+
+        /// What a delivery that replaces this selection must still find selected when it pastes.
+        /// A ⌘C capture came from an app AX cannot see into, so nothing there can be confirmed.
+        public var replacement: SelectionReplacement? {
+            SelectionReplacement(original: text, requiresEvidence: source != .clipboard)
+        }
     }
 
     /// The one queue every selection read runs on.

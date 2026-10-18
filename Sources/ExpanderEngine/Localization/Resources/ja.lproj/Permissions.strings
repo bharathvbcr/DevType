@@ -270,6 +270,9 @@
 "inject.secureClipboardManualPaste" = "パスワードがクリップボードにあります — ⌘V を押してください";
 "recovery.refuse.undo" = "元の挿入を確認できなかったため、取り消しを拒否しました。代わりにアプリ側で ⌘Z を使ってください — DevType は自分が行ったと証明できない編集を元に戻しません。";
 "recovery.refuse.selectionSource" = "元のフィールドが利用できなくなったため、生成テキストを配信できませんでした。そのフィールドをクリックし直してから再試行してください。";
+"recovery.refuse.selectionReplace" = "置き換える予定のテキストが選択されていなかったため、結果は貼り付けられませんでした（貼り付けると元のテキストの横に追加されていました）。結果はクリップボードにあります。元のテキストを選択して ⌘V を押してください。";
+"inject.selectionReplaceRefused" = "選択範囲が変わりました — 結果をコピーしました。元のテキストを選択して ⌘V を押してください。";
+"inject.selectionReplaceRefusedNoCopy" = "選択範囲が変わりました — 何も貼り付けず、結果もコピーできませんでした。";
 "recovery.health.idle" = "挿入の状態: アイドル";
 "recovery.health.tapExpected" = "タップが必要ですが動作していません — 古い動作中表示は行いません。";
 "recovery.health.full" = "挿入経路: フル（AX + HID）。";
