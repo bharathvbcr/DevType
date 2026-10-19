@@ -174,9 +174,7 @@ final class SourceContractTests: XCTestCase {
 
     func testStatusButtonUsesTheSecureInputPresentationAtTheLiveBoundary() throws {
         let app = try source("Sources/DevTypeAppCore/AppDelegate.swift")
-        let start = try XCTUnwrap(app.range(of: "private func refreshStatusItemUI()"))
-        let end = try XCTUnwrap(app.range(of: "private func refreshOpenAtLoginMenuItem()"))
-        let body = String(app[start.lowerBound..<end.lowerBound])
+        let body = try SourceTree.functionBody("func refreshStatusItemUI()", in: app)
         XCTAssertTrue(body.contains("AXContextChecker.isSecureEventInputEnabledLive()"),
                       "Menu refresh must re-read Secure Input rather than replay a queued sample")
         XCTAssertTrue(body.contains("StatusItemPresentation("),
@@ -186,18 +184,14 @@ final class SourceContractTests: XCTestCase {
 
     func testCopySecretButtonOpensSecretSearchDirectly() throws {
         let app = try source("Sources/DevTypeAppCore/AppDelegate.swift")
-        let setupStart = try XCTUnwrap(app.range(of: "private func setupStatusItem()"))
-        let setupEnd = try XCTUnwrap(app.range(of: "private func rebuildMenu()"))
-        let setup = String(app[setupStart.lowerBound..<setupEnd.lowerBound])
+        let setup = try SourceTree.functionBody("func setupStatusItem()", in: app)
         XCTAssertTrue(setup.contains("StatusItemInteraction("),
                       "The status button must dispatch a direct action instead of always opening its menu")
         XCTAssertTrue(setup.contains("openSecretSearch(nil)"),
                       "The direct copy action must use the existing secret-search entry point")
         XCTAssertFalse(setup.contains("statusItem?.menu ="),
                        "An attached NSStatusItem menu intercepts the button action")
-        let searchStart = try XCTUnwrap(app.range(of: "@objc private func openSecretSearch"))
-        let searchEnd = try XCTUnwrap(app.range(of: "private func appendBiometryToggle"))
-        let search = String(app[searchStart.lowerBound..<searchEnd.lowerBound])
+        let search = try SourceTree.functionBody("func openSecretSearch(", in: app)
         XCTAssertTrue(search.contains("InlineSearchPanel.open(mode: .copySecrets)"),
                       "An explicit search click must open secrets even if another palette is already visible")
         XCTAssertTrue(search.contains("self.copyToClipboard(snippet)"),
@@ -503,18 +497,9 @@ final class SourceContractTests: XCTestCase {
     func testPaletteCommandHandlersDoNotReReadSelectionLive() throws {
         let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
 
-        guard let start = offset(of: "private func handlePaletteCommand", in: text),
-              let end = offset(of: "private func runPaletteAI", in: text)
-        else {
-            return XCTFail("Could not locate the palette command handling region in AppDelegate.")
-        }
-        guard start < end else {
-            return XCTFail("Unexpected ordering of palette handlers in AppDelegate.")
-        }
-
-        let startIndex = text.index(text.startIndex, offsetBy: start)
-        let endIndex = text.index(text.startIndex, offsetBy: end)
-        let region = String(text[startIndex..<endIndex])
+        // `handlePaletteCommand` is the dispatcher's whole body; `runPaletteAI` is a separate
+        // function that may live in another file of the family and is deliberately not in it.
+        let region = try SourceTree.functionBody("func handlePaletteCommand(", in: text)
 
         // Guard against a vacuous pass: if the region extraction ever silently yields an empty
         // or wrong slice, the absence assertion below would succeed while checking nothing.
@@ -548,8 +533,10 @@ final class SourceContractTests: XCTestCase {
     func testPaletteAIRecoversNoFocusAfterReactivatingTheSourceApp() throws {
         let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
 
-        guard let start = offset(of: "private func runPaletteAI", in: text),
-              let end = offset(of: "private func injectPaletteText", in: text),
+        // Spans runPaletteAI through the delivery-refusal reporters that precede injectPaletteText,
+        // exactly as before the split; both anchors live in AppDelegate+Palette.swift, in that order.
+        guard let start = offset(of: "func runPaletteAI", in: text),
+              let end = offset(of: "func injectPaletteText", in: text),
               start < end else {
             return XCTFail("Could not locate the palette AI handling region in AppDelegate.")
         }
@@ -822,7 +809,7 @@ final class SourceContractTests: XCTestCase {
     func testRefreshStatusItemUIHopsToMainThread() throws {
         let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
 
-        guard let start = offset(of: "private func refreshStatusItemUI()", in: text) else {
+        guard let start = offset(of: "func refreshStatusItemUI()", in: text) else {
             return XCTFail("Could not locate refreshStatusItemUI() in AppDelegate.")
         }
         let startIndex = text.index(text.startIndex, offsetBy: start)
@@ -863,7 +850,7 @@ final class SourceContractTests: XCTestCase {
         let theme = try source("Sources/DevTypeAppCore/DevTypeTheme.swift")
 
         for (name, marker, text) in [
-            ("rebuildRecentMenu()", "private func rebuildRecentMenu()", appDelegate),
+            ("rebuildRecentMenu()", "func rebuildRecentMenu()", appDelegate),
             ("PillBadgeView.update(text:tint:)", "func update(text: String, tint newTint: NSColor)", theme)
         ] {
             guard let start = offset(of: marker, in: text) else {
@@ -1025,11 +1012,14 @@ final class SourceContractTests: XCTestCase {
             appDelegate.components(separatedBy: "migrateLegacy(allowInteraction: true)").count - 1, 1,
             "One doorway: offerSecretMigration. A second caller is a second surprise prompt."
         )
-        guard let offer = appDelegate.range(of: "private func offerSecretMigration("),
-              let migrateCall = appDelegate.range(of: "migrateLegacy(allowInteraction: true)") else {
-            return XCTFail("AppDelegate no longer has the shape this contract describes.")
+        // The single call sits inside the offer's own body, not merely after it in some file.
+        let offer: String
+        do {
+            offer = try SourceTree.functionBody("func offerSecretMigration(", in: appDelegate)
+        } catch {
+            return XCTFail("AppDelegate no longer has the shape this contract describes: \(error)")
         }
-        XCTAssertTrue(offer.upperBound < migrateCall.lowerBound)
+        XCTAssertTrue(offer.contains("migrateLegacy(allowInteraction: true)"))
     }
 
     /// §8.10: a locked login keychain must be diagnosed as locked, never reported as "no secret
@@ -1050,11 +1040,13 @@ final class SourceContractTests: XCTestCase {
             appDelegate.components(separatedBy: "requestKeychainUnlock()").count - 1, 1,
             "One doorway: offerKeychainUnlock. A second caller is a second surprise dialog."
         )
-        guard let offer = appDelegate.range(of: "private func offerKeychainUnlock("),
-              let unlockCall = appDelegate.range(of: "requestKeychainUnlock()") else {
-            return XCTFail("AppDelegate no longer has the shape this contract describes.")
+        let offer: String
+        do {
+            offer = try SourceTree.functionBody("func offerKeychainUnlock(", in: appDelegate)
+        } catch {
+            return XCTFail("AppDelegate no longer has the shape this contract describes: \(error)")
         }
-        XCTAssertTrue(offer.upperBound < unlockCall.lowerBound)
+        XCTAssertTrue(offer.contains("requestKeychainUnlock()"))
     }
 
     /// §8.11: a keychain copy may be dropped only after the sealed copy is saved and verified —
@@ -1293,15 +1285,12 @@ final class SourceContractTests: XCTestCase {
         let appDelegate = try source("Sources/DevTypeAppCore/AppDelegate.swift")
         // The switch moved out of `copyToClipboard` when the resolve step became asynchronous
         // for the Touch ID gate; the contract is about wherever the *result* is applied.
-        guard let start = appDelegate.range(of: "private func applyCopyResult("),
-              let end = appDelegate.range(
-                  of: "\n    private func",
-                  range: start.upperBound..<appDelegate.endIndex
-              )
-        else {
-            return XCTFail("applyCopyResult no longer has the shape this contract describes.")
+        let body: String
+        do {
+            body = try SourceTree.functionBody("func applyCopyResult(", in: appDelegate)
+        } catch {
+            return XCTFail("applyCopyResult no longer has the shape this contract describes: \(error)")
         }
-        let body = String(appDelegate[start.upperBound..<end.lowerBound])
 
         XCTAssertTrue(body.contains("ToastPanel.show"), "The success path must use the toast.")
         // `DevTypeAlert.present` survives for the *failure* path, where the user has to go and fix
@@ -1605,15 +1594,15 @@ final class SourceContractTests: XCTestCase {
     func testSnippetStoreHasNoSynchronousSetPendingConflictsDuplicate() throws {
         let store = try source("Sources/ExpanderEngine/Models/SnippetStore.swift")
         XCTAssertFalse(
-            store.contains("private func setPendingConflicts("),
+            store.contains("func setPendingConflicts("),
             "A leftover setter that notifies off-main cannot be the conflict listener path"
         )
         XCTAssertTrue(
-            store.contains("private func storePendingConflicts("),
+            store.contains("func storePendingConflicts("),
             "Conflict snapshots still persist through storePendingConflicts"
         )
         XCTAssertTrue(
-            store.contains("private func notifyConflictListeners()"),
+            store.contains("func notifyConflictListeners()"),
             "Conflict observers still fire through notifyConflictListeners"
         )
         XCTAssertTrue(

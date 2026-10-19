@@ -95,8 +95,8 @@ final class UndoAuditRegressionTests: XCTestCase {
                                                 range: start.upperBound..<source.endIndex))
             XCTAssertTrue(source[start.upperBound..<end.lowerBound].contains("clearLastExpansion()"))
         }
-        let observer = try XCTUnwrap(source.range(of: "private func installAppSwitchObserver()"))
-        XCTAssertTrue(source[observer.upperBound...].contains("TextInjectionPipeline.shared.clearLastExpansion()"))
+        let observer = try SourceTree.functionBody("func installAppSwitchObserver()", in: source)
+        XCTAssertTrue(observer.contains("TextInjectionPipeline.shared.clearLastExpansion()"))
         let pause = try XCTUnwrap(source.range(of: "public var isEnabled: Bool"))
         let end = try XCTUnwrap(source.range(of: "UserDefaults.standard.set(!newValue", range: pause.upperBound..<source.endIndex))
         XCTAssertTrue(source[pause.upperBound..<end.lowerBound].contains("cancelCurrentInjection()"))

@@ -144,9 +144,7 @@ final class CasePropagationTests: XCTestCase {
     /// the first pass would vanish exactly when the user filled a field in.
     func testTheTypedPathShapesBothRenderPasses() throws {
         let tap = try source("Sources/ExpanderEngine/Engine/EventTapEngine.swift")
-        let start = try XCTUnwrap(tap.range(of: "private func performDeferredExpand("))
-        let end = try XCTUnwrap(tap.range(of: "private func handleTypedAITransformExpand("))
-        let body = String(tap[start.lowerBound..<end.lowerBound])
+        let body = try SourceTree.functionBody("func performDeferredExpand(", in: tap)
         XCTAssertEqual(body.components(separatedBy: "MacroRenderer.expand(").count - 1, 2)
         XCTAssertEqual(body.components(separatedBy: "caseShape: caseShape").count - 1, 2)
         XCTAssertTrue(tap.contains("caseShape: match.caseShape"), "The immediate expansion")

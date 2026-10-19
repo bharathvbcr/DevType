@@ -315,10 +315,12 @@ final class LibraryWritePathContractTests: XCTestCase {
                       "a backup write failure must be logged")
         XCTAssertTrue(backupSource.contains("[Backup] Could not preserve the library before replacing it"))
         XCTAssertFalse(backupSource.contains(".moveItem("), "preserve must not rename the live library aside")
-        let replace = try XCTUnwrap(source.range(of: "private func coordinatedReplace("))
-        let write = try XCTUnwrap(source.range(of: "data.write(to: actualURL, options: .atomic)"))
-        let backupStep = try XCTUnwrap(source.range(of: "self.backups.preserve(fileAt: actualURL"))
-        XCTAssertTrue(replace.lowerBound < backupStep.lowerBound && backupStep.lowerBound < write.lowerBound,
+        // The order is checked inside the replace's own body, so it holds wherever the family's
+        // extension files place it relative to the rest of the store.
+        let replace = try SourceTree.functionBody("func coordinatedReplace(", in: source)
+        let write = try XCTUnwrap(replace.range(of: "data.write(to: actualURL, options: .atomic)"))
+        let backupStep = try XCTUnwrap(replace.range(of: "self.backups.preserve(fileAt: actualURL"))
+        XCTAssertTrue(backupStep.lowerBound < write.lowerBound,
                       "the backup step must precede the write inside the coordinated replace")
     }
 

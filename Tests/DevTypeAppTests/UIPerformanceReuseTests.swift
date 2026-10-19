@@ -287,7 +287,7 @@ final class UIPerformanceReuseTests: XCTestCase {
     }
 
     func testSidebarOutlineRowsAreDequeued() throws {
-        let text = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        let text = try SnippetManagerSource.read()
         let range = try XCTUnwrap(text.range(of: "func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any)"))
         let body = String(text[range.lowerBound...].prefix(500))
         XCTAssertTrue(body.contains("RoundedSelectionRowView.dequeue(from: outlineView, owner: self)"))
@@ -305,14 +305,14 @@ final class UIPerformanceReuseTests: XCTestCase {
         )
         let long = String(repeating: "a", count: 500)
         XCTAssertEqual(SnippetOneLinePreview.text(long).count, 160)
-        let text = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        let text = try SnippetManagerSource.read()
         XCTAssertTrue(text.contains("SnippetOneLinePreview.text(snippet.replacementText)"))
         XCTAssertFalse(text.contains("replacementText.replacingOccurrences(of: \"\\n\", with: \" ↵ \")"))
     }
 
     func testLibraryListenerAppliesTheMatcherSnapshotOffMain() throws {
         let text = try source("Sources/DevTypeAppCore/AppDelegate.swift")
-        let range = try XCTUnwrap(text.range(of: "private func bindSnippetStore()"))
+        let range = try XCTUnwrap(text.range(of: "func bindSnippetStore()"))
         let body = String(text[range.lowerBound...].prefix(800))
         XCTAssertTrue(body.contains("applySnippetSnapshot(snippets)"))
         XCTAssertFalse(body.contains("EventTapEngine.shared.snippets = snippets"))

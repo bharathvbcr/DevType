@@ -77,13 +77,9 @@ final class PermissionRecoveryLayoutTests: XCTestCase {
 
     func testRecoveryWindowOwnsPersistentTapFailureWithoutStackingAModalAlert() throws {
         let delegate = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
-        let alertStart = try XCTUnwrap(delegate.range(of: "private func presentTapFailedAlert()"))
-        let monitorStart = try XCTUnwrap(
-            delegate.range(of: "private func startSecureInputMonitoring()", range: alertStart.upperBound..<delegate.endIndex)
-        )
-        let alertBody = delegate[alertStart.lowerBound..<monitorStart.lowerBound]
+        let alertBody = try SourceTree.functionBody("func presentTapFailedAlert()", in: delegate)
 
-        XCTAssertTrue(delegate.contains("private var isPermissionRecoveryVisible: Bool"))
+        XCTAssertTrue(delegate.contains("var isPermissionRecoveryVisible: Bool"))
         XCTAssertTrue(alertBody.contains("isOnboardingVisible || isPermissionRecoveryVisible"))
     }
 

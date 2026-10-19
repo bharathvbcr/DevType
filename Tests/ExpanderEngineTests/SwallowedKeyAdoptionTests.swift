@@ -39,7 +39,7 @@ final class SwallowedKeyAdoptionTests: XCTestCase {
     func testTheTapRefusePathAsksTheKeyWhetherItWasSwallowed() throws {
         let tap = try source("Sources/ExpanderEngine/Engine/EventTapEngine.swift")
         XCTAssertFalse(tap.contains("mustReinjectOnRefuse(didSwallow: true)"))
-        let refuse = try XCTUnwrap(tap.range(of: "private func refuseAfterSwallow("))
+        let refuse = try XCTUnwrap(tap.range(of: "func refuseAfterSwallow("))
         let body = tap[refuse.upperBound...].prefix(600)
         XCTAssertTrue(body.contains("if swallowed.mustReinjectOnRefuse"))
     }

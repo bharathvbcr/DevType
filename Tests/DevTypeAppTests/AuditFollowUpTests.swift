@@ -138,7 +138,7 @@ final class AuditFollowUpTests: XCTestCase {
     /// Search ran the full pipeline on every keystroke with no coalescing. The debounce that
     /// replaced that has to be short enough to feel immediate.
     func testFilterDebounceIsShortEnoughToFeelImmediate() throws {
-        let manager = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        let manager = try SnippetManagerSource.read()
         XCTAssertTrue(
             manager.contains("filterDebounceInterval"),
             "the search field must coalesce rather than run the pipeline per keystroke"
@@ -165,7 +165,7 @@ final class AuditFollowUpTests: XCTestCase {
     /// The `.conflicts` chip called `triggerConflicts()` — a whole-library analysis — once per
     /// filter application, and `.unused` took a lock in `UsageStatsStore` once per snippet.
     func testChipFiltersDoNotRecomputeWholeLibraryAnalysesPerSnippet() throws {
-        let manager = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        let manager = try SnippetManagerSource.read()
         XCTAssertTrue(
             manager.contains("conflictSnippetIDs()"),
             "conflicts must come from a revision-keyed cache, not a fresh scan per keystroke"
@@ -185,8 +185,8 @@ final class AuditFollowUpTests: XCTestCase {
     /// per comparison for `.usage` / `.recentlyUsed`, and `localizedStandardCompare` for the
     /// text modes.
     func testSortComparatorsComputeTheirKeysOncePerElement() throws {
-        let manager = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
-        XCTAssertTrue(manager.contains("private func sortedByKey<Key>"))
+        let manager = try SnippetManagerSource.read()
+        XCTAssertTrue(manager.contains("func sortedByKey<Key>"))
         XCTAssertFalse(
             manager.contains("input.sorted { store.usageCount(for: $0) > store.usageCount(for: $1) }"),
             "the two-locked-reads-per-comparison sort is what this replaced"
@@ -196,18 +196,16 @@ final class AuditFollowUpTests: XCTestCase {
     /// `reloadData()` clears selection, so refining a search after selecting rows for a bulk
     /// operation used to silently drop the selection.
     func testSelectionSurvivesAFilterReload() throws {
-        let manager = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
-        XCTAssertTrue(manager.contains("private func restoreSelection(ids: Set<UUID>)"))
+        let manager = try SnippetManagerSource.read()
+        XCTAssertTrue(manager.contains("func restoreSelection(ids: Set<UUID>)"))
         XCTAssertTrue(manager.contains("restoreSelection(ids: selectedIDs)"))
     }
 
     /// The stats pill used to build a second full copy of the library immediately after the
     /// pool did.
     func testTheLibraryIsFlattenedOncePerFilterPass() throws {
-        let manager = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
-        let start = try XCTUnwrap(manager.range(of: "private func applyFilterAndReloadTable() {"))
-        let end = try XCTUnwrap(manager.range(of: "private func restoreSelection(ids: Set<UUID>)"))
-        let body = String(manager[start.lowerBound..<end.lowerBound])
+        let manager = try SnippetManagerSource.read()
+        let body = try SourceTree.functionBody("func applyFilterAndReloadTable()", in: manager)
         let flattens = body.components(separatedBy: "groups.flatMap(\\.snippets)").count - 1
         XCTAssertLessThanOrEqual(
             flattens, 1,
@@ -219,7 +217,7 @@ final class AuditFollowUpTests: XCTestCase {
     /// Counting rows should never allocate the rows. The group outline rebuilt the whole
     /// flattened library per row render to display one integer.
     func testRowCountsAreSummedNotFlattened() throws {
-        let manager = try source("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        let manager = try SnippetManagerSource.read()
         XCTAssertFalse(
             manager.contains("groups.flatMap(\\.snippets).count"),
             "a count must be summed from the group sizes, not materialised"

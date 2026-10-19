@@ -155,7 +155,9 @@ final class RuntimeLocalizationUXTests: XCTestCase {
         XCTAssertTrue(preferences.contains("func refreshLocalization()"))
         XCTAssertTrue(preferences.contains("localizationState()"))
         XCTAssertTrue(preferences.contains("restorationState:"))
-        XCTAssertTrue(manager.contains("struct SnippetManagerLocalizationState"))
+        // The state type moved out of the view controller's family into its own file.
+        let localizationState = try SourceTree.text("Sources/DevTypeAppCore/SnippetManagerLocalizationState.swift")
+        XCTAssertTrue(localizationState.contains("struct SnippetManagerLocalizationState"))
         XCTAssertTrue(manager.contains("localizationState()"))
         XCTAssertTrue(manager.contains("snippetUndoManager:"))
         XCTAssertTrue(delegate.contains("refreshSnippetManagerLocalization()"))
