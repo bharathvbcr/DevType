@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 final class AudioBufferPoolCopyTests: XCTestCase {
@@ -187,10 +188,7 @@ final class AudioBufferPoolCopyTests: XCTestCase {
 
 final class DurableVoiceCaptureTapCopyTests: XCTestCase {
     func testInstallTapDoesNotPassTheEngineBufferIntoATask() throws {
-        let source = try String(
-            contentsOf: Self.captureSourceURL,
-            encoding: .utf8
-        )
+        let source = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
         let marker = "installTap(onBus:"
         guard let start = source.range(of: marker) else {
             return XCTFail("DurableVoiceCapture must install the microphone tap")
@@ -270,14 +268,6 @@ final class DurableVoiceCaptureTapCopyTests: XCTestCase {
         let stats = try writer.finalize()
         XCTAssertGreaterThan(stats.totalFrames, 0)
         XCTAssertThrowsError(try writer.finalize())
-    }
-
-    private static var captureSourceURL: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
     }
 }
 

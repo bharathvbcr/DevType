@@ -2,6 +2,7 @@ import AppKit
 import DevTypeSafety
 import Security
 import XCTest
+import SourceTreeTestSupport
 
 final class DevTypeSafetyTests: XCTestCase {
     func testMakeKeyAndOrderFrontCatchingExceptionOnValidWindow() {
@@ -264,9 +265,7 @@ final class DevTypeSafetyTests: XCTestCase {
     }
 
     private func source(_ relativePath: String) throws -> String {
-        let url = repoRoot.appendingPathComponent(relativePath)
-        let text = try String(contentsOf: url, encoding: .utf8)
-        return SourceContractTests.strippingComments(text)
+        SourceContractTests.strippingComments(try SourceTree.text(relativePath))
     }
 
     func testSetValueForKeyCatchingValidAndInvalidKeys() {

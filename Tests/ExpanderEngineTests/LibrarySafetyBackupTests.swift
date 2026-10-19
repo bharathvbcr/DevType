@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Every path that replaces a library file the user did not just write keeps a copy first, and
@@ -293,12 +294,7 @@ final class LibrarySafetyBackupTests: XCTestCase {
 /// backup step, and the forced write cannot be requested without it.
 final class LibraryWritePathContractTests: XCTestCase {
     private func storeSource() throws -> String {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/Models/SnippetStore.swift")
-        return try String(contentsOf: url, encoding: .utf8)
+        return try SourceTree.text("Sources/ExpanderEngine/Models/SnippetStore.swift")
     }
 
     func testEveryLibraryWriteGoesThroughTheCoordinatedReplace() throws {
@@ -314,14 +310,7 @@ final class LibraryWritePathContractTests: XCTestCase {
                       "linkToSnippets must log a missing local backup")
         XCTAssertTrue(source.contains("[Store] Could not encode the library for relocation"),
                       "a relocation encode failure must be logged")
-        let backupSource = try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .appendingPathComponent("Sources/ExpanderEngine/Models/LibraryBackupStore.swift"),
-            encoding: .utf8
-        )
+        let backupSource = try SourceTree.text("Sources/ExpanderEngine/Models/LibraryBackupStore.swift")
         XCTAssertTrue(backupSource.contains("[Backup] Could not write library backup"),
                       "a backup write failure must be logged")
         XCTAssertTrue(backupSource.contains("[Backup] Could not preserve the library before replacing it"))

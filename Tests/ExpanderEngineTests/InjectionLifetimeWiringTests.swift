@@ -1,10 +1,10 @@
 import Foundation
 import XCTest
+import SourceTreeTestSupport
 
 final class InjectionLifetimeWiringTests: XCTestCase {
     private func source(_ name: String) throws -> String {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        return try String(contentsOf: root.appendingPathComponent("Sources/ExpanderEngine/Engine/\(name).swift"), encoding: .utf8)
+        return try SourceTree.text("Sources/ExpanderEngine/Engine/\(name).swift")
     }
 
     func testQueuedOperationsAndEngineStopUseTheSameCancellationOwner() throws {

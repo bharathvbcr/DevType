@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Adversarial checks for the palette false-success fix.
@@ -196,7 +197,7 @@ final class PaletteToolRoutingTestsHostile: XCTestCase {
     }
 
     func testRouterSourceDoesNotResolveAMissAsToday() throws {
-        let source = try String(contentsOf: routerSourceURL(), encoding: .utf8)
+        let source = try SourceTree.text("Sources/ExpanderEngine/AI/PaletteToolRouter.swift")
         XCTAssertFalse(
             source.contains("offsetDays(0"),
             "resolveDatePhrase must not call resolveDate(.offsetDays(0)) on a miss"
@@ -480,14 +481,6 @@ final class PaletteToolRoutingTestsHostile: XCTestCase {
             )
         }
         return nil
-    }
-
-    private func routerSourceURL() -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/AI/PaletteToolRouter.swift")
     }
 
     private func functionBody(_ name: String, in source: String) throws -> String {

@@ -1,5 +1,6 @@
 import ApplicationServices
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// §2.2: an expansion resolves the focused element once and threads it through.
@@ -121,12 +122,7 @@ final class FocusThreadingTests: XCTestCase {
     // MARK: - The pipeline resolves once
 
     private func pipelineSource() throws -> String {
-        SourceContractTests.strippingComments(try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift"),
-            encoding: .utf8
-        ))
+        SourceContractTests.strippingComments(try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift"))
     }
 
     func testTheInjectResolvesFocusInExactlyOnePlace() throws {

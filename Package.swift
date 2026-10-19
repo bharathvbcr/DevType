@@ -69,9 +69,15 @@ let package = Package(
             name: "DevTypeApp",
             dependencies: ["DevTypeAppCore"]
         ),
+        // Test support, not product code: the single reader source-contract tests use so a contract
+        // covers a whole `Type.swift` + `Type+*.swift` family. Test targets cannot share a file.
+        .target(
+            name: "SourceTreeTestSupport",
+            path: "Tests/SourceTreeTestSupport"
+        ),
         .testTarget(
             name: "ExpanderEngineTests",
-            dependencies: ["ExpanderEngine"],
+            dependencies: ["ExpanderEngine", "SourceTreeTestSupport"],
             resources: [
                 .copy("Fixtures")
             ]
@@ -86,7 +92,7 @@ let package = Package(
         ),
         .testTarget(
             name: "DevTypeAppTests",
-            dependencies: ["DevTypeAppCore"]
+            dependencies: ["DevTypeAppCore", "SourceTreeTestSupport"]
         )
     ]
 )

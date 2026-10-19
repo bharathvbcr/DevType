@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 final class UserClipboardWriteTests: XCTestCase {
@@ -240,18 +241,8 @@ final class UserClipboardWriteTests: XCTestCase {
     }
 
     func testDiagnosticAndRecoveryCopiesUseTheCanonicalBroker() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let diagnostics = try String(
-            contentsOf: root.appendingPathComponent("Sources/ExpanderEngine/Logging/DiagnosticReport.swift"),
-            encoding: .utf8
-        )
-        let recovery = try String(
-            contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/RecoveredDictationWindowController.swift"),
-            encoding: .utf8
-        )
+        let diagnostics = try SourceTree.text("Sources/ExpanderEngine/Logging/DiagnosticReport.swift")
+        let recovery = try SourceTree.text("Sources/DevTypeAppCore/RecoveredDictationWindowController.swift")
 
         XCTAssertTrue(diagnostics.contains("PasteboardBroker.shared.writeUserClipboardString(text)"))
         XCTAssertFalse(diagnostics.contains("pasteboard.clearContents()"))

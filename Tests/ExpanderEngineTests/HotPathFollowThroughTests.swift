@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 final class SnippetSnapshotThreadTests: XCTestCase {
@@ -53,14 +54,7 @@ final class ActivityPublishThreadTests: XCTestCase {
         }
         wait(for: [recorded], timeout: 5)
 
-        let source = try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .appendingPathComponent("Sources/ExpanderEngine/Models/ActivityHistoryStore.swift"),
-            encoding: .utf8
-        )
+        let source = try SourceTree.text("Sources/ExpanderEngine/Models/ActivityHistoryStore.swift")
         let range = try XCTUnwrap(source.range(of: "public static func publish"))
         let body = String(source[range.lowerBound...].prefix(400))
         XCTAssertTrue(body.contains("persistQueue.async"))
@@ -70,11 +64,7 @@ final class ActivityPublishThreadTests: XCTestCase {
 
 final class HotPathStructureTests: XCTestCase {
     private func source(_ relative: String) throws -> String {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        return try String(contentsOf: root.appendingPathComponent(relative), encoding: .utf8)
+        try SourceTree.text(relative)
     }
 
     func testKeyPathSkipsLayoutWorkWhenPhysicalFallbackIsOff() throws {

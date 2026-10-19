@@ -1,17 +1,11 @@
 import AppKit
 import ExpanderEngine
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 @MainActor
 final class SecretCleanupMaintenanceUXTests: XCTestCase {
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
     func testMaintenancePresentationClearsAStaleFailureWhenDebtReachesZero() {
         let localization = LocalizationManager()
 
@@ -38,11 +32,7 @@ final class SecretCleanupMaintenanceUXTests: XCTestCase {
     }
 
     func testAutomaticCleanupCompletionRefreshesTheVisibleAdvancedPane() throws {
-        let delegate = try String(
-            contentsOf: Self.repositoryRoot
-                .appendingPathComponent("Sources/DevTypeAppCore/AppDelegate.swift"),
-            encoding: .utf8
-        )
+        let delegate = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
         let preferences = try PreferencesSource.read()
 
         XCTAssertTrue(delegate.contains("requestOrphanSecretCleanupRetry {"))

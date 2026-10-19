@@ -2,6 +2,7 @@ import AVFoundation
 import CommonCrypto
 import Foundation
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Adversarial checks for the synchronous mic-buffer copy. No microphone.
@@ -648,7 +649,7 @@ final class LiveSpeechStreamAdversarialTests: XCTestCase {
 
 final class DurableVoiceCaptureAdversarialTests: XCTestCase {
     func testTapClosureHasNoTaskAndDrainStartsOnlyAfterEngineStart() throws {
-        let source = try String(contentsOf: Self.captureSourceURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
         let marker = "installTap(onBus:"
         let start = try XCTUnwrap(source.range(of: marker))
         let tail = source[start.lowerBound...]
@@ -824,14 +825,6 @@ final class DurableVoiceCaptureAdversarialTests: XCTestCase {
         let file = try AVAudioFile(forReading: url)
         XCTAssertEqual(file.length, 8)
         XCTAssertThrowsError(try writer.finalize())
-    }
-
-    private static var captureSourceURL: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
     }
 
     private func makeDirectory(named name: String) throws -> URL {

@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 final class MacroAdapterRegressionTests: XCTestCase {
@@ -12,9 +13,7 @@ final class MacroAdapterRegressionTests: XCTestCase {
     }
 
     func testExpansionLabPassesItsPreparedResultToInjection() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/TestExpansionLab.swift"), encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/TestExpansionLab.swift")
         XCTAssertTrue(source.contains("MacroRenderer.expand("))
         XCTAssertTrue(source.contains("preResolvedText: self.prepared.text"))
         XCTAssertTrue(source.contains("preResolvedCursorOffset: self.prepared.cursorOffset"))

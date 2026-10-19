@@ -1,5 +1,6 @@
 import ApplicationServices
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Adversarial suite for the AX selection read — the "Prompt Enhance says no text is selected"
@@ -1178,13 +1179,8 @@ final class SelectionHardeningTests: XCTestCase {
     /// widening past a stalled app spends latency on an answer that is not coming, and widening
     /// while DevType is frontmost would surface our own UI text as the user's selection.
     func testWideningGatesAreDocumentedInTheReader() throws {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/AI/SelectionReader.swift")
         let source = SourceContractTests.strippingComments(
-            try String(contentsOf: url, encoding: .utf8)
+            try SourceTree.text("Sources/ExpanderEngine/AI/SelectionReader.swift")
         )
         for gate in ["!stalling", "!frontmostIsOwnProcess", "budgetExhausted"] {
             XCTAssertTrue(
@@ -1457,13 +1453,8 @@ final class SelectionHardeningTests: XCTestCase {
     /// 2. The typed-path allowlist is a *read* filter (`cachedSelection`), not a retention rule.
     ///    Clearing the shared entry on it silently disabled the explicit paths outside the list.
     func testMonitorRefreshEvidenceRulesAreEnforcedInSource() throws {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/AI/SelectionMonitor.swift")
         let source = SourceContractTests.strippingComments(
-            try String(contentsOf: url, encoding: .utf8)
+            try SourceTree.text("Sources/ExpanderEngine/AI/SelectionMonitor.swift")
         )
         XCTAssertTrue(
             source.contains("queryFocusedElement()"),

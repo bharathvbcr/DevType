@@ -2,17 +2,11 @@ import AppKit
 import Carbon.HIToolbox
 import ExpanderEngine
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 @MainActor
 final class P1UICompletionTests: XCTestCase {
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
     private var previousLanguage: AppLanguage?
 
     override func setUp() {
@@ -234,10 +228,7 @@ final class P1UICompletionTests: XCTestCase {
     }
 
     private func source(_ relativePath: String) throws -> String {
-        try String(
-            contentsOf: Self.repositoryRoot.appendingPathComponent(relativePath),
-            encoding: .utf8
-        )
+        try SourceTree.text(relativePath)
     }
 
     private func descendants(of view: NSView) -> [NSView] {

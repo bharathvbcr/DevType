@@ -1,5 +1,6 @@
 import AVFoundation
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 final class PermissionsSecurityRegressionTests: XCTestCase {
@@ -471,11 +472,7 @@ final class PermissionsSecurityRegressionTests: XCTestCase {
     }
 
     private func source(_ relativePath: String) throws -> String {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        return try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
+        try SourceTree.text(relativePath)
     }
 }
 

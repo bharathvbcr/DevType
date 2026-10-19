@@ -1,5 +1,6 @@
 import LocalAuthentication
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// The Touch ID gate in front of a secret.
@@ -234,10 +235,6 @@ final class BiometricGateTests: XCTestCase {
     /// `SecretStore` directly gets the value *without the prompt*, silently — and the next surface
     /// added would copy whichever example it found first.
     func testNoUISurfaceReadsASecretDirectly() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
 
         for name in [
             "AppDelegate.swift",
@@ -248,8 +245,7 @@ final class BiometricGateTests: XCTestCase {
             "SecretManagerViewController.swift",
             "ToastPanel.swift",
         ] {
-            let url = root.appendingPathComponent("Sources/DevTypeAppCore/\(name)")
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            guard let text = try? SourceTree.text("Sources/DevTypeAppCore/\(name)") else { continue }
             XCTAssertFalse(
                 SourceContractTests.strippingComments(text).contains("SecretStore.shared.secret("),
                 "\(name) reads a secret straight from the store, around the Touch ID gate."
@@ -258,15 +254,9 @@ final class BiometricGateTests: XCTestCase {
 
         // Secret editing delegates unchanged-value validation to the existing resource
         // transaction; neither editor nor manager fetches a value to populate the UI.
-        let editor = try String(
-            contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/SecretEditorSheet.swift"),
-            encoding: .utf8
-        )
+        let editor = try SourceTree.text("Sources/DevTypeAppCore/SecretEditorSheet.swift")
         XCTAssertTrue(editor.contains("value.isEmpty ? .unchanged : .set(value)"))
-        let transaction = try String(
-            contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/SnippetEditTransaction.swift"),
-            encoding: .utf8
-        )
+        let transaction = try SourceTree.text("Sources/DevTypeAppCore/SnippetEditTransaction.swift")
         XCTAssertTrue(transaction.contains("case .value = resources.readSecret(candidate.id)"),
                       "An untouched field must verify the stored value before committing metadata.")
     }

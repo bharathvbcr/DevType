@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Native image paste must publish the stored file bytes. Re-encoding through
@@ -27,11 +28,7 @@ final class ImagePasteBytesTests: XCTestCase {
     }
 
     private func repoSource(_ relative: String) throws -> String {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        return try String(contentsOf: root.appendingPathComponent(relative), encoding: .utf8)
+        try SourceTree.text(relative)
     }
 
     private func assertFallback(

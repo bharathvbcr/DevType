@@ -1,12 +1,11 @@
 import AppKit
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 final class ClipboardBoundaryRegressionTests: XCTestCase {
     func testImageCopyRequiresCheckedPublicationBeforeReportingSuccess() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/AppDelegate.swift"), encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertTrue(source.contains("guard PasteboardBroker.shared.writeUserClipboardImage(image) else"))
         XCTAssertFalse(source.contains("NSPasteboard.general.writeObjects([image])"))
     }

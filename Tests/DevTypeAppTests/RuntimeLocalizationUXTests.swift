@@ -1,6 +1,7 @@
 import AppKit
 import ExpanderEngine
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 private final class WeakReference<Object: AnyObject> {
@@ -13,13 +14,6 @@ private final class WeakReference<Object: AnyObject> {
 
 @MainActor
 final class RuntimeLocalizationUXTests: XCTestCase {
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
     func testEveryAIActionDescriptionAndBehaviorResolvesInEveryLanguage() {
         for kind in AITransformKind.allCases {
             let presentation = AIActionPresentation(kind: kind)
@@ -134,20 +128,13 @@ final class RuntimeLocalizationUXTests: XCTestCase {
             }
         }
 
-        let appDelegate = try String(
-            contentsOf: Self.repositoryRoot.appendingPathComponent("Sources/DevTypeAppCore/AppDelegate.swift"),
-            encoding: .utf8
-        )
+        let appDelegate = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertTrue(appDelegate.contains("PillBadgeView(text: loc.s(\"status.active\")"))
         XCTAssertFalse(appDelegate.contains("PillBadgeView(text: \"Active\""))
     }
 
     func testImportModeSelectorRendersItsLocalizedLabelAndAccessibilityName() throws {
-        let source = try String(
-            contentsOf: Self.repositoryRoot
-                .appendingPathComponent("Sources/DevTypeAppCore/SnippetImportPreviewSheet.swift"),
-            encoding: .utf8
-        )
+        let source = try SourceTree.text("Sources/DevTypeAppCore/SnippetImportPreviewSheet.swift")
 
         XCTAssertTrue(
             source.contains("root.addSubview(modeRow)"),
@@ -161,20 +148,9 @@ final class RuntimeLocalizationUXTests: XCTestCase {
     }
 
     func testLongLivedWindowLanguageRefreshPreservesUserState() throws {
-        let preferences = try String(
-            contentsOf: Self.repositoryRoot
-                .appendingPathComponent("Sources/DevTypeAppCore/PreferencesWindowController.swift"),
-            encoding: .utf8
-        )
-        let manager = try String(
-            contentsOf: Self.repositoryRoot
-                .appendingPathComponent("Sources/DevTypeAppCore/SnippetManagerViewController.swift"),
-            encoding: .utf8
-        )
-        let delegate = try String(
-            contentsOf: Self.repositoryRoot.appendingPathComponent("Sources/DevTypeAppCore/AppDelegate.swift"),
-            encoding: .utf8
-        )
+        let preferences = try SourceTree.text("Sources/DevTypeAppCore/PreferencesWindowController.swift")
+        let manager = try SourceTree.text("Sources/DevTypeAppCore/SnippetManagerViewController.swift")
+        let delegate = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
 
         XCTAssertTrue(preferences.contains("func refreshLocalization()"))
         XCTAssertTrue(preferences.contains("localizationState()"))
@@ -253,10 +229,7 @@ final class RuntimeLocalizationUXTests: XCTestCase {
     }
 
     func testAIActionPanelNoLongerRendersOrFiltersWithEnglishLiterals() throws {
-        let source = try String(
-            contentsOf: Self.repositoryRoot.appendingPathComponent("Sources/DevTypeAppCore/AIActionPanel.swift"),
-            encoding: .utf8
-        )
+        let source = try SourceTree.text("Sources/DevTypeAppCore/AIActionPanel.swift")
         let retired = [
             "Fix grammar, spelling, and typos",
             "Improve clarity, flow, and tone",

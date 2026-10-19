@@ -1,6 +1,7 @@
 import ApplicationServices
 import Foundation
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 final class UndoAuditRegressionTests: XCTestCase {
@@ -41,11 +42,7 @@ final class UndoAuditRegressionTests: XCTestCase {
     }
 
     func testUndoUsesTheGuardedInjectionOwner() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent(
-            "Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift"
-        ), encoding: .utf8)
+        let source = try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
         let start = try XCTUnwrap(source.range(of: "    private func performUndo("))
         let end = try XCTUnwrap(source.range(of: "    // MARK: - Inject (main thread)", range: start.upperBound..<source.endIndex))
         let undo = String(source[start.lowerBound..<end.lowerBound])
@@ -90,11 +87,7 @@ final class UndoAuditRegressionTests: XCTestCase {
     }
 
     func testMatchingBypassesAndAppSwitchesInvalidateUndoBeforeReturning() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent(
-            "Sources/ExpanderEngine/Engine/EventTapEngine.swift"
-        ), encoding: .utf8)
+        let source = try SourceTree.text("Sources/ExpanderEngine/Engine/EventTapEngine.swift")
         for marker in ["guard enabled && !secureFlag && !suspended else {",
                        "if EventTapEngine.shouldIgnoreForMatching(isAutorepeat: isAutorepeat) {"] {
             let start = try XCTUnwrap(source.range(of: marker))

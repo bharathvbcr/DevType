@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Perf-sweep item 9: chunk budgets are computed once per chunk, the static token cache is
@@ -84,12 +85,7 @@ final class AITransformExtrasTests: XCTestCase {
     // MARK: - Source contracts (the transformer actor and flow need a live model / AppKit)
 
     private func source(_ relative: String) throws -> String {
-        SourceContractTests.strippingComments(try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent(relative),
-            encoding: .utf8
-        ))
+        SourceContractTests.strippingComments(try SourceTree.text(relative))
     }
 
     func testTheTransformFlowDoesNotPrewarmInFrontOfTheTransform() throws {

@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 /// Regression coverage for permission UI defects that are otherwise only visible after the
@@ -75,14 +76,7 @@ final class PermissionRecoveryLayoutTests: XCTestCase {
     }
 
     func testRecoveryWindowOwnsPersistentTapFailureWithoutStackingAModalAlert() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let delegate = try String(
-            contentsOf: root.appendingPathComponent("Sources/DevTypeAppCore/AppDelegate.swift"),
-            encoding: .utf8
-        )
+        let delegate = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
         let alertStart = try XCTUnwrap(delegate.range(of: "private func presentTapFailedAlert()"))
         let monitorStart = try XCTUnwrap(
             delegate.range(of: "private func startSecureInputMonitoring()", range: alertStart.upperBound..<delegate.endIndex)
@@ -97,11 +91,7 @@ final class PermissionRecoveryLayoutTests: XCTestCase {
     /// Scan every direct `symbol:` literal in the app-core UI so the whole class of defect stays
     /// fixed rather than pinning the test to the one spelling that exposed it.
     func testEveryDirectUISymbolLiteralRenders() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let sourceRoot = root.appendingPathComponent("Sources/DevTypeAppCore", isDirectory: true)
+        let sourceRoot = SourceTree.root.appendingPathComponent("Sources/DevTypeAppCore", isDirectory: true)
         let files = try FileManager.default.contentsOfDirectory(
             at: sourceRoot,
             includingPropertiesForKeys: nil

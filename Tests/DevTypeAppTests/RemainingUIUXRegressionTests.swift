@@ -1,18 +1,12 @@
 import AppKit
 import ExpanderEngine
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 @MainActor
 final class RemainingUIUXRegressionTests: XCTestCase {
     private var previousLanguageValue: Any?
-
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     override func setUp() {
         super.setUp()
@@ -340,11 +334,7 @@ final class RemainingUIUXRegressionTests: XCTestCase {
     }
 
     func testImagePickerPromptUsesLocalizedChrome() throws {
-        let source = try String(
-            contentsOf: Self.repositoryRoot
-                .appendingPathComponent("Sources/DevTypeAppCore/SnippetEditorSheet.swift"),
-            encoding: .utf8
-        )
+        let source = try SourceTree.text("Sources/DevTypeAppCore/SnippetEditorSheet.swift")
 
         XCTAssertTrue(source.contains("panel.prompt = loc.s(\"common.choose\")"))
         XCTAssertFalse(source.contains("panel.prompt = \"Choose\""))
@@ -365,11 +355,7 @@ final class RemainingUIUXRegressionTests: XCTestCase {
     }
 
     func testEditorTriggerPlaceholderUsesTheLocalizedKey() throws {
-        let source = try String(
-            contentsOf: Self.repositoryRoot
-                .appendingPathComponent("Sources/DevTypeAppCore/SnippetEditorSheet.swift"),
-            encoding: .utf8
-        )
+        let source = try SourceTree.text("Sources/DevTypeAppCore/SnippetEditorSheet.swift")
 
         XCTAssertTrue(source.contains(
             "placeholder(loc.s(\"editor.trigger.placeholder\"))"

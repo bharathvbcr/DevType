@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 import ExpanderEngine
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 /// The bulk bar's "Export…" button.
@@ -15,13 +16,6 @@ import ExpanderEngine
 /// `restrict(_:to:)` is the narrowing that makes the button mean what it says. The save
 /// panel itself is not exercised here — `present` needs an `NSSavePanel` and a window.
 final class BulkExportSelectionTests: XCTestCase {
-
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     private func snippet(_ trigger: String) -> SnippetModel {
         SnippetModel(title: trigger, triggerKeyword: trigger, replacementText: "body-\(trigger)")
@@ -102,9 +96,7 @@ final class BulkExportSelectionTests: XCTestCase {
     }
 
     func testSlowExportIsSingleFlightVisibleAndDoesNotExposeRawErrors() throws {
-        let sourceURL = Self.repositoryRoot
-            .appendingPathComponent("Sources/DevTypeAppCore/LibraryExporter.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/LibraryExporter.swift")
 
         XCTAssertTrue(source.contains("SnippetOperationGate"))
         XCTAssertTrue(source.contains("DevTypeProgressPresentation.present("))

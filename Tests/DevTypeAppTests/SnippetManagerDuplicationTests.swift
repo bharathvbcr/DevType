@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 import ExpanderEngine
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 final class SnippetManagerDuplicationTests: XCTestCase {
@@ -230,17 +231,8 @@ final class SnippetManagerDuplicationTests: XCTestCase {
             }
         }
 
-        let repositoryRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
         let preferences = try PreferencesSource.read()
-        let appDelegate = try String(
-            contentsOf: repositoryRoot.appendingPathComponent(
-                "Sources/DevTypeAppCore/AppDelegate.swift"
-            ),
-            encoding: .utf8
-        )
+        let appDelegate = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertTrue(preferences.contains("action: #selector(retrySecretCleanup)"))
         XCTAssertTrue(preferences.contains("store.requestOrphanSecretCleanupRetry"))
         XCTAssertTrue(

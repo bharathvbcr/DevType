@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 // MARK: - Source-level contract audits for the app UI target
@@ -251,10 +252,13 @@ final class SourceContractTests: XCTestCase {
     }
 
     private static var repoRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // ExpanderEngineTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // repo root
+        SourceTree.root
+    }
+
+    /// `url`'s repo-relative path, attributed to its type family's primary file: a hit in
+    /// `Type+Role.swift` reports as `Type.swift`, so "only in the owner" checks survive a split.
+    private static func familyRelativePath(_ url: URL) -> String {
+        SourceTree.familyPrimary(of: String(url.path.dropFirst(repoRoot.path.count + 1)))
     }
 
     /// Source with comments removed.
@@ -323,7 +327,7 @@ final class SourceContractTests: XCTestCase {
             guard let raw = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let code = Self.strippingComments(raw)
             let range = NSRange(code.startIndex..., in: code)
-            let relative = String(url.path.dropFirst(Self.repoRoot.path.count + 1))
+            let relative = Self.familyRelativePath(url)
             for match in pattern.matches(in: code, range: range) {
                 if relative == owner { ownerHits += 1; continue }
                 let token = String(code[Range(match.range, in: code)!])
@@ -373,9 +377,8 @@ final class SourceContractTests: XCTestCase {
     }
 
     private func source(_ relativePath: String) throws -> String {
-        let url = Self.repoRoot.appendingPathComponent(relativePath)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            XCTFail("Could not read \(relativePath) at \(url.path)")
+        guard let text = try? SourceTree.text(relativePath) else {
+            XCTFail("Could not read \(relativePath) at \(SourceTree.root.appendingPathComponent(relativePath).path)")
             return ""
         }
         return Self.strippingComments(text)
@@ -396,7 +399,7 @@ final class SourceContractTests: XCTestCase {
         for case let url as URL in enumerator where url.pathExtension == "swift" {
             guard let text = try? String(contentsOf: url, encoding: .utf8),
                   Self.strippingComments(text).contains(token) else { continue }
-            matches.insert(String(url.path.dropFirst(Self.repoRoot.path.count + 1)))
+            matches.insert(Self.familyRelativePath(url))
         }
         return matches
     }

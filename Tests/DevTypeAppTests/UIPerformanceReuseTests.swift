@@ -1,19 +1,13 @@
 import AppKit
 import ExpanderEngine
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 /// Counting seams for the UI-side performance work: Preferences open cost, conflict-scan reuse,
 /// per-language formatter caching, Activity row reuse, and the small one-call-site fixes.
 @MainActor
 final class UIPerformanceReuseTests: XCTestCase {
-
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     /// `LocalizationManager.language` persists to the shared defaults key, so a test that
     /// switches language must put the stored value back or it leaks into every later test.
@@ -34,7 +28,7 @@ final class UIPerformanceReuseTests: XCTestCase {
     }
 
     private func source(_ path: String) throws -> String {
-        try String(contentsOf: Self.repositoryRoot.appendingPathComponent(path), encoding: .utf8)
+        try SourceTree.text(path)
     }
 
     // MARK: - Preferences open

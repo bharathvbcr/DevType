@@ -1,6 +1,7 @@
 import ExpanderEngine
 import Foundation
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 private actor CorrectionDiffSuspensionGate {
@@ -66,29 +67,12 @@ private final class CorrectionDiffAttemptState: @unchecked Sendable {
 }
 
 final class VoiceCorrectionDiffRaceTests: XCTestCase {
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
     /// The terminal callback is attempt-scoped, but its nested correction-diff task crosses an
     /// actor hop. Keep this wiring assertion alongside the behavioral race below so a future
     /// refactor cannot silently return to the unscoped `transcripts()` accessor.
     func testControllerCarriesAttemptThroughGenerationScopedTranscriptLookup() throws {
-        let source = try String(
-            contentsOf: Self.repositoryRoot.appendingPathComponent(
-                "Sources/DevTypeAppCore/VoiceDictationController.swift"
-            ),
-            encoding: .utf8
-        )
-        let coordinatorSource = try String(
-            contentsOf: Self.repositoryRoot.appendingPathComponent(
-                "Sources/ExpanderEngine/Voice/Session/VoiceSessionCoordinator.swift"
-            ),
-            encoding: .utf8
-        )
+        let source = try SourceTree.text("Sources/DevTypeAppCore/VoiceDictationController.swift")
+        let coordinatorSource = try SourceTree.text("Sources/ExpanderEngine/Voice/Session/VoiceSessionCoordinator.swift")
 
         XCTAssertTrue(source.contains("showCorrectionDiff(for: text, attempt: attempt)"))
         XCTAssertTrue(source.contains(

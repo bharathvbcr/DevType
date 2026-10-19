@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 // MARK: - §8.12: the payload must outlive the host's read
@@ -33,13 +34,8 @@ final class ClipboardResidencyTests: XCTestCase {
     private static let brokerPath = "Sources/ExpanderEngine/Engine/PasteboardBroker.swift"
 
     private func brokerSource() throws -> String {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // ExpanderEngineTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // repo root
-        let url = root.appendingPathComponent(Self.brokerPath)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            XCTFail("Could not read \(Self.brokerPath) at \(url.path)")
+        guard let text = try? SourceTree.text(Self.brokerPath) else {
+            XCTFail("Could not read \(Self.brokerPath) at \(SourceTree.root.appendingPathComponent(Self.brokerPath).path)")
             return ""
         }
         return SourceContractTests.strippingComments(text)
@@ -178,7 +174,9 @@ final class ClipboardResidencyTests: XCTestCase {
         for case let url as URL in files where url.pathExtension == "swift" {
             guard let raw = try? String(contentsOf: url, encoding: .utf8) else { continue }
             guard SourceContractTests.strippingComments(raw).contains("postCmdVKeyEvents") else { continue }
-            posters.insert(url.lastPathComponent)
+            // A `Type+Role.swift` hit is attributed to its `Type.swift` owner.
+            let relative = String(url.path.dropFirst(SourceTree.root.path.count + 1))
+            posters.insert((SourceTree.familyPrimary(of: relative) as NSString).lastPathComponent)
         }
 
         XCTAssertEqual(

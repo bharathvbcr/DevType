@@ -2,16 +2,10 @@ import AppKit
 import Foundation
 import XCTest
 import ExpanderEngine
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 final class ConflictResolverStateTests: XCTestCase {
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
     private func snippet(
         _ trigger: String,
         title: String,
@@ -166,9 +160,7 @@ final class ConflictResolverStateTests: XCTestCase {
     }
 
     func testControllerSourceUsesExactActionIdentityConfirmationAndDynamicCompleteRows() throws {
-        let sourceURL = Self.repositoryRoot
-            .appendingPathComponent("Sources/DevTypeAppCore/SnippetConflictResolverSheet.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/SnippetConflictResolverSheet.swift")
 
         XCTAssertFalse(source.contains("prefix(3)"), "The resolver must render the complete conflict.")
         XCTAssertFalse(source.contains(".id.hashValue"), "A hash is not a unique action identity.")

@@ -1,10 +1,10 @@
 import Foundation
 import XCTest
+import SourceTreeTestSupport
 
 final class ClipboardClockWiringTests: XCTestCase {
     func testClipboardOperationalDeadlinesCannotReadWallTime() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let code = try String(contentsOf: root.appendingPathComponent("Sources/ExpanderEngine/Engine/PasteboardBroker.swift"), encoding: .utf8)
+        let code = try SourceTree.text("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
         XCTAssertFalse(code.contains("Date()"))
         XCTAssertFalse(code.contains("timeIntervalSinceNow"))
         XCTAssertTrue(code.contains("InputClock.monotonicNow"))

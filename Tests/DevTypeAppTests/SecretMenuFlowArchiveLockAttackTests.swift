@@ -1,6 +1,7 @@
 import Darwin
 import XCTest
 import ExpanderEngine
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 /// Adversarial checks for the off-main archive lease. The only secret value asserted is "synthetic".
@@ -178,12 +179,7 @@ final class SecretMenuFlowArchiveLockAttackTests: XCTestCase {
     }
 
     private func sourceText() throws -> String {
-        let sourceURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/Models/SecretStore.swift")
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try SourceTree.text("Sources/ExpanderEngine/Models/SecretStore.swift")
     }
 
     /// Brace-matched function starting at `signaturePrefix`, including its signature.

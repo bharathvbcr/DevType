@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 final class UncleanExitSentinelAttackTests: XCTestCase {
@@ -538,7 +539,7 @@ final class UncleanExitSentinelAttackTests: XCTestCase {
     }
 
     func testAppDelegateArmsAndClearsSentinelWithoutSignalHandler() throws {
-        let source = try String(contentsOf: appDelegateURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
         XCTAssertTrue(source.contains("UncleanExitSentinel.noteLaunch()"))
         XCTAssertTrue(source.contains("UncleanExitSentinel.noteCleanTermination()"))
         XCTAssertFalse(source.contains("signal("))
@@ -548,14 +549,6 @@ final class UncleanExitSentinelAttackTests: XCTestCase {
 
     private var sentinelURL: URL {
         support.appendingPathComponent(UncleanExitSentinel.sentinelFileName)
-    }
-
-    private var appDelegateURL: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/DevTypeAppCore/AppDelegate.swift")
     }
 
     private func launch() -> UncleanExitSentinel.LaunchResult {

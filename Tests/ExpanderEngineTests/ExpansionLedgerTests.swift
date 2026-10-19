@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// §2.4 + §3.1: one owner, one lock. The undo record, the counters that keep a blind undo
@@ -27,12 +28,7 @@ final class ExpansionLedgerTests: XCTestCase {
     // MARK: - The pipeline owns no lock
 
     func testThePipelineHoldsNoLockOfItsOwn() throws {
-        let source = SourceContractTests.strippingComments(try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift"),
-            encoding: .utf8
-        ))
+        let source = SourceContractTests.strippingComments(try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift"))
         for lockUse in ["UnfairLock", ".withLock", ".lock()", ".unlock()"] {
             XCTAssertFalse(source.contains(lockUse),
                            "\(lockUse) in the pipeline: shared inject/undo state has one owner, ExpansionLedger")

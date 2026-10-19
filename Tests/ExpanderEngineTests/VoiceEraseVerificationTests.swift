@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Voice dictation erases by posting backspaces at the caret. That is only safe while the
@@ -265,21 +266,11 @@ final class VoiceEraseVerificationTests: XCTestCase {
     }
 
     private static func voiceInsertionSource() throws -> String {
-        try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("Sources/ExpanderEngine/Voice/Delivery/VoiceInsertionService.swift"),
-            encoding: .utf8
-        )
+        try SourceTree.text("Sources/ExpanderEngine/Voice/Delivery/VoiceInsertionService.swift")
     }
 
     func testDictationSendsAVerifiedPlanAndDoesNotVouchForTheCaret() throws {
-        let service = try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("Sources/ExpanderEngine/Voice/Delivery/VoiceInsertionService.swift"),
-            encoding: .utf8
-        )
+        let service = try SourceTree.text("Sources/ExpanderEngine/Voice/Delivery/VoiceInsertionService.swift")
         let inject = try XCTUnwrap(service.range(of: "private func inject("))
         let body = String(service[inject.lowerBound...])
         XCTAssertTrue(

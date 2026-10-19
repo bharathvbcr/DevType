@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// The status-menu options added for failure recovery and feature toggles:
@@ -16,14 +17,7 @@ final class MenuBarOptionTests: XCTestCase {
     }
 
     private func appSource(_ relativePath: String) throws -> String {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent(relativePath)
-        return SourceContractTests.strippingComments(
-            try String(contentsOf: url, encoding: .utf8)
-        )
+        SourceContractTests.strippingComments(try SourceTree.text(relativePath))
     }
 
     // MARK: - Restart after a failed expansion

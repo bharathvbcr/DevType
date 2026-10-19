@@ -1,6 +1,7 @@
 import AppKit
 import ExpanderEngine
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 /// The remaining audit fixes: the tag-suggestion merge that rescanned the library once per
@@ -9,15 +10,8 @@ import XCTest
 /// screen-reader users never got.
 final class AuditFollowUpTests: XCTestCase {
 
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
     private func source(_ path: String) throws -> String {
-        try String(contentsOf: Self.repositoryRoot.appendingPathComponent(path), encoding: .utf8)
+        try SourceTree.text(path)
     }
 
     private func snippet(_ trigger: String, tags: [String] = [], id: UUID = UUID()) -> SnippetModel {

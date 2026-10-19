@@ -1,17 +1,13 @@
 import CoreGraphics
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// §8.2: one `SwallowedKey` value instead of four parameters through nine signatures.
 final class SwallowedKeyAdoptionTests: XCTestCase {
 
     private func source(_ path: String) throws -> String {
-        SourceContractTests.strippingComments(try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent(path),
-            encoding: .utf8
-        ))
+        SourceContractTests.strippingComments(try SourceTree.text(path))
     }
 
     /// The legacy list survived beside the struct for a release "verbatim"; a second spelling

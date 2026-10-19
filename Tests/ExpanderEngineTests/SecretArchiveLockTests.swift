@@ -1,5 +1,6 @@
 import Darwin
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 // §-audit hardening for `ConsolidatedSecretBackingStore.withArchiveLock`.
@@ -257,12 +258,7 @@ final class SecretArchiveLockTests: XCTestCase {
     }
 
     func testWithArchiveLockDoesNotSleepAndMainRefusesAHeldFileLock() throws {
-        let sourceURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/Models/SecretStore.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/ExpanderEngine/Models/SecretStore.swift")
         guard let start = source.range(of: "private func withArchiveLock") else {
             return XCTFail("withArchiveLock is gone")
         }

@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Enhancement plan 1.4: `sig` / `Sig` / `SIG` shapes the expansion.
@@ -136,12 +137,7 @@ final class CasePropagationTests: XCTestCase {
     // MARK: - Wiring
 
     private func source(_ path: String) throws -> String {
-        SourceContractTests.strippingComments(try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent(path),
-            encoding: .utf8
-        ))
+        SourceContractTests.strippingComments(try SourceTree.text(path))
     }
 
     /// The typed path renders twice when a fill-in panel intervenes; a shape that reached only

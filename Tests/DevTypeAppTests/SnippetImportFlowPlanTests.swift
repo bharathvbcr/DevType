@@ -1,20 +1,12 @@
 import Foundation
 import ExpanderEngine
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 final class SnippetImportFlowPlanTests: XCTestCase {
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
-
     func testConfirmationCommitsThePreparedPlanWithoutReReadingTheSourceURL() throws {
-        let sourceURL = Self.repositoryRoot
-            .appendingPathComponent("Sources/DevTypeAppCore/SnippetImportFlow.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/SnippetImportFlow.swift")
 
         XCTAssertTrue(source.contains("SnippetImporter.prepareImport(from: url)"))
         XCTAssertTrue(source.contains("store.commitImport(preview.plan, mode: mode)"))
@@ -25,9 +17,7 @@ final class SnippetImportFlowPlanTests: XCTestCase {
     }
 
     func testSlowImportPhasesAreVisibleAndFailuresAreNotRawFrameworkProse() throws {
-        let sourceURL = Self.repositoryRoot
-            .appendingPathComponent("Sources/DevTypeAppCore/SnippetImportFlow.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/SnippetImportFlow.swift")
 
         XCTAssertTrue(source.contains("DevTypeProgressPresentation.present("))
         XCTAssertTrue(source.contains("alert.import.progress.parsing.title"))
@@ -43,9 +33,7 @@ final class SnippetImportFlowPlanTests: XCTestCase {
     }
 
     func testARefusedImportSaveCannotUseTheSuccessPresentation() throws {
-        let sourceURL = Self.repositoryRoot
-            .appendingPathComponent("Sources/DevTypeAppCore/SnippetImportFlow.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/SnippetImportFlow.swift")
 
         XCTAssertTrue(source.contains("guard summary.outcome.didSave else"))
         XCTAssertTrue(source.contains("alert.import.saveFailed.title"))
@@ -136,9 +124,7 @@ final class SnippetImportFlowPlanTests: XCTestCase {
     }
 
     func testPreviewSheetRendersCountsAndRowsFromTheSamePreparedPlanProjection() throws {
-        let sourceURL = Self.repositoryRoot
-            .appendingPathComponent("Sources/DevTypeAppCore/SnippetImportPreviewSheet.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try SourceTree.text("Sources/DevTypeAppCore/SnippetImportPreviewSheet.swift")
 
         XCTAssertTrue(source.contains("preview: SnippetStore.ImportPreview"))
         XCTAssertTrue(source.contains("preview.plan.snippetCount"))

@@ -1,4 +1,5 @@
 import XCTest
+import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// Guards the double-injection shape: `ScholarLM` inserted, then inserted again.
@@ -141,13 +142,8 @@ final class DoubleInjectGuardTests: XCTestCase {
     /// The pipeline must derive the flag from the outcome — a literal `afterPossibleWrite: true`
     /// is the bug shape this section exists to prevent.
     func testPipelineDerivesTheFlagFromWriteProvenance() throws {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
         let source = SourceContractTests.strippingComments(
-            try String(contentsOf: url, encoding: .utf8)
+            try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
         )
         XCTAssertTrue(
             source.contains("attemptedAXWrite = axOutcome.fieldMayHaveMutated"),
@@ -169,13 +165,8 @@ final class DoubleInjectGuardTests: XCTestCase {
     /// path. `SelectionMonitor` does the same poke but only while the AI feature is enabled —
     /// plain text expansion must not depend on an unrelated feature flag for its AX visibility.
     func testEventTapWakesAccessibilityTreesOnAppSwitch() throws {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/ExpanderEngine/Engine/EventTapEngine.swift")
         let source = SourceContractTests.strippingComments(
-            try String(contentsOf: url, encoding: .utf8)
+            try SourceTree.text("Sources/ExpanderEngine/Engine/EventTapEngine.swift")
         )
         XCTAssertTrue(
             source.contains("ensureManualAccessibility"),

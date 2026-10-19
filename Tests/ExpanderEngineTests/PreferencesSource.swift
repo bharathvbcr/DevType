@@ -1,4 +1,5 @@
 import Foundation
+import SourceTreeTestSupport
 
 /// The Preferences window's source: `PreferencesWindowController.swift` plus every tab controller
 /// under `Sources/DevTypeAppCore/Preferences/`, concatenated in path order.
@@ -22,7 +23,7 @@ enum PreferencesSource {
         guard !tabs.isEmpty else {
             throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: directory.path])
         }
-        let files = [core.appendingPathComponent("PreferencesWindowController.swift")] + tabs
+        let files = try SourceTree.files("Sources/DevTypeAppCore/PreferencesWindowController.swift") + tabs
         return try files
             .map { try String(contentsOf: $0, encoding: .utf8) }
             .joined(separator: "\n")

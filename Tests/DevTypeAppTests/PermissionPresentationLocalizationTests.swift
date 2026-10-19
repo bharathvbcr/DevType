@@ -1,18 +1,12 @@
 import AppKit
 import ExpanderEngine
 import XCTest
+import SourceTreeTestSupport
 @testable import DevTypeAppCore
 
 @MainActor
 final class PermissionPresentationLocalizationTests: XCTestCase {
     private var previousLanguageValue: Any?
-
-    private static var repositoryRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     override func setUp() {
         super.setUp()
@@ -220,9 +214,6 @@ final class PermissionPresentationLocalizationTests: XCTestCase {
     }
 
     private func source(_ path: String) throws -> String {
-        try String(
-            contentsOf: Self.repositoryRoot.appendingPathComponent(path),
-            encoding: .utf8
-        )
+        try SourceTree.text(path)
     }
 }
