@@ -178,6 +178,27 @@ final class WhisperServerSetupTests: XCTestCase {
         )
     }
 
+    /// The probe path is computed, not left to `deletingLastPathComponent`, whose answer for a
+    /// root or empty path differs by OS (macOS 14 turns `/` into `/../`). Every shape lands
+    /// on an explicit request-path root and keeps host, port and percent-encoding.
+    func testReadinessProbeIsAnExplicitRootForEveryPathShape() {
+        let cases: [(String, String)] = [
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080/"),
+            ("http://127.0.0.1:8080/", "http://127.0.0.1:8080/"),
+            ("http://127.0.0.1:8080//", "http://127.0.0.1:8080/"),
+            ("http://127.0.0.1:8080/api/inference/", "http://127.0.0.1:8080/api/"),
+            ("http://127.0.0.1:8080/a%20b/inference", "http://127.0.0.1:8080/a%20b/"),
+            ("http://[::1]:9090/inference", "http://[::1]:9090/")
+        ]
+        for (endpoint, expected) in cases {
+            XCTAssertEqual(
+                WhisperServerSetup.readinessProbeURL(for: URL(string: endpoint)!).absoluteString,
+                expected,
+                endpoint
+            )
+        }
+    }
+
     /// The spawned child is bound to 127.0.0.1 even when the saved endpoint says localhost or ::1.
     func testSpawnedChildProbeURLUsesTheBoundLoopbackAddress() {
         XCTAssertEqual(
