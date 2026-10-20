@@ -50,7 +50,12 @@ final class UIPerformanceReuseTests: XCTestCase {
 
         XCTAssertEqual(prefs.reloadAllCount, 1, "viewDidLoad, viewWillAppear and show() each reloaded")
         // The tab selected on open is populated by being built, then left alone by the pass.
-        XCTAssertEqual(prefs.paneReloadCounts[.ai], 1, "first AI presentation reloaded twice")
+        // Before macOS 26 the AI tab is hidden and `select(.ai)` presents General instead.
+        let presented: PreferencesTab = PreferencesTab.visibleCases.contains(.ai) ? .ai : .general
+        XCTAssertEqual(prefs.paneReloadCounts[presented], 1, "first \(presented) presentation reloaded twice")
+        if presented != .ai {
+            XCTAssertNil(prefs.paneReloadCounts[.ai], "a hidden AI tab must not be built or read")
+        }
     }
 
     func testFirstAdvancedPresentationDoesNotReloadTwice() throws {

@@ -126,8 +126,18 @@ public enum WhisperServerSetup {
     /// The stock server exposes a GET page at its request-path root; it does not provide a
     /// `/health` route. For the default `/inference` endpoint this is `/`, while a custom
     /// endpoint such as `/api/inference` is probed at `/api/`.
+    ///
+    /// The parent path is computed here rather than with `URL.deletingLastPathComponent()`:
+    /// on macOS 14 that call turns a root path `/` into `/../`, so the probe for a spawned
+    /// child (`http://127.0.0.1:<port>/`) left the root it is bound to.
     static func readinessProbeURL(for endpoint: URL) -> URL {
-        endpoint.deletingLastPathComponent()
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            return endpoint
+        }
+        var segments = components.percentEncodedPath.split(separator: "/")
+        if !segments.isEmpty { segments.removeLast() }
+        components.percentEncodedPath = segments.isEmpty ? "/" : "/" + segments.joined(separator: "/") + "/"
+        return components.url ?? endpoint
     }
 
     /// Readiness URL for a `whisper-server` this controller has just spawned.
