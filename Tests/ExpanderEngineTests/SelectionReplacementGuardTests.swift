@@ -257,6 +257,73 @@ final class SelectionReplacementGuardTests: XCTestCase {
         XCTAssertEqual(confirm(field), .refused(.reselectFailed))
     }
 
+    /// Field report (1.3.0, Safari proofread): the selection read live through `kAXSelectedText`,
+    /// the transform succeeded, and the replace was refused as unreadable — the one reading the
+    /// guard took landed while Safari was still restoring focus after DevType's panel resigned.
+    /// A host that answers a moment later must be waited for, not refused on the first blank.
+    func testConfirmerWaitsForAHostStillRestoringFocus() {
+        let blind = observation(value: nil)
+        let field = FakeField([
+            blind, blind,
+            observation(value: nil, selectedText: original)
+        ])
+        XCTAssertEqual(confirm(field), .confirmed(reselected: false))
+        XCTAssertEqual(field.scheduled, 2)
+        XCTAssertTrue(field.selected.isEmpty)
+    }
+
+    /// The settle is bounded, and a copy-read original (no AX evidence) is never waited for.
+    func testConfirmerStopsSettlingAfterItsBudget() {
+        let blindField = FakeField([observation(value: nil)])
+        XCTAssertEqual(confirm(blindField), .refused(.unreadable))
+        XCTAssertEqual(blindField.scheduled, SelectionReplacementGuard.Confirmer.settleAttempts)
+
+        let copied = FakeField([observation(value: nil)])
+        XCTAssertEqual(
+            confirm(copied, replacement: SelectionReplacement(original: original, requiresEvidence: false)),
+            .unverified
+        )
+        XCTAssertEqual(copied.scheduled, 0)
+    }
+
+    /// No element at entry (focus still in flight): the settle resolves one and reports it, so the
+    /// pipeline judges the rest of the inject on that element rather than on the stale nil.
+    func testConfirmerRefocusesWhenNoElementWasResolved() {
+        let field = FakeField([observation(value: nil, selectedText: original)])
+        var access = field.access
+        var refocused = 0
+        access.refocus = {
+            refocused += 1
+            return refocused < 2 ? nil : self.element
+        }
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: nil
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: false, refocusedOn: element))
+        XCTAssertEqual(refocused, 2)
+    }
+
+    func testLadderFillsOnlyAnObservationWithNoSelectionAndNoRange() {
+        let blank = observation(value: nil, selectedText: "")
+        XCTAssertEqual(
+            SelectionReplacementGuard.Confirmer.fillingSelection(blank) { self.original }.selectedText,
+            original
+        )
+        // A caret is the host saying the selection collapsed; the ladder must not overrule it.
+        let caret = observation(value: "say: \(original)", selectedText: "", range: NSRange(location: 24, length: 0))
+        var consulted = false
+        let kept = SelectionReplacementGuard.Confirmer.fillingSelection(caret) {
+            consulted = true
+            return self.original
+        }
+        XCTAssertEqual(kept, caret)
+        XCTAssertFalse(consulted)
+        // An answered selection is not re-read.
+        let answered = observation(value: nil, selectedText: "other")
+        XCTAssertEqual(SelectionReplacementGuard.Confirmer.fillingSelection(answered) { self.original }, answered)
+    }
+
     func testUnreadableFieldRefusesUnlessTheOriginalCameFromACopy() {
         let blind = observation(value: nil)
         XCTAssertEqual(confirm(FakeField([blind])), .refused(.unreadable))

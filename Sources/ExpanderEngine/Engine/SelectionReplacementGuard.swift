@@ -177,13 +177,30 @@ public enum SelectionReplacementGuard {
     /// and reads it back before answering. The AX reads and the one range write are injectable
     /// so the whole sequence is testable without a window server.
     public struct Confirmer {
-        public enum Verdict: Equatable, Sendable {
+        public enum Verdict: Equatable {
             /// The original is selected now; ⌘V replaces it. `reselected` says this guard had to
-            /// put it back, which is worth a log line — it means the host lost it.
-            case confirmed(reselected: Bool)
+            /// put it back, which is worth a log line — it means the host lost it. `refocusedOn`
+            /// is set only when no element was handed in and the settle had to resolve one: the
+            /// caller's focus is stale, and this is the element the selection was confirmed on.
+            case confirmed(reselected: Bool, refocusedOn: AXUIElement? = nil)
             /// Nothing could be checked and the replacement does not require evidence.
             case unverified
             case refused(Refusal)
+
+            public static func == (lhs: Self, rhs: Self) -> Bool {
+                switch (lhs, rhs) {
+                case let (.confirmed(left, leftFocus), .confirmed(right, rightFocus)):
+                    guard left == right else { return false }
+                    switch (leftFocus, rightFocus) {
+                    case (nil, nil): return true
+                    case let (leftElement?, rightElement?): return CFEqual(leftElement, rightElement)
+                    default: return false
+                    }
+                case (.unverified, .unverified): return true
+                case let (.refused(left), .refused(right)): return left == right
+                default: return false
+                }
+            }
         }
 
         public struct Access {
@@ -192,23 +209,54 @@ public enum SelectionReplacementGuard {
             /// Schedules the read-back after a range write. Hosts publish the new selection on
             /// their next run-loop turn, not synchronously with the `.success` they return.
             public var schedule: (TimeInterval, @escaping () -> Void) -> Void
+            /// Resolves the focused element again, for a settle that started with none.
+            public var refocus: () -> AXUIElement?
 
             public init(
                 observe: @escaping (AXUIElement) -> DeliveryVerifier.FocusedTextObservation,
                 select: @escaping (NSRange, AXUIElement) -> Bool,
-                schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void
+                schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
+                refocus: @escaping () -> AXUIElement? = { nil }
             ) {
                 self.observe = observe
                 self.select = select
                 self.schedule = schedule
+                self.refocus = refocus
             }
 
             public static let live = Access(
-                observe: { DeliveryVerifier.fullObservation(for: $0) },
+                observe: { element in
+                    Confirmer.fillingSelection(DeliveryVerifier.fullObservation(for: element)) {
+                        SelectionReader.copySelectedText(from: element)
+                    }
+                },
                 select: { AXTextWriter.shared.selectRange($0, in: $1) },
                 schedule: { delay, action in
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
-                }
+                },
+                refocus: { AXContextChecker.shared.queryFocusedElement(allowTimeoutRetry: false).element }
+            )
+        }
+
+        /// The three plain attributes are not how the selection was read. `SelectionReader` climbs
+        /// a ladder — parameterized ranges, plural ranges, text markers — and a WebKit field can
+        /// answer the original on one rung and leave `kAXSelectedText` blank on the next reading.
+        /// Judging the replace on a weaker read than the capture made an intact selection look
+        /// unreadable. The ladder is consulted only when the observation has no selected text and
+        /// no range: a caret range is a real answer (the selection collapsed) and stays one.
+        static func fillingSelection(
+            _ observation: DeliveryVerifier.FocusedTextObservation,
+            ladder: () -> String?
+        ) -> DeliveryVerifier.FocusedTextObservation {
+            guard observation.selectedText?.isEmpty ?? true,
+                  observation.selectedRange == nil,
+                  let laddered = ladder(), !laddered.isEmpty else { return observation }
+            return DeliveryVerifier.FocusedTextObservation(
+                value: observation.value,
+                selectedText: laddered,
+                selectedRange: observation.selectedRange,
+                target: observation.target,
+                numberOfCharacters: observation.numberOfCharacters
             )
         }
 
@@ -216,6 +264,14 @@ public enum SelectionReplacementGuard {
         /// reports the selection costs at most `readBackAttempts × readBackInterval`, then refuses.
         public static let readBackAttempts = 3
         public static let readBackInterval: TimeInterval = 0.03
+
+        /// Re-readings of a field that answered nothing, and the gap before each. The selection is
+        /// read with the source app frontmost; the replace is judged the moment it is frontmost
+        /// *again*, and a host restoring focus (Safari hands it to its web content over IPC) can
+        /// answer blank for that instant. Bounded: a field that stays blind costs at most
+        /// `settleAttempts × settleInterval`, then refuses as before.
+        public static let settleAttempts = 4
+        public static let settleInterval: TimeInterval = 0.05
 
         private let access: Access
 
@@ -228,32 +284,58 @@ public enum SelectionReplacementGuard {
             element: AXUIElement?,
             completion: @escaping (Verdict) -> Void
         ) {
-            guard let element else {
-                completion(Self.unjudged(replacement))
-                return
-            }
-            switch SelectionReplacementGuard.decide(
-                original: replacement.original,
-                observation: access.observe(element)
-            ) {
+            judge(
+                replacement, element: element, refocused: false,
+                settlesRemaining: Self.settleAttempts, completion: completion
+            )
+        }
+
+        private func judge(
+            _ replacement: SelectionReplacement,
+            element: AXUIElement?,
+            refocused: Bool,
+            settlesRemaining: Int,
+            completion: @escaping (Verdict) -> Void
+        ) {
+            let decision = element.map {
+                SelectionReplacementGuard.decide(original: replacement.original, observation: access.observe($0))
+            } ?? .unverifiable
+            let refocusedOn = refocused ? element : nil
+            switch decision {
             case .proceed:
-                completion(.confirmed(reselected: false))
+                completion(.confirmed(reselected: false, refocusedOn: refocusedOn))
             case .unverifiable:
-                completion(Self.unjudged(replacement))
+                // Only a replacement that must prove its selection is worth waiting for; one read
+                // by copy is delivered unverified either way.
+                guard replacement.requiresEvidence, settlesRemaining > 0 else {
+                    completion(Self.unjudged(replacement))
+                    return
+                }
+                access.schedule(Self.settleInterval) {
+                    let next = element ?? access.refocus()
+                    judge(
+                        replacement, element: next, refocused: refocused || (element == nil && next != nil),
+                        settlesRemaining: settlesRemaining - 1, completion: completion
+                    )
+                }
             case .refuse(let refusal):
                 completion(.refused(refusal))
             case .reselect(let range):
-                guard access.select(range, element) else {
+                guard let element, access.select(range, element) else {
                     completion(.refused(.reselectFailed))
                     return
                 }
-                readBack(replacement, element: element, remaining: Self.readBackAttempts, completion: completion)
+                readBack(
+                    replacement, element: element, refocusedOn: refocusedOn,
+                    remaining: Self.readBackAttempts, completion: completion
+                )
             }
         }
 
         private func readBack(
             _ replacement: SelectionReplacement,
             element: AXUIElement,
+            refocusedOn: AXUIElement?,
             remaining: Int,
             completion: @escaping (Verdict) -> Void
         ) {
@@ -264,9 +346,12 @@ public enum SelectionReplacementGuard {
                     original: replacement.original,
                     observation: access.observe(element)
                 ) == .proceed {
-                    completion(.confirmed(reselected: true))
+                    completion(.confirmed(reselected: true, refocusedOn: refocusedOn))
                 } else if remaining > 1 {
-                    readBack(replacement, element: element, remaining: remaining - 1, completion: completion)
+                    readBack(
+                        replacement, element: element, refocusedOn: refocusedOn,
+                        remaining: remaining - 1, completion: completion
+                    )
                 } else {
                     completion(.refused(.reselectFailed))
                 }

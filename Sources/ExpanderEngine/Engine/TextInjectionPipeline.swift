@@ -917,14 +917,22 @@ public final class TextInjectionPipeline {
     ) {
         selectionConfirmer.confirm(replacement, element: element) { verdict in
             switch verdict {
-            case .confirmed(let reselected):
+            case .confirmed(let reselected, let refocusedOn):
                 var confirmed = request.selectionConfirmed()
+                var focus = focus
                 if reselected {
                     DevTypeLog.inject.notice(
                         "[Inject] replace: selection was lost on return to the source app — re-selected the original before pasting"
                     )
+                }
+                if let refocusedOn {
+                    // The focus this inject resolved had no element; the confirmer found one
+                    // while the host settled, and every later gate must judge that one.
+                    focus = .available(refocusedOn)
+                }
+                if reselected || refocusedOn != nil {
                     confirmed = request.selectionConfirmed(
-                        target: PasteboardBroker.PasteTarget.capture(focus: .resolved(element))
+                        target: PasteboardBroker.PasteTarget.capture(focus: .resolved(refocusedOn ?? element))
                     )
                 }
                 self.injectWithFocus(confirmed, focus: focus, completion: completion)
@@ -939,8 +947,11 @@ public final class TextInjectionPipeline {
                 // must not cost the user that work, so it goes to the clipboard for a manual ⌘V
                 // into a selection they can see.
                 let copied = self.keepRefusedReplacement(payload)
+                // The role is what tells "the host answered with the wrong element" apart from
+                // "the right element answered blank" — the report cannot otherwise.
+                let role = element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) } ?? "none"
                 DevTypeLog.inject.notice(
-                    "[Inject] replace refused — \(refusal.rawValue, privacy: .public); result copied=\(copied, privacy: .public)"
+                    "[Inject] replace refused — \(refusal.rawValue, privacy: .public); role=\(role, privacy: .public) result copied=\(copied, privacy: .public)"
                 )
                 self.refuseInject(
                     refusal.reason,
