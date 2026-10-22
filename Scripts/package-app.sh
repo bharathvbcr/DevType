@@ -157,6 +157,14 @@ DT_XCODE_BUILD="${XCODE_BUILD_RAW:-unknown}"
 DT_SDK_NAME="macosx${SDK_VER_RAW:-unknown}"
 DT_PLATFORM_VER="${PLATFORM_VER_RAW:-${SDK_VER_RAW:-unknown}}"
 
+# A missing xcodebuild or xcrun used to stamp the literal "unknown" and the
+# package gate only checked that the keys existed. Refuse that placeholder
+# before it is written. The published path and local packaging both run here.
+DT_XCODE="$(${ROOT}/Scripts/toolchain-stamp.sh DTXcode "${DT_XCODE}")" || exit 1
+DT_XCODE_BUILD="$(${ROOT}/Scripts/toolchain-stamp.sh DTXcodeBuild "${DT_XCODE_BUILD}")" || exit 1
+DT_SDK_NAME="$(${ROOT}/Scripts/toolchain-stamp.sh DTSDKName "${DT_SDK_NAME}")" || exit 1
+DT_PLATFORM_VER="$(${ROOT}/Scripts/toolchain-stamp.sh DTPlatformVersion "${DT_PLATFORM_VER}")" || exit 1
+
 set_staged_plist_entry() {
   local key="$1" val="$2"
   /usr/libexec/PlistBuddy -c "Set :${key} ${val}" "${PLIST_STAGED}" 2>/dev/null \
