@@ -78,6 +78,33 @@ final class AITransformDiscardTests: XCTestCase {
         XCTAssertEqual(text, "Heading\n\nbold")
     }
 
+    /// `settled()` waits for the generation task, which releases the single-flight latch.
+    /// The completion handler is `queue.async`'d and is not part of that wait. A caller
+    /// that reads the result in the same turn as `settled()` returns is racing the queue.
+    func testSettledReturnsBeforeTheCompletionQueueRuns() async throws {
+        try requireTransformer()
+        guard #available(macOS 26.0, *) else { return }
+        let queue = DispatchQueue(label: "devtype.test.settled-before-completion")
+        queue.suspend()
+        let collected = ResultBox()
+        let handle = AITextTransformer().transformStreaming(
+            kind: .removeMarkdown,
+            input: "# Heading\n\n**bold**",
+            onPartial: nil,
+            completionQueue: queue
+        ) { collected.append($0) }
+
+        await handle.settled()
+        let pending = collected.count
+        queue.resume()
+
+        XCTAssertEqual(pending, 0, "settled() must not wait for the completion queue")
+        await waitUntil { collected.count == 1 }
+        guard case .success = try XCTUnwrap(collected.first) else {
+            return XCTFail("the queued completion should still succeed")
+        }
+    }
+
     /// A handle is handed back from the same statement that creates its task, so `discard()`
     /// can arrive before the task exists. The request must still be cancelled, not lost.
     func testDiscardBeforeTheTaskIsObservedStillEndsTheRequest() async throws {
@@ -183,6 +210,8 @@ final class AITransformDiscardTests: XCTestCase {
         }
 
         // The predecessor really was interrupted — otherwise the latch was never contested.
+        // Its completion was queued at discard time and is not ordered with settled().
+        await waitUntil { abandoned.result.count == 1 }
         guard case .failure(.discarded) = try XCTUnwrap(abandoned.result.first) else {
             return XCTFail("the abandoned request should report `.discarded`")
         }
@@ -200,7 +229,7 @@ final class AITransformDiscardTests: XCTestCase {
         let live = try await liveGeneration()
         live.handle.discard()
         await live.handle.settled()
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await waitUntil { live.result.count == 1 }
 
         guard case .failure(.discarded) = try XCTUnwrap(live.result.first) else {
             return XCTFail("the request should report `.discarded`")
@@ -223,6 +252,9 @@ final class AITransformDiscardTests: XCTestCase {
         live.handle.discard()
         await live.handle.settled()
         let elapsed = Date().timeIntervalSince(start)
+        // discard() enqueues `.discarded` immediately. settled() waits for the task,
+        // so the result can still be absent when it returns.
+        await waitUntil({ live.result.count == 1 }, timeout: 20)
 
         guard case .failure(.discarded) = try XCTUnwrap(live.result.first) else {
             return XCTFail("the request should report `.discarded`")
