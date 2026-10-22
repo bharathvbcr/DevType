@@ -169,9 +169,9 @@ lldb .build/DevType.app/Contents/MacOS/DevType
 
 ## 📦 Version Stamping & Releases
 
-DevType avoids hardcoded version strings. `Resources/Info.plist` ships placeholders (`0.0.1` / build `1`) that are overwritten at packaging time from Git:
+DevType avoids hardcoded version strings. `Resources/Info.plist` ships placeholders (`0.1.7` / build `2`) that are overwritten at packaging time from Git:
 
-- **`CFBundleShortVersionString`** = nearest tag from `git describe --tags` (v-prefix stripped; e.g. `0.0.9`, or `0.0.9-3-gabc1234` when ahead of the tag, with `+dirty` appended for an unclean tree).
+- **`CFBundleShortVersionString`** = nearest tag from `git describe --tags --always --dirty=+dirty` (one leading `v` stripped; e.g. `0.0.9`, or `0.0.9-3-gabc1234` when ahead of the tag, with `+dirty` appended when tracked files differ from HEAD).
 - **`CFBundleVersion`** = monotonic commit count — the number macOS compares when deciding which of two bundles is newer.
 
 Outside a Git checkout, packaging falls back to the plist values. Local CI fails the build if a placeholder version survives stamping, so field diagnostics always map to an exact commit.
