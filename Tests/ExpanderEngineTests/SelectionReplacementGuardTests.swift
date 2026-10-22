@@ -304,6 +304,288 @@ final class SelectionReplacementGuardTests: XCTestCase {
         XCTAssertEqual(refocused, 2)
     }
 
+    /// Field report (1.3.0 build 389, Safari proofread): the selection read live, the transform
+    /// succeeded, and the replace was refused `unreadable` with `role=AXWindow`. Focus had landed
+    /// on the browser window while WebKit restored the page, and the settle re-read that window
+    /// until the budget ran out. A window cannot publish the selection, so the settle has to
+    /// resolve focus again and confirm on the element that appears.
+    func testConfirmerRefocusesWhenTheFocusedElementIsAWindow() {
+        let window = AXUIElementCreateApplication(1)
+        let field = element
+        var lookups = 0
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { candidate in
+                if CFEqual(candidate, field) {
+                    return self.observation(value: nil, selectedText: self.original)
+                }
+                return self.observation(value: nil)
+            },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: {
+                lookups += 1
+                return lookups < 2 ? window : field
+            },
+            role: { candidate in
+                CFEqual(candidate, field) ? "AXTextArea" : "AXWindow"
+            }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: false, refocusedOn: field))
+        XCTAssertEqual(lookups, 2)
+    }
+
+    /// The earlier Safari failure was the field itself answering blank for a moment. Following
+    /// focus away from that field would drop the element that is about to publish the selection.
+    func testConfirmerKeepsABlankTextElementInsteadOfFollowingFocus() {
+        let text = element
+        let elsewhere = AXUIElementCreateApplication(1)
+        var reads = 0
+        var lookups = 0
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { candidate in
+                XCTAssertTrue(CFEqual(candidate, text))
+                reads += 1
+                if reads < 2 { return self.observation(value: nil) }
+                return self.observation(value: nil, selectedText: self.original)
+            },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: {
+                lookups += 1
+                return elsewhere
+            },
+            role: { _ in "AXTextArea" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: text
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: false))
+        XCTAssertEqual(lookups, 0)
+    }
+
+    /// The same handoff lands on a sheet, drawer, popover, or the application element. Each is a
+    /// window-level container: a blank reading there is not the field, and re-reading it cannot
+    /// see the selection arrive on the element that takes focus next.
+    func testConfirmerRefocusesOffEveryWindowLevelContainer() {
+        let roles = [
+            kAXApplicationRole, kAXWindowRole, kAXSheetRole, kAXDrawerRole, kAXPopoverRole,
+        ].map { $0 as String }
+        let field = element
+        for (index, role) in roles.enumerated() {
+            let container = AXUIElementCreateApplication(pid_t(1_000 + Int32(index)))
+            var lookups = 0
+            let access = SelectionReplacementGuard.Confirmer.Access(
+                observe: { candidate in
+                    if CFEqual(candidate, field) {
+                        return self.observation(value: nil, selectedText: self.original)
+                    }
+                    return self.observation(value: nil)
+                },
+                select: { _, _ in false },
+                schedule: { _, action in action() },
+                refocus: {
+                    lookups += 1
+                    return field
+                },
+                role: { candidate in CFEqual(candidate, field) ? "AXTextArea" : role }
+            )
+            var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+            SelectionReplacementGuard.Confirmer(access: access).confirm(
+                SelectionReplacement(original: original)!, element: container
+            ) { verdict = $0 }
+            XCTAssertEqual(verdict, .confirmed(reselected: false, refocusedOn: field), role)
+            XCTAssertEqual(lookups, 1, role)
+        }
+    }
+
+    /// A container that itself publishes the original is the field for this replace. Resolving
+    /// focus away from it would drop a selection the host has already handed back.
+    func testConfirmerTrustsAContainerThatPublishesTheSelection() {
+        let window = AXUIElementCreateApplication(1)
+        var lookups = 0
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in self.observation(value: nil, selectedText: self.original) },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: {
+                lookups += 1
+                return nil
+            },
+            role: { _ in kAXWindowRole as String }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: false))
+        XCTAssertEqual(lookups, 0)
+    }
+
+    /// Safari's page is an `AXWebArea`. The window is abandoned once; the web area is then the
+    /// field, and a blank answer from it is waited on rather than treated as another container.
+    func testConfirmerWaitsOnTheWebAreaAfterLeavingTheWindow() {
+        let window = AXUIElementCreateApplication(1)
+        let web = element
+        var webReads = 0
+        var lookups = 0
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { candidate in
+                guard CFEqual(candidate, web) else { return self.observation(value: nil) }
+                webReads += 1
+                if webReads < 2 { return self.observation(value: nil) }
+                return self.observation(value: nil, selectedText: self.original)
+            },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: {
+                lookups += 1
+                return web
+            },
+            role: { candidate in CFEqual(candidate, web) ? "AXWebArea" : "AXWindow" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: false, refocusedOn: web))
+        XCTAssertEqual(lookups, 1)
+        XCTAssertEqual(webReads, 2)
+    }
+
+    /// The field behind the window has the original, but the caret collapsed when focus left.
+    /// The re-select has to land on that field, and the rest of the inject has to be told about it.
+    func testConfirmerReselectsOnTheFieldFoundAfterTheWindow() {
+        let window = AXUIElementCreateApplication(1)
+        let field = element
+        let text = "say: \(original)"
+        var fieldReads = 0
+        var selected: [NSRange] = []
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { candidate in
+                guard CFEqual(candidate, field) else { return self.observation(value: nil) }
+                fieldReads += 1
+                if fieldReads == 1 {
+                    return self.observation(value: text, selectedText: "", range: NSRange(location: 24, length: 0))
+                }
+                return self.observation(
+                    value: text, selectedText: self.original, range: NSRange(location: 5, length: 19)
+                )
+            },
+            select: { range, candidate in
+                XCTAssertTrue(CFEqual(candidate, field))
+                selected.append(range)
+                return true
+            },
+            schedule: { _, action in action() },
+            refocus: { field },
+            role: { candidate in CFEqual(candidate, field) ? "AXTextArea" : "AXWindow" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: true, refocusedOn: field))
+        XCTAssertEqual(selected, [NSRange(location: 5, length: 19)])
+    }
+
+    /// A window that never hands focus to a field still refuses, and the lookups are bounded by
+    /// the same settle budget as a blank text element.
+    func testConfirmerStopsRefocusingAWindowThatNeverYieldsAField() {
+        let window = AXUIElementCreateApplication(1)
+        var lookups = 0
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in self.observation(value: nil) },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: {
+                lookups += 1
+                return window
+            },
+            role: { _ in "AXWindow" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .refused(.unreadable))
+        XCTAssertEqual(lookups, SelectionReplacementGuard.Confirmer.settleAttempts)
+    }
+
+    /// An unreadable role is not evidence of a container. A clipboard capture is not waited on
+    /// even when the focused element is a window.
+    func testConfirmerKeepsABlankElementWhoseRoleCannotBeRead() {
+        for role in [nil, ""] {
+            let text = element
+            let elsewhere = AXUIElementCreateApplication(1)
+            var reads = 0
+            var lookups = 0
+            let access = SelectionReplacementGuard.Confirmer.Access(
+                observe: { candidate in
+                    XCTAssertTrue(CFEqual(candidate, text))
+                    reads += 1
+                    if reads < 2 { return self.observation(value: nil) }
+                    return self.observation(value: nil, selectedText: self.original)
+                },
+                select: { _, _ in false },
+                schedule: { _, action in action() },
+                refocus: {
+                    lookups += 1
+                    return elsewhere
+                },
+                role: { _ in role }
+            )
+            var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+            SelectionReplacementGuard.Confirmer(access: access).confirm(
+                SelectionReplacement(original: original)!, element: text
+            ) { verdict = $0 }
+            XCTAssertEqual(verdict, .confirmed(reselected: false), role ?? "nil")
+            XCTAssertEqual(lookups, 0, role ?? "nil")
+        }
+
+        let window = AXUIElementCreateApplication(1)
+        var lookups = 0
+        let copied = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in self.observation(value: nil) },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: {
+                lookups += 1
+                return nil
+            },
+            role: { _ in "AXWindow" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: copied).confirm(
+            SelectionReplacement(original: original, requiresEvidence: false)!, element: window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .unverified)
+        XCTAssertEqual(lookups, 0)
+    }
+
+    func testBlankReadingAbandonsOnlyWindowLevelContainers() {
+        let containers = [
+            kAXApplicationRole, kAXWindowRole, kAXSheetRole, kAXDrawerRole, kAXPopoverRole,
+        ].map { $0 as String }
+        for role in containers {
+            XCTAssertTrue(
+                SelectionReplacementGuard.Confirmer.blankReadingAbandonsElement(role: role),
+                role
+            )
+        }
+        for role in ["AXTextArea", "AXTextField", "AXWebArea", "AXGroup", "AXScrollArea", "AXComboBox", ""] {
+            XCTAssertFalse(
+                SelectionReplacementGuard.Confirmer.blankReadingAbandonsElement(role: role),
+                role
+            )
+        }
+        XCTAssertFalse(SelectionReplacementGuard.Confirmer.blankReadingAbandonsElement(role: nil))
+    }
+
     func testLadderFillsOnlyAnObservationWithNoSelectionAndNoRange() {
         let blank = observation(value: nil, selectedText: "")
         XCTAssertEqual(

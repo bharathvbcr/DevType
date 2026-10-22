@@ -180,8 +180,9 @@ public enum SelectionReplacementGuard {
         public enum Verdict: Equatable {
             /// The original is selected now; ⌘V replaces it. `reselected` says this guard had to
             /// put it back, which is worth a log line — it means the host lost it. `refocusedOn`
-            /// is set only when no element was handed in and the settle had to resolve one: the
-            /// caller's focus is stale, and this is the element the selection was confirmed on.
+            /// is set when the confirmed element is not the one handed in: focus was missing, or
+            /// it was a window-level container and the settle found the field. The caller's focus
+            /// is stale, and this is the element to judge from here.
             case confirmed(reselected: Bool, refocusedOn: AXUIElement? = nil)
             /// Nothing could be checked and the replacement does not require evidence.
             case unverified
@@ -209,19 +210,25 @@ public enum SelectionReplacementGuard {
             /// Schedules the read-back after a range write. Hosts publish the new selection on
             /// their next run-loop turn, not synchronously with the `.success` they return.
             public var schedule: (TimeInterval, @escaping () -> Void) -> Void
-            /// Resolves the focused element again, for a settle that started with none.
+            /// Resolves the focused element again. Used when the settle started with none, and
+            /// when it started on a window-level container that cannot hold the selection.
             public var refocus: () -> AXUIElement?
+            /// `kAXRoleAttribute` of an element, or nil when the host did not answer. A nil role
+            /// is not a container: the settle keeps the element it has.
+            public var role: (AXUIElement) -> String?
 
             public init(
                 observe: @escaping (AXUIElement) -> DeliveryVerifier.FocusedTextObservation,
                 select: @escaping (NSRange, AXUIElement) -> Bool,
                 schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
-                refocus: @escaping () -> AXUIElement? = { nil }
+                refocus: @escaping () -> AXUIElement? = { nil },
+                role: @escaping (AXUIElement) -> String? = { _ in nil }
             ) {
                 self.observe = observe
                 self.select = select
                 self.schedule = schedule
                 self.refocus = refocus
+                self.role = role
             }
 
             public static let live = Access(
@@ -234,7 +241,8 @@ public enum SelectionReplacementGuard {
                 schedule: { delay, action in
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
                 },
-                refocus: { AXContextChecker.shared.queryFocusedElement(allowTimeoutRetry: false).element }
+                refocus: { AXContextChecker.shared.queryFocusedElement(allowTimeoutRetry: false).element },
+                role: { AXContextChecker.shared.focusedElementRole(element: $0) }
             )
         }
 
@@ -267,11 +275,29 @@ public enum SelectionReplacementGuard {
 
         /// Re-readings of a field that answered nothing, and the gap before each. The selection is
         /// read with the source app frontmost; the replace is judged the moment it is frontmost
-        /// *again*, and a host restoring focus (Safari hands it to its web content over IPC) can
-        /// answer blank for that instant. Bounded: a field that stays blind costs at most
-        /// `settleAttempts × settleInterval`, then refuses as before.
+        /// *again*. A host restoring focus can answer blank for that instant, or answer with the
+        /// window while its content process restores the field (Safari, after a panel took focus).
+        /// A blank text element is re-read. A blank window-level container cannot publish the
+        /// selection, so the settle resolves focus again instead of pinning the container.
+        /// Bounded: a field that stays blind costs at most `settleAttempts × settleInterval`,
+        /// then refuses as before.
         public static let settleAttempts = 4
         public static let settleInterval: TimeInterval = 0.05
+
+        /// Window-level containers. Focus lands on one of these while a host hands the field
+        /// back; none of them expose the selection the replace has to confirm.
+        static let containerRoles: Set<String> = [
+            kAXApplicationRole as String,
+            kAXWindowRole as String,
+            kAXSheetRole as String,
+            kAXDrawerRole as String,
+            kAXPopoverRole as String,
+        ]
+
+        static func blankReadingAbandonsElement(role: String?) -> Bool {
+            guard let role, !role.isEmpty else { return false }
+            return containerRoles.contains(role)
+        }
 
         private let access: Access
 
@@ -311,10 +337,31 @@ public enum SelectionReplacementGuard {
                     completion(Self.unjudged(replacement))
                     return
                 }
+                // No element, or a window-level container: the field is whoever holds focus
+                // after the host settles. A text element that answered blank stays put — that
+                // is the host publishing the selection a moment late, and following focus away
+                // from it would drop the element that is about to answer.
+                let abandon = element.map {
+                    Self.blankReadingAbandonsElement(role: access.role($0))
+                } ?? true
                 access.schedule(Self.settleInterval) {
-                    let next = element ?? access.refocus()
+                    let next: AXUIElement?
+                    let gained: Bool
+                    if abandon {
+                        let resolved = access.refocus()
+                        if let resolved {
+                            next = resolved
+                            gained = element.map { !CFEqual($0, resolved) } ?? true
+                        } else {
+                            next = element
+                            gained = false
+                        }
+                    } else {
+                        next = element
+                        gained = false
+                    }
                     judge(
-                        replacement, element: next, refocused: refocused || (element == nil && next != nil),
+                        replacement, element: next, refocused: refocused || gained,
                         settlesRemaining: settlesRemaining - 1, completion: completion
                     )
                 }
