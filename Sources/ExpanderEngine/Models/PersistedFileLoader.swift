@@ -113,6 +113,17 @@ public enum PersistedFileLoader {
         }
     }
 
+    /// Same move, log line, and write-block as `load`, for a caller that already bounded its
+    /// own read. `load` reads the whole file and must not be used for that caller.
+    @discardableResult
+    public static func quarantineUnreadableFile(
+        store: String,
+        fileURL: URL,
+        error: Error
+    ) -> Outcome<Void> {
+        quarantine(store: store, fileURL: fileURL, error: error)
+    }
+
     /// Moves `fileURL` aside as `<name>.unreadable`, or `<name>.unreadable.<uuid>` when that
     /// name is taken, so an earlier quarantined copy is never replaced.
     private static func quarantine<Value>(

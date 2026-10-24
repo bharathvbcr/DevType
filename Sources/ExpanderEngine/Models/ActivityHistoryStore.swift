@@ -320,6 +320,8 @@ public final class ActivityHistoryStore {
     }
 
     public static let maxEvents = 25
+    /// Log name shared with `PersistedFileLoader`. The block key is the file path, not this string.
+    private static let persistenceStoreName = "ActivityHistoryStore"
     /// Read one byte beyond the envelope so growth between open and read still fails closed.
     public static let maximumPersistedBytes = 2 * 1_024 * 1_024
     public static let maximumLegacyTitleCharacters = 1_024
@@ -352,19 +354,36 @@ public final class ActivityHistoryStore {
         } else {
             self.fileURL = SnippetStore.defaultLocalSupportDirectory.appendingPathComponent("activity-history.json")
         }
+        let loaded: LoadedHistory
         do {
-            let loaded = try Self.load(from: self.fileURL)
-            let scrubbed = loaded.events.filter { !Self.isLegacyPlaintextRecoveryEvent($0) }
-            self.events = scrubbed
-            if loaded.hadDiscardedTail || scrubbed.count != loaded.events.count {
-                try Self.save(scrubbed, to: self.fileURL)
-            }
+            loaded = try Self.load(from: self.fileURL)
         } catch {
+            // Only a thrown load is quarantined. A successful decode that scrubs legacy
+            // plaintext still saves below and must not be moved aside.
             self.events = []
             self.lastPersistenceFailureKind = Self.failureKind(
                 for: error,
                 fallback: .readFailed
             ).rawValue
+            _ = PersistedFileLoader.quarantineUnreadableFile(
+                store: Self.persistenceStoreName,
+                fileURL: self.fileURL,
+                error: error
+            )
+            return
+        }
+        let scrubbed = loaded.events.filter { !Self.isLegacyPlaintextRecoveryEvent($0) }
+        self.events = scrubbed
+        if loaded.hadDiscardedTail || scrubbed.count != loaded.events.count {
+            do {
+                try Self.save(scrubbed, to: self.fileURL)
+            } catch {
+                self.events = []
+                self.lastPersistenceFailureKind = Self.failureKind(
+                    for: error,
+                    fallback: .readFailed
+                ).rawValue
+            }
         }
     }
 
@@ -509,6 +528,12 @@ public final class ActivityHistoryStore {
     /// in-memory snapshot, so callers cannot mistake an undurable mutation for success.
     private func persistLocked(_ candidate: [ActivityEvent]) -> MutationResult {
         lastPersistWasOnMain = Thread.isMainThread
+        // A successful quarantine clears the block, so a later record may replace the live path.
+        // A failed move leaves the block set: refuse without `save`, and keep the load failure.
+        guard PersistedFileLoader.permitWrite(store: Self.persistenceStoreName, fileURL: fileURL) else {
+            let kind = lastPersistenceFailureKind ?? PersistenceFailureKind.writeFailed.rawValue
+            return .persistenceFailed(kind)
+        }
         do {
             try Self.save(candidate, to: fileURL)
             events = candidate
