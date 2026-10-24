@@ -853,6 +853,34 @@ public final class AXContextChecker {
         return role
     }
 
+    /// Screen frame from `kAXPosition` and `kAXSize`. Nil when either attribute is unreadable
+    /// or the size is not a positive finite rect. A zero or non-finite frame is not evidence
+    /// that two controls are the same one.
+    static func elementFrame(_ element: AXUIElement) -> CGRect? {
+        var positionRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let positionRef, let sizeRef,
+              CFGetTypeID(positionRef) == AXValueGetTypeID(),
+              CFGetTypeID(sizeRef) == AXValueGetTypeID() else {
+            return nil
+        }
+        var origin = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(unsafeBitCast(positionRef, to: AXValue.self), .cgPoint, &origin),
+              AXValueGetValue(unsafeBitCast(sizeRef, to: AXValue.self), .cgSize, &size) else {
+            return nil
+        }
+        let frame = CGRect(origin: origin, size: size)
+        guard frame.origin.x.isFinite, frame.origin.y.isFinite,
+              frame.size.width.isFinite, frame.size.height.isFinite,
+              frame.size.width > 0, frame.size.height > 0 else {
+            return nil
+        }
+        return frame
+    }
+
     /// Text attributes whose settability distinguishes an editable field from a rendered
     /// projection. `AXValue` covers plain fields; `AXSelectedText` covers views that only accept
     /// ranged edits (most web and document editors report the latter and not the former).

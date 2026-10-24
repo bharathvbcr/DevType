@@ -67,9 +67,32 @@ final class SourceContractTests: XCTestCase {
         XCTAssertEqual(inject.components(separatedBy: "canProceed: canProceed").count - 1, 2,
                        "Both image and text erases must keep the live input/focus guard")
         XCTAssertEqual(
-            inject.components(separatedBy: "postingContinue: canProceedAfterMutation").count - 1, 2,
-            "Both image and text HID posts must use the post-mutation continue-guard so combo-box retarget is not an incomplete erase"
+            inject.components(separatedBy: "postingContinue: postingContinue").count - 1, 2,
+            "Both image and text HID posts must use the during-erase continue closure"
         )
+        let continueClosure = try XCTUnwrap(inject.range(of: "let postingContinue: () -> Bool = {"))
+        let imageBranch = try XCTUnwrap(inject.range(of: "if context.snippet.isImageSnippet"))
+        let closure = String(inject[continueClosure.lowerBound..<imageBranch.lowerBound])
+        let opened = try XCTUnwrap(closure.range(of: "canContinue(context, phase: .afterMutation)"))
+        let capture = try XCTUnwrap(closure.range(of: "eraseAnchor = self.eraseFieldPicture"))
+        let stopWithoutAnchor = try XCTUnwrap(
+            closure.range(of: "guard context.adopted.eraseAnchor != nil else { return false }")
+        )
+        XCTAssertLessThan(
+            opened.lowerBound, capture.lowerBound,
+            "After-mutation continue is decided before any snapshot, so a combo box's node flicker is not an incomplete erase"
+        )
+        XCTAssertLessThan(capture.lowerBound, stopWithoutAnchor.lowerBound)
+        XCTAssertEqual(
+            closure.components(separatedBy: "eraseAnchor = self.eraseFieldPicture").count - 1,
+            2,
+            "When continue fails before any snapshot, the closure still reads the element the box already accepted"
+        )
+        XCTAssertFalse(
+            closure.contains("focusedElement()"),
+            "That snapshot is the accepted element, never a fresh focus read of the replacement"
+        )
+        XCTAssertTrue(closure.contains("continuation: .duringErase"))
         XCTAssertEqual(
             inject.components(separatedBy: "path: \"eraseIncomplete\"").count - 1, 2,
             "A short HID post must be a distinct refuse from a field mismatch"
@@ -94,6 +117,50 @@ final class SourceContractTests: XCTestCase {
         XCTAssertFalse(
             hid.contains("posted == count && shouldContinue()"),
             "The GitPulse refuse treated combo-box retarget during settle as an incomplete erase"
+        )
+    }
+
+    /// A vouched element swap is adopted at every direct erase-continuation refusal. Dropping
+    /// one of them puts the next WebKit node replacement back on `eraseContextChanged` with
+    /// nothing recorded about which half moved.
+    func testEraseContinuationRetargetIsWiredAtEveryDirectRefusal() throws {
+        let pipeline = try source("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
+        XCTAssertEqual(
+            pipeline.components(separatedBy: "adoptVouchedContinuation(").count - 1,
+            6,
+            "the definition plus the pre-erase check, the pre-write closure, the during-post check, and both post-erase checks"
+        )
+        XCTAssertEqual(
+            pipeline.components(separatedBy: "elementAfterContinue:").count - 1,
+            2,
+            "both erases must read the element again after a continue-check that may have adopted one"
+        )
+        XCTAssertTrue(
+            pipeline.contains("replacesSelection: replacingSelection != nil"),
+            "a selection replace must stay ineligible for retarget after the selection is confirmed"
+        )
+        XCTAssertTrue(
+            pipeline.contains("replacesSelection: replacesSelection"),
+            "selectionConfirmed() must keep the replace flag"
+        )
+        XCTAssertTrue(
+            pipeline.contains("retryOnMismatch: false"),
+            "the live voucher is one reading of the element just observed; it must not sleep and re-resolve a different one"
+        )
+        XCTAssertEqual(
+            pipeline.components(separatedBy: "roleAllowsInsertionRetarget").count - 1,
+            3,
+            "before the erase, after it, and at the adopt itself, a secure or non-text role is not a destination"
+        )
+        XCTAssertEqual(
+            pipeline.components(separatedBy: "substantivePrecondition(").count - 1,
+            1,
+            "an empty plan's .ok is not a voucher for following a different element"
+        )
+        XCTAssertEqual(
+            pipeline.components(separatedBy: "phase: .beforeMutation").count - 1,
+            2,
+            "the retarget wiring must not add a third before-mutation range gate"
         )
     }
 

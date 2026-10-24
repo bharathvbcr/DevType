@@ -293,7 +293,7 @@ public final class TextInjectionPipeline {
                 secureClipboardPaste: secureClipboardPaste,
                 eraseCaretVouched: eraseCaretVouched,
                 operation: operation, inputRevision: revision, target: target, purpose: purpose,
-                replacing: replacingSelection
+                replacing: replacingSelection, replacesSelection: replacingSelection != nil
             )
             DispatchQueue.main.async {
                 self.injectOnMain(request) { outcome in
@@ -474,6 +474,147 @@ public final class TextInjectionPipeline {
         )
     }
 
+    /// Typed expansion with a vouched caret, and not a selection replace. Undo and voice pass
+    /// the other values on purpose and must not follow an element swap.
+    private func allowsEraseRetarget(_ context: InjectContext) -> Bool {
+        guard context.eraseCaretVouched, !context.replacesSelection else { return false }
+        if case .expansion = context.purpose { return true }
+        return false
+    }
+
+    /// `canContinue` failed, or is about to be asked again from a closure that must not refuse
+    /// on its own. Returns `.retarget` only after the adopted box names the element this call
+    /// just read. `.proceed` means a fresh reading matches again. `.refuse` stashes the label
+    /// the caller records — this method does not record it, so a closure that only needs a Bool
+    /// cannot double-refuse.
+    private func adoptVouchedContinuation(
+        _ context: InjectContext,
+        rangeGate: PasteboardBroker.SelectionRangeGate,
+        checkRange: Bool,
+        continuation: EraseContinuationPhase,
+        removedGraphemes: Int = 0
+    ) -> EraseContinuationDecision {
+        let revisionCurrent = ledger.isCurrent(context.operation, revision: context.inputRevision)
+        let block = context.operation.continuationBlock()
+        let secureInputBlocked = AXContextChecker.isSecureEventInputEnabledLive()
+        let axUntrusted = !AXContextChecker.shared.isProcessTrusted()
+        let checkElement = PasteboardBroker.verifyFocusedElement(role: context.focusedRole, phase: rangeGate)
+        let element = (checkElement || checkRange) ? AXContextChecker.shared.focusedElement() : nil
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let mismatch = context.target.mismatch(
+            observing: element, pid: pid, checkRange: checkRange, checkElement: checkElement
+        )
+        let allows = allowsEraseRetarget(context)
+        let operationBlocked = !revisionCurrent || block != nil || secureInputBlocked || axUntrusted
+        let elementOrRange = mismatch == .elementChanged || mismatch == .rangeChanged
+        var livePrecondition: ErasePreconditionResult?
+        var liveRole: String?
+        var reading: EraseFieldReading?
+        var deletionMatched = false
+        if !operationBlocked, allows, elementOrRange {
+            switch continuation {
+            case .beforeErase:
+                if let element {
+                    liveRole = AXContextChecker.shared.focusedElementRole(element: element)
+                    // A secure field or a non-text role is not read. The voucher would be a
+                    // comparison against that control's value, and a match must not retarget there.
+                    if EraseContinuation.roleAllowsInsertionRetarget(liveRole) {
+                        livePrecondition = EraseContinuation.substantivePrecondition(
+                            eraser.evaluateErasePrecondition(
+                                plan: context.erasePlan,
+                                focus: .resolved(element),
+                                retryOnMismatch: false,
+                                insertionPointFollowsExpectedText: context.eraseCaretVouched,
+                                intent: context.purpose.eraseIntent
+                            ),
+                            expectedText: context.erasePlan.expectedText
+                        )
+                    }
+                } else {
+                    livePrecondition = .unavailable("no focused element")
+                }
+            case .beforeInsertion, .duringErase:
+                liveRole = element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) }
+                if mismatch == .elementChanged, EraseContinuation.roleAllowsInsertionRetarget(liveRole),
+                   let element {
+                    let live = eraseFieldPicture(element)
+                    let maxRemoved = continuation == .duringErase
+                        ? removedGraphemes
+                        : (context.erasePlan.expectedText?.count ?? 0)
+                    deletionMatched = EraseContinuation.deletionConfirms(
+                        phase: continuation,
+                        anchor: context.adopted.eraseAnchor,
+                        live: live,
+                        expectedText: context.erasePlan.expectedText,
+                        caseInsensitive: context.erasePlan.caseInsensitive,
+                        maxRemovedGraphemes: maxRemoved
+                    )
+                    reading = EraseContinuation.fieldReading(
+                        expected: context.erasePlan.expectedText,
+                        value: live.value,
+                        caretLocation: live.caretLocation,
+                        selectionLength: live.selectionLength,
+                        caseInsensitive: context.erasePlan.caseInsensitive
+                    )
+                }
+            }
+        }
+        let decision = EraseContinuation.decide(EraseContinuationFacts(
+            phase: continuation,
+            revisionCurrent: revisionCurrent,
+            continuationBlock: block,
+            secureInputBlocked: secureInputBlocked,
+            axUntrusted: axUntrusted,
+            mismatch: mismatch,
+            allowsRetarget: allows,
+            deletionMatched: deletionMatched,
+            livePrecondition: livePrecondition,
+            liveRole: liveRole,
+            fieldReading: reading
+        ))
+        switch decision {
+        case .proceed:
+            context.adopted.lastRefusal = nil
+        case .retarget:
+            guard let element else {
+                let refusal = EraseContinuation.unadoptedRefusal(continuation, mismatch)
+                context.adopted.lastRefusal = refusal
+                return .refuse(refusal)
+            }
+            let role = liveRole ?? AXContextChecker.shared.focusedElementRole(element: element)
+            // `decide` already requires this. The second check is the adopt itself: a retarget
+            // that arrived without a text-field role does not get written into the box.
+            guard EraseContinuation.roleAllowsInsertionRetarget(role) else {
+                let refusal = EraseContinuation.unadoptedRefusal(continuation, mismatch)
+                context.adopted.lastRefusal = refusal
+                return .refuse(refusal)
+            }
+            let range = DeliveryVerifier.selectedRange(for: element)
+            context.adopted.target = PasteboardBroker.PasteTarget(pid: pid, element: element, range: range)
+            context.adopted.element = element
+            context.adopted.role = role
+            context.adopted.lastRefusal = nil
+        case .refuse(let refusal):
+            context.adopted.lastRefusal = refusal
+        }
+        return decision
+    }
+
+    /// Value, caret, selection, and screen frame of one element. The timeout is the same bound
+    /// the undo read uses: a hung field must not stall the backspace loop for the default AX
+    /// timeout. Called on the can-continue path once, to remember the field before any key, and
+    /// again only when that continue-check has already failed.
+    private func eraseFieldPicture(_ element: AXUIElement) -> EraseContinuation.EraseFieldPicture {
+        AXContextChecker.applyMessagingTimeout(to: element)
+        let observation = verifier.focusedTextObservation(for: element)
+        return EraseContinuation.EraseFieldPicture(
+            value: observation.value,
+            caretLocation: observation.caretLocation,
+            selectionLength: observation.selectedRange?.length,
+            frame: AXContextChecker.elementFrame(element)
+        )
+    }
+
     /// Internal test reader for the delivery-window counter. Not public API.
     var deliveryInputUnitsForTesting: Int {
         ledger.currentDeliveryInputUnits
@@ -596,6 +737,10 @@ public final class TextInjectionPipeline {
         /// Non-nil until `injectWithFocus` has confirmed the selection; the confirmed request is
         /// re-entered with this cleared, so the check runs exactly once per inject.
         let replacing: SelectionReplacement?
+        /// Stays true after `selectionConfirmed()` clears `replacing`. A confirmed replace must
+        /// not borrow the typed-expansion retarget: the payload is an already-generated result,
+        /// and a replaced AX node is not evidence the selection is still the one that was read.
+        let replacesSelection: Bool
 
         /// The request after its selection was confirmed. `target` is recaptured when the guard
         /// had to re-select: the range moved on purpose, and a range-gated host would otherwise
@@ -608,8 +753,30 @@ public final class TextInjectionPipeline {
                 snippetLookup: snippetLookup, secureClipboardPaste: secureClipboardPaste,
                 eraseCaretVouched: eraseCaretVouched, operation: operation,
                 inputRevision: inputRevision, target: newTarget ?? target, purpose: purpose,
-                replacing: nil
+                replacing: nil, replacesSelection: replacesSelection
             )
+        }
+    }
+
+    /// One inject's focus, shared by every copy of `InjectContext`. Escaping continue-closures
+    /// copy the struct and would otherwise keep comparing against the element captured at the
+    /// start, so a retarget written here is what the next `canContinue` and the next AX write see.
+    /// Mutated on main only: the inject runs there, and the backspace post calls its guard there.
+    private final class AdoptedInjectTarget {
+        var target: PasteboardBroker.PasteTarget
+        var element: AXUIElement?
+        var role: String?
+        /// The refusal the pre-write guard records. `canProceed` already made the decision; a
+        /// second live read in the guard could name a different instant.
+        var lastRefusal: EraseContinuationRefusal?
+        /// The field when the first backspace was authorized. Later deletion math stays against
+        /// this picture; adopting a mid-erase node must not replace it with the field the
+        /// deletes have already changed, or a different control would match itself.
+        var eraseAnchor: EraseContinuation.EraseFieldPicture?
+        init(target: PasteboardBroker.PasteTarget, element: AXUIElement?, role: String?) {
+            self.target = target
+            self.element = element
+            self.role = role
         }
     }
 
@@ -625,11 +792,13 @@ public final class TextInjectionPipeline {
         let deliveryInputUnits: Int
         /// §2.2: the focused element resolved once at inject time and threaded through every AX
         /// read and write of this inject. `nil` when focus was missing or unreadable — the
-        /// HID-only path, where nothing below may query AX for a substitute.
-        let focusedElement: AXUIElement?
-        let focusedRole: String?
+        /// HID-only path, where nothing below may query AX for a substitute. Held by `adopted`
+        /// so a vouched element swap is what later reads and writes use.
+        let adopted: AdoptedInjectTarget
         let gateDecision: AXContextChecker.ExpandGateDecision
 
+        var focusedElement: AXUIElement? { adopted.element }
+        var focusedRole: String? { adopted.role }
         var snippet: SnippetModel { request.snippet }
         var erasePlan: ErasePlan { request.erasePlan }
         var clipboardOverride: String? { request.clipboardOverride }
@@ -642,8 +811,9 @@ public final class TextInjectionPipeline {
         var eraseCaretVouched: Bool { request.eraseCaretVouched }
         var operation: InjectCompletionGuard { request.operation }
         var inputRevision: UInt64 { request.inputRevision }
-        var target: PasteboardBroker.PasteTarget { request.target }
+        var target: PasteboardBroker.PasteTarget { adopted.target }
         var purpose: InjectionPurpose { request.purpose }
+        var replacesSelection: Bool { request.replacesSelection }
         var frontBundle: String { frontBundleID ?? "nil" }
     }
 
@@ -829,8 +999,7 @@ public final class TextInjectionPipeline {
             frontBundleID: frontBundleID,
             frontPID: frontApp?.processIdentifier,
             deliveryInputUnits: deliveryInputUnits,
-            focusedElement: element,
-            focusedRole: focusedRole,
+            adopted: AdoptedInjectTarget(target: request.target, element: element, role: focusedRole),
             gateDecision: decision
         )
 
@@ -844,22 +1013,43 @@ public final class TextInjectionPipeline {
         let purpose = request.purpose
         eraser.evaluateErasePrecondition(plan: erasePlan, focus: .resolved(element),
                                           insertionPointFollowsExpectedText: eraseCaretVouched,
-                                          intent: purpose.eraseIntent) { eraseCheck in
+                                          intent: purpose.eraseIntent) { incoming in
             // One live re-check answers both questions two separate reads used to ask: the
             // operation is still current, and the target — with this host's range gate — has
-            // not moved while the precondition may have waited out its settle.
-            guard self.canContinue(context, checkRange: PasteboardBroker.verifySelectionRange(
+            // not moved while the precondition may have waited out its settle. A failure here
+            // is not yet a refusal: the same field's AX node (WebKit) or caret (a trusted app,
+            // after the firing key) can change while the trigger is still at the caret. Only a
+            // live `.ok` on that element may follow it. The captured element's reading is not
+            // that voucher.
+            let beforeEraseRangeCheck = PasteboardBroker.verifySelectionRange(
                 bundleID: context.frontBundleID,
                 role: context.focusedRole,
                 phase: .beforeMutation
-            )) else {
-                let reason = "Expansion cancelled — input or target application changed before erase"
-                self.refuseInject(
-                    reason, path: "eraseContextChanged", swallowed: swallowed,
-                    allowKeyReplay: false,
-                    refuseContext: .capture(reason: reason, decision: decision), completion: completion
-                )
-                return
+            )
+            var eraseCheck = incoming
+            if !self.canContinue(context, checkRange: beforeEraseRangeCheck) {
+                switch self.adoptVouchedContinuation(
+                    context,
+                    rangeGate: .beforeMutation,
+                    checkRange: beforeEraseRangeCheck,
+                    continuation: .beforeErase
+                ) {
+                case .proceed:
+                    break
+                case .retarget:
+                    eraseCheck = .ok
+                case .refuse(let refusal):
+                    self.refuseInject(
+                        refusal.reason, path: refusal.path, swallowed: swallowed,
+                        allowKeyReplay: false,
+                        refuseContext: .capture(
+                            reason: refusal.reason, decision: decision,
+                            targetMismatch: refusal.recordedMismatch
+                        ),
+                        completion: completion
+                    )
+                    return
+                }
             }
             // #region agent log
             if eraseCheck != .ok {
@@ -970,27 +1160,72 @@ public final class TextInjectionPipeline {
         eraseCheck: ErasePreconditionResult,
         completion: @escaping InjectionCompletion
     ) {
-        // §2.2: every AX read and write below uses the element `injectWithFocus` resolved.
-        let focus = FocusedElementSource.resolved(context.focusedElement)
+        // Element at entry. A vouched retarget writes `context.adopted` before the AX write,
+        // and the `focus` read after that guard is the one those writes use.
+        let initialFocus = FocusedElementSource.resolved(context.focusedElement)
         let swallowed = context.swallowed
         let erasePlan = context.erasePlan
         let frontBundle = context.frontBundle
         let canProceed = {
-            self.canContinue(context)
+            if self.canContinue(context) { return true }
+            switch self.adoptVouchedContinuation(
+                context,
+                rangeGate: .beforeMutation,
+                checkRange: false,
+                continuation: .beforeErase
+            ) {
+            case .proceed, .retarget:
+                return true
+            case .refuse:
+                return false
+            }
         }
         let canProceedAfterMutation = {
             self.canContinue(context, phase: .afterMutation)
         }
+        // How many times this closure has already returned true. `shouldContinue` runs before
+        // each pair, so a failure is judged against keys already authorized, never against a
+        // deletion this post has not sent. The anchor is `context.focusedElement`, the element
+        // the box already accepted. A failed focus read is the replacement, and snapshotting
+        // that read would let the replacement match itself.
+        var postedBackspaces = 0
+        let postingContinue: () -> Bool = {
+            if self.canContinue(context, phase: .afterMutation) {
+                if context.adopted.eraseAnchor == nil, let element = context.focusedElement {
+                    context.adopted.eraseAnchor = self.eraseFieldPicture(element)
+                }
+                postedBackspaces += 1
+                return true
+            }
+            if context.adopted.eraseAnchor == nil, let element = context.focusedElement {
+                context.adopted.eraseAnchor = self.eraseFieldPicture(element)
+            }
+            guard context.adopted.eraseAnchor != nil else { return false }
+            switch self.adoptVouchedContinuation(
+                context,
+                rangeGate: .afterMutation,
+                checkRange: false,
+                continuation: .duringErase,
+                removedGraphemes: postedBackspaces
+            ) {
+            case .proceed, .retarget:
+                postedBackspaces += 1
+                return true
+            case .refuse:
+                return false
+            }
+        }
 
         if context.snippet.isImageSnippet {
             performImageInject(
-                context: context, focus: focus, beforeMutation: canProceed,
-                afterMutation: canProceedAfterMutation, completion: completion
+                context: context, focus: initialFocus, beforeMutation: canProceed,
+                afterMutation: canProceedAfterMutation, duringPost: postingContinue,
+                completion: completion
             )
             return
         }
 
-        let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext(focus: focus)
+        let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext(focus: initialFocus)
         guard let resolved = resolveText(context: context, completion: completion) else { return }
         let textToInject = resolved.text
         let cursorOffset = resolved.cursorOffset
@@ -1041,8 +1276,30 @@ public final class TextInjectionPipeline {
         )
         // #endregion
 
+        guard canProceed() else {
+            let refusal = context.adopted.lastRefusal ?? EraseContinuationRefusal(
+                path: "eraseContextChanged",
+                reason: "Expansion cancelled — input or target application changed before erase",
+                recordedMismatch: nil
+            )
+            refuseInject(
+                refusal.reason,
+                path: refusal.path, swallowed: swallowed,
+                allowKeyReplay: false,
+                refuseContext: .capture(
+                    reason: refusal.reason,
+                    decision: context.gateDecision,
+                    targetMismatch: refusal.recordedMismatch
+                ),
+                completion: completion
+            )
+            return
+        }
+
         // An unverifiable precondition cannot license writing through those same AX coordinates.
-        // Also skip apps/roles known to report successful writes without mutating.
+        // Also skip apps/roles known to report successful writes without mutating. Read after the
+        // guard: a retarget may have replaced the element and the role.
+        let focus = FocusedElementSource.resolved(context.focusedElement)
         let focusedRole = context.focusedRole
         var preferHID = eraseCheck.requiresHID || AXWriteCapabilityStore.shared.shouldSkipAXSelectedText(
             bundleID: frontBundle,
@@ -1061,15 +1318,6 @@ public final class TextInjectionPipeline {
             )
         }
         // #endregion
-
-        guard canProceed() else {
-            refuseInject(
-                "Expansion cancelled — input or target application changed before erase",
-                path: "eraseContextChanged", swallowed: swallowed,
-                allowKeyReplay: false, completion: completion
-            )
-            return
-        }
 
         switch effectivePlan {
         case .refuse(let reason):
@@ -1200,7 +1448,7 @@ public final class TextInjectionPipeline {
             insertionPointFollowsExpectedText: context.eraseCaretVouched,
             intent: context.purpose.eraseIntent,
             canProceed: canProceed,
-            postingContinue: canProceedAfterMutation,
+            postingContinue: postingContinue,
             onUnverifiableAfterWrite: { why in
                 // Self-healing: an attempted AX write left the field unreadable even after the
                 // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
@@ -1228,7 +1476,8 @@ public final class TextInjectionPipeline {
                 case .alreadyCondemned:
                     break
                 }
-            }
+            },
+            elementAfterContinue: { context.focusedElement }
         ) { erased in
             guard erased else {
                 self.refuseInject(
@@ -1244,20 +1493,35 @@ public final class TextInjectionPipeline {
                 )
                 return
             }
-            guard canProceedAfterMutation() else {
-                self.refuseInject(
-                    "Expansion cancelled — input or target application changed before insertion",
-                    path: "eraseContextChanged",
-                    swallowed: swallowed,
-                    allowKeyReplay: false,
-                    refuseContext: .capture(
-                        reason: "Input or target application changed before insertion",
-                        decision: context.gateDecision
-                    ),
-                    completion: completion
-                )
-                return
+            if !canProceedAfterMutation() {
+                switch self.adoptVouchedContinuation(
+                    context,
+                    rangeGate: .afterMutation,
+                    checkRange: false,
+                    continuation: .beforeInsertion
+                ) {
+                case .proceed, .retarget:
+                    break
+                case .refuse(let refusal):
+                    self.refuseInject(
+                        refusal.reason,
+                        path: refusal.path,
+                        swallowed: swallowed,
+                        allowKeyReplay: false,
+                        refuseContext: .capture(
+                            reason: refusal.reason,
+                            decision: context.gateDecision,
+                            targetMismatch: refusal.recordedMismatch
+                        ),
+                        completion: completion
+                    )
+                    return
+                }
             }
+            // The paste targets the element the continuation just adopted, not the one captured
+            // before the backspaces.
+            let focus = FocusedElementSource.resolved(context.focusedElement)
+            let focusedRole = context.focusedRole
             switch InjectionPlanner.insertAfterErase(
                 bundleID: context.frontBundleID,
                 text: textToInject,
@@ -1470,6 +1734,7 @@ public final class TextInjectionPipeline {
         focus: FocusedElementSource,
         beforeMutation canProceed: @escaping () -> Bool,
         afterMutation canProceedAfterMutation: @escaping () -> Bool,
+        duringPost postingContinue: @escaping () -> Bool,
         completion: @escaping InjectionCompletion
     ) {
         let swallowed = context.swallowed
@@ -1495,7 +1760,8 @@ public final class TextInjectionPipeline {
             plan: context.erasePlan,
             focus: focus,
             canProceed: canProceed,
-            postingContinue: canProceedAfterMutation
+            postingContinue: postingContinue,
+            elementAfterContinue: { context.focusedElement }
         ) { erased in
             guard erased else {
                 self.refuseInject(
@@ -1511,20 +1777,32 @@ public final class TextInjectionPipeline {
                 )
                 return
             }
-            guard canProceedAfterMutation() else {
-                self.refuseInject(
-                    "Expansion cancelled — input or target application changed before insertion",
-                    path: "eraseContextChanged",
-                    swallowed: swallowed,
-                    allowKeyReplay: false,
-                    refuseContext: .capture(
-                        reason: "Input or target application changed before insertion",
-                        decision: context.gateDecision
-                    ),
-                    completion: completion
-                )
-                return
+            if !canProceedAfterMutation() {
+                switch self.adoptVouchedContinuation(
+                    context,
+                    rangeGate: .afterMutation,
+                    checkRange: false,
+                    continuation: .beforeInsertion
+                ) {
+                case .proceed, .retarget:
+                    break
+                case .refuse(let refusal):
+                    self.refuseInject(
+                        refusal.reason,
+                        path: refusal.path,
+                        swallowed: swallowed,
+                        allowKeyReplay: false,
+                        refuseContext: .capture(
+                            reason: refusal.reason,
+                            decision: context.gateDecision,
+                            targetMismatch: refusal.recordedMismatch
+                        ),
+                        completion: completion
+                    )
+                    return
+                }
             }
+            let focus = FocusedElementSource.resolved(context.focusedElement)
             self.clipboard.pasteImageViaClipboard(
                 image: image,
                 imagePath: context.snippet.imagePath,

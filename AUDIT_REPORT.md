@@ -1,3 +1,197 @@
+# DevType audit 2026-10-24
+
+Read-only. No source, config, or dependency edits. No DevMap rebuild. No `.devcouncil` gap file. No card was deleted, merged, or moved to done.
+
+The label on every new card is `audit-2026-10-24`. The user-info date for the session was 2026-10-23. The audit session started 2026-10-24T03:26Z, and that is the label date.
+
+HEAD is `05b07a1be0019d2b21b56adb6591d6ddda55b11f` on `main`, six commits ahead of `origin/main`. One worktree: this checkout. GitPulse Insights (worktrees, agents, changes, collisions, ledger) returned `ok: false` / deferred under the git spawn rate limit on every call, including every auditor. Empty collision lists are unknown. Local `git worktree list` shows this checkout only.
+
+Dirty in this checkout, flagged in-flight, not edited:
+
+- `Sources/ExpanderEngine/Engine/AXContextChecker.swift`
+- `Sources/ExpanderEngine/Engine/EraseExecutor.swift`
+- `Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift`
+- `Tests/ExpanderEngineTests/DiagnosticReportTests.swift`
+- `Tests/ExpanderEngineTests/SourceContractTests.swift`
+- untracked `Sources/ExpanderEngine/Engine/EraseContinuation.swift`
+- untracked `Tests/ExpanderEngineTests/EraseContinuationTests.swift`
+
+DevMap CLI 0.2.5, schema 27, generation 695, `source_freshness` true, `is_fresh` true, `query_ready`. Degraded: Swift net resolution 582/1000, `walk_incomplete` (33555 of 104113 unresolved sites unattributed). Dead-symbol rows are confidence 0.4. The clone census was truncated. Empty graph answers were treated as unknown. Findings below are from files that were opened.
+
+The board had 30 open cards before this pass, none `in_progress`, none `done`. `gitpulse_get_task` still truncates near 19.5 KB. Overwrite replaces the description that is sent. Truncated cards were not overwritten.
+
+Roles were prompt contracts. The host cannot select Sonnet, Opus, or Fable. Slice audits and the grouping pass ran as Grok `code-reader` subagents. The parent re-read the cited lines and filed the board. The grouping subagent's plan was followed.
+
+The 2026-10-13 report is preserved unchanged under [Historical ledger](#historical-ledger-devtype-audit-2026-10-13). Where it and this tree disagree, this section wins.
+
+## Severity × dimension
+
+Counts are verified findings from this pass that are still open. A fold is one row. An existing card that was left alone is not a new row.
+
+| Dimension | Critical | High | Medium | Low |
+| --- | --- | --- | --- | --- |
+| Correctness | 0 new | 2 withheld, in-flight (combo-box erase skips the voucher; a partial Unicode insert returns success) | 4 (second undo backspace withheld; secret clipboard restore; whisper inference host; case-folded prefix hold; hotkey manager cleared) | 0 |
+| Security | 0 | 1 (blank `snippets.json` adopts empty and a later save can purge secrets) | 2 (diagnostic identifiers pasted raw; import symlink and absolute image path, both withheld) | 0 |
+| Defensive validation | 0 | 0 | 4 (unbounded library read; activity-history replace; nested lookup ignores disabled and app scope; uncapped import label and tags, withheld) | 0 |
+| Performance | 0 | 0 | 0 | 1 withheld (live transcript assembler still joins every segment) |
+| Async / error boundaries | 0 | 0 | 0 new | 0 |
+| Testability / CI | 0 | 0 | 0 new | 0 |
+| Modular architecture | 0 | 0 | 0 new | 0 |
+| Strict typing | 0 | 0 | 0 | 0 |
+
+The correctness medium cell is five findings. The table header says four because the hotkey row is also a UI state bug; it is counted once, under correctness.
+
+## Top 10 risks
+
+1. A 0-byte or whitespace `snippets.json` is adopted as an empty library. The empty-file banner does not block saves. The next save with secret purge on calls `purgeOrphans` with an empty set and can delete keychain secrets. Priority 1, high. `ft-d612c08302bc30c601bf3321d1abe3cf`.
+2. Combo-box erase keeps posting after focus moves. `canContinue` treats "identity check skipped" as permission to continue, so the new erase voucher never runs. Priority 1, high. In-flight on `TextInjectionPipeline.swift` and `EraseContinuation.swift`. Evidence belongs on `ft-1c6669c1ee7788129e57e56a0e19ca67`. Not written. Do not re-enable the GitPulse identity abort.
+3. A short Unicode insert that posts some characters and then fails returns `postedUnverified` and never uses the clipboard. Priority 1, high. Same in-flight pipeline file. Same withheld card.
+4. TIS off-main crash on macOS 27. Priority 0, critical. `ft-3859d51812d308f5967de27039296b60`. `KeyboardLayoutState` does not call TIS and primes on the main queue. Qualification (dSYM, manual macOS 27, full suite) stays open. Not re-filed. Not lowered.
+5. Dictation buffer lifetime. Priority 0, high. `ft-3e80b9bf50f8010a11a99f82d1535ebf`. The voice auditor reported the copy-before-lock path present. The parent did not re-read those lines this filing turn. Not marked done.
+6. Copying a secret drops the clipboard an expansion was about to restore. Priority 2, medium. `ft-2c1890de228cb32daed33c3b0ac22552`.
+7. Nested `{{snippet:}}` / `%snippet:` inserts disabled and app-excluded snippets, and a disabled earlier duplicate shadows the live one. Priority 2, medium. `ft-46b0dd013369967dff8eae2801a799ce`.
+8. Uncaught window ordering after a palette session. Priority 1, high. `ft-bcfad27abd6da4d8801efba5357e033f`. Production Swift sites found this pass go through `WindowOrdering` or `DTOrderFrontRegardlessCatchingException`. Full suite unmet. Not marked done.
+9. Managed whisper transcribe still POSTs the saved endpoint. The child listens on `127.0.0.1`. The user message allows `localhost` and `[::1]`. Priority 2, medium. Folded onto `ft-402cb3154acfe9940491d06453c6cdf1` (revision 7). Severity was not raised.
+10. Import of a symlink match file reads bytes outside the selected folder, and label, tags, and app lists have no character cap. Absolute `imagePath` values still resolve before the `..` check. Priority 2, medium. Evidence belongs on `ft-7f34376060acdc85a759e2fccc989c20`. The body could not be resent. Not written.
+
+## New cards
+
+| Item | Title | Priority | Severity | Status |
+| --- | --- | --- | --- | --- |
+| `ft-d612c08302bc30c601bf3321d1abe3cf` | Blank or whitespace snippets.json must not adopt an empty library or purge secrets | 1 | high | ready |
+| `ft-fa91b0be8625350fd6bdd44bec30be70` | Bound coordinatedRead and the non-JSON safety copy of snippets.json | 2 | medium | ready |
+| `ft-2c1890de228cb32daed33c3b0ac22552` | Copying a secret drops the clipboard an expansion was about to restore | 2 | medium | ready |
+| `ft-46b0dd013369967dff8eae2801a799ce` | Nested snippet lookup inserts disabled and app-excluded snippets | 2 | medium | ready |
+| `ft-c545c7aeb8e4e4ce8e05e23a0d53c9f9` | Keyboard Shortcuts reference clears the live HotkeyManager | 2 | medium | ready |
+| `ft-a010ea88776e4b8a6cc4d6b134b19c91` | Live speech assigns contextual strings with no 100-item cap | 2 | medium | ready |
+| `ft-cb05c092318ca709859c20b0ed42a860` | Case-insensitive immediate triggers are not held for a longer trigger that differs only in case | 2 | medium | ready |
+| `ft-a576580051bfdcd9c3abf864f97726cc` | Diagnostic identifiers under 512 bytes are pasted raw, including newlines | 2 | medium | ready |
+
+Stable keys are `gp-audit-20261024-*`.
+
+## Folded cards
+
+| Item | Revision after | What changed |
+| --- | --- | --- |
+| `ft-187f62faa97118dc223575f2d1c745d3` | 3 | Activity history added. A load error sets `events = []` and the next record replaces the file (`ActivityHistoryStore.swift:355-368`, `510-521`). Priority stays 2. Severity stays medium. Status stays review. Existing criteria were not marked met. |
+| `ft-402cb3154acfe9940491d06453c6cdf1` | 7 | Inference follows the saved endpoint, including `localhost` and `[::1]`, while the child binds `127.0.0.1` (`WhisperCppServerAdapter.swift:12`, `74`, `99-100`; `WhisperServerController.swift:224`, `484`; `LocalEndpointSecurity.swift:48-54`). Priority stays 2. Severity stays medium. Status stays review. The 2026-10-13 readiness and quit criteria were not marked met. |
+
+Both overwrites resent the full description and the full criteria that `gitpulse_get_task` had just returned, plus the new section. Logs were left in place.
+
+## Withheld folds
+
+These cards are too large to resend. The evidence is here. Do not build them from a partial body.
+
+| Item | What should be added | Do not |
+| --- | --- | --- |
+| `ft-1c6669c1ee7788129e57e56a0e19ca67` | Three criteria. Unstable roles must consult the erase voucher before more posts. A partial Unicode insert must not return success. A swallowed undo backspace that later fails `undoAttemptIsCurrent` must be replayed (`ExpansionLedger.swift:164-205`, `TextInjectionPipeline.swift:662-679`). The pipeline and `EraseContinuation.swift` are dirty. | Do not raise severity. The October 13 raise to high is still withheld. Do not re-enable the combo-box identity abort. Do not mark done. Do not edit the dirty files from this audit. |
+| `ft-d2d8bcc27acc03703dce238469b1b7e3` | The assembler `rebuild()` still joins every segment on the main thread. The voice auditor said the HUD tail cap is present. The parent did not re-read the assembler. | Do not mark done. No second quadratic card. |
+| `ft-7f34376060acdc85a759e2fccc989c20` | Three criteria. Refuse symlink match files and `group_*.xml` whose target is outside the import root (`EspansoImporter.swift:167-186`, `SnippetImporter.swift:60-68`, `TEImporter.swift:162-196`). Cap label, tags, app lists, and group name at the same gate as `isOversized` (`EspansoImporter.swift:412-461`). An untrusted library must not resolve an absolute `imagePath` (`ImageAttachmentStore.swift:351-371`). A user-authored absolute path is the documented legacy pass-through. Say so before changing it. Export already refuses absolute paths. | Do not new-card these. Do not break a hand-written absolute path without that sentence. Image export containment from 13 October stays on this card. |
+| `ft-5df87ce5d1c355297e97d73e1e31bd5e` | No new criterion this pass. The blank-file adopt is the new card, not this one. The October 13 severity raise to high was not re-applied. Backups use `0o600`. | Do not lower priority 1. Do not edit `SecretStore.swift` in the same wave as the blank-library card. |
+| `ft-5122c7a1d701be6adad52718cb978167` | No second benchmark card. Ceilings are asserted in `AuditBenchmarkTests.swift`. Hosted CI still does not run them. `LayoutBuffer` is a ring. `removeFirst` remains only in a comment. That note was not written onto the card. | Do not overwrite. |
+| `ft-230179974c5d2f0f5b035866978c402a` | Action SHAs in `ci.yml` and `release.yml` are pinned. The card sentence that they float at `@v4` is stale. Dependabot, the parity step, LCOV upload, and `swift test` versus `Scripts/test.sh` stay open. The sentinel is on this tree. A directory at the sentinel path still hides the flag, and the card log already says that. Diagnostic newline is the new card, not this one. | Do not overwrite. Do not lower. |
+| `ft-06d301ac43af0a7d1d43dbd24d676830` | No new evidence written. `PreferencesViewController.reloadAll` is still one pass per open. Item 11 archive sleep is owned by `ft-da0d4ce9`. | Do not lower. Do not also rewrite `withArchiveLock`. |
+| `ft-0e11634c8058959a738d6d12d10c4f33` | "Already converged" remains unverified on this checkout. The worktree named in the log is gone. | Do not overwrite. |
+
+## Verified in source, board left unchanged
+
+These were re-read. They were not marked `[MET — verified in source]` because the card body could not be resent, or because a qualification criterion is still open. None were moved to done.
+
+- `ft-93e0d03e` peer check: socket, mode `0600`, uid match, refuse before write (`LappiClient.swift:148-152`, `234-238`). Full suite was not run.
+- `ft-3859d518` layout owner never calls TIS (`KeyboardLayoutState.swift:108-126`). dSYM, manual macOS 27, and the full suite stay open.
+- `ft-6b20f61e` terminal refusal clears the preview and disables Replace when the text is empty (`AIPreviewPanel.swift:983-1001`). The stream `isPublishable` gate was not re-read.
+- `ft-4be020d4` a date phrase both parsers miss returns nil (`PaletteToolRouter.swift:86`). An unknown macro id returns nil (`91-93`). The live Foundation Models session is still unmet. `onCall` sites were not re-read this filing turn.
+- `ft-a57ffb45` package stamp still ignores untracked files (`Scripts/package-app.sh:115-116`). Release preflight still dies on any porcelain, including untracked (`Scripts/release-preflight.sh:37-39`).
+- `ft-c03bf527` the matching auditor read a locked language publish. The parent did not re-read `LocalizationManager.swift` this filing turn. Not marked met.
+
+Auditor-claimed and not re-read by the parent on the filing turn, so the cards were not edited: mic-buffer copy (`ft-3e80b9bf`), Gemini redirect and scratch delete (`ft-16d55bfc`), correction stop reason (`ft-7a3fc214`), protected-span length cap (`ft-21791f0c`), archive-lock sleep gone (`ft-da0d4ce9`), whisper quit without `usleep`. The 2026-10-14 log on `ft-187f62fa` says the shared loader is on main. Those lines were not re-read before the fold, and the old criteria were left unmarked.
+
+## Waves
+
+Fable's order. At most four cards. No shared planned file inside a wave. Withheld cards are not in a wave.
+
+Wave 1:
+
+1. `ft-d612c083` blank library. `SnippetStore+Reading.swift`, `SnippetStore+Load.swift`, `SnippetStore+ExternalChange.swift`, `SnippetStore+Save.swift`, `SnippetStore+SaveState.swift`, `SecretStore.swift`, `LibraryHealth.swift`.
+2. `ft-2c1890de` secret clipboard. `PasteboardBroker.swift`, `SecretClipboard.swift`. Do not edit `TextInjectionPipeline.swift`.
+3. `ft-402cb315` whisper inference fold. `WhisperServerController.swift`, `WhisperServerSetup.swift`, `WhisperCppServerAdapter.swift`, `LocalEndpointSecurity.swift`. Do not edit `AppDelegate.swift`.
+4. `ft-46b0dd01` nested eligibility. `NestedSnippetResolver.swift`, `SnippetMatchSnapshot.swift`, `EventTapEngine+State.swift`, `SnippetModel.swift`. Do not edit `TextInjectionPipeline.swift`. Do not share a wave with `ft-1c6669c1` if that card edits `EventTapEngine`.
+
+Wave 2, after wave 1 releases `SnippetStore+Reading.swift`:
+
+5. `ft-fa91b0be` read bound. `SnippetStore+Reading.swift` only.
+6. `ft-c545c7ae` hotkey nil manager. `ShortcutReferenceWindowController.swift`, `PreferencesWindowController.swift`, `ShortcutRecorder.swift`.
+7. `ft-a010ea88` live contextual cap. `LiveSpeechStream.swift` and the two adapters that already cap.
+8. `ft-cb05c092` case-folded prefix hold. `TriggerPrefixIndex.swift`, `TriggerPrefixScan.swift`.
+
+Wave 3, after wave 1 releases `SecretStore.swift` and wave 2 releases `ShortcutRecorder.swift`:
+
+9. `ft-187f62fa` activity-history fold, plus the criteria already on that card.
+10. `ft-a5765800` diagnostic identifiers. `DiagnosticPrivacy.swift`, `DiagnosticReport.swift`, `DevTypeLog.swift`. Do not edit `DiagnosticReportTests.swift` or `AXContextChecker.swift` while they are dirty.
+
+`PasteboardBroker.swift` is only on the wave 1 clipboard card. Do not start that card while another lane is editing it for the withheld engine work.
+
+## Rejected, not filed
+
+- `F-engine-5`. `AXTextWriter` treats any change from the baseline as replaced on purpose. A containment check double-applies when the host returns a stale value.
+- `F-pack-1`. `package-app.sh:142` interpolates `VERSION_SHORT` inside double quotes. Bash does not rescan that expansion for `$(...)` or for quotes. A legal git tag cannot contain a newline. The shell-execution claim is false. Confirmed with a local `bash -c` print. The untracked-file stamp bug stays on `ft-a57ffb45`.
+- Same-remainder matching across moved frames. A test pins it.
+- Widened-range clamping. A count-only plan is unavailable and skips the AX writer.
+- TIS off main as a new card. The layout owner is on `ft-3859d518`.
+- Import clearing `isSecret`. Nested lookup already drops secrets.
+- World-readable live library. Backups use `0o600`.
+- `UpdateChecker` cross-host redirect. The sanitized URL is a locally built GitHub URL.
+- YAML alias bombs past libyaml's nest cap, and CSV formula prefixes. Prefixes are already quoted.
+- Espanso matches stored case-insensitive. That matches DevType's default. Current Espanso docs were not re-read.
+- One-line model answer as a palette row. Routing stays off. A test expects the sanitize path.
+- Guided-table partials skipping `isPublishable`. Too weak to file.
+- Shell, regex, and `{{shortcut}}` macros. No executor in `Sources/ExpanderEngine/Macros`. They stay an owner decision.
+- Nested case precedence versus the matcher's exact-then-insensitive order. `NestedSnippetResolverTests` pins library order.
+- `NSDateFormatter` races. The 10.9+ header says the modern formatter is thread-safe. The cache lock covers construction.
+- Activity Center and snippet-manager `show(..., hotkeyManager: nil)` else branches. They run only when `NSApp.delegate` is not `AppDelegate`.
+- Gemini key accessibility weaker than `WhenUnlockedThisDeviceOnly`. macOS enforcement was not verified.
+- `localhost` as a DNS rebind of a local model. The spelling check and the proxy disable are present. A privileged `/etc/hosts` change is outside the product.
+- Direct production `makeKeyAndOrderFront` outside the trampolines. The app-shell search found production sites on `WindowOrdering` or `DTOrderFrontRegardlessCatchingException`.
+- A second benchmark card.
+
+## Decisions made without asking
+
+- Slice auditors and the grouping advisor were Grok `code-reader` subagents. The host has no model parameter. The parent verified cited lines.
+- The grouping advisor's split was followed, including separate cards for the blank-library adopt and the read ceiling even though both touch `SnippetStore+Reading.swift`.
+- `SecretClipboard.swift` was added to the clipboard card's planned files. The advisor named only `PasteboardBroker.swift`. The call that drops the ticket is in `SecretClipboard.swift`. That does not add a wave conflict.
+- GitPulse scans failed. Local `git status` and `git worktree list` are the fallback and are labeled as such.
+- Auditors returned findings in their final message. They did not write repo files.
+- The 2026-10-13 report was kept by prepending this pass. It was not deleted.
+- No `devmap gap-record`. The state directory is protected.
+- No Windows or Linux port findings. The package is macOS 14+.
+- `F-store-2` was downgraded from the auditor's priority 1 to priority 2 before filing. That is a new finding, not a lowering of an existing card.
+- Import symlink, import field caps, and absolute image paths were not given a new card. They belong on `ft-7f343760`, and that body cannot be resent.
+- Engine severity was not raised. Voice quadratic evidence was not written onto `ft-d2d8bcc2`.
+- Nothing was merged, deleted, or moved to done. No `in_progress` card was touched. There were none.
+- Long-card overwrites were withheld. Wiping a description is data loss.
+- `related_tasks_exist` refusals were read from the titles and the bodies already fetched this audit. Genuinely separate cards were retried with `reviewed_related` naming every listed id.
+
+## Owner decisions, not resolved here
+
+- v1.3.0 pipeline policy: SBOM, checksum, Xcode pin, rollback, and the local-only v1.2.1 tag. `ft-9291b0fa7c3466737d650505144a527e`. `DEVTYPE_SKIP_NOTARIZE=1` stays on that card.
+- Developer ID, notarization, and Homebrew. `ft-3ca735f221ea890cbd7b033c1a8595af`.
+- URL scheme and Services security sign-off. `ft-0e5ece50f52cab9492c6f91a92a0729b`. The sync auditor reported the `devtype` scheme present in `Resources/Info.plist`. The parent did not re-open that file. The October 13 sentence that the scheme is absent is stale if the auditor's line holds.
+- Shell, regex, and `{{shortcut}}` macros. Still not implemented.
+- Voice qualification defaults: WER/CER corpus, zero-egress proof, live-typing default, Gemini endpoint. `ft-327ddd0e`.
+- Semantic routing stays off until that default is decided. `ft-f4d2393d`.
+- Manual macOS 27 run and the 1.2.1 dSYM for the TIS card.
+- Windsurf bundle id for injection C3. Do not invent one.
+
+## What was not run
+
+No tests. No build. `Scripts/test.sh` was not run. Browser verification does not apply. Building waits for a go-ahead.
+
+---
+
+# Historical ledger: DevType audit 2026-10-13
+
+The text below is the 2026-10-13 report, unchanged. It describes HEAD `31773e8`. It is not the current tree.
+
 # DevType audit 2026-10-13
 
 Read-only. No source, config, or dependency edits. No DevMap rebuild. No `.devcouncil` gap file. No card was deleted, merged, or moved to done.

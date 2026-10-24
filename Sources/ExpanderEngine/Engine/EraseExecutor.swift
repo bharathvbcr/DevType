@@ -380,6 +380,7 @@ public final class EraseExecutor {
         canProceed: @escaping () -> Bool = { true },
         postingContinue: (() -> Bool)? = nil,
         onUnverifiableAfterWrite: ((String) -> Void)? = nil,
+        elementAfterContinue: (() -> AXUIElement?)? = nil,
         completion: @escaping (Bool) -> Void
     ) {
         let duringPost = postingContinue ?? canProceed
@@ -399,7 +400,9 @@ public final class EraseExecutor {
         // Resolve focus once (or take the inject's) and share it: `focusedElement()` is a
         // multi-step AX round trip and this sits on the keystroke path. Attribute reads through
         // the handle stay live, so the precondition still sees the post-collapse selection.
-        let element = focus.element
+        // Read after `canProceed`: that guard may have adopted a vouched replacement of the
+        // same field, and `focus` was captured before it.
+        let element = elementAfterContinue?() ?? focus.element
         if !intent.isUndo, let element { ax.collapseSelectionToCaret(element: element) }
         evaluateErasePrecondition(
             plan: plan,

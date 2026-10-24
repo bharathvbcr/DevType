@@ -241,6 +241,15 @@ final class DiagnosticReportTests: XCTestCase {
         XCTAssertTrue(
             DiagnosticReport.formatHeader(context).contains("Target mismatch: (not a target refusal)")
         )
+
+        context = Self.refuseContext(
+            reason: "Input or target application changed before insertion",
+            targetMismatch: "beforeErase:elementChanged"
+        )
+        XCTAssertTrue(
+            DiagnosticReport.formatHeader(context).contains("Target mismatch: beforeErase:elementChanged"),
+            "an erase continuation refusal must name the phase and the half that moved"
+        )
     }
 
     private static func refuseContext(
