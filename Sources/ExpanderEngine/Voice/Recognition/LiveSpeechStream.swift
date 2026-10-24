@@ -144,6 +144,22 @@ public final class LiveSpeechStream: @unchecked Sendable {
 
     // MARK: - Recognition
 
+    /// The buffer request live recognition starts from. Contextual strings are capped here so a
+    /// test can read them without starting a recognition task.
+    static func audioBufferRecognitionRequest(
+        contextualStrings: [String]
+    ) -> SFSpeechAudioBufferRecognitionRequest {
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        let capped = AppleSpeechAnalyzerRuntime.contextualTerms(from: contextualStrings)
+        if !capped.isEmpty {
+            request.contextualStrings = capped
+        }
+        request.addsPunctuation = true
+        request.requiresOnDeviceRecognition = true
+        return request
+    }
+
     private func startTaskLocked() {
         guard !isFinished else { return }
         guard consecutiveEmptyRestarts < Self.maxConsecutiveEmptyRestarts else {
@@ -204,13 +220,7 @@ public final class LiveSpeechStream: @unchecked Sendable {
                 + "pendingBuffers=\(pendingBuffers.count) emptyRestarts=\(consecutiveEmptyRestarts)"
         )
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        if !contextualStrings.isEmpty {
-            request.contextualStrings = contextualStrings
-        }
-        request.addsPunctuation = true
-        request.requiresOnDeviceRecognition = true
+        let request = Self.audioBufferRecognitionRequest(contextualStrings: contextualStrings)
         activeRequest = request
 
         // Replay buffers captured while no request was live, so the restart window
