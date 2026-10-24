@@ -271,6 +271,11 @@ enum HotkeyPreferences {
 /// pass one, so a voice rebind stays silent the way it always has. A Bool would mean
 /// "do the other thing"; the closure is the caller's own failure policy.
 enum HotkeyBindingApply {
+    /// Stands in for `manager.apply` (the `registerAll` path) on the non-nil branch.
+    /// Nil in production. A test sets it to count that branch without Carbon registration;
+    /// the defaults-only branch never calls it.
+    static var commitApplyHook: ((DevTypeShortcut, BuiltInHotkey) -> OSStatus)?
+
     /// `failureLoc` is the caller's choice to surface a Carbon refusal. Voice omits it.
     static func commit(
         _ shortcut: DevTypeShortcut?,
@@ -287,7 +292,8 @@ enum HotkeyBindingApply {
             reload()
             return
         }
-        let status = manager.apply(shortcut, to: kind)
+        // Hook replaces apply. Calling both would reach InstallEventHandler / RegisterEventHotKey.
+        let status = commitApplyHook?(shortcut, kind) ?? manager.apply(shortcut, to: kind)
         if status != noErr, let failureLoc {
             DevTypeAlert.warn(
                 title: failureLoc.s("prefs.hotkeys.failed.title"),
