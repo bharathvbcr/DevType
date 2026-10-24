@@ -15,14 +15,20 @@ final class NestedSnippetResolverTests: XCTestCase {
         _ trigger: String,
         _ body: String,
         caseSensitive: Bool = false,
-        isSecret: Bool = false
+        isSecret: Bool = false,
+        enabled: Bool = true,
+        includeApps: [String] = [],
+        excludeApps: [String] = []
     ) -> SnippetModel {
         var model = SnippetModel(
             title: trigger,
             triggerKeyword: trigger,
             replacementText: isSecret ? "" : body,
             isCaseSensitive: caseSensitive,
-            requireWordBoundary: true
+            requireWordBoundary: true,
+            enabled: enabled,
+            includeApps: includeApps,
+            excludeApps: excludeApps
         )
         model.isSecret = isSecret
         return model
@@ -171,6 +177,223 @@ final class NestedSnippetResolverTests: XCTestCase {
             }
             assertAgrees(library, spellings)
         }
+    }
+
+    // MARK: - Disabled snippets must not keep the slot
+
+    func testDisabledSnippetDoesNotAnswerAndLaterEnabledDoes() {
+        let library = [
+            snippet(";t", "off", enabled: false),
+            snippet(";t", "on")
+        ]
+        let resolver = NestedSnippetResolver(snippets: library)
+        XCTAssertNil(
+            NestedSnippetResolver(snippets: [snippet(";t", "off", enabled: false)])
+                .replacement(for: ";t")
+        )
+        XCTAssertEqual(resolver.replacement(for: ";t"), "on")
+        XCTAssertEqual(resolver.replacement(for: ";T"), "on")
+        XCTAssertEqual(resolver.lookup(";t"), "on")
+    }
+
+    /// A disabled case-insensitive snippet is not in the folded table, so it cannot beat a
+    /// later case-sensitive exact match — and a folded query it would have claimed is unanswered.
+    func testDisabledFoldedSnippetDoesNotShadowLaterExactMatch() {
+        let resolver = NestedSnippetResolver(snippets: [
+            snippet(";Ab", "off", enabled: false),
+            snippet(";ab", "exact", caseSensitive: true)
+        ])
+        XCTAssertEqual(resolver.replacement(for: ";ab"), "exact")
+        XCTAssertNil(resolver.replacement(for: ";AB"))
+    }
+
+    // MARK: - App scope is decided at lookup
+
+    func testExcludedOrIncludeRestrictedSnippetDoesNotShadowALaterEligibleOne() {
+        let safari = "com.apple.Safari"
+        let chrome = "com.google.Chrome"
+        let mail = "com.apple.mail"
+        let library = [
+            snippet(";go", "safari only", includeApps: ["COM.APPLE.SAFARI"]),
+            snippet(";go", "not in mail", excludeApps: [mail]),
+            snippet(";go", "everywhere")
+        ]
+
+        func resolve(_ bundle: String?) -> String? {
+            NestedSnippetResolver(snippets: library, frontmostBundleID: { bundle })
+                .replacement(for: ";go")
+        }
+
+        XCTAssertEqual(resolve(safari), "safari only", "include list matches case-insensitively")
+        XCTAssertEqual(resolve("com.apple.safari"), "safari only")
+        XCTAssertEqual(resolve(chrome), "not in mail", "the include-restricted snippet must not keep the slot")
+        XCTAssertEqual(resolve(mail), "everywhere", "exclusion wins, then the next eligible snippet")
+        XCTAssertEqual(
+            resolve(nil), "not in mail",
+            "unknown app: include-restricted does not answer; exclude-only still does"
+        )
+        XCTAssertEqual(
+            NestedSnippetResolver(snippets: library, frontmostBundleID: { "" }).replacement(for: ";go"),
+            "not in mail",
+            "an empty bundle is an unknown app, same as nil"
+        )
+    }
+
+    func testSameTriggerAnswersInTheAppWhereTheEarlierSnippetApplies() {
+        let library = [
+            snippet(";app", "in safari", includeApps: ["com.apple.Safari"]),
+            snippet(";app", "in mail", includeApps: ["com.apple.mail"])
+        ]
+        let safari = NestedSnippetResolver(snippets: library) { "com.apple.Safari" }
+        let mail = NestedSnippetResolver(snippets: library, frontmostBundleID: { "com.apple.mail" })
+        let chrome = NestedSnippetResolver(snippets: library, frontmostBundleID: { "com.google.Chrome" })
+        XCTAssertEqual(safari.replacement(for: ";app"), "in safari")
+        XCTAssertEqual(mail.lookup(";app"), "in mail")
+        XCTAssertNil(chrome.replacement(for: ";app"))
+        XCTAssertNil(
+            NestedSnippetResolver(snippets: library).replacement(for: ";app"),
+            "nil bundle does not satisfy an include list"
+        )
+    }
+
+    /// Library order still decides once ineligible snippets are skipped. An excluded earlier
+    /// folded match must not beat a later exact one, and must beat it again where it applies.
+    func testIneligibleEarlierFoldedMatchDoesNotKeepTheSlot() {
+        let library = [
+            snippet(";Y", "folded first", excludeApps: ["com.apple.Safari"]),
+            snippet(";y", "exact later", caseSensitive: true)
+        ]
+        let safari = NestedSnippetResolver(
+            snippets: library,
+            frontmostBundleID: { "com.apple.Safari" }
+        )
+        let textEdit = NestedSnippetResolver(
+            snippets: library,
+            frontmostBundleID: { "com.apple.TextEdit" }
+        )
+        XCTAssertEqual(safari.replacement(for: ";y"), "exact later")
+        XCTAssertEqual(
+            textEdit.replacement(for: ";y"), "folded first",
+            "where the earlier folded snippet applies, library order still beats the exact table"
+        )
+        XCTAssertEqual(
+            NestedSnippetResolver(snippets: library).replacement(for: ";y"), "folded first",
+            "exclude-only still answers when the app is unknown"
+        )
+    }
+
+    func testExclusionWinsOverInclusionForTheSameBundle() {
+        let library = [
+            snippet(
+                ";x", "blocked",
+                includeApps: ["com.apple.Safari"],
+                excludeApps: ["com.apple.Safari"]
+            ),
+            snippet(";x", "fallback")
+        ]
+        let resolver = NestedSnippetResolver(snippets: library) { "com.apple.Safari" }
+        XCTAssertEqual(resolver.replacement(for: ";x"), "fallback")
+    }
+
+    func testBundleProviderIsReadOnEachLookup() {
+        var bundle: String? = "com.apple.Safari"
+        let resolver = NestedSnippetResolver(
+            snippets: [
+                snippet(";live", "safari", includeApps: ["com.apple.Safari"]),
+                snippet(";live", "other")
+            ],
+            frontmostBundleID: { bundle }
+        )
+        XCTAssertEqual(resolver.lookup(";live"), "safari")
+        bundle = "com.google.Chrome"
+        XCTAssertEqual(resolver.replacement(for: ";live"), "other")
+        bundle = nil
+        XCTAssertEqual(resolver.lookup(";live"), "other")
+    }
+
+    func testSnapshotForwardsTheBundleProvider() {
+        var bundle: String? = "com.apple.mail"
+        let snapshot = SnippetMatchSnapshot(
+            snippets: [
+                snippet(";m", "mail", excludeApps: ["com.google.Chrome"]),
+                snippet(";m", "fallback")
+            ],
+            frontmostBundleID: { bundle }
+        )
+        XCTAssertEqual(snapshot.snippets.count, 2, "app scope is not filtered when the snapshot is built")
+        XCTAssertEqual(snapshot.nestedResolver.lookup(";m"), "mail")
+        bundle = "com.google.Chrome"
+        XCTAssertEqual(snapshot.nestedResolver.replacement(for: ";m"), "fallback")
+    }
+
+    func testEngineNestedLookupReadsTheCachedFrontmostBundle() {
+        let engine = EventTapEngine()
+        let disabled = snippet(";d", "off", enabled: false)
+        let safari = snippet(";d", "safari", includeApps: ["com.apple.Safari"])
+        let other = snippet(";d", "other")
+        engine.snippets = [disabled, safari, other]
+        XCTAssertEqual(
+            engine.matchSnapshot.snippets.map(\.replacementText),
+            ["off", "safari", "other"],
+            "the shared snapshot still holds disabled and app-scoped snippets"
+        )
+
+        func setBundle(_ bundleID: String?) {
+            engine.contextLock.lock()
+            engine._frontmostContext = EventTapEngine.FrontmostContext(bundleID: bundleID)
+            engine.contextLock.unlock()
+        }
+
+        setBundle("com.apple.Safari")
+        XCTAssertEqual(engine.matchSnapshot.nestedResolver.lookup(";d"), "safari")
+        setBundle("com.google.Chrome")
+        XCTAssertEqual(engine.matchSnapshot.nestedResolver.replacement(for: ";d"), "other")
+        setBundle(nil)
+        XCTAssertEqual(
+            engine.matchSnapshot.nestedResolver.replacement(for: ";d"), "other",
+            "include-restricted does not answer an unknown app; the disabled snippet still must not"
+        )
+    }
+
+    // MARK: - Unicode and empty triggers
+
+    func testUnicodeTriggersAndEmptyTriggerSkipIneligibleEarlierSnippets() {
+        let library = [
+            snippet("café", "off", enabled: false),
+            snippet("café", "coffee"),
+            snippet("→go", "off", enabled: false),
+            snippet("→go", "arrow", caseSensitive: true),
+            snippet("", "off", enabled: false),
+            snippet("", "restricted", includeApps: ["com.apple.Safari"]),
+            snippet("", "blank")
+        ]
+        let resolver = NestedSnippetResolver(snippets: library, frontmostBundleID: { nil })
+        XCTAssertEqual(resolver.replacement(for: "CAFÉ"), "coffee")
+        XCTAssertEqual(resolver.replacement(for: "Café"), "coffee")
+        XCTAssertEqual(resolver.replacement(for: "café"), "coffee")
+        XCTAssertEqual(resolver.replacement(for: "→go"), "arrow")
+        XCTAssertNil(resolver.replacement(for: "→GO"), "the case-sensitive unicode trigger does not fold")
+        XCTAssertEqual(
+            resolver.replacement(for: ""), "blank",
+            "nil bundle: the include-restricted empty trigger does not answer, and the disabled one does not either"
+        )
+        let safari = NestedSnippetResolver(
+            snippets: library,
+            frontmostBundleID: { "com.apple.Safari" }
+        )
+        XCTAssertEqual(safari.replacement(for: ""), "restricted")
+    }
+
+    func testExcludeOnlyUnicodeTriggerStillAnswersWhenTheAppIsUnknown() {
+        let resolver = NestedSnippetResolver(snippets: [
+            snippet("café", "not in mail", excludeApps: ["com.apple.mail"])
+        ])
+        XCTAssertEqual(resolver.replacement(for: "CAFÉ"), "not in mail")
+        let mail = NestedSnippetResolver(snippets: [
+            snippet("café", "not in mail", excludeApps: ["com.apple.mail"]),
+            snippet("café", "fallback")
+        ], frontmostBundleID: { "com.apple.mail" })
+        XCTAssertEqual(mail.replacement(for: "café"), "fallback")
     }
 
     // MARK: - The cost that motivated it

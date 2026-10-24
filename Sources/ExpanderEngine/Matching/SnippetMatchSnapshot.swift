@@ -24,11 +24,21 @@ public final class SnippetMatchSnapshot {
     /// Monotonic revision so observers can detect a swap without comparing arrays.
     public let revision: UInt64
 
-    public init(snippets: [SnippetModel], revision: UInt64 = 0) {
+    /// `frontmostBundleID` is read when a nested reference resolves, not when this snapshot is
+    /// built. App scope must not be baked in: one snapshot serves every frontmost app. The
+    /// default leaves the bundle unknown.
+    public init(
+        snippets: [SnippetModel],
+        revision: UInt64 = 0,
+        frontmostBundleID: @escaping () -> String? = { nil }
+    ) {
         self.snippets = snippets
         self.matcher = AbbreviationMatcher(snippets: snippets)
         self.prefixIndex = TriggerPrefixIndex(snippets: snippets)
-        self.nestedResolver = NestedSnippetResolver(snippets: snippets)
+        self.nestedResolver = NestedSnippetResolver(
+            snippets: snippets,
+            frontmostBundleID: frontmostBundleID
+        )
         self.revision = revision
     }
 
