@@ -229,10 +229,19 @@ public final class PasteboardBroker {
     /// Abandon scheduled restoration and paste work when a deliberate copy supersedes it.
     /// Clipboard handling markers are shared conventions and never establish ownership.
     public func invalidatePendingRestore() {
+        _ = suspendPendingRestoreKeepingUserSnapshot()
+    }
+
+    /// A secret copy must supersede the expansion's scheduled restore without discarding
+    /// the user clipboard that restore was going to put back. The generation bump makes
+    /// `releaseWhenDue` bail; clearing the ticket stops it from firing later.
+    public func suspendPendingRestoreKeepingUserSnapshot() -> PasteboardSnapshot? {
         _ = beginRestoreGeneration()
         restoreLock.lock()
+        let snapshot = pendingTicket?.oldItems
         pendingTicket = nil
         restoreLock.unlock()
+        return snapshot
     }
 
     /// Pure policy: may the contents currently on the board be adopted as "the user's clipboard"
@@ -1392,7 +1401,7 @@ public final class PasteboardBroker {
         return PasteboardBroker.snapshotPasteboard(pasteboard)
     }
 
-    private func registerPendingTicket(_ ticket: ClipboardTicket) {
+    func registerPendingTicket(_ ticket: ClipboardTicket) {
         restoreLock.lock()
         pendingTicket = ticket
         restoreLock.unlock()

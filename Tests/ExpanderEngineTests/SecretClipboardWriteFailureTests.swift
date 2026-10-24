@@ -222,4 +222,261 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
         }
     }
 
+    func testParkedClipboardReturnsWhenSecretWriteFails() {
+        let parked = "parked-user-clipboard"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let clipboard = SecretClipboard()
+        let writer = Writer(failure: .concealed)
+
+        let result = clipboard.copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { _, _ in XCTFail("A failed secret write must not schedule a clear") }
+        )
+
+        XCTAssertEqual(result, .writeFailed)
+        XCTAssertFalse(result.didCopy)
+        XCTAssertEqual(
+            writer.currentString, parked,
+            "A failed secret copy must put the expansion's parked user clipboard back"
+        )
+        XCTAssertFalse(writer.currentString?.isEmpty ?? true)
+    }
+
+    func testParkedClipboardReturnsWhenSecretTimerClears() {
+        let parked = "parked-user-clipboard"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let clipboard = SecretClipboard()
+        let writer = Writer(failure: .none)
+        var fire: (() -> Void)?
+
+        let result = clipboard.copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { action, _ in fire = action }
+        )
+
+        XCTAssertTrue(result.didCopy)
+        XCTAssertEqual(writer.currentString, "secret")
+        fire?()
+        XCTAssertEqual(
+            writer.currentString, parked,
+            "The timed clear must restore the parked user clipboard, not leave the board empty"
+        )
+        XCTAssertFalse(clipboard.hasOutstandingSecret)
+    }
+
+    func testUnicodeParkedClipboardRoundTripsOnFailureAndOnTheTimer() {
+        let parked = "café 🔐 東京 — “quotes”"
+        let (failBroker, failBoard) = park(parked)
+        defer { failBoard.releaseGlobally() }
+        let failWriter = Writer(failure: .transient)
+        XCTAssertEqual(
+            SecretClipboard().copyResult(
+                "secret",
+                pasteboardWriter: failWriter,
+                broker: failBroker,
+                schedule: { _, _ in }
+            ),
+            .writeFailed
+        )
+        XCTAssertEqual(failWriter.currentString, parked)
+
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        var fire: (() -> Void)?
+        let clipboard = SecretClipboard()
+        XCTAssertTrue(clipboard.copyResult(
+            "secret",
+            pasteboard: board,
+            broker: broker,
+            schedule: { action, _ in fire = action }
+        ).didCopy)
+        XCTAssertEqual(board.string(forType: .string), "secret")
+        fire?()
+        XCTAssertEqual(board.string(forType: .string), parked)
+        XCTAssertEqual(board.data(forType: .string), Data(parked.utf8))
+    }
+
+    func testNoPendingTicketStillClearsOnTheTimerAndFailureIsNotSuccess() {
+        let broker = PasteboardBroker()
+        let clipboard = SecretClipboard()
+        let success = Writer(failure: .none)
+        var fire: (() -> Void)?
+        XCTAssertTrue(clipboard.copyResult(
+            "secret",
+            pasteboardWriter: success,
+            broker: broker,
+            schedule: { action, _ in fire = action }
+        ).didCopy)
+        fire?()
+        XCTAssertNil(success.currentString)
+        XCTAssertFalse(clipboard.hasOutstandingSecret)
+
+        let failure = Writer(failure: .string)
+        let failed = clipboard.copyResult(
+            "secret",
+            pasteboardWriter: failure,
+            broker: PasteboardBroker(),
+            schedule: { _, _ in XCTFail("Failure must not schedule") }
+        )
+        XCTAssertEqual(failed, .writeFailed)
+        XCTAssertFalse(failed.didCopy)
+        XCTAssertNil(failure.currentString)
+    }
+
+    func testUserChangeBeforeTimerDoesNotWriteParkedItems() {
+        let parked = "parked-user-clipboard"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let clipboard = SecretClipboard()
+        let writer = Writer(failure: .none)
+        var fire: (() -> Void)?
+        XCTAssertTrue(clipboard.copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { action, _ in fire = action }
+        ).didCopy)
+        let writesBeforeTimer = writer.stringWrites
+        writer.simulateExternalCopy("the user copy")
+
+        fire?()
+
+        XCTAssertEqual(writer.currentString, "the user copy")
+        XCTAssertEqual(
+            writer.stringWrites, writesBeforeTimer,
+            "A moved change count is supersededByUser; the parked snapshot must not be written"
+        )
+        XCTAssertFalse(clipboard.hasOutstandingSecret)
+    }
+
+    func testConcealedParkedSnapshotIsNotRestoredAsTheUserClipboard() {
+        XCTAssertFalse(
+            PasteboardBroker.mayAdoptAsUserClipboard(types: [.string, PasteboardBroker.concealedType])
+        )
+        let (failBroker, failBoard) = park(
+            "do-not-restore-secret",
+            extra: [PasteboardBroker.concealedType: Data()]
+        )
+        defer { failBoard.releaseGlobally() }
+        let failWriter = Writer(failure: .generated)
+        XCTAssertEqual(
+            SecretClipboard().copyResult(
+                "secret",
+                pasteboardWriter: failWriter,
+                broker: failBroker,
+                schedule: { _, _ in }
+            ),
+            .writeFailed
+        )
+        XCTAssertNotEqual(failWriter.currentString, "do-not-restore-secret")
+        XCTAssertNil(failWriter.currentString)
+
+        let (broker, board) = park(
+            "do-not-restore-secret",
+            extra: [PasteboardBroker.concealedType: Data()]
+        )
+        defer { board.releaseGlobally() }
+        let clipboard = SecretClipboard()
+        let writer = Writer(failure: .none)
+        var fire: (() -> Void)?
+        XCTAssertTrue(clipboard.copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { action, _ in fire = action }
+        ).didCopy)
+        fire?()
+        XCTAssertNil(writer.currentString)
+        XCTAssertNotEqual(writer.currentString, "do-not-restore-secret")
+    }
+
+    func testEmptySecretDoesNotDropAPendingRestoreTicket() {
+        let parked = "still-parked"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let clipboard = SecretClipboard()
+        let writer = Writer(failure: .none)
+        let generation = broker.currentRestoreGeneration()
+
+        XCTAssertEqual(
+            clipboard.copyResult("", pasteboardWriter: writer, broker: broker),
+            .empty
+        )
+        XCTAssertEqual(broker.currentRestoreGeneration(), generation)
+        XCTAssertEqual(writer.clearCount, 0)
+
+        var fire: (() -> Void)?
+        XCTAssertTrue(clipboard.copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { action, _ in fire = action }
+        ).didCopy)
+        fire?()
+        XCTAssertEqual(writer.currentString, parked)
+    }
+
+    func testOverlappingSecretCopiesDoNotRestoreTheFirstSecret() {
+        let parked = "parked-user-clipboard"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let clipboard = SecretClipboard()
+        let writer = Writer(failure: .none)
+        var scheduled: [() -> Void] = []
+
+        XCTAssertTrue(clipboard.copyResult(
+            "secret-one",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { action, _ in scheduled.append(action) }
+        ).didCopy)
+        XCTAssertTrue(clipboard.copyResult(
+            "secret-two",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { action, _ in scheduled.append(action) }
+        ).didCopy)
+        XCTAssertEqual(scheduled.count, 2)
+
+        scheduled[0]()
+        XCTAssertEqual(writer.currentString, "secret-two")
+        XCTAssertNotEqual(writer.currentString, "secret-one")
+        XCTAssertTrue(clipboard.hasOutstandingSecret)
+
+        scheduled[1]()
+        XCTAssertNotEqual(writer.currentString, "secret-one")
+        XCTAssertNotEqual(writer.currentString, "secret-two")
+        XCTAssertEqual(
+            writer.currentString, parked,
+            "The second clear restores the parked user clipboard, never the earlier secret"
+        )
+        XCTAssertFalse(clipboard.hasOutstandingSecret)
+    }
+
+    private func park(
+        _ text: String,
+        extra: [NSPasteboard.PasteboardType: Data] = [:]
+    ) -> (PasteboardBroker, NSPasteboard) {
+        let broker = PasteboardBroker()
+        let board = NSPasteboard(name: NSPasteboard.Name("devtype.tests.secret.park.\(UUID())"))
+        var item: [NSPasteboard.PasteboardType: Data] = [.string: Data(text.utf8)]
+        for (type, data) in extra {
+            item[type] = data
+        }
+        let generation = broker.beginRestoreGeneration()
+        broker.registerPendingTicket(PasteboardBroker.ClipboardTicket(
+            pasteboard: board,
+            oldItems: [item],
+            generation: generation,
+            targetChangeCount: board.changeCount
+        ))
+        return (broker, board)
+    }
+
 }
