@@ -85,7 +85,9 @@ public final class PasteboardBroker {
     enum ClipboardPublicationOutcome: Equatable {
         case published(ownedChangeCount: Int)
         case writeFailed(ownedChangeCount: Int)
-        case ownershipLost
+        /// `nil` means the count moved before `clearContents`. A value means this call
+        /// already cleared, then a later write saw a different count.
+        case ownershipLost(ownedChangeCount: Int?)
         case notPrepared
     }
 
@@ -104,13 +106,13 @@ public final class PasteboardBroker {
         publicationLock.lock()
         defer { publicationLock.unlock() }
         if let expectedChangeCount, currentChangeCount() != expectedChangeCount {
-            return .ownershipLost
+            return .ownershipLost(ownedChangeCount: nil)
         }
         let owned = clearContents()
         for write in writes {
-            guard currentChangeCount() == owned else { return .ownershipLost }
+            guard currentChangeCount() == owned else { return .ownershipLost(ownedChangeCount: owned) }
             let wrote = write()
-            guard currentChangeCount() == owned else { return .ownershipLost }
+            guard currentChangeCount() == owned else { return .ownershipLost(ownedChangeCount: owned) }
             guard wrote else { return .writeFailed(ownedChangeCount: owned) }
         }
         return .published(ownedChangeCount: owned)
@@ -679,6 +681,7 @@ public final class PasteboardBroker {
             restore(ClipboardTicket(pasteboard: pasteboard, oldItems: oldItems,
                                     generation: generation, targetChangeCount: owned))
         case .ownershipLost, .notPrepared:
+            // The board is no longer ours. Do not write oldItems over whoever took it.
             clearPendingTicket(generation: generation)
         }
         DevTypeLog.inject.error("[Clipboard] automatic publication failed — paste not posted")
@@ -1874,6 +1877,38 @@ public final class PasteboardBroker {
         // through the same original-owner publication policy, so no partial payload survives.
         switch publishClipboard(clearContents: clearContents, currentChangeCount: currentChangeCount,
                                 writes: [{ writeObjects(restoredItems) }], expectedChangeCount: ownedChangeCount) {
+        case .published: return .restored
+        case .ownershipLost: return .ownershipLost
+        case .writeFailed, .notPrepared: return .failed
+        }
+    }
+
+    /// Put a snapshot back after a publication cleared the board and then lost the count.
+    /// The count is not a token here: the caller has already seen an empty board.
+    /// `makeRestoredItems` refuses a partial set, and nothing is published when it does.
+    static func republishClearedSnapshot(
+        _ snapshot: PasteboardSnapshot,
+        stillEmpty: () -> Bool,
+        clearContents: () -> Int,
+        currentChangeCount: () -> Int,
+        setData: (NSPasteboardItem, Data, NSPasteboard.PasteboardType) -> Bool = {
+            item, data, type in item.setData(data, forType: type)
+        },
+        writeObjects: @escaping ([NSPasteboardItem]) -> Bool
+    ) -> UserClipboardRestoreOutcome {
+        guard stillEmpty() else { return .ownershipLost }
+        guard let restoredItems = makeRestoredItems(snapshot, setData: setData) else {
+            DevTypeLog.inject.error(
+                "[Clipboard] bounded snapshot reconstruction failed — no partial representation set was written"
+            )
+            return .failed
+        }
+        guard stillEmpty() else { return .ownershipLost }
+        switch publishClipboard(
+            clearContents: clearContents,
+            currentChangeCount: currentChangeCount,
+            writes: [{ writeObjects(restoredItems) }]
+        ) {
         case .published: return .restored
         case .ownershipLost: return .ownershipLost
         case .writeFailed, .notPrepared: return .failed

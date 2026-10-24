@@ -8,6 +8,7 @@ protocol SecretPasteboardWriting: AnyObject {
     @discardableResult func clearContents() -> Int
     func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool
     func setData(_ data: Data?, forType dataType: NSPasteboard.PasteboardType) -> Bool
+    func string(forType type: NSPasteboard.PasteboardType) -> String?
 }
 
 extension NSPasteboard: SecretPasteboardWriting {}
@@ -202,7 +203,19 @@ public final class SecretClipboard {
             operationLock.unlock()
             DevTypeLog.inject.error("[Secret] clipboard publication failed")
             return .writeFailed
-        case .ownershipLost, .notPrepared:
+        case .ownershipLost(let ownedAfterClear):
+            // A nil count means the board moved before we cleared it. Do not guess.
+            // A count means we cleared, then lost it. An empty board gets the parked
+            // snapshot back; a string already there belongs to someone else.
+            if ownedAfterClear != nil,
+               let userSnapshot,
+               writer.string(forType: .string) == nil {
+                _ = Self.republishClearedUserSnapshot(userSnapshot, writer: writer)
+            }
+            operationLock.unlock()
+            DevTypeLog.inject.error("[Secret] clipboard ownership changed during publication")
+            return .writeFailed
+        case .notPrepared:
             operationLock.unlock()
             DevTypeLog.inject.error("[Secret] clipboard ownership changed during publication")
             return .writeFailed
@@ -355,13 +368,33 @@ public final class SecretClipboard {
             ownedChangeCount: ownedChangeCount,
             clearContents: { writer.clearContents() },
             currentChangeCount: { writer.changeCount },
-            writeObjects: { items in
-                if let pasteboard = writer as? NSPasteboard {
-                    return pasteboard.writeObjects(items)
-                }
-                return writeRestoredItems(items, to: writer)
-            }
+            writeObjects: { publishRestoredItems($0, to: writer) }
         )
+    }
+
+    /// The change count no longer matches, because that is how this publication failed.
+    /// Reconstruction still goes through `makeRestoredItems`; a refusal publishes nothing.
+    private static func republishClearedUserSnapshot(
+        _ snapshot: PasteboardBroker.PasteboardSnapshot,
+        writer: SecretPasteboardWriting
+    ) -> PasteboardBroker.UserClipboardRestoreOutcome {
+        PasteboardBroker.republishClearedSnapshot(
+            snapshot,
+            stillEmpty: { writer.string(forType: .string) == nil },
+            clearContents: { writer.clearContents() },
+            currentChangeCount: { writer.changeCount },
+            writeObjects: { publishRestoredItems($0, to: writer) }
+        )
+    }
+
+    private static func publishRestoredItems(
+        _ items: [NSPasteboardItem],
+        to writer: SecretPasteboardWriting
+    ) -> Bool {
+        if let pasteboard = writer as? NSPasteboard {
+            return pasteboard.writeObjects(items)
+        }
+        return writeRestoredItems(items, to: writer)
     }
 
     private static func writeRestoredItems(

@@ -54,7 +54,13 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
             clearCount += 1
             changeCount += 1
             currentString = nil
-            return changeCount
+            let owned = changeCount
+            if takeoverAfterNextClear {
+                takeoverAfterNextClear = false
+                changeCount += 1
+                currentString = nil
+            }
+            return owned
         }
 
         func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool {
@@ -66,6 +72,18 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
             guard failure != .string else { return false }
             currentString = string
             if let externalCopyAfterString { simulateExternalCopy(externalCopyAfterString) }
+            switch takeoverAfterNextString {
+            case .none:
+                break
+            case .emptyBoard:
+                takeoverAfterNextString = .none
+                changeCount += 1
+                currentString = nil
+            case .replaced(let text):
+                takeoverAfterNextString = .none
+                changeCount += 1
+                currentString = text
+            }
             return true
         }
 
@@ -90,6 +108,21 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
         /// Another owner touched the board. Content is left exactly as it is now.
         func noteExternalOwner() {
             changeCount += 1
+        }
+
+        /// Next `clearContents` returns its count, then the count moves and the board stays empty.
+        var takeoverAfterNextClear = false
+        /// Next successful string write is recorded, then the count moves and the string is replaced.
+        var takeoverAfterNextString: PostWriteTakeover = .none
+
+        enum PostWriteTakeover {
+            case none
+            case emptyBoard
+            case replaced(String)
+        }
+
+        func string(forType type: NSPasteboard.PasteboardType) -> String? {
+            type == .string ? currentString : nil
         }
     }
 
@@ -886,6 +919,74 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
         fire?()
         XCTAssertNotEqual(board.string(forType: .string), "secret")
         XCTAssertEqual(board.data(forType: .string), bytes)
+    }
+
+    func testOwnershipLostAfterClearDropsTheParkedClipboardAndLeavesTheBoardEmpty() {
+        let parked = "parked-user-clipboard"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let writer = Writer(failure: .none)
+        writer.takeoverAfterNextClear = true
+        var scheduled = 0
+
+        let result = SecretClipboard().copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { _, _ in scheduled += 1 }
+        )
+
+        XCTAssertEqual(result, .writeFailed)
+        XCTAssertFalse(result.didCopy)
+        XCTAssertEqual(scheduled, 0)
+        XCTAssertEqual(writer.currentString, parked)
+        XCTAssertNotEqual(writer.currentString, "secret")
+    }
+
+    func testOwnershipLostAfterTheStringWriteDoesNotLeaveTheBoardEmptyOfTheUserClipboard() {
+        let parked = "parked-user-clipboard"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let writer = Writer(failure: .none)
+        writer.takeoverAfterNextString = .emptyBoard
+        var scheduled = 0
+
+        let result = SecretClipboard().copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { _, _ in scheduled += 1 }
+        )
+
+        XCTAssertEqual(result, .writeFailed)
+        XCTAssertFalse(result.didCopy)
+        XCTAssertEqual(scheduled, 0)
+        XCTAssertEqual(writer.currentString, parked)
+        XCTAssertNotEqual(writer.currentString, "secret")
+    }
+
+    func testOwnershipLostAfterTheStringWriteDoesNotOverwriteAReplacement() {
+        let parked = "parked-user-clipboard"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let writer = Writer(failure: .none)
+        writer.takeoverAfterNextString = .replaced("user-replaced")
+        var scheduled = 0
+        let writesBeforeRestoreWouldRun = 1
+
+        let result = SecretClipboard().copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { _, _ in scheduled += 1 }
+        )
+
+        XCTAssertEqual(result, .writeFailed)
+        XCTAssertFalse(result.didCopy)
+        XCTAssertEqual(scheduled, 0)
+        XCTAssertEqual(writer.currentString, "user-replaced")
+        XCTAssertNotEqual(writer.currentString, parked)
+        XCTAssertEqual(writer.stringWrites, writesBeforeRestoreWouldRun)
     }
 
     private func park(
