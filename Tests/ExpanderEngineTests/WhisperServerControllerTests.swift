@@ -516,6 +516,7 @@ final class WhisperServerControllerTests: XCTestCase {
             XCTAssertEqual(probes.values.map(\.absoluteString), [endpoint.absoluteString])
             XCTAssertEqual(launches.value, 0, "portBusy still resolved a binary for \(raw)")
             XCTAssertFalse(controller.isManagedByApp)
+            XCTAssertNil(controller.managedInferenceURL, "portBusy published a bound inference URL for \(raw)")
             XCTAssertFalse(controller.stop())
         }
     }
@@ -555,6 +556,7 @@ final class WhisperServerControllerTests: XCTestCase {
         XCTAssertEqual(probes.value, 0)
         XCTAssertEqual(launches.value, 0)
         XCTAssertFalse(controller.isManagedByApp)
+        XCTAssertNil(controller.managedInferenceURL)
         XCTAssertFalse(controller.stop(), "stop() reported work after an invalid endpoint")
         XCTAssertTrue(processExists(foreignPID), "stop() signaled foreign pid \(foreignPID)")
         XCTAssertTrue(commandLine(of: foreignPID).contains("sleep"))
@@ -838,6 +840,7 @@ final class WhisperServerControllerTests: XCTestCase {
             return XCTFail("start reported ready after the spawned child had already exited: \(result)")
         }
         XCTAssertFalse(controller.isManagedByApp)
+        XCTAssertNil(controller.managedInferenceURL)
     }
 
     /// `stop()` during a hung post-launch probe must return immediately and must not let a
@@ -854,6 +857,7 @@ final class WhisperServerControllerTests: XCTestCase {
         XCTAssertTrue(didStop)
         XCTAssertLessThan(elapsed, .milliseconds(500))
         XCTAssertFalse(hung.controller.isManagedByApp)
+        XCTAssertNil(hung.controller.managedInferenceURL)
         XCTAssertFalse(hung.controller.stop(), "second stop() signaled again")
         try await waitUntil(timeout: 1.0) { !processExists(hung.pid) }
         XCTAssertFalse(
@@ -1068,6 +1072,7 @@ final class WhisperServerControllerTests: XCTestCase {
     /// must not stop it.
     func testStopDoesNothingWhenTheServerIsNotOurs() {
         XCTAssertFalse(WhisperServerController.shared.isManagedByApp)
+        XCTAssertNil(WhisperServerController.shared.managedInferenceURL)
         XCTAssertFalse(
             WhisperServerController.shared.stop(),
             "stop() claimed to have stopped a server it did not start"
@@ -1103,6 +1108,7 @@ final class WhisperServerControllerTests: XCTestCase {
             WhisperServerController.shared.isManagedByApp,
             "The app took ownership of a server it did not start"
         )
+        XCTAssertNil(WhisperServerController.shared.managedInferenceURL)
     }
 
     // MARK: - Integration
@@ -1122,12 +1128,17 @@ final class WhisperServerControllerTests: XCTestCase {
             return XCTFail("Start failed: \(result)")
         }
         XCTAssertTrue(WhisperServerController.shared.isManagedByApp)
+        XCTAssertEqual(
+            WhisperServerController.shared.managedInferenceURL?.absoluteString,
+            "http://127.0.0.1:8097/inference"
+        )
 
         let reachable = await WhisperServerSetup.isReachable(endpoint: endpoint, timeout: 2.0)
         XCTAssertTrue(reachable, "Reported ready but the endpoint does not answer")
 
         XCTAssertTrue(WhisperServerController.shared.stop())
         XCTAssertFalse(WhisperServerController.shared.isManagedByApp)
+        XCTAssertNil(WhisperServerController.shared.managedInferenceURL)
 
         let stillUp = await WhisperServerSetup.isReachable(endpoint: endpoint, timeout: 1.0)
         XCTAssertFalse(stillUp, "Server survived stop()")
@@ -1236,6 +1247,19 @@ final class WhisperServerControllerTests: XCTestCase {
         XCTAssertFalse(args.contains("::1"), file: file, line: line)
         XCTAssertFalse(args.contains("[::1]"), file: file, line: line)
         XCTAssertFalse(args.contains("/custom"), file: file, line: line)
+        let expectedInference = WhisperServerSetup.spawnedChildInferenceURL(
+            port: expectedPort,
+            savedEndpoint: endpoint
+        )
+        XCTAssertEqual(
+            controller.managedInferenceURL?.absoluteString,
+            expectedInference.absoluteString,
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(controller.stop(), file: file, line: line)
+        XCTAssertNil(controller.managedInferenceURL, "stopped child still published an inference URL", file: file, line: line)
+        XCTAssertFalse(controller.isManagedByApp, file: file, line: line)
     }
 
     private struct HungPostLaunch {
@@ -1297,6 +1321,13 @@ final class WhisperServerControllerTests: XCTestCase {
         for url in postLaunch {
             XCTAssertEqual(url.absoluteString, "http://127.0.0.1:\(endpoint.port ?? 8080)/")
         }
+        XCTAssertEqual(
+            controller.managedInferenceURL?.absoluteString,
+            WhisperServerSetup.spawnedChildInferenceURL(
+                port: endpoint.port ?? 8080,
+                savedEndpoint: endpoint
+            ).absoluteString
+        )
         return HungPostLaunch(
             controller: controller,
             hang: hang,

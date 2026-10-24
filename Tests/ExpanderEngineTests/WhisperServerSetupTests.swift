@@ -219,6 +219,30 @@ final class WhisperServerSetupTests: XCTestCase {
         XCTAssertEqual(ipv6Probe.port, 9090)
     }
 
+    /// Inference follows the same bind as the probe, but keeps the saved path.
+    func testSpawnedChildInferenceURLKeepsTheSavedPathOnBoundIPv4() {
+        let cases: [(String, String)] = [
+            ("http://localhost:18181/inference", "http://127.0.0.1:18181/inference"),
+            ("http://[::1]:9090/inference", "http://127.0.0.1:9090/inference"),
+            ("http://127.0.0.1:8080/inference", "http://127.0.0.1:8080/inference"),
+            ("http://localhost/inference", "http://127.0.0.1:8080/inference"),
+            ("https://127.0.0.1:28192/custom", "http://127.0.0.1:28192/custom"),
+            ("http://localhost:18184/api/inference", "http://127.0.0.1:18184/api/inference"),
+            ("http://127.0.0.1:8080/a%20b/inference", "http://127.0.0.1:8080/a%20b/inference"),
+        ]
+        for (raw, expected) in cases {
+            let saved = URL(string: raw)!
+            let inference = WhisperServerSetup.spawnedChildInferenceURL(
+                port: saved.port ?? 8080,
+                savedEndpoint: saved
+            )
+            XCTAssertEqual(inference.absoluteString, expected, raw)
+            XCTAssertEqual(inference.scheme, "http", raw)
+            XCTAssertEqual(inference.host, "127.0.0.1", raw)
+            XCTAssertNotEqual(inference.absoluteString, WhisperServerSetup.spawnedChildProbeURL(port: saved.port ?? 8080).absoluteString)
+        }
+    }
+
     /// Ports the child is allowed to bind must survive both the spawn URL builder and the
     /// production reachability rewrite (`deletingLastPathComponent` on a root path).
     func testSpawnedChildProbeStaysOnTheBoundRootForEdgePorts() {

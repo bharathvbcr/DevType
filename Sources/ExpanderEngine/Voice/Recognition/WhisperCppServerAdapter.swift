@@ -2,42 +2,50 @@ import Foundation
 
 public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendable {
     typealias Transport = @Sendable (URLRequest, Int) async throws -> (Data, URLResponse)
+    typealias ManagedInferenceURL = @Sendable () -> URL?
+    typealias Reachability = @Sendable (URL) async -> Bool
 
     public let descriptor: SpeechProviderDescriptor
     private let endpointOverride: URL?
     private let maximumWAVBytes: Int
     private let transport: Transport
+    private let managedInferenceURL: ManagedInferenceURL
+    private let reachability: Reachability
 
     /// Resolved per call so a Preferences change applies without relaunching.
+    /// This is the saved spelling. A spawned child is addressed from `requestURL()`.
     public var endpointURL: URL { endpointOverride ?? VoicePreferences.whisperEndpoint }
 
-    public init(endpointURL: URL? = nil) {
-        self.endpointOverride = endpointURL
-        self.maximumWAVBytes = WhisperAudioPayload.maximumWAVBytes
-        self.transport = { request, maximumResponseBytes in
-            try await LocalEndpointSecurity.data(
-                for: request,
-                maximumResponseBytes: maximumResponseBytes
-            )
-        }
-        self.descriptor = SpeechProviderDescriptor(
-            id: "whispercpp.server",
-            displayName: "Local whisper.cpp Server",
-            modelVersion: "whisper-local",
-            privacyRoute: .localNetworkOnly,
-            supportsStreaming: false,
-            supportsContextualStrings: false
+    public convenience init(endpointURL: URL? = nil) {
+        self.init(
+            endpointURL: endpointURL,
+            transport: { request, maximumResponseBytes in
+                try await LocalEndpointSecurity.data(
+                    for: request,
+                    maximumResponseBytes: maximumResponseBytes
+                )
+            },
+            managedInferenceURL: { WhisperServerController.shared.managedInferenceURL },
+            reachability: { url in
+                await WhisperServerSetup.isReachable(endpoint: url, timeout: 2.0)
+            }
         )
     }
 
     init(
         endpointURL: URL?,
         maximumWAVBytes: Int = WhisperAudioPayload.maximumWAVBytes,
-        transport: @escaping Transport
+        transport: @escaping Transport,
+        managedInferenceURL: @escaping ManagedInferenceURL = { nil },
+        reachability: @escaping Reachability = { url in
+            await WhisperServerSetup.isReachable(endpoint: url, timeout: 2.0)
+        }
     ) {
         self.endpointOverride = endpointURL
         self.maximumWAVBytes = maximumWAVBytes
         self.transport = transport
+        self.managedInferenceURL = managedInferenceURL
+        self.reachability = reachability
         self.descriptor = SpeechProviderDescriptor(
             id: "whispercpp.server",
             displayName: "Local whisper.cpp Server",
@@ -48,13 +56,26 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
         )
     }
 
+    /// Saved spelling after it has been accepted as loopback, then the bound address of a
+    /// child this controller spawned. A non-loopback preference is returned unchanged so it
+    /// stays `invalidEndpoint` instead of being hidden on 127.0.0.1.
+    private func requestURL() -> URL {
+        let saved = endpointURL
+        guard LocalEndpointSecurity.isValid(saved) else { return saved }
+        return managedInferenceURL() ?? saved
+    }
+
     public func probe() async -> ProviderReadiness {
-        let endpoint = endpointURL
+        let endpoint = requestURL()
         guard LocalEndpointSecurity.isValid(endpoint) else {
             return .requiresConfiguration(.invalidEndpointFormat)
         }
+        let probeURL = WhisperServerSetup.readinessProbeURL(for: endpoint)
+        guard LocalEndpointSecurity.isValid(probeURL) else {
+            return .temporarilyUnavailable(retryAfterSeconds: 5.0, reason: .endpointUnreachable)
+        }
 
-        guard await WhisperServerSetup.isReachable(endpoint: endpoint, timeout: 2.0) else {
+        guard await reachability(probeURL) else {
             return .temporarilyUnavailable(retryAfterSeconds: 5.0, reason: .endpointUnreachable)
         }
 
@@ -71,7 +92,7 @@ public final class WhisperCppServerAdapter: SpeechRecognizer, @unchecked Sendabl
         // Capture once, then enforce again at the actual egress boundary. `probe()` is only a
         // readiness hint: callers can invoke `transcribe` directly and preferences can change
         // between a probe and this call. Audio must never follow either path off loopback.
-        let endpoint = endpointURL
+        let endpoint = requestURL()
         return AsyncThrowingStream { continuation in
             let task = Task {
                 let startTime = Date()
