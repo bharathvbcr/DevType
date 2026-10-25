@@ -732,6 +732,16 @@ public final class PasteboardBroker {
         return nil
     }
 
+    /// A paste's way of following a control that was replaced under it. `vouch` is the caller's
+    /// own judgement — the pipeline asks the same continuation policy the erase uses — and returns
+    /// the replacement it accepts, or nil. Main-thread only, like every check that reads it.
+    final class PasteTargetFollower {
+        let vouch: () -> PasteTarget?
+        /// The replacement this paste now follows; nil while the captured target still holds.
+        var adopted: PasteTarget?
+        init(vouch: @escaping () -> PasteTarget?) { self.vouch = vouch }
+    }
+
     struct PasteTarget {
         let pid: pid_t?
         let element: AXUIElement?
@@ -958,17 +968,17 @@ public final class PasteboardBroker {
 
     private func pasteContinuation(
         ticket: ClipboardTicket, target: PasteTarget, checkRange: Bool,
-        checkElement: Bool = true,
+        checkElement: Bool = true, follower: PasteTargetFollower? = nil,
         allowSecureInput: Bool, shouldContinue: () -> Bool
     ) -> Bool {
         cmdVAbortReason(ticket: ticket, target: target, checkRange: checkRange,
-                        checkElement: checkElement,
+                        checkElement: checkElement, follower: follower,
                         allowSecureInput: allowSecureInput, shouldContinue: shouldContinue) == nil
     }
 
     private func cmdVAbortReason(
         ticket: ClipboardTicket, target: PasteTarget, checkRange: Bool,
-        checkElement: Bool = true,
+        checkElement: Bool = true, follower: PasteTargetFollower? = nil,
         allowSecureInput: Bool, shouldContinue: () -> Bool
     ) -> CmdVAbortReason? {
         Self.cmdVAbortReason(
@@ -977,8 +987,27 @@ public final class PasteboardBroker {
             shouldContinue: shouldContinue(),
             canPost: environment.canPostEvents(),
             secureInputBlocked: !allowSecureInput && environment.secureInputActive(),
-            targetCurrent: environment.targetCurrent(target, checkRange, checkElement)
+            targetCurrent: targetIsCurrent(
+                target, follower: follower, checkRange: checkRange, checkElement: checkElement
+            )
         )
+    }
+
+    /// Whether `target` is still the focused control — or, when the caller vouches for a
+    /// replacement of it, whether *that* is. `environment.targetCurrent` stays the only judge of
+    /// what is focused: an offered replacement is checked against the live focus exactly like the
+    /// captured target, so a caller can narrow what the paste follows but never widen it.
+    private func targetIsCurrent(
+        _ target: PasteTarget, follower: PasteTargetFollower?, checkRange: Bool, checkElement: Bool
+    ) -> Bool {
+        let tracked = follower?.adopted ?? target
+        if environment.targetCurrent(tracked, checkRange, checkElement) { return true }
+        guard let follower, let replacement = follower.vouch(),
+              environment.targetCurrent(replacement, checkRange, checkElement) else {
+            return false
+        }
+        follower.adopted = replacement
+        return true
     }
 
     private func logCmdVNotPosted(
@@ -987,12 +1016,13 @@ public final class PasteboardBroker {
         target: PasteTarget,
         checkRange: Bool,
         checkElement: Bool = true,
+        follower: PasteTargetFollower? = nil,
         allowSecureInput: Bool,
         shouldContinue: () -> Bool
     ) {
         let suffix = cmdVAbortReason(
             ticket: ticket, target: target, checkRange: checkRange,
-            checkElement: checkElement,
+            checkElement: checkElement, follower: follower,
             allowSecureInput: allowSecureInput, shouldContinue: shouldContinue
         )?.logSuffix ?? "Cmd+V was not posted"
         DevTypeLog.inject.error("\(prefix, privacy: .public) — \(suffix, privacy: .public)")
@@ -1023,7 +1053,11 @@ public final class PasteboardBroker {
     ///   - holdTimeoutOverride: Optional longer hold (e.g. secure clipboard paste under SI).
     ///   - completeBeforeRestore: When true and no `expectedText`, report `.unavailable` right after
     ///     Cmd+V so callers are not blocked for the full hold window.
-    public func pasteViaClipboard(
+    ///   - followVouchedReplacement: Asked only when the captured target is no longer the focused
+    ///     control. Returns the control that replaced it if the caller can vouch it is the same
+    ///     one (WebKit swaps the text node under a typed expansion), nil otherwise. The answer is
+    ///     still checked against the live focus before ⌘V; nil keeps the target pinned.
+    func pasteViaClipboard(
         text: String,
         expectedText: String?,
         baseline: DeliveryVerifier.FocusedTextObservation?,
@@ -1036,6 +1070,7 @@ public final class PasteboardBroker {
         holdTimeoutOverride: TimeInterval? = nil,
         completeBeforeRestore: Bool = false,
         allowSecureInput: Bool = false,
+        followVouchedReplacement: (() -> PasteTarget?)? = nil,
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
@@ -1062,13 +1097,16 @@ public final class PasteboardBroker {
                     leaveClipboardOnFailure: leaveClipboardOnFailure,
                     holdTimeoutOverride: holdTimeoutOverride,
                     completeBeforeRestore: completeBeforeRestore,
-                    allowSecureInput: allowSecureInput, shouldContinue: shouldContinue,
+                    allowSecureInput: allowSecureInput,
+                    followVouchedReplacement: followVouchedReplacement,
+                    shouldContinue: shouldContinue,
                     completion: completion
                 )
             }
             return
         }
         let target = PasteTarget.capture(focus: focus, baseline: baseline)
+        let follower = followVouchedReplacement.map { PasteTargetFollower(vouch: $0) }
         // HID erase (or a no-AX secure paste) has already happened; AX selectedRange is settling.
         let verifySelection = Self.verifySelectionRange(
             bundleID: bundleID, role: focusedRole, phase: .afterMutation
@@ -1089,7 +1127,7 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        guard environment.targetCurrent(target, verifySelection, checkElement) else {
+        guard targetIsCurrent(target, follower: follower, checkRange: verifySelection, checkElement: checkElement) else {
             DevTypeLog.inject.error("[Inject] paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
@@ -1125,7 +1163,7 @@ public final class PasteboardBroker {
         DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.prePasteSettleDelay) {
             self.hid.postCmdVKeyEventsAsync(shouldContinue: {
                 self.pasteContinuation(ticket: ticket, target: target, checkRange: verifySelection,
-                                       checkElement: checkElement,
+                                       checkElement: checkElement, follower: follower,
                                        allowSecureInput: allowSecureInput, shouldContinue: shouldContinue)
             }) { posted in
                 guard posted else {
@@ -1134,7 +1172,7 @@ public final class PasteboardBroker {
                     self.logCmdVNotPosted(
                         prefix: "[Inject] paste refused",
                         ticket: ticket, target: target, checkRange: verifySelection,
-                        checkElement: checkElement,
+                        checkElement: checkElement, follower: follower,
                         allowSecureInput: allowSecureInput, shouldContinue: shouldContinue
                     )
                     self.releaseOwnership(
@@ -1196,7 +1234,7 @@ public final class PasteboardBroker {
                     residency: residency,
                     shouldContinue: {
                         self.pasteContinuation(ticket: ticket, target: target, checkRange: false,
-                                               checkElement: checkElement,
+                                               checkElement: checkElement, follower: follower,
                                                allowSecureInput: allowSecureInput, shouldContinue: shouldContinue)
                     },
                     completion: completion
