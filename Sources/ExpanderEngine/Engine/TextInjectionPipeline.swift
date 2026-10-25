@@ -635,6 +635,17 @@ public final class TextInjectionPipeline {
         )
     }
 
+    /// Internal test seam for the input-revision gate every post-erase continue-check consults:
+    /// claims an operation the way an inject does, then answers whether it is still current.
+    func claimOperationForTesting() -> (operation: InjectCompletionGuard, revision: UInt64) {
+        let operation = InjectCompletionGuard()
+        return (operation, ledger.claim(operation, consumingUndo: false))
+    }
+
+    func operationIsCurrentForTesting(_ operation: InjectCompletionGuard, revision: UInt64) -> Bool {
+        ledger.isCurrent(operation, revision: revision)
+    }
+
     /// Internal test reader for the delivery-window counter. Not public API.
     var deliveryInputUnitsForTesting: Int {
         ledger.currentDeliveryInputUnits
