@@ -1987,6 +1987,15 @@ public final class TextInjectionPipeline {
         let focus = FocusedElementSource.resolved(context.focusedElement)
         guard canContinue(context) else {
             finishAbandonedPaste(result: result, path: "clipboardAbandoned", completion: completion)
+            // The usual cause in a WebKit field is the paste itself replacing the focused node:
+            // the text is there and the element is not `CFEqual` to the one captured. The
+            // deferred, observation-only read may still prove it on a vouched replacement; for a
+            // different field, or no focus, it proves nothing and leaves the outcome unverified.
+            if result != .notPosted {
+                scheduleDeferredPasteReverify(
+                    context: context, expectedText: expectedText, baseline: baseline, path: path
+                )
+            }
             return
         }
         let safeBundleID = DevTypeLog.boundedPublicIdentifier(
@@ -2039,35 +2048,9 @@ public final class TextInjectionPipeline {
                 ),
                 completion: completion
             )
-            DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteReverifyDelay) {
-                guard self.canContinue(context, observationOnly: true) else { return }
-                let retry = self.verifier.verifyFocusedTextDelivery(
-                    expectedText: expectedText,
-                    baseline: baseline,
-                    staleProbe: context.erasePlan.expectedText,
-                    staleProbeCaseInsensitive: context.erasePlan.caseInsensitive
-                )
-                switch retry {
-                case .delivered:
-                    // Late confirmation upgrades the recorded outcome but deliberately does NOT
-                    // record delivery-read proof: a mirror that confirms only after the hold
-                    // window cannot be trusted to justify in-window corrections next time.
-                    DevTypeLog.inject.info("[Inject] paste re-verify: text confirmed after settle delay")
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        .succeeded,
-                        refuseContext: nil,
-                        path: context.purpose.deliveryPath(path)
-                    )
-                case .failed, .unavailable:
-                    // Neither provable: AX cannot read this field at all (common for
-                    // Electron/terminal hosts). The outcome stays `postedUnverified` —
-                    // but the ambiguity itself is logged, so a diagnostic report shows
-                    // that this app was never verifiable instead of silently skipping.
-                    DevTypeLog.inject.info(
-                        "[Inject] paste re-verify: field unreadable — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
-                    )
-                }
-            }
+            scheduleDeferredPasteReverify(
+                context: context, expectedText: expectedText, baseline: baseline, path: path
+            )
 
         case .notPosted, .failed:
             DevTypeLog.inject.error(
@@ -2088,6 +2071,71 @@ public final class TextInjectionPipeline {
                     .failedSilent, refuseContext: nil, path: path
                 )
                 completion(.failedSilent)
+            }
+        }
+    }
+
+    /// One owner for the deferred, observation-only re-verification of a posted-but-unverified
+    /// paste. It writes nothing and never re-pastes; the only thing it can do is upgrade the
+    /// recorded outcome, and only on evidence.
+    ///
+    /// Only the operation half of the continue-check gates it (superseded, cancelled, user input
+    /// since, trust, Secure Input). The target half is the verifier's: it compares the live
+    /// element with the baseline's and, because WebKit can swap the node under a paste, accepts a
+    /// replacement that is the same control and holds exactly the text the baseline predicts. A
+    /// different field fails there as `.focusReplaced`, so a click elsewhere never verifies.
+    private func scheduleDeferredPasteReverify(
+        context: InjectContext,
+        expectedText: String,
+        baseline: DeliveryVerifier.FocusedTextObservation?,
+        path: String
+    ) {
+        let safeBundleID = DevTypeLog.boundedPublicIdentifier(context.frontBundleID, label: "bundleID")
+        DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteReverifyDelay) {
+            guard self.operationStateIsCurrent(
+                context.operation, revision: context.inputRevision, observationOnly: true
+            ) else { return }
+            let reading = self.verifier.readFocusedTextDelivery(
+                expectedText: expectedText,
+                baseline: baseline,
+                staleProbe: context.erasePlan.expectedText,
+                staleProbeCaseInsensitive: context.erasePlan.caseInsensitive,
+                vouchingReplacement: true
+            )
+            switch reading.verification {
+            case .delivered:
+                // Late confirmation upgrades the recorded outcome but deliberately does NOT
+                // record delivery-read proof: a mirror that confirms only after the hold
+                // window cannot be trusted to justify in-window corrections next time.
+                if reading.replacementElement == nil {
+                    DevTypeLog.inject.info("[Inject] paste re-verify: text confirmed after settle delay")
+                } else {
+                    DevTypeLog.inject.info("[Inject] paste re-verify: text confirmed on the replacement of the focused element")
+                }
+                PermissionCoordinator.shared.recordInjectOutcome(
+                    .succeeded,
+                    refuseContext: nil,
+                    path: context.purpose.deliveryPath(path)
+                )
+            case .failed, .unavailable:
+                // Not provable. The outcome stays `postedUnverified`, but the reason is logged
+                // as what it was: an element that was replaced and could not be vouched is not
+                // a host whose AX cannot be read, and a report must not say so.
+                switch reading.unavailableReason {
+                case .focusReplaced:
+                    DevTypeLog.inject.info(
+                        "[Inject] paste re-verify: focused element was replaced and is not the same control — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
+                    )
+                case .noFocusedElement, .noBaselineTarget:
+                    DevTypeLog.inject.info(
+                        "[Inject] paste re-verify: no focused element to read — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
+                    )
+                case .fieldUnreadable, nil:
+                    // AX cannot read this field at all (common for Electron/terminal hosts).
+                    DevTypeLog.inject.info(
+                        "[Inject] paste re-verify: field unreadable — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
+                    )
+                }
             }
         }
     }
