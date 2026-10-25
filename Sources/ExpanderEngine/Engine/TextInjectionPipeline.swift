@@ -2400,7 +2400,14 @@ public final class TextInjectionPipeline {
         undoable: Bool,
         completion: @escaping InjectionCompletion
     ) {
-        guard canContinue(context, phase: .afterMutation) else { completion(.postedUnverified); return }
+        guard canContinue(context, phase: .afterMutation) else {
+            // The text was posted; what is no longer provable is where it landed. Recorded like
+            // every other abandoned delivery, so the report shows the attempt.
+            finishAbandonedPaste(
+                result: .unavailable, path: context.purpose.deliveryPath(path), completion: completion
+            )
+            return
+        }
         PermissionCoordinator.shared.recordInjectOutcome(
             outcome,
             refuseContext: nil,

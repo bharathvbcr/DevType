@@ -61,6 +61,8 @@ extension EventTapEngine {
         if mainProbe.secureInput {
             refuseAfterSwallow(
                 reason: AXContextChecker.secureInputActiveReason,
+                drop: .secureInputLive,
+                erasePlan: erasePlan,
                 swallowed: swallowed,
                 refuseContext: mainProbe.refuseContext
             )
@@ -70,6 +72,8 @@ extension EventTapEngine {
         if mainProbe.decision.shouldBlock {
             refuseAfterSwallow(
                 reason: mainProbe.decision.reason,
+                drop: .gateRefused,
+                erasePlan: erasePlan,
                 swallowed: swallowed,
                 refuseContext: mainProbe.refuseContext
             )
@@ -79,6 +83,8 @@ extension EventTapEngine {
         if let armedFocusPID, mainProbe.currentPID != armedFocusPID {
             refuseAfterSwallow(
                 reason: "Focus moved — expand aborted",
+                drop: .focusMoved,
+                erasePlan: erasePlan,
                 swallowed: swallowed
             )
             return
@@ -87,6 +93,8 @@ extension EventTapEngine {
         if case .abort = inputClock.decide(quiescence) {
             refuseAfterSwallow(
                 reason: "User input after arm — expand aborted",
+                drop: .userInputAfterArm,
+                erasePlan: erasePlan,
                 swallowed: swallowed
             )
             return
@@ -126,6 +134,8 @@ extension EventTapEngine {
                 guard let presenter else {
                     self.refuseAfterSwallow(
                         reason: "Fill-in required but no presenter wired",
+                        drop: .fillInAborted,
+                        erasePlan: erasePlan,
                         swallowed: swallowed
                     )
                     return
@@ -135,6 +145,8 @@ extension EventTapEngine {
                         guard let values else {
                             self.refuseAfterSwallow(
                                 reason: "Fill-in cancelled",
+                                drop: .fillInAborted,
+                                erasePlan: erasePlan,
                                 swallowed: swallowed
                             )
                             return
@@ -200,6 +212,8 @@ extension EventTapEngine {
         guard let kind = AITransformKind.named(snippet.aiTransform) else {
             refuseAfterSwallow(
                 reason: "Unknown AI transform kind",
+                drop: .aiTransformRefused,
+                erasePlan: erasePlan,
                 swallowed: swallowed
             )
             return
@@ -216,6 +230,8 @@ extension EventTapEngine {
         if kind == .custom, customInstructions == nil {
             refuseAfterSwallow(
                 reason: "Custom AI transform has no instructions",
+                drop: .aiTransformRefused,
+                erasePlan: erasePlan,
                 swallowed: swallowed
             )
             DispatchQueue.main.async { [weak self] in
@@ -240,6 +256,8 @@ extension EventTapEngine {
                 if case .abort = self.inputClock.decide(quiescence) {
                     self.refuseAfterSwallow(
                         reason: "User input after arm — expand aborted",
+                        drop: .userInputAfterArm,
+                        erasePlan: erasePlan,
                         swallowed: swallowed
                     )
                     return
@@ -259,6 +277,8 @@ extension EventTapEngine {
                 if secureInput {
                     self.refuseAfterSwallow(
                         reason: AXContextChecker.secureInputActiveReason,
+                        drop: .secureInputLive,
+                        erasePlan: erasePlan,
                         swallowed: swallowed,
                         refuseContext: .capture(
                             reason: AXContextChecker.secureInputActiveReason,
@@ -270,6 +290,8 @@ extension EventTapEngine {
                 if decision.shouldBlock {
                     self.refuseAfterSwallow(
                         reason: decision.reason,
+                        drop: .gateRefused,
+                        erasePlan: erasePlan,
                         swallowed: swallowed,
                         refuseContext: .capture(reason: decision.reason, decision: decision)
                     )
@@ -278,6 +300,8 @@ extension EventTapEngine {
                 if let armedFocusPID, currentPID != armedFocusPID {
                     self.refuseAfterSwallow(
                         reason: "Focus moved — expand aborted",
+                        drop: .focusMoved,
+                        erasePlan: erasePlan,
                         swallowed: swallowed
                     )
                     return
@@ -293,6 +317,8 @@ extension EventTapEngine {
                 ) else {
                     self.refuseAfterSwallow(
                         reason: weakAXBlocked ? "AI selection weak-AX" : "AI selection unavailable",
+                        drop: .aiTransformRefused,
+                        erasePlan: erasePlan,
                         swallowed: swallowed
                     )
                     let hintKey = weakAXBlocked
@@ -305,6 +331,8 @@ extension EventTapEngine {
                 guard self.presentAITransform != nil else {
                     self.refuseAfterSwallow(
                         reason: "AI transform required but no presenter wired",
+                        drop: .aiTransformRefused,
+                        erasePlan: erasePlan,
                         swallowed: swallowed
                     )
                     return
@@ -320,6 +348,8 @@ extension EventTapEngine {
                     if !erased {
                         self.refuseAfterSwallow(
                             reason: "AI trigger erase failed",
+                            drop: .aiTransformRefused,
+                            erasePlan: erasePlan,
                             swallowed: swallowed
                         )
                         return
@@ -430,7 +460,7 @@ extension EventTapEngine {
         }
     }
 
-    private func finishDeferredInject(
+    func finishDeferredInject(
         snippet: SnippetModel,
         triggerUTF16Length: Int,
         lastEventUTF16Count: Int,
@@ -446,12 +476,19 @@ extension EventTapEngine {
         gateFocus: AXUIElement? = nil
     ) {
         if let failure = resolved.failure {
-            refuseAfterSwallow(reason: failure.message, swallowed: swallowed)
+            refuseAfterSwallow(
+                reason: failure.message,
+                drop: .renderFailed,
+                erasePlan: erasePlan,
+                swallowed: swallowed
+            )
             return
         }
         if case .abort = inputClock.decide(quiescence) {
             refuseAfterSwallow(
                 reason: "User input after arm — expand aborted",
+                drop: .userInputAfterArm,
+                erasePlan: erasePlan,
                 swallowed: swallowed
             )
             return
@@ -468,6 +505,8 @@ extension EventTapEngine {
         if let armedFocusPID, mainProbe.currentPID != armedFocusPID {
             refuseAfterSwallow(
                 reason: "Focus moved — expand aborted",
+                drop: .focusMoved,
+                erasePlan: erasePlan,
                 swallowed: swallowed
             )
             return
@@ -488,6 +527,8 @@ extension EventTapEngine {
         if case .refuse(let reason) = plan {
             refuseAfterSwallow(
                 reason: reason,
+                drop: .plannerRefused,
+                erasePlan: erasePlan,
                 swallowed: swallowed
             )
             return
@@ -521,11 +562,23 @@ extension EventTapEngine {
     }
 
     /// Records refuse and reinjects the swallowed key while `isExpanding` still suppresses rematch.
+    ///
+    /// The one owner of "a matched expansion was abandoned after the claim": `drop` is required,
+    /// so no abort can leave the matched-then-dropped report reading "none" for a trigger that
+    /// matched, was swallowed and never expanded. The inject outcome below is the refuse reason;
+    /// the drop is the count a reader rules failures out with.
     private func refuseAfterSwallow(
         reason: String,
+        drop: MatchDropReason,
+        erasePlan: ErasePlan,
         swallowed: SwallowedKey,
         refuseContext: PermissionCoordinator.InjectRefuseProvenance? = nil
     ) {
+        recordMatchDrop(
+            reason: drop.rawValue,
+            trigger: erasePlan.expectedText,
+            bundleID: cachedFrontmostBundleID
+        )
         // §8.2: the key's own `didSwallow` decides. This was a hard-coded `didSwallow: true`, and
         // the prefix-debounce fire — which swallows nothing — avoided a replay only because its
         // empty payload happened to fail `hasPayload` inside `reinjectSwallowedKey`.
