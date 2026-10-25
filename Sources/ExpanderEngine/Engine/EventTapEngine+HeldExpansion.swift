@@ -259,6 +259,22 @@ extension EventTapEngine {
             )
         }
     }
+    /// A real keystroke reached the field without passing through matching (pause, suspension,
+    /// Secure Input, autorepeat).
+    ///
+    /// Two things stop describing the field at that moment, and both must go together:
+    ///   * a live hold, whose erase is counted from *observed* keystrokes;
+    ///   * the buffer — it still holds the characters typed before the bypass, so one more
+    ///     character after matching resumes could complete a trigger that the field never
+    ///     contained, and the erase that follows deletes whatever is there instead.
+    /// Cheap enough for every bypassed key: an already-empty ring clears in O(1).
+    func discardStateForBypassedInput(_ why: String) {
+        if heldCoordinator.cancelAll(reason: .unobservedInput) {
+            DevTypeLog.debounce.debug("[Debounce] hold cancelled — \(why, privacy: .public)")
+        }
+        resetBuffer()
+    }
+
     public func resetBuffer() {
         // A held expansion describes text at a caret position this reset invalidates (mouse
         // click, focus change, escape). Cancel it *first*: from the moment the invalidating

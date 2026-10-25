@@ -236,5 +236,11 @@ extension EventTapEngine {
         if keyCode == 57 {
             resetBuffer()
         }
+        // Fn / Globe (keycode 63) is how the emoji picker and dictation open, and both insert text
+        // with no key events at all — the buffer would lack it. Pressing Fn to reach an F-key or
+        // a navigation key costs only a partially typed trigger.
+        if keyCode == Int64(kVK_Function) {
+            resetBuffer()
+        }
     }
 }
