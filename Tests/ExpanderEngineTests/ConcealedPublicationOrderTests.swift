@@ -9,8 +9,8 @@ import XCTest
 /// payload without them. Writing the payload first and the markers after leaves a window, one
 /// pasteboard round trip per marker wide, in which a secret is readable and unmarked.
 ///
-/// The text paste publishes payload and markers as a single item (`PasteResidencyWitnessTests`).
-/// The secret copy and the image paste write representation by representation, so their order is
+/// The text and image pastes publish payload and markers as a single item (`PasteReentrancyAndQuitTests`).
+/// The secret copy writes representation by representation, so its order is
 /// the guarantee: markers first.
 final class ConcealedPublicationOrderTests: XCTestCase {
     /// Records the pasteboard state after every write, and whether it was ever exposed.
@@ -79,17 +79,19 @@ final class ConcealedPublicationOrderTests: XCTestCase {
                                                        NSPasteboard.PasteboardType.tiff.rawValue])
     }
 
-    /// The image paste writes through `NSPasteboard.general` (it has no injectable board), so its
-    /// order is pinned at the source: the markers go in at index 0, never appended after the bytes.
-    func testImagePasteInsertsItsMarkersAheadOfTheImageBytes() throws {
+    /// The image paste publishes through the one shared publication (`publishPayload` →
+    /// `payloadItem`, whose marker order is pinned in `PasteReentrancyAndQuitTests`), not through
+    /// a write list of its own that could append the markers after the bytes.
+    func testImagePastePublishesThroughTheSharedMarkedItem() throws {
         let source = SourceContractTests.strippingComments(
             try SourceTree.text("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
         )
         let start = try XCTUnwrap(source.range(of: "public func pasteImageViaClipboard("))
         let end = try XCTUnwrap(source.range(of: "private func runImageHoldLoop("))
         let body = String(source[start.lowerBound..<end.lowerBound])
-        XCTAssertTrue(body.contains("at: 0)"), "the image paste must put its markers ahead of the image bytes")
-        XCTAssertFalse(body.contains("representations.append(contentsOf: ["),
-                       "markers appended after the bytes leave the image readable and unmarked")
+        XCTAssertTrue(body.contains("publishPayload(on: environment.pasteboard(), representations: representations)"),
+                      "the image paste must publish through the shared marked item")
+        XCTAssertFalse(body.contains("pasteboard.setData("),
+                       "a representation-by-representation write can leave the image readable and unmarked")
     }
 }
