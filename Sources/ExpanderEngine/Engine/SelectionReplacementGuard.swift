@@ -339,19 +339,10 @@ public enum SelectionReplacementGuard {
         public static let settleAttempts = 4
         public static let settleInterval: TimeInterval = 0.05
 
-        /// Window-level containers. Focus lands on one of these while a host hands the field
-        /// back; none of them expose the selection the replace has to confirm.
-        static let containerRoles: Set<String> = [
-            kAXApplicationRole as String,
-            kAXWindowRole as String,
-            kAXSheetRole as String,
-            kAXDrawerRole as String,
-            kAXPopoverRole as String,
-        ]
-
+        /// A blank reading from a window-level container (`AXContextChecker.windowLevelContainerRoles`)
+        /// abandons the element: none of them expose the selection the replace has to confirm.
         static func blankReadingAbandonsElement(role: String?) -> Bool {
-            guard let role, !role.isEmpty else { return false }
-            return containerRoles.contains(role)
+            AXContextChecker.isWindowLevelContainer(role: role)
         }
 
         private let access: Access

@@ -434,7 +434,9 @@ public extension SelectionReader {
     /// *which* process holds focus, because the answer would be misleading — see `.external`.
     enum AXFocusObservation: Equatable, Sendable {
         case notObserved
-        /// AX answered, and nothing anywhere holds focus. Focus has not arrived yet.
+        /// AX answered, and nothing that can take a selection or a paste holds focus: no element
+        /// at all, or only a window-level container (`AXContextChecker.windowLevelContainerRoles`),
+        /// which is what WebKit publishes while it restores a page. Focus has not arrived yet.
         case unfocused
         /// Focus is still inside DevType — our own panel has not given it up.
         case ownProcess

@@ -6,6 +6,17 @@ import ExpanderEngine
 /// the app that happens to be frontmost after a fixed delay. The continuation
 /// preserves the original process through the pipeline's later queue/clipboard waits.
 enum SourceAppDelivery {
+    /// Report-ready name of what the focus wait ended on. `.external` is the one settled state;
+    /// every other reading means the budget ran out and the read went ahead anyway.
+    fileprivate static func label(_ focus: SelectionReader.AXFocusObservation) -> String {
+        switch focus {
+        case .external: return "settled on a field"
+        case .unfocused: return "budget spent, no field published (none, or a window-level container)"
+        case .ownProcess: return "budget spent, focus still in DevType"
+        case .notObserved: return "focus not probed"
+        }
+    }
+
     struct Environment {
         var frontmostPID: @Sendable () -> pid_t?
         var sourceTerminated: @Sendable () -> Bool
@@ -58,7 +69,8 @@ enum SourceAppDelivery {
                     return classifyFocus(
                         elementOwner: SelectionMonitor.pid(owning: element),
                         elementIdentity: UInt64(CFHash(element)),
-                        ownPID: ownPID
+                        ownPID: ownPID,
+                        elementRole: AXContextChecker.shared.focusedElementRole(element: element)
                     )
                 }
             ),
@@ -67,7 +79,8 @@ enum SourceAppDelivery {
         )
     }
 
-    /// Classify an AX focus reading for the focus wait. Pure: the AX round-trip stays at the
+    /// Classify an AX focus reading for the focus wait. `elementRole` is the focused element's
+    /// `kAXRoleAttribute`; nil when the host did not answer it. Pure: the AX round-trip stays at the
     /// call site so every branch is reachable in tests without a window server.
     ///
     /// Getting `.ownProcess` wrong in either direction is a real bug rather than a slow path.
@@ -77,7 +90,8 @@ enum SourceAppDelivery {
     static func classifyFocus(
         elementOwner: pid_t?,
         elementIdentity: UInt64?,
-        ownPID: pid_t
+        ownPID: pid_t,
+        elementRole: String? = nil
     ) -> SelectionReader.AXFocusObservation {
         // No element at all: focus has not been published yet, by anyone.
         guard let elementIdentity else { return .unfocused }
@@ -85,8 +99,13 @@ enum SourceAppDelivery {
         // `SelectionReader.makeCandidate` resolves it. Stalling a delivery that is perfectly
         // safe costs the user an already-generated payload, and the inject's own entry gate
         // still verifies the target before anything is written.
-        guard elementOwner == ownPID else { return .external(element: elementIdentity) }
-        return .ownProcess
+        guard elementOwner != ownPID else { return .ownProcess }
+        // A window-level container is focus that has not arrived: Safari answers with its stable
+        // AXWindow while WebKit restores the page, and a wait keyed on identity alone settles on
+        // it after two polls and captures it as the paste target. Not stalled on forever — the
+        // budget still ends in a read — and an unreadable role is not a container.
+        if AXContextChecker.isWindowLevelContainer(role: elementRole) { return .unfocused }
+        return .external(element: elementIdentity)
     }
 
     static func perform(
@@ -133,6 +152,14 @@ enum SourceAppDelivery {
                 previousAXFocus: previousFocus
             ) {
             case .read:
+                // What the next field report needs to judge the replace guard's settle budget:
+                // how long the source app took to publish a field after `activate()`, and whether
+                // the wait settled on one or ran out and read anyway.
+                let elapsed = Int(Date().timeIntervalSince(activatedAt) * 1000)
+                let polls = SelectionReader.sourceFocusMaxPolls - remainingPolls
+                DevTypeLog.inject.info(
+                    "[SourceFocus] read after \(elapsed, privacy: .public) ms, \(polls, privacy: .public) polls — \(label(focus), privacy: .public)"
+                )
                 operation(shouldContinue)
             case .wait(let next):
                 environment.schedule(SelectionReader.sourceFocusPollInterval) {
@@ -148,6 +175,7 @@ enum SourceAppDelivery {
             }
         }
 
+        let activatedAt = Date()
         environment.activate()
         poll(remainingPolls: SelectionReader.sourceFocusMaxPolls, previousFocus: .notObserved)
     }

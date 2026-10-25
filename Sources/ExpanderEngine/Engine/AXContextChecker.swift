@@ -832,6 +832,25 @@ public final class AXContextChecker {
         manualAccessibilityLock.unlock()
     }
 
+    /// Window-level containers. Focus lands on one of these while a host hands the field back
+    /// (Safari, after a panel took focus and returned it); none of them can hold a text selection
+    /// or take a paste, so none is ever a target. The one definition: the source-app focus wait
+    /// keeps polling past one, and the replace guard's settle resolves focus again off one.
+    public static let windowLevelContainerRoles: Set<String> = [
+        kAXApplicationRole as String,
+        kAXWindowRole as String,
+        kAXSheetRole as String,
+        kAXDrawerRole as String,
+        kAXPopoverRole as String,
+    ]
+
+    /// Whether `role` names a window-level container. An unreadable or empty role is not one:
+    /// that is the host not answering, which says nothing about what the element is.
+    public static func isWindowLevelContainer(role: String?) -> Bool {
+        guard let role, !role.isEmpty else { return false }
+        return windowLevelContainerRoles.contains(role)
+    }
+
     /// Focused element's `kAXRoleAttribute`, when readable.
     ///
     /// Used by inject to consult `AXWriteCapabilityStore` with a `(bundleID, role)` key so a
