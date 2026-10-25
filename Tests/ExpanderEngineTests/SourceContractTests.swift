@@ -216,9 +216,24 @@ final class SourceContractTests: XCTestCase {
                 "\(label) paste must not treat combo-box AX retarget as a field switch after HID erase"
             )
             XCTAssertTrue(
-                body.contains("environment.targetCurrent(target, verifySelection"),
+                body.contains(label == "text"
+                    ? "targetIsCurrent(target, follower: follower, checkRange: verifySelection"
+                    : "environment.targetCurrent(target, verifySelection"),
                 "\(label) paste must not require a stable AX range after our own mutation"
             )
+            if label == "text" {
+                // The text paste's identity check is `PasteboardBroker.targetIsCurrent`: still the
+                // environment's `targetCurrent` and nothing else judges what is focused — a caller's
+                // vouched replacement is verified through the same call, never trusted.
+                let source = SourceContractTests.strippingComments(
+                    try SourceTree.text("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
+                )
+                let judge = try SourceTree.functionBody("private func targetIsCurrent(", in: source)
+                XCTAssertEqual(judge.components(separatedBy: "environment.targetCurrent(").count - 1, 2,
+                               "the captured target and an offered replacement go through the one judge")
+                XCTAssertFalse(body.contains("environment.targetCurrent("),
+                               "text paste must not judge the target outside `targetIsCurrent`")
+            }
             XCTAssertFalse(
                 body.contains("target.isCurrent(checkRange: true)"),
                 "\(label) paste must not hardcode a selection-range check that aborts Electron HID paste after erase"

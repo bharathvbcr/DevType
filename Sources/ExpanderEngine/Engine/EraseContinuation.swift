@@ -250,6 +250,38 @@ enum EraseContinuation {
         return removed < expectedText.count
     }
 
+    /// Whether the field now holds exactly what `posted` backspaces should have left: the field
+    /// as it was before the first key (`anchor`) with the last `posted` graphemes of the trigger
+    /// gone from before the caret, and nothing else changed.
+    ///
+    /// This is what admits restoring the removed tail after a burst stopped part-way. A suffix
+    /// check on the remaining head cannot tell how many graphemes are gone when the head repeats
+    /// them (`aaa` with two pairs authorized and one posted leaves `xaa`, which still ends in the
+    /// claimed head `a`), so a restore on an overstated count would add a character the user never
+    /// typed. Comparing against the whole pre-erase picture pins the count: each removed grapheme
+    /// changes the length, so only the true count matches. No pre-erase picture, an unreadable
+    /// live field, or a live field that is not the anchor minus exactly `posted` graphemes fails
+    /// closed — the same-frame match for an unreadable value is deliberately not accepted here.
+    static func partialEraseLanded(
+        anchor: EraseFieldPicture?,
+        live: EraseFieldPicture?,
+        expectedText: String?,
+        caseInsensitive: Bool,
+        posted: Int
+    ) -> Bool {
+        guard posted > 0,
+              case .progress(let removed)? = deletionMatch(
+                anchor: anchor,
+                live: live,
+                expectedText: expectedText,
+                caseInsensitive: caseInsensitive,
+                maxRemovedGraphemes: posted
+              ) else {
+            return false
+        }
+        return removed == posted
+    }
+
     /// One AX reading of a field, with the text left out of `EraseContinuationFacts`. The
     /// pipeline stores the pre-delete reading and compares a later one; `decide` only sees
     /// whether that comparison succeeded.

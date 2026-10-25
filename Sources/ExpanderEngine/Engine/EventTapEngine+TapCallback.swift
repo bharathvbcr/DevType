@@ -45,6 +45,16 @@ extension EventTapEngine {
     }
 
 
+    /// A real key the tap hands to the field without matching it (matching suspended or disabled,
+    /// Secure Input, autorepeat, a caret-moving or chorded key, a key racing the type-ahead
+    /// replay). It reaches the field, so an operation in flight — an AI delivery, whose matching
+    /// suspension is exactly why this branch is taken, or a replace confirm about to write focus —
+    /// must see the input revision move. Only a key swallowed into type-ahead never does, and that
+    /// path returns before any of these.
+    private func noteBypassedRealKey() {
+        TextInjectionPipeline.shared.noteDeliveryInput()
+    }
+
     /// The whole tap hot path. Extracted from the C callback so it can use `autoreleasepool`,
     /// early `return`s and instance state directly.
     ///
@@ -110,6 +120,7 @@ extension EventTapEngine {
         let enabled = _isEnabled
         let polledSecureFlag = _isSecureInputActive
         let suspended = _matchingSuspendCount > 0
+        let replayInFlight = _replayInFlight
         lock.unlock()
 
         // Pass through while inject+restore owns the critical section.
@@ -156,7 +167,19 @@ extension EventTapEngine {
             secureFlag = false
         }
 
+        // A real key while `endExpansion` is still posting the replayed type-ahead lands in the
+        // field before or after those characters, and the ring was seeded as if it knew which.
+        // Matching on it could erase text that is not the trigger, so it bypasses like any other
+        // input the buffer cannot account for.
+        if replayInFlight {
+            noteBypassedRealKey()
+            TextInjectionPipeline.shared.clearLastExpansion()
+            discardStateForBypassedInput("keystroke raced the type-ahead replay")
+            return Unmanaged.passUnretained(event)
+        }
+
         guard enabled && !secureFlag && !suspended else {
+            noteBypassedRealKey()
             TextInjectionPipeline.shared.clearLastExpansion()
             discardStateForBypassedInput(
                 "keystroke bypassed matching (disabled/secure/suspended)"
@@ -168,6 +191,7 @@ extension EventTapEngine {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let isAutorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         if EventTapEngine.shouldIgnoreForMatching(isAutorepeat: isAutorepeat) {
+            noteBypassedRealKey()
             TextInjectionPipeline.shared.clearLastExpansion()
             // Autorepeat appends characters the matcher never sees (repeats are filtered from
             // matching), so from the first repeat on the buffer no longer describes the field:
@@ -179,6 +203,7 @@ extension EventTapEngine {
         }
 
         if EventTapEngine.shouldResetBuffer(flags: flags, keyCode: keyCode) {
+            noteBypassedRealKey()
             resetBuffer()
             // §3.1: escape / arrows / chorded keys mean the caret probably moved, so the recorded
             // expansion no longer describes the text sitting in front of the caret. Undoing after

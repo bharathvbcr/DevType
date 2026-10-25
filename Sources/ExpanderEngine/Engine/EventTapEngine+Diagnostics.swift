@@ -22,6 +22,22 @@ extension EventTapEngine {
         public var secureInputLive = 0
         /// A held expansion was already in flight, so this match stood down.
         public var expansionInFlight = 0
+        // The drops below happen *after* the tap swallowed the trigger's last key and claimed the
+        // expansion — `refuseAfterSwallow` is their one owner. Each is also an inject outcome with
+        // a refuse reason, but "Matched-then-dropped: none" is what a reader rules failures out
+        // with, so a swallowed-then-abandoned expansion has to be counted here too.
+        /// A key reached the field between arming the expansion and delivering it.
+        public var userInputAfterArm = 0
+        /// Focus left the app the trigger was typed in.
+        public var focusMoved = 0
+        /// The deferred AX / permission gate blocked the expansion.
+        public var gateRefused = 0
+        /// The snippet's macros could not be rendered.
+        public var renderFailed = 0
+        /// A fill-in panel was cancelled or had no presenter.
+        public var fillInAborted = 0
+        /// A typed AI transform was refused before its trigger was erased, or the erase failed.
+        public var aiTransformRefused = 0
         /// Suspensions force-cleared by `recoverOrphanedSuspensions`.
         public var orphanedSuspensionsRecovered = 0
         public var lastReason: String?
@@ -32,11 +48,21 @@ extension EventTapEngine {
 
         public init() {}
 
-        public var total: Int { plannerRefused + secureInputLive + expansionInFlight }
+        public var total: Int {
+            plannerRefused + secureInputLive + expansionInFlight + userInputAfterArm + focusMoved
+                + gateRefused + renderFailed + fillInAborted + aiTransformRefused
+        }
 
         public var isEmpty: Bool { total == 0 && orphanedSuspensionsRecovered == 0 }
     }
 
+
+    /// Why a matched expansion was dropped. `rawValue` is the label `recordMatchDrop` counts, so a
+    /// case added here that `recordMatchDrop` does not know is reported as `unknown`, never lost.
+    enum MatchDropReason: String {
+        case plannerRefused, secureInputLive, expansionInFlight
+        case userInputAfterArm, focusMoved, gateRefused, renderFailed, fillInAborted, aiTransformRefused
+    }
 
     public var matchDropCounters: MatchDropCounters {
         matchDropLock.withLock { _matchDrops }
@@ -47,7 +73,9 @@ extension EventTapEngine {
     func recordMatchDrop(reason: String, trigger: String?, bundleID: String?) {
         let safeReason: String
         switch reason {
-        case "plannerRefused", "secureInputLive", "expansionInFlight": safeReason = reason
+        case "plannerRefused", "secureInputLive", "expansionInFlight", "userInputAfterArm",
+             "focusMoved", "gateRefused", "renderFailed", "fillInAborted", "aiTransformRefused":
+            safeReason = reason
         default: safeReason = "unknown"
         }
         let triggerMetadata = trigger.map {
@@ -66,6 +94,12 @@ extension EventTapEngine {
         case "plannerRefused": _matchDrops.plannerRefused += 1
         case "secureInputLive": _matchDrops.secureInputLive += 1
         case "expansionInFlight": _matchDrops.expansionInFlight += 1
+        case "userInputAfterArm": _matchDrops.userInputAfterArm += 1
+        case "focusMoved": _matchDrops.focusMoved += 1
+        case "gateRefused": _matchDrops.gateRefused += 1
+        case "renderFailed": _matchDrops.renderFailed += 1
+        case "fillInAborted": _matchDrops.fillInAborted += 1
+        case "aiTransformRefused": _matchDrops.aiTransformRefused += 1
         default: break
         }
         _matchDrops.lastReason = safeReason
@@ -89,7 +123,13 @@ extension EventTapEngine {
             "Matched-then-dropped: \(drops.total)"
                 + " (planner-refused=\(drops.plannerRefused)"
                 + " secure-input=\(drops.secureInputLive)"
-                + " already-expanding=\(drops.expansionInFlight))"
+                + " already-expanding=\(drops.expansionInFlight)"
+                + " user-input-after-arm=\(drops.userInputAfterArm)"
+                + " focus-moved=\(drops.focusMoved)"
+                + " gate-refused=\(drops.gateRefused)"
+                + " render-failed=\(drops.renderFailed)"
+                + " fill-in-aborted=\(drops.fillInAborted)"
+                + " ai-refused=\(drops.aiTransformRefused))"
         ]
         if drops.orphanedSuspensionsRecovered > 0 {
             lines.append(

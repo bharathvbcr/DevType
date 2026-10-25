@@ -110,6 +110,11 @@ extension EventTapEngine {
     func endExpansion() {
         // Before `lock`, like `tryBeginExpansion`: the context has its own lock.
         let currentPID = frontmostContext.processID
+        // Before `lock`, for the same reason: the physical-layout buffer is cleared here and never
+        // seeded, so on that path the ring must not claim text the layout buffer does not.
+        contextLock.lock()
+        let physicalLayoutPath = _allowPhysicalFallback
+        contextLock.unlock()
         lock.lock()
         _isExpanding = false
         let holdPID = _typeAhead.holdPID
@@ -120,16 +125,25 @@ extension EventTapEngine {
         // The replay is posted as synthetic events, which the tap ignores — so the buffer would
         // never learn of characters that are about to land in the field. Two triggers typed back
         // to back (`` `slm `` then `` `asu ``) lost the first characters of the second this way.
-        // Seeded under the same lock as the reset, before the replay is posted, so no real key
-        // can be appended ahead of them; and only when the replay will actually be posted.
-        if !replay.isEmpty, TypeAheadBuffer.mayReplay(heldFor: holdPID, intoFrontmost: currentPID) {
+        // Seeded only when the replay will actually be posted, and only while the ring is the
+        // whole story: `_replayInFlight` keeps a real key that races the posts out of it (see the
+        // tap callback), so the ring is never in an order the field may not share.
+        let seeded = !replay.isEmpty && !physicalLayoutPath
+            && TypeAheadBuffer.mayReplay(heldFor: holdPID, intoFrontmost: currentPID)
+        if seeded {
             ringBuffer.append(contentsOf: replay)
             lastEventUTF16Count = max(1, String(replay.last ?? " ").utf16.count)
+            _replayInFlight = true
         }
         lock.unlock()
         // §8.3: outside the lock — replaying posts HID events, and the tap callback for those
         // events takes this same lock.
         replayTypeAhead(replay, heldFor: holdPID, reason: "expansion complete")
+        if seeded {
+            lock.lock()
+            _replayInFlight = false
+            lock.unlock()
+        }
     }
 
     /// Decides one keystroke against the type-ahead hold. Runs on the tap thread, so it reads the

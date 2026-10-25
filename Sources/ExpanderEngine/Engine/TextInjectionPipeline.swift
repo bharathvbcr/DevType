@@ -503,6 +503,39 @@ public final class TextInjectionPipeline {
         return false
     }
 
+    /// The continue-check for everything after the erase: the plain check, and — only when that
+    /// fails — the same vouched-replacement policy the erase and the verifier use. True means the
+    /// work may go on against `context.target`, which `adoptVouchedContinuation` has re-pointed at
+    /// the replacement when it was one. False leaves the refusal it stashed for the caller to record.
+    private func followsVouchedReplacement(_ context: InjectContext) -> Bool {
+        if canContinue(context, phase: .afterMutation) { return true }
+        switch adoptVouchedContinuation(
+            context, rangeGate: .afterMutation, checkRange: false, continuation: .beforeInsertion
+        ) {
+        case .proceed, .retarget: return true
+        case .refuse: return false
+        }
+    }
+
+    /// What the paste is offered when its captured control is no longer focused: the control this
+    /// inject now follows, if — and only if — the continuation policy vouches for it.
+    private func vouchedPasteTarget(_ context: InjectContext) -> PasteboardBroker.PasteTarget? {
+        followsVouchedReplacement(context) ? context.adopted.target : nil
+    }
+
+    /// Whether the field now holds exactly what the posted backspaces should have left, compared
+    /// with the picture taken before the first one — see `EraseContinuation.partialEraseLanded`.
+    private func partialEraseLanded(_ context: InjectContext, posted: Int) -> Bool {
+        guard let element = context.focusedElement else { return false }
+        return EraseContinuation.partialEraseLanded(
+            anchor: context.adopted.eraseAnchor,
+            live: eraseFieldPicture(element),
+            expectedText: context.erasePlan.expectedText,
+            caseInsensitive: context.erasePlan.caseInsensitive,
+            posted: posted
+        )
+    }
+
     /// `canContinue` failed, or is about to be asked again from a closure that must not refuse
     /// on its own. Returns `.retarget` only after the adopted box names the element this call
     /// just read. `.proceed` means a fresh reading matches again. `.refuse` stashes the label
@@ -647,6 +680,17 @@ public final class TextInjectionPipeline {
             selectionLength: observation.selectedRange?.length,
             frame: AXContextChecker.elementFrame(element)
         )
+    }
+
+    /// Internal test seam for the input-revision gate every post-erase continue-check consults:
+    /// claims an operation the way an inject does, then answers whether it is still current.
+    func claimOperationForTesting() -> (operation: InjectCompletionGuard, revision: UInt64) {
+        let operation = InjectCompletionGuard()
+        return (operation, ledger.claim(operation, consumingUndo: false))
+    }
+
+    func operationIsCurrentForTesting(_ operation: InjectCompletionGuard, revision: UInt64) -> Bool {
+        ledger.isCurrent(operation, revision: revision)
     }
 
     /// Internal test reader for the delivery-window counter. Not public API.
@@ -884,9 +928,40 @@ public final class TextInjectionPipeline {
     /// * **a confirmed replace that waited**, which resolves again before re-entering, because
     ///   the focus it was handed predates the wait (see `confirmReplacementSelection`).
     private func injectOnMain(_ request: InjectRequest, completion: @escaping InjectionCompletion) {
-        focusQuery { focus in
-            self.injectWithFocus(request, focus: focus, completion: completion)
+        // Something is about to be erased, and a previous expansion's payload may still be waiting
+        // to be read: the paste's own gate would hold *this* one after the erase, past the point
+        // the held type-ahead gives up. Wait first, while the field is untouched — every gate
+        // below (focus, entry, precondition) then runs after the wait. See `BoardHoldOff`.
+        guard !request.erasePlan.isEmpty, !request.secureClipboardPaste else {
+            focusQuery { focus in
+                self.injectWithFocus(request, focus: focus, completion: completion)
+            }
+            return
         }
+        BoardHoldOff.untilFree(
+            remaining: { self.clipboard.publicationGateRemaining() },
+            stillCurrent: {
+                self.operationStateIsCurrent(request.operation, revision: request.inputRevision)
+            },
+            schedule: { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) },
+            proceed: {
+                self.focusQuery { focus in
+                    self.injectWithFocus(request, focus: focus, completion: completion)
+                }
+            },
+            abandon: {
+                // Nothing was erased, so there is nothing to restore; the entry-gate refusal records
+                // which condition ended the wait (input, cancellation, trust, Secure Input).
+                self.refuseEntryGate(
+                    operation: request.operation,
+                    revision: request.inputRevision,
+                    targetMismatch: nil,
+                    allowSecureInput: false,
+                    swallowed: request.swallowed,
+                    completion: completion
+                )
+            }
+        )
     }
 
     private func injectWithFocus(
@@ -1308,8 +1383,11 @@ public final class TextInjectionPipeline {
                 return false
             }
         }
+        // After the erase the trigger is gone: a refusal here costs the user the trigger *and* the
+        // expansion. So the check follows a replaced node the same way the erase did (one owner:
+        // `EraseContinuation`, through `followsVouchedReplacement`) instead of re-pinning identity.
         let canProceedAfterMutation = {
-            self.canContinue(context, phase: .afterMutation)
+            self.followsVouchedReplacement(context)
         }
         // How many times this closure has already returned true. `shouldContinue` runs before
         // each pair, so a failure is judged against keys already authorized, never against a
@@ -1589,7 +1667,11 @@ public final class TextInjectionPipeline {
                        plan: head,
                        focus: FocusedElementSource.resolved(context.focusedElement),
                        retryOnMismatch: false
-                   ) == .ok {
+                   ) == .ok,
+                   // A second, independent signal: the head check is a suffix check and cannot
+                   // see how many graphemes of a repeating head are gone. The whole field must be
+                   // the pre-erase field minus exactly the posted graphemes.
+                   self.partialEraseLanded(context, posted: postedBackspaces) {
                     restoredPartialErase = true
                     self.restoreTriggerAfterFailedPaste(
                         erasePlan: tail,
@@ -1617,42 +1699,37 @@ public final class TextInjectionPipeline {
                 return
             }
             if !canProceedAfterMutation() {
-                switch self.adoptVouchedContinuation(
-                    context,
-                    rangeGate: .afterMutation,
-                    checkRange: false,
-                    continuation: .beforeInsertion
-                ) {
-                case .proceed, .retarget:
-                    break
-                case .refuse(let refusal):
-                    // The trigger is already gone. A reading WebKit produces while it replaces
-                    // the node (focus nothing, a web area, an AX value still behind the keys)
-                    // gets a bounded second look before it stands — the vouchers are unchanged.
-                    if context.adopted.lastRefusalMayClear,
-                       EraseContinuation.rereadBudgetRemains(attempt: settleAttempt) {
-                        DevTypeLog.inject.info(
-                            "[Inject] focus not yet vouched after the erase — re-reading after settle (attempt \(settleAttempt + 1, privacy: .public)/\(EraseContinuation.maxSettleRereads, privacy: .public))"
-                        )
-                        DispatchQueue.main.asyncAfter(deadline: .now() + AXSettleRetry.settleDelay) {
-                            afterErase(true, settleAttempt: settleAttempt + 1)
-                        }
-                        return
-                    }
-                    self.refuseInject(
-                        refusal.reason,
-                        path: refusal.path,
-                        swallowed: swallowed,
-                        allowKeyReplay: false,
-                        refuseContext: .capture(
-                            reason: refusal.reason,
-                            decision: context.gateDecision,
-                            targetMismatch: refusal.recordedMismatch
-                        ),
-                        completion: completion
+                // `followsVouchedReplacement` just judged this and stashed why: reading the stash
+                // keeps the label, and the second-look decision, from describing a different
+                // instant than the refusal they explain.
+                let refusal = context.adopted.lastRefusal
+                    ?? EraseContinuation.unadoptedRefusal(.beforeInsertion, nil)
+                // The trigger is already gone. A reading WebKit produces while it replaces
+                // the node (focus nothing, a web area, an AX value still behind the keys)
+                // gets a bounded second look before it stands — the vouchers are unchanged.
+                if context.adopted.lastRefusalMayClear,
+                   EraseContinuation.rereadBudgetRemains(attempt: settleAttempt) {
+                    DevTypeLog.inject.info(
+                        "[Inject] focus not yet vouched after the erase — re-reading after settle (attempt \(settleAttempt + 1, privacy: .public)/\(EraseContinuation.maxSettleRereads, privacy: .public))"
                     )
+                    DispatchQueue.main.asyncAfter(deadline: .now() + AXSettleRetry.settleDelay) {
+                        afterErase(true, settleAttempt: settleAttempt + 1)
+                    }
                     return
                 }
+                self.refuseInject(
+                    refusal.reason,
+                    path: refusal.path,
+                    swallowed: swallowed,
+                    allowKeyReplay: false,
+                    refuseContext: .capture(
+                        reason: refusal.reason,
+                        decision: context.gateDecision,
+                        targetMismatch: refusal.recordedMismatch
+                    ),
+                    completion: completion
+                )
+                return
             }
             // The paste targets the element the continuation just adopted, not the one captured
             // before the backspaces.
@@ -1763,6 +1840,7 @@ public final class TextInjectionPipeline {
                 focusedRole: focusedRole,
                 staleProbe: erasePlan.expectedText,
                 staleProbeCaseInsensitive: erasePlan.caseInsensitive,
+                followVouchedReplacement: { self.vouchedPasteTarget(context) },
                 shouldContinue: canProceedAfterMutation
             ) { result in
                 // #region agent log
@@ -2291,8 +2369,13 @@ public final class TextInjectionPipeline {
         trailingKeys: [String] = [],
         completion: @escaping InjectionCompletion
     ) {
-        let focus = FocusedElementSource.resolved(context.focusedElement)
-        guard canContinue(context) else {
+        // The plain check first, then the vouched replacement: a paste that never went out (⌘V
+        // refused, board lost) into a field whose node was swapped still owes the user their
+        // trigger back, and the restore has to follow the swap exactly as the paste would have.
+        // A paste that did land replaced the node with text the pre-erase picture does not predict,
+        // so the vouching read refuses it and it falls through to the abandoned path as before.
+        let stillOurs = { self.canContinue(context) || self.followsVouchedReplacement(context) }
+        guard stillOurs() else {
             finishAbandonedPaste(result: result, path: "clipboardAbandoned", completion: completion)
             // The usual cause in a WebKit field is the paste itself replacing the focused node:
             // the text is there and the element is not `CFEqual` to the one captured. The
@@ -2305,6 +2388,8 @@ public final class TextInjectionPipeline {
             }
             return
         }
+        // Read after the guard: a vouched replacement re-points `context` at the new element.
+        let focus = FocusedElementSource.resolved(context.focusedElement)
         let safeBundleID = DevTypeLog.boundedPublicIdentifier(
             context.frontBundleID,
             label: "bundleID"
@@ -2372,7 +2457,8 @@ public final class TextInjectionPipeline {
                 focus: focus,
                 bundleID: context.frontBundleID,
                 countsAsDuplicateRisk: result != .notPosted,
-                shouldContinue: { self.canContinue(context) }
+                followVouchedReplacement: { self.vouchedPasteTarget(context) },
+                shouldContinue: stillOurs
             ) {
                 PermissionCoordinator.shared.recordInjectOutcome(
                     .failedSilent, refuseContext: nil, path: path
@@ -2457,6 +2543,7 @@ public final class TextInjectionPipeline {
         focus: FocusedElementSource,
         bundleID: String? = nil,
         countsAsDuplicateRisk: Bool = true,
+        followVouchedReplacement: (() -> PasteboardBroker.PasteTarget?)? = nil,
         shouldContinue: @escaping () -> Bool,
         completion: @escaping () -> Void
     ) {
@@ -2480,7 +2567,14 @@ public final class TextInjectionPipeline {
                 return
             }
             // AX cannot restore — clipboard paste the trigger, then reinject the swallowed key.
-            clipboard.pasteViaClipboard(text: text, expectedText: nil, baseline: nil, focus: focus, bundleID: bundleID, shouldContinue: shouldContinue) { _ in
+            clipboard.pasteViaClipboard(
+                text: text, expectedText: nil, baseline: nil, focus: focus, bundleID: bundleID,
+                followVouchedReplacement: followVouchedReplacement,
+                // The restore replaces this expansion's own payload (or follows an erase that
+                // already waited out the board in `injectOnMain`): it must not sit behind it.
+                supersedesOwnPayload: true,
+                shouldContinue: shouldContinue
+            ) { _ in
                 if shouldContinue(), swallowed.mustReinjectOnRefuse {
                     _ = self.reinjectSwallowedKey(swallowed)
                 }
@@ -2593,7 +2687,14 @@ public final class TextInjectionPipeline {
         undoable: Bool,
         completion: @escaping InjectionCompletion
     ) {
-        guard canContinue(context, phase: .afterMutation) else { completion(.postedUnverified); return }
+        guard canContinue(context, phase: .afterMutation) else {
+            // The text was posted; what is no longer provable is where it landed. Recorded like
+            // every other abandoned delivery, so the report shows the attempt.
+            finishAbandonedPaste(
+                result: .unavailable, path: context.purpose.deliveryPath(path), completion: completion
+            )
+            return
+        }
         PermissionCoordinator.shared.recordInjectOutcome(
             outcome,
             refuseContext: nil,

@@ -84,6 +84,68 @@ final class ErasePartialRestoreTests: XCTestCase {
         XCTAssertEqual(exact, .ok)
     }
 
+    // MARK: - Exact comparison against the pre-erase field
+
+    private func picture(_ value: String?, caret: Int? = nil) -> EraseContinuation.EraseFieldPicture {
+        EraseContinuation.EraseFieldPicture(
+            value: value, caretLocation: caret ?? value?.utf16.count, selectionLength: 0,
+            frame: CGRect(x: 10, y: 20, width: 200, height: 22)
+        )
+    }
+
+    /// The suffix check cannot tell how many graphemes are gone when the head repeats them: `aaa`
+    /// with two pairs authorized and one posted leaves `xaa`, which ends in the claimed head `a`.
+    func testTheHeadSuffixCheckAloneAdmitsARepeatedHeadWithAnOverstatedCount() throws {
+        let head = try XCTUnwrap(ErasePlan(text: "aaa").keptHead(graphemes: 2))
+        XCTAssertEqual(
+            ErasePreconditionChecker.evaluate(plan: head, value: "xaa", caretLocation: 3, selectionLength: 0),
+            .ok,
+            "the characterization: this is the hole the exact comparison closes"
+        )
+    }
+
+    func testTheExactComparisonRefusesAnOverstatedCountThatARepeatedHeadHides() {
+        let before = picture("xaaa")
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: before, live: picture("xaa"), expectedText: "aaa", caseInsensitive: false, posted: 2
+        ), "two authorized, one landed: restoring the tail would add a character the user never typed")
+        XCTAssertTrue(EraseContinuation.partialEraseLanded(
+            anchor: before, live: picture("xaa"), expectedText: "aaa", caseInsensitive: false, posted: 1
+        ))
+        XCTAssertTrue(EraseContinuation.partialEraseLanded(
+            anchor: before, live: picture("xa"), expectedText: "aaa", caseInsensitive: false, posted: 2
+        ))
+        let semicolons = picture("see;;x")
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: semicolons, live: picture("see;;"), expectedText: ";;x", caseInsensitive: false, posted: 2
+        ))
+        XCTAssertTrue(EraseContinuation.partialEraseLanded(
+            anchor: semicolons, live: picture("see;;"), expectedText: ";;x", caseInsensitive: false, posted: 1
+        ))
+    }
+
+    func testNoPreEraseReadingOrNoLiveReadingMeansNoRestore() {
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: nil, live: picture("xa"), expectedText: "aaa", caseInsensitive: false, posted: 2
+        ), "without a picture of the field before the erase there is nothing to compare against")
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: picture("xaaa"), live: nil, expectedText: "aaa", caseInsensitive: false, posted: 2
+        ))
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: picture("xaaa"), live: picture(nil), expectedText: "aaa", caseInsensitive: false, posted: 2
+        ), "an unreadable field is not evidence of how much landed")
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: picture("xaaa"), live: picture("xa"), expectedText: "aaa", caseInsensitive: false, posted: 0
+        ))
+    }
+
+    func testAFieldThatIsNotTheOneTheEraseStartedInIsNotRestored() {
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: picture("xaaa"), live: picture("another field"), expectedText: "aaa",
+            caseInsensitive: false, posted: 2
+        ))
+    }
+
     // MARK: - Wiring
 
     func testAnIncompleteEraseRestoresTheTailBeforeTheKeyIsReplayed() throws {
@@ -110,6 +172,12 @@ final class ErasePartialRestoreTests: XCTestCase {
         )
         XCTAssertLessThan(restore.lowerBound, headCheck.lowerBound)
         XCTAssertLessThan(headCheck.lowerBound, refuse.lowerBound)
-        XCTAssertTrue(afterErase.contains("== .ok {"), "Only a confirmed head admits the restore; unavailable does not")
+        XCTAssertTrue(afterErase.contains("== .ok"), "Only a confirmed head admits the restore; unavailable does not")
+        let exact = try XCTUnwrap(
+            afterErase.range(of: "self.partialEraseLanded("),
+            "The restore must also match the pre-erase field exactly, not just a suffix"
+        )
+        XCTAssertLessThan(headCheck.lowerBound, exact.lowerBound)
+        XCTAssertLessThan(exact.lowerBound, refuse.lowerBound)
     }
 }

@@ -66,6 +66,32 @@ final class TapTypeAheadTests: TapEventTestCase {
         XCTAssertTrue(hasHold, "`s was replayed into the field; `lm completes the trigger")
     }
 
+    /// A real key that arrives while the replay is still being posted lands in the field either
+    /// before or after the replayed characters — the tap cannot know which. The buffer must not
+    /// claim an order it cannot vouch for, so it is emptied and the next trigger starts clean
+    /// rather than matching text that may be in a different order in the field.
+    func testARealKeyRacingTheReplayLeavesNoClaimedOrderInTheBuffer() {
+        XCTAssertTrue(engine.tryBeginExpansion())
+        type("`s")
+        engine.typeAheadReplayPoster = { [unowned self] _ in
+            self.key("x")
+        }
+        engine.endExpansion()
+        XCTAssertEqual(ring, "", "the ring claimed `sx while the field may hold x`s")
+    }
+
+    /// The physical-layout buffer is cleared, not seeded; seeding only the ring would make the two
+    /// disagree about what the field holds on the layout path that reads the other one.
+    func testReplayIsNotSeededWhereThePhysicalLayoutBufferWouldDisagree() {
+        engine.contextLock.lock()
+        engine._allowPhysicalFallback = true
+        engine.contextLock.unlock()
+        XCTAssertTrue(engine.tryBeginExpansion())
+        type("`s")
+        engine.endExpansion()
+        XCTAssertEqual(ring, "")
+    }
+
     func testReplayDroppedForAFocusChangeDoesNotSeedTheBuffer() {
         XCTAssertTrue(engine.tryBeginExpansion())
         type("`s")

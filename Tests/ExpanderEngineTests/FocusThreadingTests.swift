@@ -137,11 +137,20 @@ final class FocusThreadingTests: XCTestCase {
         // the target against a focus that predates the wait (`confirmReplacementSelection`).
         XCTAssertEqual(inject.components(separatedBy: "queryFocusedElement").count - 1, 0,
                        "Focus is resolved through the `focusQuery` seam, not by a direct query")
-        XCTAssertEqual(inject.components(separatedBy: "focusQuery {").count - 1, 2,
-                       "One resolution per inject, and one re-read after a replace confirm that waited")
+        // `injectOnMain` names it twice: the inject that erases nothing resolves at once, and the one
+        // that does waits out `BoardHoldOff` first. They are the two arms of one `guard … else`
+        // (the early-return arm and the `proceed` of the wait), so an inject still resolves once.
+        XCTAssertEqual(inject.components(separatedBy: "focusQuery {").count - 1, 3,
+                       "One resolution per inject (two exclusive arms), and one re-read after a replace confirm that waited")
         let confirmStart = try XCTUnwrap(inject.range(of: "private func confirmReplacementSelection("))
-        XCTAssertEqual(inject[..<confirmStart.lowerBound].components(separatedBy: "focusQuery {").count - 1, 1,
+        let beforeConfirm = String(inject[..<confirmStart.lowerBound])
+        XCTAssertEqual(beforeConfirm.components(separatedBy: "focusQuery {").count - 1, 2,
                        "the entry re-check's answer is the threaded element for every path but a waited replace")
+        let wait = try XCTUnwrap(beforeConfirm.range(of: "BoardHoldOff.untilFree("))
+        let bypass = try XCTUnwrap(beforeConfirm.range(of: "focusQuery {"))
+        XCTAssertLessThan(bypass.lowerBound, wait.lowerBound, "the unwaited arm is the early return before the wait")
+        XCTAssertTrue(beforeConfirm[bypass.lowerBound..<wait.lowerBound].contains("return\n"),
+                      "the unwaited arm returns, so it and the waited arm never both resolve")
         for untracked in [
             "focusedElement()", "focusedElementRole()", "captureFocusedTextObservation()",
             "isFrontmostShellLikeContext()", "PasteTarget.capture()"
