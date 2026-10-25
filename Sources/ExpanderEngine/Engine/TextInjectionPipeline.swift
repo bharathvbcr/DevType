@@ -137,21 +137,25 @@ public final class TextInjectionPipeline {
     }
 
     /// Tests supply the selection confirmer (so a lost selection can be scripted without a live
-    /// field) and where a refused replace's payload goes (so a test never writes the real clipboard).
+    /// field), where a refused replace's payload goes (so a test never writes the real clipboard),
+    /// and the broker and verifier that paste and then read the field back (so a ⌘V and its
+    /// aftermath run against a private pasteboard and a scripted field, not the user's).
     init(
         defaults: UserDefaults,
         selectionConfirmer: SelectionReplacementGuard.Confirmer,
         keepRefusedReplacement: @escaping (String) -> Bool,
         focusQuery: @escaping (@escaping (AXContextChecker.FocusQueryResult) -> Void) -> Void = {
             AXContextChecker.shared.queryFocusedElement(completion: $0)
-        }
+        },
+        clipboard: PasteboardBroker = .shared,
+        verifier: DeliveryVerifier = .shared
     ) {
         self.focusQuery = focusQuery
         ledger = ExpansionLedger(defaults: defaults)
         hid = HIDKeyPoster.shared
         ax = AXTextWriter.shared
-        verifier = DeliveryVerifier.shared
-        clipboard = PasteboardBroker.shared
+        self.verifier = verifier
+        self.clipboard = clipboard
         eraser = EraseExecutor.shared
         timing = InjectTimingStore.shared
         self.selectionConfirmer = selectionConfirmer
@@ -174,6 +178,16 @@ public final class TextInjectionPipeline {
     /// Optional UI hook when a replace was refused rather than pasted beside the original.
     /// `copied` says whether the payload made it onto the clipboard.
     public var onSelectionReplaceRefused: ((_ copied: Bool) -> Void)?
+
+    /// Localization keys (Permissions.strings) of the toast shown when a replace's ⌘V went out but
+    /// the result may not be in the field — read back unchanged, or never posted: with the result
+    /// kept on the clipboard, and without.
+    public static let replaceNotLandedHintKey = "inject.replaceNotLanded"
+    public static let replaceNotLandedNoCopyHintKey = "inject.replaceNotLandedNoCopy"
+
+    /// Optional UI hook for the above. Separate from `onSelectionReplaceRefused` because the
+    /// sentence differs: that one says the selection changed, which here is not what was seen.
+    public var onReplaceNotLanded: ((_ copied: Bool) -> Void)?
 
     private let selectionConfirmer: SelectionReplacementGuard.Confirmer
     /// Resolves the focused element asynchronously. The live query in production; a test scripts
@@ -957,7 +971,9 @@ public final class TextInjectionPipeline {
                 trailingKeys: request.trailingKeys,
                 snippetLookup: request.snippetLookup,
                 focus: .resolved(element),
+                replacesSelection: request.replacesSelection,
                 shouldContinue: { self.operationIsCurrent(operation, revision: revision, target: target, allowSecureInput: true) },
+                operationIsCurrent: { self.operationStateIsCurrent(operation, revision: revision, allowSecureInput: true) },
                 completion: completion
             )
             return
@@ -1951,7 +1967,13 @@ public final class TextInjectionPipeline {
 
     /// Explicit Inline Search / hotkey path: HID clipboard Cmd+V only (never AX).
     /// Bypasses live Secure Input, secure-field, and missing-focus-under-SI refuses.
-    private func injectSecureClipboardPasteOnMain(
+    ///
+    /// A selection replace (`replacesSelection`) is not left fire-and-forget: the selection was
+    /// confirmed carefully, and the ⌘V that follows is the one step nothing used to watch. See
+    /// `witnessReplacement`. `operationIsCurrent` is the operation half of `shouldContinue` — the
+    /// part that says the user did not cancel, supersede or type, as opposed to focus moving.
+    /// Internal rather than private so a test can drive it against a scripted field.
+    func injectSecureClipboardPasteOnMain(
         snippet: SnippetModel,
         clipboardOverride: String?,
         swallowed: SwallowedKey,
@@ -1959,7 +1981,9 @@ public final class TextInjectionPipeline {
         trailingKeys: [String],
         snippetLookup: ((String) -> String?)?,
         focus: FocusedElementSource,
+        replacesSelection: Bool,
         shouldContinue: @escaping () -> Bool,
+        operationIsCurrent: @escaping () -> Bool,
         completion: @escaping InjectionCompletion
     ) {
         if snippet.isImageSnippet {
@@ -2027,12 +2051,26 @@ public final class TextInjectionPipeline {
         // need to press ⌘V themselves — and it is safe only because `PasteboardBroker` now tracks
         // ownership: the next expansion inherits this pending restore instead of snapshotting our
         // concealed payload as if it were the user's clipboard.
+        //
+        // A replace over a field AX can read is the exception to "no AX verification": the guard
+        // proved the selection, and nothing proved the paste. With a baseline the broker runs its
+        // hold loop (reads only, and a real answer releases the board at once), and the role it is
+        // given is the field's own so the after-mutation gate treats a combo box as the unstable
+        // node it is. Under Secure Input, or over a field that cannot be read, the call is the one
+        // it always was: the fields that need this path are the ones AX cannot read.
+        let focusedRole = focus.element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) }
+        let replaceBaseline = replacesSelection && !underSecureInput
+            ? verifier.captureFocusedTextObservation(focus: focus).flatMap { observed in
+                observed.target != nil && observed.value != nil && observed.selectedRange != nil ? observed : nil
+            }
+            : nil
         clipboard.pasteViaClipboard(
             text: textToInject,
-            expectedText: nil,
-            baseline: nil,
+            expectedText: replaceBaseline == nil ? nil : textToInject,
+            baseline: replaceBaseline,
             focus: focus,
             bundleID: frontBundleID,
+            focusedRole: focusedRole,
             leaveClipboardOnFailure: underSecureInput,
             holdTimeoutOverride: underSecureInput ? InjectTiming.secureClipboardPasteHoldTimeout : nil,
             completeBeforeRestore: true,
@@ -2040,6 +2078,17 @@ public final class TextInjectionPipeline {
             shouldContinue: shouldContinue
         ) { result in
             guard shouldContinue() else {
+                // Focus moved while the operation is still the user's: the very shape a paste that
+                // lands nowhere has. Whether it did is a question for the field, not for this gate.
+                if let replaceBaseline, result != .notPosted, operationIsCurrent() {
+                    self.witnessReplacement(
+                        payload: textToInject, baseline: replaceBaseline, role: focusedRole,
+                        bundleID: frontBundleID, trailingKeys: keysToPress,
+                        shouldContinue: shouldContinue, operationIsCurrent: operationIsCurrent,
+                        completion: completion
+                    )
+                    return
+                }
                 self.finishAbandonedPaste(result: result, path: "secureClipboardAbandoned", completion: completion)
                 return
             }
@@ -2054,6 +2103,15 @@ public final class TextInjectionPipeline {
                 completion(.succeeded)
 
             case .unavailable:
+                if let replaceBaseline {
+                    self.witnessReplacement(
+                        payload: textToInject, baseline: replaceBaseline, role: focusedRole,
+                        bundleID: frontBundleID, trailingKeys: keysToPress,
+                        shouldContinue: shouldContinue, operationIsCurrent: operationIsCurrent,
+                        completion: completion
+                    )
+                    return
+                }
                 // Cmd+V posted; password fields usually cannot confirm via AX.
                 if underSecureInput { self.notifySecureClipboardManualPaste() }
                 PermissionCoordinator.shared.recordInjectOutcome(
@@ -2064,12 +2122,100 @@ public final class TextInjectionPipeline {
                 completion(.postedUnverified)
 
             case .notPosted, .failed:
+                // No ⌘V went out, so the broker has restored the user's clipboard and the result
+                // — generated, and not reproducible — would be gone. Under Secure Input the
+                // broker already leaves the payload up for a manual ⌘V; everywhere else a
+                // replace keeps it the way a refused selection does.
+                var copied: Bool?
+                if replacesSelection, !underSecureInput {
+                    copied = self.keepRefusedReplacement(textToInject)
+                    DevTypeLog.inject.notice(
+                        "[Inject] replace not pasted — result copied=\(copied == true, privacy: .public)"
+                    )
+                }
                 PermissionCoordinator.shared.recordInjectOutcome(
                     .failedSilent, refuseContext: nil, path: "secureClipboardPaste"
                 )
                 completion(.failedSilent)
+                if let copied { self.onReplaceNotLanded?(copied) }
             }
         }
+    }
+
+    /// Reads a selection replace's field after its ⌘V and says what became of the result.
+    ///
+    /// The result is the only copy: the model produced it, the original is about to be (or
+    /// has been) overwritten, and the broker restores the user's old clipboard moments after the
+    /// paste. So a ⌘V that lands nowhere — focus slipped back to the window after the selection
+    /// was confirmed — used to lose it silently as `postedUnverified`.
+    ///
+    /// - **landed**: `succeeded`, whether the node was replaced under the paste or not.
+    /// - **not landed**, still true after `replacementMissWindow`: the result goes to the clipboard
+    ///   through `keepRefusedReplacement` (invalidating the restore) and the outcome is a refusal
+    ///   the report can name. **Nothing re-pastes**: a host that reads the board late would
+    ///   duplicate the result, and the clipboard copy costs nothing if it did land.
+    /// - anything else: `postedUnverified`, as before this existed.
+    ///
+    /// Bounded by attempt count, not the clock, so a clock that stops cannot make it a loop. The
+    /// operation half of the continue-check ends it: a cancelled or superseded inject, or typing
+    /// since, means the field is no longer ours to judge.
+    private func witnessReplacement(
+        payload: String,
+        baseline: DeliveryVerifier.FocusedTextObservation,
+        role: String?,
+        bundleID: String?,
+        trailingKeys: [String],
+        shouldContinue: @escaping () -> Bool,
+        operationIsCurrent: @escaping () -> Bool,
+        attempt: Int = 0,
+        completion: @escaping InjectionCompletion
+    ) {
+        guard operationIsCurrent() else {
+            finishAbandonedPaste(result: .unavailable, path: "secureClipboardAbandoned", completion: completion)
+            return
+        }
+        let verdict = verifier.readReplacementOutcome(
+            expectedText: payload, baseline: baseline,
+            mirrorTrusted: AXWriteCapabilityStore.shared.canConfirmDelivery(bundleID: bundleID, role: role)
+        )
+        if verdict == .landed {
+            if shouldContinue() { hid.postTrailingKeys(trailingKeys, shouldContinue: shouldContinue) }
+            PermissionCoordinator.shared.recordInjectOutcome(
+                .succeeded, refuseContext: nil, path: "secureClipboardPaste"
+            )
+            completion(.succeeded)
+            return
+        }
+        let budget = Int((InjectTiming.replacementMissWindow / InjectTiming.pasteDeliverySettleDelay).rounded(.up))
+        if attempt < budget {
+            DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteDeliverySettleDelay) {
+                self.witnessReplacement(
+                    payload: payload, baseline: baseline, role: role, bundleID: bundleID,
+                    trailingKeys: trailingKeys, shouldContinue: shouldContinue,
+                    operationIsCurrent: operationIsCurrent, attempt: attempt + 1, completion: completion
+                )
+            }
+            return
+        }
+        guard verdict == .notLanded else {
+            PermissionCoordinator.shared.recordInjectOutcome(
+                .postedUnverified, refuseContext: nil, path: "secureClipboardPaste"
+            )
+            completion(.postedUnverified)
+            return
+        }
+        let copied = keepRefusedReplacement(payload)
+        DevTypeLog.inject.notice(
+            "[Inject] replace not confirmed — field unchanged \(InjectTiming.replacementMissWindow, privacy: .public)s after ⌘V; result copied=\(copied, privacy: .public)"
+        )
+        refuseInject(
+            SelectionReplacementGuard.Refusal.notLanded.reason,
+            path: SelectionReplacementGuard.refusalPath,
+            swallowed: .notSwallowed,
+            allowKeyReplay: false,
+            completion: completion
+        )
+        onReplaceNotLanded?(copied)
     }
 
     private func notifySecureClipboardManualPaste() {

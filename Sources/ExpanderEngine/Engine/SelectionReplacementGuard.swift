@@ -70,10 +70,19 @@ public enum SelectionReplacementGuard {
         /// The selection was confirmed, but while that waited focus left the element it was
         /// confirmed on: the paste would land somewhere the confirm never looked.
         case focusMoved
+        /// The paste was posted and the field was read back unchanged: the original is still
+        /// there and the result is not. Unlike every other case, ⌘V did go out — the result is
+        /// kept on the clipboard because nothing re-pastes it (a late paste would duplicate it).
+        case notLanded
 
         /// Report-ready sentence. Carries no field content, so `InjectRefusalKind.classify` passes
         /// it through to the report intact.
         public var reason: String {
+            // The one cause that is not about the selection going stale before the paste, so it
+            // must not wear that prefix: the report would send its reader after the wrong stage.
+            if self == .notLanded {
+                return "Replace not confirmed — the field still held the original after the paste"
+            }
             let detail: String
             switch self {
             case .unreadable: detail = "the selection could not be read back"
@@ -83,6 +92,7 @@ public enum SelectionReplacementGuard {
             case .reselectFailed: detail = "re-selecting the original text did not take"
             case .fieldTooLarge: detail = "the field is too large to search for the original text"
             case .focusMoved: detail = "focus left the field while its selection was being confirmed"
+            case .notLanded: detail = ""
             }
             return "\(SelectionReplacementGuard.refusalPrefix)\(detail)"
         }

@@ -293,6 +293,63 @@ public final class DeliveryVerifier {
         )
     }
 
+    /// What the field says about a selection replace, after the ⌘V was posted.
+    public enum ReplacementOutcome: Equatable {
+        /// The field holds the result where the selection was (a node swap is vouched, as in
+        /// `readFocusedTextDelivery`).
+        case landed
+        /// The baseline's own field was read, and it is exactly as it was before the paste: the
+        /// original text is still where the result belonged. Positive evidence about the field,
+        /// not an absence read through whatever happens to be focused.
+        case notLanded
+        /// Anything else — unreadable, changed in some other way, a different field focused with
+        /// nothing to compare. The caller stays where it was before this read existed.
+        case unverified
+    }
+
+    /// Judges a selection replace, read-only. `readFocusedTextDelivery` can only say "delivered",
+    /// so a paste that went nowhere and a field AX cannot read were the same `.unavailable`; the
+    /// second half of this tells them apart.
+    ///
+    /// The miss is read on the baseline's **target element directly**, never through focus. The
+    /// case this exists for is focus slipping to the window after the selection was confirmed:
+    /// the focused element is then the window, which fails the `CFEqual` and the same-control
+    /// vouch, so a focus-based read has nothing to say — while the field itself still answers, and
+    /// still holds the original.
+    ///
+    /// Fails closed to `.unverified` where an unchanged field would prove nothing:
+    /// - `mirrorTrusted` is false (a host whose AX value lags its own edits reads unchanged for a
+    ///   paste that landed — `AXWriteCapabilityStore.canConfirmDelivery`);
+    /// - the baseline never read the field's value or selection;
+    /// - the result reads the same as the text it replaces, so a paste that landed leaves the
+    ///   field as it was;
+    /// - the field's value is unreadable now, or is anything but the baseline's, byte for byte.
+    public func readReplacementOutcome(
+        expectedText: String,
+        baseline: FocusedTextObservation,
+        mirrorTrusted: Bool
+    ) -> ReplacementOutcome {
+        let reading = readFocusedTextDelivery(
+            expectedText: expectedText, baseline: baseline, vouchingReplacement: true
+        )
+        if reading.verification == .delivered { return .landed }
+        guard mirrorTrusted, !expectedText.isEmpty,
+              let target = baseline.target,
+              let beforeValue = baseline.value, let selection = baseline.selectedRange else {
+            return .unverified
+        }
+        let before = beforeValue as NSString
+        guard Self.validRange(selection, length: before.length) else { return .unverified }
+        if selection.length > 0,
+           before.substring(with: selection).normalizedWhitespace == expectedText.normalizedWhitespace {
+            return .unverified
+        }
+        guard let now = focusedTextObservation(for: target).value, now == beforeValue else {
+            return .unverified
+        }
+        return .notLanded
+    }
+
     /// Verifies against `kAXNumberOfCharacters` plus a `kAXStringForRange` read over the insertion
     /// window instead of the whole field — this runs on every 50 ms hold-loop tick.
     ///

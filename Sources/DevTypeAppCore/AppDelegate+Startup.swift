@@ -122,6 +122,18 @@ extension AppDelegate {
                 preempt: true
             )
         }
+        // A replace whose ⌘V went out but whose result was not found in the field. The result is
+        // on the clipboard; the toast is how the user learns the transform did not simply vanish.
+        TextInjectionPipeline.shared.onReplaceNotLanded = { copied in
+            let key = copied
+                ? TextInjectionPipeline.replaceNotLandedHintKey
+                : TextInjectionPipeline.replaceNotLandedNoCopyHintKey
+            ToastPanel.show(
+                LocalizationManager.shared.s(key),
+                symbol: copied ? "doc.on.clipboard.fill" : "exclamationmark.triangle.fill",
+                preempt: true
+            )
+        }
     }
 
     func handleCoordinatorStatus(_ status: PermissionCoordinator.Status) {

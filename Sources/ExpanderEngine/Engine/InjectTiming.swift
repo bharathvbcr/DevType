@@ -36,6 +36,12 @@ public enum InjectTiming {
     public static let pasteDeliveryMaxAttempts = 2
     /// Settle delay for the deferred AX re-verification pass after unverified HID paste.
     public static let pasteReverifyDelay: TimeInterval = 0.25
+    /// How long after the hold loop gave up a selection replace keeps reading its field before it
+    /// calls the paste a miss. The hold loop answers on `pasteDeliveryHoldTimeout`, and a focus
+    /// slip ends it on its first tick, 50 ms after ⌘V — far too early to say a host that reads
+    /// the board from a content process has not pasted yet. Kept under the residency ceiling so
+    /// a miss is still found while our payload, not the user's old clipboard, is on the board.
+    public static let replacementMissWindow: TimeInterval = 0.5
     /// §3.4: p90 delivery latency is multiplied by this to pick a restore delay.
     public static let deliverySafetyFactor: Double = 1.5
     /// §3.4: …and by this to pick a hold timeout (we would rather wait than report a false miss).
