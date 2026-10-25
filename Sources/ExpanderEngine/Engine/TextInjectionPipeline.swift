@@ -511,6 +511,7 @@ public final class TextInjectionPipeline {
         var liveRole: String?
         var reading: EraseFieldReading?
         var deletionMatched = false
+        var deletionLagging = false
         if !operationBlocked, allows, elementOrRange {
             switch continuation {
             case .beforeErase:
@@ -549,6 +550,14 @@ public final class TextInjectionPipeline {
                         caseInsensitive: context.erasePlan.caseInsensitive,
                         maxRemovedGraphemes: maxRemoved
                     )
+                    if continuation == .beforeInsertion {
+                        deletionLagging = EraseContinuation.deletionIsLagging(
+                            anchor: context.adopted.eraseAnchor,
+                            live: live,
+                            expectedText: context.erasePlan.expectedText,
+                            caseInsensitive: context.erasePlan.caseInsensitive
+                        )
+                    }
                     reading = EraseContinuation.fieldReading(
                         expected: context.erasePlan.expectedText,
                         value: live.value,
@@ -559,7 +568,7 @@ public final class TextInjectionPipeline {
                 }
             }
         }
-        let decision = EraseContinuation.decide(EraseContinuationFacts(
+        let facts = EraseContinuationFacts(
             phase: continuation,
             revisionCurrent: revisionCurrent,
             continuationBlock: block,
@@ -570,8 +579,11 @@ public final class TextInjectionPipeline {
             deletionMatched: deletionMatched,
             livePrecondition: livePrecondition,
             liveRole: liveRole,
-            fieldReading: reading
-        ))
+            fieldReading: reading,
+            deletionLagging: deletionLagging
+        )
+        let decision = EraseContinuation.decide(facts)
+        context.adopted.lastRefusalMayClear = false
         switch decision {
         case .proceed:
             context.adopted.lastRefusal = nil
@@ -596,6 +608,7 @@ public final class TextInjectionPipeline {
             context.adopted.lastRefusal = nil
         case .refuse(let refusal):
             context.adopted.lastRefusal = refusal
+            context.adopted.lastRefusalMayClear = EraseContinuation.mayClearOnReread(facts)
         }
         return decision
     }
@@ -769,6 +782,10 @@ public final class TextInjectionPipeline {
         /// The refusal the pre-write guard records. `canProceed` already made the decision; a
         /// second live read in the guard could name a different instant.
         var lastRefusal: EraseContinuationRefusal?
+        /// Whether `lastRefusal` was a `.beforeInsertion` reading a second look may clear
+        /// (`EraseContinuation.mayClearOnReread`). Set with the refusal from the same facts, so
+        /// the caller never re-derives it from a different instant.
+        var lastRefusalMayClear = false
         /// The field when the first backspace was authorized. Later deletion math stays against
         /// this picture; adopting a mid-erase node must not replace it with the field the
         /// deletes have already changed, or a different control would match itself.
@@ -1441,44 +1458,9 @@ public final class TextInjectionPipeline {
         // The guarded erase collapses any stray selection and re-verifies the trigger is still left
         // of the caret, so a half-applied AX edit above cannot be swallowed by backspace #1 and turn
         // the remaining backspaces loose on the user's text.
-        eraser.performGuardedErase(
-            plan: erasePlan,
-            focus: focus,
-            afterPossibleWrite: attemptedAXWrite,
-            insertionPointFollowsExpectedText: context.eraseCaretVouched,
-            intent: context.purpose.eraseIntent,
-            canProceed: canProceed,
-            postingContinue: postingContinue,
-            onUnverifiableAfterWrite: { why in
-                // Self-healing: an attempted AX write left the field unreadable even after the
-                // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
-                // this on its very first expansion). Strikes escalate rather than condemn
-                // outright: a transient (focus stolen mid-inject) looks identical on one
-                // observation, and a wrong condemnation is effectively permanent. The second
-                // strike condemns, so a genuinely broken shell heals on the user's next retry
-                // and every expansion after that skips the AX write for the HID paste path.
-                // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
-                guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
-                let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
-                let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
-                switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
-                    bundleID: bundleID,
-                    role: focusedRole
-                ) {
-                case .struck(let count):
-                    DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
-                    )
-                case .condemned:
-                    DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
-                    )
-                case .alreadyCondemned:
-                    break
-                }
-            },
-            elementAfterContinue: { context.focusedElement }
-        ) { erased in
+        // The continuation after the erase is a local function, not the call's trailing closure,
+        // so a refusal that a second look may clear can re-enter it after a settle.
+        func afterErase(_ erased: Bool, settleAttempt: Int) {
             guard erased else {
                 self.refuseInject(
                     "Trigger erase did not complete — field may hold a partial trigger",
@@ -1503,6 +1485,19 @@ public final class TextInjectionPipeline {
                 case .proceed, .retarget:
                     break
                 case .refuse(let refusal):
+                    // The trigger is already gone. A reading WebKit produces while it replaces
+                    // the node (focus nothing, a web area, an AX value still behind the keys)
+                    // gets a bounded second look before it stands — the vouchers are unchanged.
+                    if context.adopted.lastRefusalMayClear,
+                       EraseContinuation.rereadBudgetRemains(attempt: settleAttempt) {
+                        DevTypeLog.inject.info(
+                            "[Inject] focus not yet vouched after the erase — re-reading after settle (attempt \(settleAttempt + 1, privacy: .public)/\(EraseContinuation.maxSettleRereads, privacy: .public))"
+                        )
+                        DispatchQueue.main.asyncAfter(deadline: .now() + AXSettleRetry.settleDelay) {
+                            afterErase(true, settleAttempt: settleAttempt + 1)
+                        }
+                        return
+                    }
                     self.refuseInject(
                         refusal.reason,
                         path: refusal.path,
@@ -1653,6 +1648,47 @@ public final class TextInjectionPipeline {
                     completion: completion
                 )
             }
+        }
+
+        eraser.performGuardedErase(
+            plan: erasePlan,
+            focus: focus,
+            afterPossibleWrite: attemptedAXWrite,
+            insertionPointFollowsExpectedText: context.eraseCaretVouched,
+            intent: context.purpose.eraseIntent,
+            canProceed: canProceed,
+            postingContinue: postingContinue,
+            onUnverifiableAfterWrite: { why in
+                // Self-healing: an attempted AX write left the field unreadable even after the
+                // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
+                // this on its very first expansion). Strikes escalate rather than condemn
+                // outright: a transient (focus stolen mid-inject) looks identical on one
+                // observation, and a wrong condemnation is effectively permanent. The second
+                // strike condemns, so a genuinely broken shell heals on the user's next retry
+                // and every expansion after that skips the AX write for the HID paste path.
+                // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
+                guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
+                let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
+                let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
+                switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
+                    bundleID: bundleID,
+                    role: focusedRole
+                ) {
+                case .struck(let count):
+                    DevTypeLog.inject.notice(
+                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
+                    )
+                case .condemned:
+                    DevTypeLog.inject.notice(
+                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
+                    )
+                case .alreadyCondemned:
+                    break
+                }
+            },
+            elementAfterContinue: { context.focusedElement }
+        ) { erased in
+            afterErase(erased, settleAttempt: 0)
         }
     }
 
