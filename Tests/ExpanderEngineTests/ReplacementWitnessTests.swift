@@ -227,7 +227,8 @@ final class ReplacementWitnessTests: XCTestCase {
                 selectionConfirmer: SelectionReplacementGuard.Confirmer(),
                 keepRefusedReplacement: { keeper($0) },
                 clipboard: broker,
-                verifier: verifier
+                verifier: verifier,
+                deliveryTrust: { _, _ in true }
             )
             keeper = { [unowned self] text in
                 self.kept.append(text)

@@ -76,6 +76,9 @@ public final class TextInjectionPipeline {
     private let ax: AXTextWriter
     private let verifier: DeliveryVerifier
     private let clipboard: PasteboardBroker
+    /// Whether this app's AX mirror may be believed about a paste (`canConfirmDelivery`). A seam
+    /// so a test's verdict is its own, not whatever this Mac learned about the test host's bundle.
+    private let deliveryTrust: (_ bundleID: String?, _ role: String?) -> Bool
     private let eraser: EraseExecutor
     private let timing: InjectTimingStore
 
@@ -148,9 +151,13 @@ public final class TextInjectionPipeline {
             AXContextChecker.shared.queryFocusedElement(completion: $0)
         },
         clipboard: PasteboardBroker = .shared,
-        verifier: DeliveryVerifier = .shared
+        verifier: DeliveryVerifier = .shared,
+        deliveryTrust: @escaping (_ bundleID: String?, _ role: String?) -> Bool = {
+            AXWriteCapabilityStore.shared.canConfirmDelivery(bundleID: $0, role: $1)
+        }
     ) {
         self.focusQuery = focusQuery
+        self.deliveryTrust = deliveryTrust
         ledger = ExpansionLedger(defaults: defaults)
         hid = HIDKeyPoster.shared
         ax = AXTextWriter.shared
@@ -2301,7 +2308,7 @@ public final class TextInjectionPipeline {
         }
         let verdict = verifier.readReplacementOutcome(
             expectedText: payload, baseline: baseline,
-            mirrorTrusted: AXWriteCapabilityStore.shared.canConfirmDelivery(bundleID: bundleID, role: role)
+            mirrorTrusted: deliveryTrust(bundleID, role)
         )
         if verdict == .landed {
             if shouldContinue() { hid.postTrailingKeys(trailingKeys, shouldContinue: shouldContinue) }
