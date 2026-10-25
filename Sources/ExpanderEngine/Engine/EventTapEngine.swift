@@ -245,6 +245,12 @@ public final class EventTapEngine {
         .leftMouseDown, .rightMouseDown, .otherMouseDown
     ]
 
+    /// Posts one replayed type-ahead character. Injectable so a test can observe the replay
+    /// without sending keystrokes to the machine it runs on; production always uses the HID poster.
+    var typeAheadReplayPoster: (String) -> Void = { character in
+        _ = HIDKeyPoster.shared.postUnicodeKeyEvent(unicode: character, keyCode: 0, flags: [])
+    }
+
     let matchDropLock = UnfairLock()
     var _matchDrops = MatchDropCounters()
 
