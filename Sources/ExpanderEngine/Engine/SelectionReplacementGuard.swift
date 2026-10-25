@@ -21,11 +21,27 @@ public struct SelectionReplacement: Equatable, Sendable {
     /// unreadable selection is a refusal: the app answered AX when the text was read, and a
     /// paste into a selection nobody can see is how the duplicate happened.
     public let requiresEvidence: Bool
+    /// The AX element the original was read from, when it was read live. Focus at replace time is
+    /// resolved again from scratch, and a host that is still restoring a page answers with its
+    /// window; this is the one element known to have held the selection. It is evidence to *read*
+    /// and, when focus still resolves to nothing that can hold a selection, a place to put focus
+    /// back — never a paste target on its own (see `Confirmer.restoreFocus`).
+    public let capturedElement: AXUIElement?
 
-    public init?(original: String, requiresEvidence: Bool = true) {
+    public init?(original: String, requiresEvidence: Bool = true, capturedElement: AXUIElement? = nil) {
         guard !original.isEmpty else { return nil }
         self.original = original
         self.requiresEvidence = requiresEvidence
+        self.capturedElement = capturedElement
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        guard lhs.original == rhs.original, lhs.requiresEvidence == rhs.requiresEvidence else { return false }
+        switch (lhs.capturedElement, rhs.capturedElement) {
+        case (nil, nil): return true
+        case let (left?, right?): return CFEqual(left, right)
+        default: return false
+        }
     }
 }
 
@@ -279,12 +295,17 @@ public enum SelectionReplacementGuard {
             public var startRole: String?
             /// The same for the element the last reading was taken from.
             public var endRole: String?
+            /// How many times focus was asked to go back to the element the selection was read
+            /// from, because it still resolved to nothing that could hold one.
+            public var capturedFocusAttempts = 0
 
             public init() {}
 
             /// Report-ready, and free of field content: counts and AX role names only.
             public var summary: String {
-                "settles=\(settles) refocuses=\(refocuses) startRole=\(startRole ?? "unread") endRole=\(endRole ?? "unread")"
+                var line = "settles=\(settles) refocuses=\(refocuses) startRole=\(startRole ?? "unread") endRole=\(endRole ?? "unread")"
+                if capturedFocusAttempts > 0 { line += " capturedFocusAttempts=\(capturedFocusAttempts)" }
+                return line
             }
         }
 
@@ -300,19 +321,25 @@ public enum SelectionReplacementGuard {
             /// `kAXRoleAttribute` of an element, or nil when the host did not answer. A nil role
             /// is not a container: the settle keeps the element it has.
             public var role: (AXUIElement) -> String?
+            /// Asks the host to make this element the focused one; true only when it accepted.
+            /// Acceptance is not evidence: the caller resolves focus again and compares. The
+            /// default declines, so an `Access` that cannot move focus never claims to have.
+            public var focus: (AXUIElement) -> Bool
 
             public init(
                 observe: @escaping (AXUIElement) -> DeliveryVerifier.FocusedTextObservation,
                 select: @escaping (NSRange, AXUIElement) -> Bool,
                 schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
                 refocus: @escaping () -> AXUIElement? = { nil },
-                role: @escaping (AXUIElement) -> String? = { _ in nil }
+                role: @escaping (AXUIElement) -> String? = { _ in nil },
+                focus: @escaping (AXUIElement) -> Bool = { _ in false }
             ) {
                 self.observe = observe
                 self.select = select
                 self.schedule = schedule
                 self.refocus = refocus
                 self.role = role
+                self.focus = focus
             }
 
             public static let live = Access(
@@ -326,7 +353,10 @@ public enum SelectionReplacementGuard {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
                 },
                 refocus: { AXContextChecker.shared.queryFocusedElement(allowTimeoutRetry: false).element },
-                role: { AXContextChecker.shared.focusedElementRole(element: $0) }
+                role: { AXContextChecker.shared.focusedElementRole(element: $0) },
+                focus: {
+                    AXUIElementSetAttributeValue($0, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+                }
             )
         }
 
@@ -449,24 +479,26 @@ public enum SelectionReplacementGuard {
                 trail.settles += 1
                 if abandon { trail.refocuses += 1 }
                 access.schedule(Self.settleInterval) {
-                    let next: AXUIElement?
+                    var next = element
+                    var tick = trail
+                    if abandon, let resolved = access.refocus() { next = resolved }
+                    // Focus still resolves to nothing that can hold a selection. The element the
+                    // selection was read from is the one place known to have held it, so focus is
+                    // asked to go back there — and only trusted once resolving it again says so.
+                    if abandon, replacement.requiresEvidence, let captured = replacement.capturedElement,
+                       next.map({ Self.blankReadingAbandonsElement(role: access.role($0)) }) ?? true,
+                       let restored = restoreFocus(to: captured, trail: &tick) {
+                        next = restored
+                    }
                     let gained: Bool
-                    if abandon {
-                        let resolved = access.refocus()
-                        if let resolved {
-                            next = resolved
-                            gained = element.map { !CFEqual($0, resolved) } ?? true
-                        } else {
-                            next = element
-                            gained = false
-                        }
-                    } else {
-                        next = element
-                        gained = false
+                    switch (element, next) {
+                    case let (held?, moved?): gained = !CFEqual(held, moved)
+                    case (nil, _?): gained = true
+                    default: gained = false
                     }
                     judge(
                         replacement, element: next, refocused: refocused || gained,
-                        settlesRemaining: settlesRemaining - 1, trail: trail,
+                        settlesRemaining: settlesRemaining - 1, trail: tick,
                         lastRefusal: observedRefusal, completion: completion
                     )
                 }
@@ -482,6 +514,20 @@ public enum SelectionReplacementGuard {
                     remaining: Self.readBackAttempts, completion: completion
                 )
             }
+        }
+
+        /// Puts focus back on the element the selection was read from, and returns it only when
+        /// the host's own answer to "what is focused" now names it. A paste goes to the first
+        /// responder, not to an element this guard happens to hold: confirming against an element
+        /// that is not focused and pasting anyway would land the text in a window, or in whatever
+        /// else had focus, and report the delivery as made. The write being accepted proves
+        /// nothing — hosts accept an `AXFocused` they then ignore — so the comparison decides.
+        private func restoreFocus(to captured: AXUIElement, trail: inout Trail) -> AXUIElement? {
+            trail.capturedFocusAttempts += 1
+            guard access.focus(captured) else { return nil }
+            trail.refocuses += 1
+            guard let live = access.refocus(), CFEqual(live, captured) else { return nil }
+            return live
         }
 
         private func readBack(

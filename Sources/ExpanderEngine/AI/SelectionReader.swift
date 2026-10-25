@@ -86,25 +86,43 @@ public enum SelectionReader {
         public let source: Source
         /// Which rung of the ladder produced the text. Diagnostics only.
         public let via: ReadVia
+        /// The AX element the text was read from. Nil for a cache recovery or a ⌘C capture, which
+        /// never touched one. Carried so the replace guard can confirm against the element that
+        /// is known to have held the selection when focus later resolves to something else.
+        public let element: AXUIElement?
 
         public init(
             text: String,
             bundleID: String?,
             isWeakAX: Bool,
             source: Source = .live,
-            via: ReadVia = .unknown
+            via: ReadVia = .unknown,
+            element: AXUIElement? = nil
         ) {
             self.text = text
             self.bundleID = bundleID
             self.isWeakAX = isWeakAX
             self.source = source
             self.via = via
+            self.element = element
+        }
+
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            guard lhs.text == rhs.text, lhs.bundleID == rhs.bundleID, lhs.isWeakAX == rhs.isWeakAX,
+                  lhs.source == rhs.source, lhs.via == rhs.via else { return false }
+            switch (lhs.element, rhs.element) {
+            case (nil, nil): return true
+            case let (left?, right?): return CFEqual(left, right)
+            default: return false
+            }
         }
 
         /// What a delivery that replaces this selection must still find selected when it pastes.
         /// A ⌘C capture came from an app AX cannot see into, so nothing there can be confirmed.
         public var replacement: SelectionReplacement? {
-            SelectionReplacement(original: text, requiresEvidence: source != .clipboard)
+            SelectionReplacement(
+                original: text, requiresEvidence: source != .clipboard, capturedElement: element
+            )
         }
     }
 
@@ -525,7 +543,8 @@ public enum SelectionReader {
             isOwnProcess: pidStatus == .success && pid == ownPID,
             bundleID: elementBundleID,
             via: via,
-            oversizedCharacterCount: oversizedCharacterCount
+            oversizedCharacterCount: oversizedCharacterCount,
+            element: element
         )
     }
 
