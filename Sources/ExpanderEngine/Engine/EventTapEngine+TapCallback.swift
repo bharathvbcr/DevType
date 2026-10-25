@@ -67,6 +67,7 @@ extension EventTapEngine {
             let eventTime = InputClock.seconds(sinceBootNanos: event.timestamp)
             if EventTapEngine.mouseDownTypes.contains(type) || type == .keyDown {
                 clockMark = inputClock.mark(at: eventTime)
+                inputClock.noteTimestampUnitsOnce(eventNanos: event.timestamp)
             }
         }
 

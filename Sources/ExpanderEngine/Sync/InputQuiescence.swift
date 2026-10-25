@@ -1,6 +1,7 @@
 // Adapted from SnipKey Kit (MIT) — Copyright 2026 SnipKey contributors
 
 import Foundation
+import os
 
 /// Marks synthetic events injected by DevType so the event tap can ignore them.
 public enum SyntheticEventMarker {
@@ -76,6 +77,35 @@ public final class InputClock: @unchecked Sendable {
         lock.lock()
         if last == mark.time { last = mark.previous }
         lock.unlock()
+    }
+
+    private var timestampUnitsNoted = false
+
+    /// Records, once per process, how `CGEvent.timestamp` compares with `DispatchTime` uptime.
+    ///
+    /// `mark(at:)` takes the event's own time and `arm()` takes `clock()`, so the deferred-expand
+    /// quiescence decision is only meaningful when the two share a unit. The SDK calls the event
+    /// timestamp "roughly nanoseconds since startup"; were a host to report mach ticks instead
+    /// (Apple silicon's timebase is 125/3), every mark would read ~24× earlier than any arm and
+    /// that guard could never abort. A constructed event carries 0, so no test can answer this —
+    /// one report line from a real tap does: a ratio near 1 is nanoseconds, near 0.024 is ticks.
+    /// A zero timestamp is skipped without spending the once.
+    @discardableResult
+    public func noteTimestampUnitsOnce(
+        eventNanos: UInt64,
+        uptimeNanos: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Double? {
+        guard eventNanos > 0, uptimeNanos > 0 else { return nil }
+        lock.lock()
+        let first = !timestampUnitsNoted
+        timestampUnitsNoted = true
+        lock.unlock()
+        guard first else { return nil }
+        let ratio = Double(eventNanos) / Double(uptimeNanos)
+        DevTypeLog.debounce.notice(
+            "[Debounce] event timestamp units ratio=\(ratio, format: .fixed(precision: 4), privacy: .public) (≈1 nanoseconds; ≈0.024 mach ticks)"
+        )
+        return ratio
     }
 
     public var lastInputAt: TimeInterval? {
