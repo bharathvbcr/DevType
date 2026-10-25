@@ -273,6 +273,8 @@
 "recovery.refuse.selectionReplace" = "置き換える予定のテキストが選択されていなかったため、結果は貼り付けられませんでした（貼り付けると元のテキストの横に追加されていました）。結果はクリップボードにあります。元のテキストを選択して ⌘V を押してください。";
 "inject.selectionReplaceRefused" = "選択範囲が変わりました — 結果をコピーしました。元のテキストを選択して ⌘V を押してください。";
 "inject.selectionReplaceRefusedNoCopy" = "選択範囲が変わりました — 何も貼り付けず、結果もコピーできませんでした。";
+"inject.replaceNotLanded" = "結果が貼り付けられたか確認できませんでした — 結果をコピーしました。入っていなければ、元のテキストを選択して ⌘V を押してください。";
+"inject.replaceNotLandedNoCopy" = "結果が貼り付けられたか確認できず、結果もコピーできませんでした。";
 "recovery.health.idle" = "挿入の状態: アイドル";
 "recovery.health.tapExpected" = "タップが必要ですが動作していません — 古い動作中表示は行いません。";
 "recovery.health.full" = "挿入経路: フル（AX + HID）。";

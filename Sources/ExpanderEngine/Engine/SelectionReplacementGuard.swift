@@ -70,10 +70,19 @@ public enum SelectionReplacementGuard {
         /// The selection was confirmed, but while that waited focus left the element it was
         /// confirmed on: the paste would land somewhere the confirm never looked.
         case focusMoved
+        /// The paste was posted and the field was read back unchanged: the original is still
+        /// there and the result is not. Unlike every other case, ⌘V did go out — the result is
+        /// kept on the clipboard because nothing re-pastes it (a late paste would duplicate it).
+        case notLanded
 
         /// Report-ready sentence. Carries no field content, so `InjectRefusalKind.classify` passes
         /// it through to the report intact.
         public var reason: String {
+            // The one cause that is not about the selection going stale before the paste, so it
+            // must not wear that prefix: the report would send its reader after the wrong stage.
+            if self == .notLanded {
+                return "Replace not confirmed — the field still held the original after the paste"
+            }
             let detail: String
             switch self {
             case .unreadable: detail = "the selection could not be read back"
@@ -83,6 +92,7 @@ public enum SelectionReplacementGuard {
             case .reselectFailed: detail = "re-selecting the original text did not take"
             case .fieldTooLarge: detail = "the field is too large to search for the original text"
             case .focusMoved: detail = "focus left the field while its selection was being confirmed"
+            case .notLanded: detail = ""
             }
             return "\(SelectionReplacementGuard.refusalPrefix)\(detail)"
         }
@@ -414,14 +424,22 @@ public enum SelectionReplacementGuard {
             self.access = access
         }
 
+        /// - Parameter isCurrent: whether the user has left the operation alone since it began —
+        ///   no click, no key, not cancelled or superseded. Asked at every settle tick, before
+        ///   anything is done on the field's behalf: the settle writes `AXFocused` to put focus
+        ///   back on the captured element, and a user who clicked the toolbar or the tab bar in
+        ///   that gap moved focus on purpose. Restoring it would paste into a field they left.
+        ///   A `false` refuses as `.focusMoved` and the caller keeps the result on the clipboard.
         public func confirm(
             _ replacement: SelectionReplacement,
             element: AXUIElement?,
+            isCurrent: @escaping () -> Bool = { true },
             completion: @escaping (Verdict) -> Void
         ) {
             judge(
                 replacement, element: element, refocused: false,
-                settlesRemaining: Self.settleAttempts, trail: Trail(), completion: completion
+                settlesRemaining: Self.settleAttempts, trail: Trail(),
+                isCurrent: isCurrent, completion: completion
             )
         }
 
@@ -440,6 +458,7 @@ public enum SelectionReplacementGuard {
             settlesRemaining: Int,
             trail: Trail,
             lastRefusal: Refusal? = nil,
+            isCurrent: @escaping () -> Bool,
             completion: @escaping (Verdict) -> Void
         ) {
             let observation = element.map { access.observe($0) }
@@ -483,6 +502,12 @@ public enum SelectionReplacementGuard {
                 trail.settles += 1
                 if abandon { trail.refocuses += 1 }
                 access.schedule(Self.settleInterval) {
+                    // Before the refocus and the focus write below, not after: either acts on the
+                    // host, and neither may undo a move the user made during the wait.
+                    guard isCurrent() else {
+                        completion(refusal(.focusMoved, element: element, trail: trail))
+                        return
+                    }
                     var next = element
                     var tick = trail
                     if abandon, let resolved = access.refocus() { next = resolved }
@@ -503,7 +528,7 @@ public enum SelectionReplacementGuard {
                     judge(
                         replacement, element: next, refocused: refocused || gained,
                         settlesRemaining: settlesRemaining - 1, trail: tick,
-                        lastRefusal: observedRefusal, completion: completion
+                        lastRefusal: observedRefusal, isCurrent: isCurrent, completion: completion
                     )
                 }
             case .refuse(let reason):
