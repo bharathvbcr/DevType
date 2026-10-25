@@ -178,6 +178,25 @@ public final class PasteboardBroker {
     private let verifier: DeliveryVerifier
     private let timing: InjectTimingStore
     private let now: () -> TimeInterval
+    private let environment: Environment
+
+    /// Everything the text paste asks the machine instead of its arguments: which board it
+    /// writes, whether ⌘V may be posted, whether Secure Input is on, whether the target is still
+    /// the target, and how the user's clipboard is read. Production uses `.live`; a test hands in
+    /// a named pasteboard and fixed answers, so the whole publish → ⌘V → hold → release sequence
+    /// runs against a board that is not the user's clipboard.
+    struct Environment {
+        var pasteboard: () -> NSPasteboard = { .general }
+        var canPostEvents: () -> Bool = { CGPreflightPostEventAccess() }
+        var secureInputActive: () -> Bool = { AXContextChecker.isSecureEventInputEnabledLive() }
+        var targetCurrent: (PasteTarget, _ checkRange: Bool, _ checkElement: Bool) -> Bool = {
+            target, checkRange, checkElement in
+            target.isCurrent(checkRange: checkRange, checkElement: checkElement)
+        }
+        var snapshot: (NSPasteboard) -> PasteboardSnapshot? = { PasteboardBroker.snapshotPasteboard($0) }
+
+        static let live = Environment()
+    }
 
     /// §2.4: `os_unfair_lock` rather than `NSLock` — taken from the inject path.
     private let restoreLock = UnfairLock()
@@ -198,16 +217,27 @@ public final class PasteboardBroker {
     private var nativeImageCache: [NativeImageCacheEntry] = []
     private static let nativeImageCacheEntryLimit = 4
 
-    public init(
+    public convenience init(
         hid: HIDKeyPoster = HIDKeyPoster.shared,
         verifier: DeliveryVerifier = DeliveryVerifier.shared,
         timing: InjectTimingStore = InjectTimingStore.shared,
         now: @escaping () -> TimeInterval = InputClock.monotonicNow
     ) {
+        self.init(hid: hid, verifier: verifier, timing: timing, now: now, environment: .live)
+    }
+
+    init(
+        hid: HIDKeyPoster,
+        verifier: DeliveryVerifier = DeliveryVerifier.shared,
+        timing: InjectTimingStore = InjectTimingStore.shared,
+        now: @escaping () -> TimeInterval = InputClock.monotonicNow,
+        environment: Environment
+    ) {
         self.hid = hid
         self.verifier = verifier
         self.timing = timing
         self.now = now
+        self.environment = environment
     }
 
     // MARK: - Generation tokens
@@ -919,9 +949,9 @@ public final class PasteboardBroker {
             generationMatches: currentRestoreGeneration() == ticket.generation,
             clipboardOwned: ticket.pasteboard.changeCount == ticket.targetChangeCount,
             shouldContinue: shouldContinue(),
-            canPost: CGPreflightPostEventAccess(),
-            secureInputBlocked: !allowSecureInput && AXContextChecker.isSecureEventInputEnabledLive(),
-            targetCurrent: target.isCurrent(checkRange: checkRange, checkElement: checkElement)
+            canPost: environment.canPostEvents(),
+            secureInputBlocked: !allowSecureInput && environment.secureInputActive(),
+            targetCurrent: environment.targetCurrent(target, checkRange, checkElement)
         )
     }
 
@@ -1002,23 +1032,23 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        guard CGPreflightPostEventAccess() else {
+        guard environment.canPostEvents() else {
             DevTypeLog.inject.error("[Inject] paste refused — Post Events denied at paste time")
             completion(.notPosted)
             return
         }
-        guard allowSecureInput || !AXContextChecker.isSecureEventInputEnabledLive() else {
+        guard allowSecureInput || !environment.secureInputActive() else {
             DevTypeLog.inject.error("[Inject] paste refused — Secure Input active at paste time")
             completion(.notPosted)
             return
         }
-        guard target.isCurrent(checkRange: verifySelection, checkElement: checkElement) else {
+        guard environment.targetCurrent(target, verifySelection, checkElement) else {
             DevTypeLog.inject.error("[Inject] paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
         }
 
-        let pasteboard = NSPasteboard.general
+        let pasteboard = environment.pasteboard()
         let oldItems = acquireUserClipboardSnapshot(pasteboard: pasteboard)
         let generation = beginRestoreGeneration()
 
@@ -1389,7 +1419,7 @@ public final class PasteboardBroker {
             )
             return nil
         }
-        return PasteboardBroker.snapshotPasteboard(pasteboard)
+        return environment.snapshot(pasteboard)
     }
 
     private func registerPendingTicket(_ ticket: ClipboardTicket) {

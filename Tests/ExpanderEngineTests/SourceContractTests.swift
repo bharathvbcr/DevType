@@ -164,6 +164,19 @@ final class SourceContractTests: XCTestCase {
         )
     }
 
+    /// The text paste no longer names the system queries inline; it asks the environment. That is
+    /// only a refactor while the production environment answers exactly what the inline calls did.
+    func testLivePasteEnvironmentIsBoundToTheRealSystemQueries() throws {
+        let live = PasteboardBroker.Environment.live
+        XCTAssertTrue(live.pasteboard() === NSPasteboard.general, "the live paste board is the user's clipboard")
+        XCTAssertEqual(live.canPostEvents(), CGPreflightPostEventAccess())
+        XCTAssertEqual(live.secureInputActive(), AXContextChecker.isSecureEventInputEnabledLive())
+        let broker = try source("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
+        XCTAssertTrue(broker.contains("var canPostEvents: () -> Bool = { CGPreflightPostEventAccess() }"))
+        XCTAssertTrue(broker.contains("AXContextChecker.isSecureEventInputEnabledLive() }"))
+        XCTAssertTrue(broker.contains("target.isCurrent(checkRange: checkRange, checkElement: checkElement)"))
+    }
+
     func testPasteRefusalsLogDistinctReasonsInsteadOfACombinedPostEventsMessage() throws {
         let broker = try source("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
         let textPaste = try XCTUnwrap(broker.range(of: "expectedText: String?,"))
@@ -180,12 +193,17 @@ final class SourceContractTests: XCTestCase {
                 body.contains("guard shouldContinue()"),
                 "\(label) paste must refuse cancelled or superseded work before posting"
             )
+            // The text paste asks `PasteboardBroker.Environment`, whose live bindings are pinned
+            // below by `testLivePasteEnvironmentIsBoundToTheRealSystemQueries`; the image paste
+            // still calls the system directly.
             XCTAssertTrue(
-                body.contains("guard CGPreflightPostEventAccess()"),
+                body.contains(label == "text"
+                    ? "guard environment.canPostEvents()" : "guard CGPreflightPostEventAccess()"),
                 "\(label) paste must re-check Post Events at paste time"
             )
             XCTAssertTrue(
-                body.contains("AXContextChecker.isSecureEventInputEnabledLive()"),
+                body.contains(label == "text"
+                    ? "environment.secureInputActive()" : "AXContextChecker.isSecureEventInputEnabledLive()"),
                 "\(label) paste must re-read Secure Input at paste time"
             )
             XCTAssertTrue(
@@ -201,7 +219,9 @@ final class SourceContractTests: XCTestCase {
                 "\(label) paste must not treat combo-box AX retarget as a field switch after HID erase"
             )
             XCTAssertTrue(
-                body.contains("target.isCurrent(checkRange: verifySelection"),
+                body.contains(label == "text"
+                    ? "environment.targetCurrent(target, verifySelection"
+                    : "target.isCurrent(checkRange: verifySelection"),
                 "\(label) paste must not require a stable AX range after our own mutation"
             )
             XCTAssertFalse(
