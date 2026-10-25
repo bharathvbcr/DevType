@@ -15,6 +15,11 @@ import XCTest
 /// These read the layouts that ship with macOS. Reading a non-selected input source does not
 /// switch the user's layout, so the test never changes machine state.
 final class CommandChordLayoutTests: XCTestCase {
+    private struct NoLayout: KeyboardLayoutProviding {
+        func currentSourceID() -> String? { nil }
+        func keyCode(for character: Character) -> CGKeyCode? { nil }
+    }
+
     private func installedLayout(_ id: String) throws -> TISInputSource {
         let filter = [kTISPropertyInputSourceID as String: id] as CFDictionary
         let list = TISCreateInputSourceList(filter, true)?.takeRetainedValue() as? [TISInputSource]
@@ -25,6 +30,28 @@ final class CommandChordLayoutTests: XCTestCase {
         LiveKeyboardLayoutProvider.keyCode(
             for: character, in: try installedLayout(id), modifiers: LiveKeyboardLayoutProvider.chordModifiers
         )
+    }
+
+    /// Characterization (passes before and after the layout fix): the chord is built from a private
+    /// event source and carries exactly Command on every event but the Command release, so a
+    /// Shift or Option the user is physically holding when the trigger fires is not in the flags
+    /// of the paste. Whether the HID tap merges the *hardware* modifier state on top of that is
+    /// not observable without a live app.
+    func testPasteChordFlagsAreExactlyCommandWhateverTheUserIsHolding() {
+        var events: [CGEvent] = []
+        let hid = HIDKeyPoster(
+            commandEventIO: .init(canPost: { true }, post: { events.append($0) }, pause: {}),
+            layout: KeyboardLayoutState(provider: NoLayout())
+        )
+        let done = expectation(description: "chord posted")
+        hid.postCmdVKeyEventsAsync { _ in done.fulfill() }
+        wait(for: [done], timeout: 5)
+
+        XCTAssertEqual(events.map { $0.flags.intersection([.maskShift, .maskAlternate, .maskControl, .maskCommand]) },
+                       [.maskCommand, .maskCommand, .maskCommand, []])
+        XCTAssertEqual(events.map { $0.getIntegerValueField(.keyboardEventKeycode) },
+                       [Int64(kVK_Command), Int64(kVK_ANSI_V), Int64(kVK_ANSI_V), Int64(kVK_Command)],
+                       "no layout is known, so the chord falls back to the ANSI key")
     }
 
     func testCommandQWERTYLayoutPastesFromTheQWERTYVKey() throws {
