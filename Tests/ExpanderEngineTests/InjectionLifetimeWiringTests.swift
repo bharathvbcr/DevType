@@ -24,6 +24,14 @@ final class InjectionLifetimeWiringTests: XCTestCase {
         let pipeline = try source("TextInjectionPipeline")
         XCTAssertFalse(pipeline.contains("erasePlan.isEmpty || self.eraseContextIsCurrent"))
         XCTAssertTrue(pipeline.contains("sendLeftArrowsAsync(count: arrowCount, shouldContinue: shouldContinue"))
-        XCTAssertTrue(pipeline.contains("canContinue(context, observationOnly: true)"))
+        // The deferred re-verify is read-only, so it keeps only the operation half of the
+        // continue-check; the target half moved into the verifier, which accepts a replaced node
+        // only when it vouches for it and fails closed as `.focusReplaced` otherwise.
+        let reverify = try SourceTree.functionBody("func scheduleDeferredPasteReverify(", in: pipeline)
+        XCTAssertTrue(reverify.contains(
+            "guard self.operationStateIsCurrent(\n                context.operation, revision: context.inputRevision, observationOnly: true\n            ) else { return }"
+        ))
+        XCTAssertTrue(reverify.contains("vouchingReplacement: true"))
+        XCTAssertFalse(reverify.contains("recordDeliveryConfirmed"), "a late confirmation must not mint read proof")
     }
 }
