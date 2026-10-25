@@ -161,9 +161,6 @@ public final class PasteboardBroker {
         let generation: UInt64
         /// The `changeCount` we produced. Anything else means someone else wrote the board.
         var targetChangeCount: Int
-        /// Proof of a host read, when the payload was published lazily (text paste). `nil` for a
-        /// payload that carries no such proof; the release policy then is the plain timer.
-        var witness: PayloadReadWitness?
     }
 
     /// §8.12: everything the release decision needs, captured at the moment ⌘V was posted.
@@ -221,9 +218,9 @@ public final class PasteboardBroker {
     private let restoreLock = UnfairLock()
     private var restoreGeneration: UInt64 = 0
     private var pendingTicket: ClipboardTicket?
-    /// Until when `pendingTicket`'s payload may still be waiting to be read. Set when ⌘V goes out
-    /// (that is when a read becomes possible), cleared with the ticket. A following paste waits on
-    /// it — see `publicationGateWait`.
+    /// Until when `pendingTicket`'s payload is still inside its residency, i.e. may still be waiting
+    /// to be read. Set when ⌘V goes out (that is when a read becomes possible), cleared with the
+    /// ticket. A following paste waits on it — see `publicationGateWait`.
     private var pendingLeaseDeadline: TimeInterval?
 
     /// Native expansion bytes only. Keyed by standardized path + mtime + size,
@@ -287,6 +284,25 @@ public final class PasteboardBroker {
         pendingTicket = nil
         pendingLeaseDeadline = nil
         restoreLock.unlock()
+    }
+
+    /// Quitting: put the user's clipboard back now, if our payload is still the board's content.
+    ///
+    /// Nothing else can. The release timers die with the process, and AppKit materialises every
+    /// promised representation when an app terminates (verified against `NSApplication.terminate`:
+    /// a lazily provided payload nobody read is provided then and stays on the board), so a quit
+    /// inside a hold would leave the snippet — not the user's clipboard — behind. A crash leaves
+    /// worse: the types stay advertised with no data behind them (verified: the board then answers
+    /// every read with nothing) and no code of ours runs to repair it.
+    ///
+    /// Guarded exactly like any restore: a board someone else has written since is not touched.
+    /// One attempt and no retry timer, because nothing runs after `applicationWillTerminate`.
+    public func restorePendingClipboardForTermination() {
+        restoreLock.lock()
+        let ticket = pendingTicket
+        restoreLock.unlock()
+        guard let ticket else { return }
+        restore(ticket, attempt: InjectTiming.maxPasteboardRestoreAttempts - 1)
     }
 
     /// Pure policy: may the contents currently on the board be adopted as "the user's clipboard"
@@ -712,14 +728,12 @@ public final class PasteboardBroker {
         _ outcome: ClipboardPublicationOutcome,
         pasteboard: NSPasteboard,
         oldItems: PasteboardSnapshot?,
-        generation: UInt64,
-        witness: PayloadReadWitness? = nil
+        generation: UInt64
     ) -> ClipboardTicket? {
         switch outcome {
         case .published(let owned):
             let ticket = ClipboardTicket(pasteboard: pasteboard, oldItems: oldItems,
-                                         generation: generation, targetChangeCount: owned,
-                                         witness: witness)
+                                         generation: generation, targetChangeCount: owned)
             registerPendingTicket(ticket)
             return ticket
         case .writeFailed(let owned):
@@ -1057,6 +1071,10 @@ public final class PasteboardBroker {
     ///     control. Returns the control that replaced it if the caller can vouch it is the same
     ///     one (WebKit swaps the text node under a typed expansion), nil otherwise. The answer is
     ///     still checked against the live focus before ⌘V; nil keeps the target pinned.
+    ///   - supersedesOwnPayload: This paste replaces the payload the *same expansion* published
+    ///     (restoring the trigger after a failed paste), so it must not wait out that payload's
+    ///     residency the way a following expansion does — see `publicationGateRemaining()`. The
+    ///     pending restore of the user's real clipboard is inherited either way.
     func pasteViaClipboard(
         text: String,
         expectedText: String?,
@@ -1071,6 +1089,7 @@ public final class PasteboardBroker {
         completeBeforeRestore: Bool = false,
         allowSecureInput: Bool = false,
         followVouchedReplacement: (() -> PasteTarget?)? = nil,
+        supersedesOwnPayload: Bool = false,
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
@@ -1080,29 +1099,6 @@ public final class PasteboardBroker {
             || holdTimeoutOverride > InjectTiming.secureClipboardPasteHoldTimeout {
             DevTypeLog.inject.error("[Inject] paste refused — invalid hold timeout override")
             completion(.notPosted)
-            return
-        }
-        // A previous expansion's ⌘V may still be waiting to read the board. Publishing now would
-        // make that host paste *this* text. Wait (bounded by its lease) and start over, so every
-        // check below — target, focus, Secure Input — is made at the moment of publication.
-        let gate = currentPublicationGateWait(pasteboard: environment.pasteboard())
-        if gate > 0 {
-            DispatchQueue.main.asyncAfter(
-                deadline: .now() + min(gate, InjectTiming.payloadWitnessPollInterval)
-            ) {
-                self.pasteViaClipboard(
-                    text: text, expectedText: expectedText, baseline: baseline, focus: focus,
-                    bundleID: bundleID, focusedRole: focusedRole, staleProbe: staleProbe,
-                    staleProbeCaseInsensitive: staleProbeCaseInsensitive,
-                    leaveClipboardOnFailure: leaveClipboardOnFailure,
-                    holdTimeoutOverride: holdTimeoutOverride,
-                    completeBeforeRestore: completeBeforeRestore,
-                    allowSecureInput: allowSecureInput,
-                    followVouchedReplacement: followVouchedReplacement,
-                    shouldContinue: shouldContinue,
-                    completion: completion
-                )
-            }
             return
         }
         let target = PasteTarget.capture(focus: focus, baseline: baseline)
@@ -1133,8 +1129,29 @@ public final class PasteboardBroker {
             return
         }
 
+        // Every refusal above comes first, and is made again after any wait: a refused paste must
+        // not sit behind another payload's residency, and a paste that waits is judged at the
+        // moment it publishes, not at the moment it asked.
+        if deferForPublicationGate(supersedesOwnPayload: supersedesOwnPayload, {
+            self.pasteViaClipboard(
+                text: text, expectedText: expectedText, baseline: baseline, focus: focus,
+                bundleID: bundleID, focusedRole: focusedRole, staleProbe: staleProbe,
+                staleProbeCaseInsensitive: staleProbeCaseInsensitive,
+                leaveClipboardOnFailure: leaveClipboardOnFailure,
+                holdTimeoutOverride: holdTimeoutOverride,
+                completeBeforeRestore: completeBeforeRestore,
+                allowSecureInput: allowSecureInput,
+                followVouchedReplacement: followVouchedReplacement,
+                supersedesOwnPayload: supersedesOwnPayload,
+                shouldContinue: shouldContinue,
+                completion: completion
+            )
+        }) {
+            return
+        }
+
         let pasteboard = environment.pasteboard()
-        guard let ticket = publishPayload(text, on: pasteboard) else {
+        guard let ticket = publishPayload(on: pasteboard, representations: [(.string, Data(text.utf8))]) else {
             completion(.notPosted)
             return
         }
@@ -1195,13 +1212,7 @@ public final class PasteboardBroker {
                     hostRespondedAtPaste: hostRespondedAtPaste,
                     bundleID: bundleID
                 )
-                // From here a host may read the payload. A following paste waits for that read, or
-                // for the same ceiling that bounds this payload's own hold — not for a manual-paste
-                // window (secure clipboard paste), which would stall every expansion behind it.
-                self.registerPendingLease(
-                    generation: ticket.generation,
-                    deadline: residency.postedAt + InjectTiming.unverifiedPayloadResidencyCeiling
-                )
+                self.registerPendingLease(for: ticket, residency: residency)
 
                 guard let expectedText, !expectedText.isEmpty else {
                     // Nothing to verify, so this paste can never produce read evidence: it always
@@ -1350,47 +1361,45 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        guard CGPreflightPostEventAccess() else {
+        guard environment.canPostEvents() else {
             DevTypeLog.inject.error("[Inject] image paste refused — Post Events denied at paste time")
             completion(.notPosted)
             return
         }
-        guard !AXContextChecker.isSecureEventInputEnabledLive() else {
+        guard !environment.secureInputActive() else {
             DevTypeLog.inject.error("[Inject] image paste refused — Secure Input active at paste time")
             completion(.notPosted)
             return
         }
-        guard target.isCurrent(checkRange: verifySelection, checkElement: checkElement) else {
+        guard environment.targetCurrent(target, verifySelection, checkElement) else {
             DevTypeLog.inject.error("[Inject] image paste refused — target element or selection changed before paste")
             completion(.notPosted)
             return
         }
 
+        // Same gate as a text paste, after the same refusals: an image written over a text payload
+        // still inside its residency makes that host paste the image.
+        if deferForPublicationGate(supersedesOwnPayload: false, {
+            self.pasteImageViaClipboard(
+                image: image, imagePath: imagePath, bundleID: bundleID, focus: focus,
+                shouldContinue: shouldContinue, completion: completion
+            )
+        }) {
+            return
+        }
+
         // Prepare before acquiring the board: no partially prepared image may clear it.
         let prepared = expansionImageRepresentations(image: image, imagePath: imagePath)
-        var representations = prepared.items
+        let representations = prepared.items
         guard !representations.isEmpty else {
             completion(.notPosted)
             return
         }
         let payloadBytes = prepared.payloadBytes
-        // Markers first, as `concealedPublication` orders every marked write: the board must not
-        // hold image bytes a clipboard manager could read before it holds the markers that tell it
-        // to skip them.
-        representations.insert(contentsOf: [
-            (Self.transientType, Data()), (Self.concealedType, Data()), (Self.autoGeneratedType, Data())
-        ], at: 0)
-        let pasteboard = NSPasteboard.general
-        let oldItems = acquireUserClipboardSnapshot(pasteboard: pasteboard)
-        let generation = beginRestoreGeneration()
-        let publication = Self.publishClipboard(
-            clearContents: { pasteboard.clearContents() },
-            currentChangeCount: { pasteboard.changeCount },
-            writes: representations.map { type, data in { pasteboard.setData(data, forType: type) } }
-        )
-        guard let ticket = ticketAfterPublication(
-            publication, pasteboard: pasteboard, oldItems: oldItems, generation: generation
-        ) else {
+        // Published exactly like a text payload: one item with the markers first (the board must
+        // not hold image bytes a clipboard manager could read before it holds the markers that
+        // tell it to skip them), re-snapshotted if the user copies mid-publication.
+        guard let ticket = publishPayload(on: environment.pasteboard(), representations: representations) else {
             completion(.notPosted)
             return
         }
@@ -1429,6 +1438,7 @@ public final class PasteboardBroker {
                     hostRespondedAtPaste: baseline != nil,
                     bundleID: bundleID
                 )
+                self.registerPendingLease(for: ticket, residency: residency)
                 self.runImageHoldLoop(
                     holdStarted: self.now(),
                     holdTimeout: holdTimeoutValue,
@@ -1505,38 +1515,58 @@ public final class PasteboardBroker {
     /// Most times one paste re-reads the user's clipboard because it changed under the snapshot.
     private static let maxPublicationAttempts = 3
 
-    /// The payload as one pasteboard item: the string is provided lazily, so the first read is
-    /// observable (`PayloadReadWitness`), and the three nspasteboard.org markers are part of the
-    /// same write — a clipboard manager that notices the change never sees the text without them.
-    /// `nil` when the item cannot be built, so the write reports failure instead of publishing
-    /// an unmarked payload.
-    private static func payloadItem(witnessedBy witness: PayloadReadWitness) -> NSPasteboardItem? {
+    /// The payload as one pasteboard item with the three nspasteboard.org markers in it, so a
+    /// clipboard manager that notices the change never reads the payload without them. `nil` when
+    /// the item cannot be built, so the write reports failure instead of publishing an unmarked
+    /// payload.
+    ///
+    /// The data is concrete, not promised. A lazily provided payload (tried: an
+    /// `NSPasteboardItemDataProvider` as a proof of the host's read) is fulfilled by *this
+    /// process's main thread* — measured: a reader waits exactly as long as main is busy, and main
+    /// makes synchronous AX calls into the very app that is reading; a crash or `exit` leaves the
+    /// types advertised with no data behind them; and `NSApplication.terminate` materialises it
+    /// at quit. What it bought (a hold past the residency floor for a host that reads late) was
+    /// never observed in the field, so a paste must not depend on our main thread to be readable.
+    ///
+    /// The order of the types inside the item is the order a reader can first see them in: the
+    /// board's types become visible one at a time, in item order. Measured from a separate reader
+    /// process sampling `types` while this sequence ran about a thousand times a run, payload type
+    /// first: 3,385 of 139,353 string-bearing samples (2.4 %) showed the payload type with no
+    /// marker or only some of them — a window in which a manager that reads at once records the
+    /// entry. Markers first: 0 of 167,009. So the markers go in first, and the payload after them.
+    static func payloadItem(representations: [(NSPasteboard.PasteboardType, Data)]) -> NSPasteboardItem? {
+        guard !representations.isEmpty else { return nil }
         let item = NSPasteboardItem()
-        guard item.setDataProvider(witness, forTypes: [.string]) else { return nil }
         for marker in [transientType, concealedType, autoGeneratedType] {
             guard item.setData(Data(), forType: marker) else { return nil }
+        }
+        for (type, data) in representations {
+            guard item.setData(data, forType: type) else { return nil }
         }
         return item
     }
 
-    /// Takes the board for one text paste: snapshot the user's clipboard, then publish `text`.
+    /// Takes the board for one paste: snapshot the user's clipboard, then publish `representations`
+    /// (text, or an image's types).
     ///
     /// The snapshot is only the user's clipboard if nothing wrote the board between reading it and
     /// clearing it. `expectedChangeCount` makes that a checked condition: a copy that lands in
     /// that gap is not overwritten with a stale restore later — the board is re-read, and the new
     /// copy is what gets snapshotted. Bounded, so a board that never stops changing fails the
     /// paste rather than spinning.
-    private func publishPayload(_ text: String, on pasteboard: NSPasteboard) -> ClipboardTicket? {
+    func publishPayload(
+        on pasteboard: NSPasteboard,
+        representations: [(NSPasteboard.PasteboardType, Data)]
+    ) -> ClipboardTicket? {
         for attempt in 1...Self.maxPublicationAttempts {
             let boardBefore = pasteboard.changeCount
             let oldItems = acquireUserClipboardSnapshot(pasteboard: pasteboard)
             let generation = beginRestoreGeneration()
-            let witness = PayloadReadWitness(text: text, clock: now)
             let publication = Self.publishClipboard(
                 clearContents: { pasteboard.clearContents() },
                 currentChangeCount: { pasteboard.changeCount },
                 writes: [{
-                    guard let item = Self.payloadItem(witnessedBy: witness) else { return false }
+                    guard let item = Self.payloadItem(representations: representations) else { return false }
                     return pasteboard.writeObjects([item])
                 }],
                 expectedChangeCount: boardBefore
@@ -1549,8 +1579,7 @@ public final class PasteboardBroker {
                 continue
             }
             return ticketAfterPublication(
-                publication, pasteboard: pasteboard, oldItems: oldItems, generation: generation,
-                witness: witness
+                publication, pasteboard: pasteboard, oldItems: oldItems, generation: generation
             )
         }
         return nil
@@ -1563,10 +1592,14 @@ public final class PasteboardBroker {
         restoreLock.unlock()
     }
 
-    /// ⌘V for `generation`'s payload has gone out, so a host may read it until `deadline`.
-    private func registerPendingLease(generation: UInt64, deadline: TimeInterval) {
+    /// ⌘V for `ticket`'s payload has gone out, so a host may read it until its residency is over.
+    /// Capped at the residency ceiling: an explicit manual-paste window (the 8 s secure clipboard
+    /// paste) is not a reason to stall every following expansion behind it.
+    private func registerPendingLease(for ticket: ClipboardTicket, residency: PayloadResidency) {
+        let deadline = residency.postedAt
+            + min(residency.unverifiedHold, InjectTiming.unverifiedPayloadResidencyCeiling)
         restoreLock.lock()
-        if pendingTicket?.generation == generation {
+        if pendingTicket?.generation == ticket.generation {
             pendingLeaseDeadline = deadline
         }
         restoreLock.unlock()
@@ -1583,49 +1616,67 @@ public final class PasteboardBroker {
 
     /// How long a new paste must hold off before it may write over the board.
     ///
-    /// The previous expansion's ⌘V is already in the host's queue. If its payload has not been
-    /// read yet, whoever reads next reads what is on the board *then* — so a second expansion that
-    /// publishes now makes the first host paste the second expansion's text, and loses the first.
-    /// Once the first payload is read (plus `payloadReadGrace`) or its lease runs out, the board
-    /// may be taken; an inherited pending restore keeps the user's real clipboard for the end.
+    /// The previous expansion's ⌘V is already in the host's queue, and the host reads the board
+    /// when it gets to it. Until the payload's residency is over, a second expansion that
+    /// publishes makes that host paste the second expansion's text and loses the first. Once the
+    /// lease runs out the board may be taken; an inherited pending restore keeps the user's real
+    /// clipboard for the end.
     ///
-    /// Zero when there is nothing to protect: no pending lazily-published payload, the board has
-    /// moved on (the user copied), or ⌘V never went out. Bounded by the lease, which is itself
-    /// bounded by the residency ceiling.
+    /// Zero when there is nothing to protect: no pending payload, the board has moved on (the
+    /// user copied, or the payload was already released), or ⌘V never went out. Bounded by the
+    /// lease, which is itself bounded by the residency ceiling.
+    ///
+    /// What this does not do: it does not know whether the host has read. Nothing in this process
+    /// can (a read is invisible to `changeCount`, and the lazily provided payload that could see it
+    /// was removed — see `payloadItem`), so the protection is the residency floor and no more. A
+    /// host slower than the lease still reads the next expansion's text.
     static func publicationGateWait(
         boardStillOurs: Bool,
-        hasWitness: Bool,
-        firstRead: TimeInterval?,
         leaseDeadline: TimeInterval?,
         now: TimeInterval
     ) -> TimeInterval {
-        guard boardStillOurs, hasWitness, let leaseDeadline else { return 0 }
-        if let firstRead {
-            return max(0, firstRead + InjectTiming.payloadReadGrace - now)
-        }
+        guard boardStillOurs, let leaseDeadline else { return 0 }
         return max(0, leaseDeadline - now)
     }
 
-    /// How long a paste started at `now` would wait before it could take the board. Asked rather
-    /// than waited on, so a caller that can hold off *earlier* — the pipeline, before it erases a
-    /// trigger — shares the gate's own answer instead of keeping a second one.
-    func publicationGateRemaining(now: TimeInterval) -> TimeInterval {
-        let pasteboard = environment.pasteboard()
+    /// How long a paste started now must wait before it may publish over the previous
+    /// expansion's payload — a `changeCount` read and a lock, cheap enough to call from a
+    /// pipeline stage.
+    ///
+    /// The pipeline erases the trigger *before* it pastes, so waiting here, inside the paste, leaves
+    /// the field without its trigger for that long (and type-ahead keys landing ahead of the
+    /// paste). A caller that can wait earlier — before it erases — should wait this long first;
+    /// the paste still honours the gate itself, and re-checks every refusal after waiting, so
+    /// calling this is an optimisation of *where* the wait happens, never a substitute for it.
+    public func publicationGateRemaining() -> TimeInterval {
+        currentPublicationGateWait(pasteboard: environment.pasteboard())
+    }
+
+    /// After the paste's refusals and before it publishes: when the gate says a previous payload
+    /// is still inside its residency, `retry` runs once that is over instead (so every check it
+    /// makes — target, focus, Secure Input — is made again at the moment of publication) and this
+    /// returns `true`. A paste that supersedes its own expansion's payload never waits.
+    private func deferForPublicationGate(
+        supersedesOwnPayload: Bool,
+        _ retry: @escaping () -> Void
+    ) -> Bool {
+        guard !supersedesOwnPayload else { return false }
+        let gate = publicationGateRemaining()
+        guard gate > 0 else { return false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + gate, execute: retry)
+        return true
+    }
+
+    private func currentPublicationGateWait(pasteboard: NSPasteboard) -> TimeInterval {
         restoreLock.lock()
         let pending = pendingTicket
         let lease = pendingLeaseDeadline
         restoreLock.unlock()
         return Self.publicationGateWait(
             boardStillOurs: pending.map { $0.targetChangeCount == pasteboard.changeCount } ?? false,
-            hasWitness: pending?.witness != nil,
-            firstRead: pending?.witness?.firstRead,
             leaseDeadline: lease,
-            now: now
+            now: now()
         )
-    }
-
-    private func currentPublicationGateWait(pasteboard: NSPasteboard) -> TimeInterval {
-        publicationGateRemaining(now: now())
     }
 
     /// §8.1 / §8.12: the single pasteboard release. Every path that finishes with our payload on
@@ -1668,38 +1719,6 @@ public final class PasteboardBroker {
     /// Independent work bound in addition to the monotonic residency deadline.
     public static let maxStallExtensions = 16
 
-    /// Independent work bound on witness polls, for the same reason: a clock that stopped must not
-    /// turn the poll into a loop. The ceiling allows `ceiling / pollInterval` = 40 of them.
-    static let maxWitnessWaits = 64
-
-    /// How much longer than the residency floor an unverified payload must stay on the board
-    /// because no host has been seen to read it.
-    ///
-    /// The floor is a guess about how late a host can be; a read is the only proof it was not too
-    /// late. So the hold can only get *longer* here, never shorter than the floor:
-    /// - nobody has read the payload: keep holding, up to the hard deadline (the ceiling);
-    /// - someone has: keep holding for `payloadReadGrace` after that first read, because one
-    ///   paste can read the board more than once.
-    /// Zero when the paste ended with read evidence (`.delivered` — AX found the text) or with no
-    /// ⌘V (`.notPosted`), when the payload carries no witness, or when the board is no longer ours.
-    static func witnessHoldRemaining(
-        result: PasteDeliveryResult,
-        hasWitness: Bool,
-        firstRead: TimeInterval?,
-        boardStillOurs: Bool,
-        now: TimeInterval,
-        residency: PayloadResidency
-    ) -> TimeInterval {
-        guard hasWitness, boardStillOurs else { return 0 }
-        switch result {
-        case .delivered, .notPosted:
-            return 0
-        case .failed, .unavailable:
-            if let firstRead { return max(0, firstRead + InjectTiming.payloadReadGrace - now) }
-            return max(0, residency.hardDeadline - now)
-        }
-    }
-
     /// Waits out the deadline, then re-asks the stall question before letting go.
     private func releaseWhenDue(
         _ ticket: ClipboardTicket,
@@ -1707,7 +1726,6 @@ public final class PasteboardBroker {
         residency: PayloadResidency?,
         notBefore: TimeInterval,
         extensionsUsed: Int = 0,
-        witnessWaitsUsed: Int = 0,
         onReleased: (() -> Void)?
     ) {
         // A newer expansion (or a deliberate user-clipboard write) owns the board now. Bail before
@@ -1726,40 +1744,10 @@ public final class PasteboardBroker {
                     residency: residency,
                     notBefore: notBefore,
                     extensionsUsed: extensionsUsed,
-                    witnessWaitsUsed: witnessWaitsUsed,
                     onReleased: onReleased
                 )
             }
             return
-        }
-
-        // The floor has passed. Whether the host read the board by now is a fact the pasteboard
-        // can tell us; a timer cannot.
-        if let residency, witnessWaitsUsed < Self.maxWitnessWaits {
-            let remaining = Self.witnessHoldRemaining(
-                result: result,
-                hasWitness: ticket.witness != nil,
-                firstRead: ticket.witness?.firstRead,
-                boardStillOurs: ticket.pasteboard.changeCount == ticket.targetChangeCount,
-                now: now(),
-                residency: residency
-            )
-            if remaining > 0 {
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + min(remaining, InjectTiming.payloadWitnessPollInterval)
-                ) {
-                    self.releaseWhenDue(
-                        ticket,
-                        result: result,
-                        residency: residency,
-                        notBefore: notBefore,
-                        extensionsUsed: extensionsUsed,
-                        witnessWaitsUsed: witnessWaitsUsed + 1,
-                        onReleased: onReleased
-                    )
-                }
-                return
-            }
         }
 
         if let residency,
@@ -1796,7 +1784,6 @@ public final class PasteboardBroker {
                     residency: residency,
                     notBefore: next,
                     extensionsUsed: extensionsUsed + 1,
-                    witnessWaitsUsed: witnessWaitsUsed,
                     onReleased: onReleased
                 )
                 return

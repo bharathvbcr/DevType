@@ -193,17 +193,14 @@ final class SourceContractTests: XCTestCase {
                 body.contains("guard shouldContinue()"),
                 "\(label) paste must refuse cancelled or superseded work before posting"
             )
-            // The text paste asks `PasteboardBroker.Environment`, whose live bindings are pinned
-            // below by `testLivePasteEnvironmentIsBoundToTheRealSystemQueries`; the image paste
-            // still calls the system directly.
+            // Both pastes ask `PasteboardBroker.Environment`, whose live bindings are pinned
+            // below by `testLivePasteEnvironmentIsBoundToTheRealSystemQueries`.
             XCTAssertTrue(
-                body.contains(label == "text"
-                    ? "guard environment.canPostEvents()" : "guard CGPreflightPostEventAccess()"),
+                body.contains("guard environment.canPostEvents()"),
                 "\(label) paste must re-check Post Events at paste time"
             )
             XCTAssertTrue(
-                body.contains(label == "text"
-                    ? "environment.secureInputActive()" : "AXContextChecker.isSecureEventInputEnabledLive()"),
+                body.contains("environment.secureInputActive()"),
                 "\(label) paste must re-read Secure Input at paste time"
             )
             XCTAssertTrue(
@@ -221,7 +218,7 @@ final class SourceContractTests: XCTestCase {
             XCTAssertTrue(
                 body.contains(label == "text"
                     ? "targetIsCurrent(target, follower: follower, checkRange: verifySelection"
-                    : "target.isCurrent(checkRange: verifySelection"),
+                    : "environment.targetCurrent(target, verifySelection"),
                 "\(label) paste must not require a stable AX range after our own mutation"
             )
             if label == "text" {

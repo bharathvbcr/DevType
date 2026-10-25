@@ -59,15 +59,6 @@ public enum InjectTiming {
     /// `PasteboardBroker.shouldExtendResidencyForStalledHost`).
     public static let stalledHostResidencyProbeInterval: TimeInterval = 0.15
 
-    /// How long after a host's first read of the payload the board stays ours. A host reads the
-    /// pasteboard in one burst (types, then data); a second read a moment later is still the same
-    /// paste, and it must get the snippet. Also how long a following expansion waits after that
-    /// read before it may write over the board.
-    public static let payloadReadGrace: TimeInterval = 0.05
-    /// How often an unread payload is re-examined while it is being held past its floor. A poll,
-    /// not a deadline: the hold is bounded by `unverifiedPayloadResidencyCeiling` regardless.
-    public static let payloadWitnessPollInterval: TimeInterval = 0.05
-
     // MARK: - Image paste
 
     /// §3.4 bug: the *text* formula (`bytes / 40_000`) saturates instantly on image data — a 1 MB

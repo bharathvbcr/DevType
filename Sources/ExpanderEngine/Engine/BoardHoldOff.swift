@@ -10,16 +10,19 @@ import Foundation
 /// deleted. Holding here instead means a refusal costs nothing: the field is untouched and the
 /// swallowed key is still the caller's to put back.
 ///
-/// Pure over its clock and scheduler so the whole policy is driven by a test: the wait is polled at
-/// the witness interval (a read ends it early and the wait has to notice), every poll re-asks
-/// whether the operation is still current, and the total is bounded by the same ceiling that
-/// bounds the payload it is waiting for.
+/// Pure over its clock and scheduler so the whole policy is driven by a test: the wait is polled
+/// (the board can be freed early — the user copied, the payload was released — and the wait has to
+/// notice), every poll re-asks whether the operation is still current, and the total is bounded by
+/// the same ceiling that bounds the payload it is waiting for.
 enum BoardHoldOff {
-    /// Longest the whole wait may run: the lease a pending payload can hold the board, its read
-    /// grace, and a poll of slack. A gate that is still closed past this is not going to open.
+    /// How often the wait looks again. Short enough that a freed board is noticed promptly and an
+    /// input arriving during the wait ends it within a poll.
+    static let pollInterval: TimeInterval = 0.05
+
+    /// Longest the whole wait may run: the lease a pending payload can hold the board, and a poll
+    /// of slack. A gate that is still closed past this is not going to open.
     static let maximumWait: TimeInterval =
-        InjectTiming.unverifiedPayloadResidencyCeiling + InjectTiming.payloadReadGrace
-        + InjectTiming.payloadWitnessPollInterval
+        InjectTiming.unverifiedPayloadResidencyCeiling + pollInterval
 
     /// Calls `proceed` once `remaining()` reports zero, or `abandon` if `stillCurrent()` goes false
     /// or the wait exceeds `maximumWait`. Exactly one of the two is called, and nothing is
@@ -54,7 +57,7 @@ enum BoardHoldOff {
             abandon()
             return
         }
-        let delay = min(wait, InjectTiming.payloadWitnessPollInterval)
+        let delay = min(wait, pollInterval)
         schedule(delay) {
             guard stillCurrent() else {
                 abandon()

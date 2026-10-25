@@ -915,7 +915,7 @@ public final class TextInjectionPipeline {
             return
         }
         BoardHoldOff.untilFree(
-            remaining: { self.clipboard.publicationGateRemaining(now: InputClock.monotonicNow()) },
+            remaining: { self.clipboard.publicationGateRemaining() },
             stillCurrent: {
                 self.operationStateIsCurrent(request.operation, revision: request.inputRevision)
             },
@@ -2376,7 +2376,11 @@ public final class TextInjectionPipeline {
             // AX cannot restore — clipboard paste the trigger, then reinject the swallowed key.
             clipboard.pasteViaClipboard(
                 text: text, expectedText: nil, baseline: nil, focus: focus, bundleID: bundleID,
-                followVouchedReplacement: followVouchedReplacement, shouldContinue: shouldContinue
+                followVouchedReplacement: followVouchedReplacement,
+                // The restore replaces this expansion's own payload (or follows an erase that
+                // already waited out the board in `injectOnMain`): it must not sit behind it.
+                supersedesOwnPayload: true,
+                shouldContinue: shouldContinue
             ) { _ in
                 if shouldContinue(), swallowed.mustReinjectOnRefuse {
                     _ = self.reinjectSwallowedKey(swallowed)
