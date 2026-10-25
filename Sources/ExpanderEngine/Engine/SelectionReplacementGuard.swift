@@ -51,6 +51,9 @@ public enum SelectionReplacementGuard {
         case reselectFailed
         /// The field is larger than this guard will scan on the main thread.
         case fieldTooLarge
+        /// The selection was confirmed, but while that waited focus left the element it was
+        /// confirmed on: the paste would land somewhere the confirm never looked.
+        case focusMoved
 
         /// Report-ready sentence. Carries no field content, so `InjectRefusalKind.classify` passes
         /// it through to the report intact.
@@ -63,6 +66,7 @@ public enum SelectionReplacementGuard {
             case .originalAmbiguous: detail = "the original text occurs more than once"
             case .reselectFailed: detail = "re-selecting the original text did not take"
             case .fieldTooLarge: detail = "the field is too large to search for the original text"
+            case .focusMoved: detail = "focus left the field while its selection was being confirmed"
             }
             return "\(SelectionReplacementGuard.refusalPrefix)\(detail)"
         }
@@ -238,14 +242,16 @@ public enum SelectionReplacementGuard {
             /// is set when the confirmed element is not the one handed in: focus was missing, or
             /// it was a window-level container and the settle found the field. The caller's focus
             /// is stale, and this is the element to judge from here.
-            case confirmed(reselected: Bool, refocusedOn: AXUIElement? = nil)
+            case confirmed(reselected: Bool, refocusedOn: AXUIElement? = nil, trail: Trail = Trail())
             /// Nothing could be checked and the replacement does not require evidence.
             case unverified
-            case refused(Refusal)
+            /// `trail` says where the settle ended; it never takes part in equality, because two
+            /// refusals for the same cause are the same refusal however long they took to reach it.
+            case refused(Refusal, trail: Trail = Trail())
 
             public static func == (lhs: Self, rhs: Self) -> Bool {
                 switch (lhs, rhs) {
-                case let (.confirmed(left, leftFocus), .confirmed(right, rightFocus)):
+                case let (.confirmed(left, leftFocus, _), .confirmed(right, rightFocus, _)):
                     guard left == right else { return false }
                     switch (leftFocus, rightFocus) {
                     case (nil, nil): return true
@@ -253,9 +259,32 @@ public enum SelectionReplacementGuard {
                     default: return false
                     }
                 case (.unverified, .unverified): return true
-                case let (.refused(left), .refused(right)): return left == right
+                case let (.refused(left, _), .refused(right, _)): return left == right
                 default: return false
                 }
+            }
+        }
+
+        /// What the settle did, for the report line. A refusal that says only "unreadable" cannot
+        /// tell a host that answered with the window four times from one whose field stayed blank
+        /// three times, and those want different fixes; the role of the element the *last*
+        /// reading came from, and how many times the settle waited and re-resolved focus, can.
+        public struct Trail: Equatable, Sendable {
+            /// Settle ticks that ran: each waited `settleInterval` and read again.
+            public var settles = 0
+            /// How many of those asked the host for its focused element again.
+            public var refocuses = 0
+            /// `kAXRole` of the element handed in, "none" when there was none, nil when the
+            /// host did not answer it or no settle ran (the caller already knows that role).
+            public var startRole: String?
+            /// The same for the element the last reading was taken from.
+            public var endRole: String?
+
+            public init() {}
+
+            /// Report-ready, and free of field content: counts and AX role names only.
+            public var summary: String {
+                "settles=\(settles) refocuses=\(refocuses) startRole=\(startRole ?? "unread") endRole=\(endRole ?? "unread")"
             }
         }
 
@@ -358,8 +387,16 @@ public enum SelectionReplacementGuard {
         ) {
             judge(
                 replacement, element: element, refocused: false,
-                settlesRemaining: Self.settleAttempts, completion: completion
+                settlesRemaining: Self.settleAttempts, trail: Trail(), completion: completion
             )
+        }
+
+        /// A refusal with the trail finished: the role of the element the last reading came from,
+        /// which is where the settle died — not necessarily the element it started on.
+        private func refusal(_ refusal: Refusal, element: AXUIElement?, trail: Trail) -> Verdict {
+            var finished = trail
+            finished.endRole = element.map { access.role($0) } ?? "none"
+            return .refused(refusal, trail: finished)
         }
 
         private func judge(
@@ -367,6 +404,7 @@ public enum SelectionReplacementGuard {
             element: AXUIElement?,
             refocused: Bool,
             settlesRemaining: Int,
+            trail: Trail,
             lastRefusal: Refusal? = nil,
             completion: @escaping (Verdict) -> Void
         ) {
@@ -388,21 +426,28 @@ public enum SelectionReplacementGuard {
             let refocusedOn = refocused ? element : nil
             switch decision {
             case .proceed:
-                completion(.confirmed(reselected: false, refocusedOn: refocusedOn))
+                completion(.confirmed(reselected: false, refocusedOn: refocusedOn, trail: trail))
             case .unverifiable:
                 // Only a replacement that must prove its selection is worth waiting for; one read
                 // by copy is delivered unverified either way.
                 guard replacement.requiresEvidence, settlesRemaining > 0 else {
-                    completion(observedRefusal.map(Verdict.refused) ?? Self.unjudged(replacement))
+                    if replacement.requiresEvidence {
+                        completion(refusal(observedRefusal ?? .unreadable, element: element, trail: trail))
+                    } else {
+                        completion(.unverified)
+                    }
                     return
                 }
                 // No element, or a window-level container: the field is whoever holds focus
                 // after the host settles. A text element that answered blank stays put — that
                 // is the host publishing the selection a moment late, and following focus away
                 // from it would drop the element that is about to answer.
-                let abandon = element.map {
-                    Self.blankReadingAbandonsElement(role: access.role($0))
-                } ?? true
+                let heldRole = element.flatMap { access.role($0) }
+                let abandon = element == nil || Self.blankReadingAbandonsElement(role: heldRole)
+                var trail = trail
+                if trail.settles == 0 { trail.startRole = element == nil ? "none" : heldRole }
+                trail.settles += 1
+                if abandon { trail.refocuses += 1 }
                 access.schedule(Self.settleInterval) {
                     let next: AXUIElement?
                     let gained: Bool
@@ -421,19 +466,19 @@ public enum SelectionReplacementGuard {
                     }
                     judge(
                         replacement, element: next, refocused: refocused || gained,
-                        settlesRemaining: settlesRemaining - 1, lastRefusal: observedRefusal,
-                        completion: completion
+                        settlesRemaining: settlesRemaining - 1, trail: trail,
+                        lastRefusal: observedRefusal, completion: completion
                     )
                 }
-            case .refuse(let refusal):
-                completion(.refused(refusal))
+            case .refuse(let reason):
+                completion(refusal(reason, element: element, trail: trail))
             case .reselect(let range):
                 guard let element, access.select(range, element) else {
-                    completion(.refused(.reselectFailed))
+                    completion(refusal(.reselectFailed, element: element, trail: trail))
                     return
                 }
                 readBack(
-                    replacement, element: element, refocusedOn: refocusedOn,
+                    replacement, element: element, refocusedOn: refocusedOn, trail: trail,
                     remaining: Self.readBackAttempts, completion: completion
                 )
             }
@@ -443,6 +488,7 @@ public enum SelectionReplacementGuard {
             _ replacement: SelectionReplacement,
             element: AXUIElement,
             refocusedOn: AXUIElement?,
+            trail: Trail,
             remaining: Int,
             completion: @escaping (Verdict) -> Void
         ) {
@@ -453,20 +499,16 @@ public enum SelectionReplacementGuard {
                     original: replacement.original,
                     observation: access.observe(element)
                 ) == .proceed {
-                    completion(.confirmed(reselected: true, refocusedOn: refocusedOn))
+                    completion(.confirmed(reselected: true, refocusedOn: refocusedOn, trail: trail))
                 } else if remaining > 1 {
                     readBack(
-                        replacement, element: element, refocusedOn: refocusedOn,
+                        replacement, element: element, refocusedOn: refocusedOn, trail: trail,
                         remaining: remaining - 1, completion: completion
                     )
                 } else {
-                    completion(.refused(.reselectFailed))
+                    completion(refusal(.reselectFailed, element: element, trail: trail))
                 }
             }
-        }
-
-        private static func unjudged(_ replacement: SelectionReplacement) -> Verdict {
-            replacement.requiresEvidence ? .refused(.unreadable) : .unverified
         }
     }
 }

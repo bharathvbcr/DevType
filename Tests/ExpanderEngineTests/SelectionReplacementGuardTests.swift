@@ -773,6 +773,148 @@ final class SelectionReplacementGuardTests: XCTestCase {
         XCTAssertEqual(lookups, 0)
     }
 
+    // MARK: - Where the settle died
+
+    private func trail(
+        of verdict: SelectionReplacementGuard.Confirmer.Verdict?
+    ) -> SelectionReplacementGuard.Confirmer.Trail? {
+        switch verdict {
+        case .refused(_, let trail), .confirmed(_, _, let trail): return trail
+        default: return nil
+        }
+    }
+
+    /// The refuse line used to log the role of the element the inject *started* on, so after the
+    /// settle left a window for a web area that stayed blank it still said `role=AXWindow` — the
+    /// one thing the report could not afford to get wrong. The trail names the last reading's
+    /// element and counts what the settle did.
+    func testRefusalTrailNamesTheElementTheSettleEndedOn() {
+        let window = AXUIElementCreateApplication(1)
+        let web = element
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in self.observation(value: nil) },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: { web },
+            role: { candidate in CFEqual(candidate, web) ? "AXWebArea" : "AXWindow" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .refused(.unreadable))
+        let settle = trail(of: verdict)
+        XCTAssertEqual(settle?.startRole, "AXWindow")
+        XCTAssertEqual(settle?.endRole, "AXWebArea")
+        XCTAssertEqual(settle?.settles, SelectionReplacementGuard.Confirmer.settleAttempts)
+        XCTAssertEqual(settle?.refocuses, 1, "the web area is waited on, not followed away from")
+        XCTAssertEqual(
+            settle?.summary,
+            "settles=4 refocuses=1 startRole=AXWindow endRole=AXWebArea"
+        )
+    }
+
+    func testRefusalTrailCountsEveryRefocusOfAWindowThatNeverYieldsAField() {
+        let window = AXUIElementCreateApplication(1)
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in self.observation(value: nil) },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: { window },
+            role: { _ in "AXWindow" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        let settle = trail(of: verdict)
+        XCTAssertEqual(settle?.refocuses, SelectionReplacementGuard.Confirmer.settleAttempts)
+        XCTAssertEqual(settle?.endRole, "AXWindow")
+    }
+
+    func testTrailOfAFocuslessInjectSaysSoAndAnImmediateAnswerRanNoSettle() {
+        let blind = FakeField([observation(value: nil)])
+        let none = trail(of: confirm(blind, element: .some(nil)))
+        XCTAssertEqual(none?.startRole, "none")
+        XCTAssertEqual(none?.endRole, "none")
+        XCTAssertEqual(none?.settles, SelectionReplacementGuard.Confirmer.settleAttempts)
+
+        let intact = FakeField([observation(value: nil, selectedText: original)])
+        XCTAssertEqual(trail(of: confirm(intact))?.settles, 0)
+
+        let late = FakeField([observation(value: nil), observation(value: nil, selectedText: original)])
+        XCTAssertEqual(trail(of: confirm(late))?.settles, 1)
+    }
+
+    /// A refusal for the same cause is the same refusal however the settle got there.
+    func testTrailDoesNotTakePartInVerdictEquality() {
+        var longer = SelectionReplacementGuard.Confirmer.Trail()
+        longer.settles = 4
+        XCTAssertEqual(
+            SelectionReplacementGuard.Confirmer.Verdict.refused(.unreadable, trail: longer),
+            .refused(.unreadable)
+        )
+    }
+
+    /// After a confirm that waited the entry gate is shown where focus is *now*. Handed the focus
+    /// the inject resolved before the wait — or the element the target was just recaptured from —
+    /// it compared a reading with itself and passed whatever the host had done in between.
+    func testAConfirmThatWaitedResolvesFocusAgainBeforeTheEntryGate() throws {
+        let suite = "SelectionReplacementGuardTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let field = element
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { candidate in
+                CFEqual(candidate, field)
+                    ? self.observation(value: nil, selectedText: self.original)
+                    : self.observation(value: nil)
+            },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: { field },
+            role: { _ in "AXTextArea" }
+        )
+        var queries = 0
+        var kept: [String] = []
+        let pipeline = TextInjectionPipeline(
+            defaults: defaults,
+            selectionConfirmer: SelectionReplacementGuard.Confirmer(access: access),
+            keepRefusedReplacement: { kept.append($0); return true },
+            focusQuery: { completion in
+                queries += 1
+                // The inject resolved no element; by the time the confirm is done the host has
+                // lost focus again. Nothing may be pasted on the strength of the confirm.
+                completion(.missing)
+            }
+        )
+
+        let result = "the quick brown fox"
+        var outcome: PermissionCoordinator.InjectOutcome?
+        let done = expectation(description: "inject completed")
+        pipeline.inject(
+            snippet: SnippetModel(title: "AI", triggerKeyword: "", replacementText: result),
+            triggerLength: 0,
+            swallowed: .notSwallowed,
+            erasePlan: .empty,
+            preResolvedText: result,
+            secureClipboardPaste: true,
+            targetFocus: .resolved(nil),
+            replacingSelection: SelectionReplacement(original: original)
+        ) {
+            outcome = $0
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+
+        if queries < 2 {
+            throw XCTSkip("entry gate refused before the confirm ran: \(String(describing: outcome))")
+        }
+        XCTAssertEqual(queries, 2, "one query for the inject, one after the confirm waited")
+        XCTAssertEqual(outcome, .refused(SelectionReplacementGuard.Refusal.focusMoved.reason))
+        XCTAssertEqual(kept, [result], "the generated payload survives the refusal")
+    }
+
     func testBlankReadingAbandonsOnlyWindowLevelContainers() {
         let containers = [
             kAXApplicationRole, kAXWindowRole, kAXSheetRole, kAXDrawerRole, kAXPopoverRole,

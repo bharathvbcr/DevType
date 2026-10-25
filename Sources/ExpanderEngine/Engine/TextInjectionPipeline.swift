@@ -141,8 +141,12 @@ public final class TextInjectionPipeline {
     init(
         defaults: UserDefaults,
         selectionConfirmer: SelectionReplacementGuard.Confirmer,
-        keepRefusedReplacement: @escaping (String) -> Bool
+        keepRefusedReplacement: @escaping (String) -> Bool,
+        focusQuery: @escaping (@escaping (AXContextChecker.FocusQueryResult) -> Void) -> Void = {
+            AXContextChecker.shared.queryFocusedElement(completion: $0)
+        }
     ) {
+        self.focusQuery = focusQuery
         ledger = ExpansionLedger(defaults: defaults)
         hid = HIDKeyPoster.shared
         ax = AXTextWriter.shared
@@ -172,6 +176,9 @@ public final class TextInjectionPipeline {
     public var onSelectionReplaceRefused: ((_ copied: Bool) -> Void)?
 
     private let selectionConfirmer: SelectionReplacementGuard.Confirmer
+    /// Resolves the focused element asynchronously. The live query in production; a test scripts
+    /// it to see what the entry gate is shown after a confirm that waited.
+    private let focusQuery: (@escaping (AXContextChecker.FocusQueryResult) -> Void) -> Void
     /// Where a refused replace's already-generated payload is kept. Returns whether it was kept.
     private let keepRefusedReplacement: (String) -> Bool
 
@@ -832,9 +839,11 @@ public final class TextInjectionPipeline {
     ///   continuation checks) and `DeliveryVerifier.verifyFocusedTextDelivery` (each paste-hold
     ///   tick and the deferred re-verify);
     /// * **the erase guard's settle retry**, which re-resolves on purpose after a mismatch,
-    ///   because the element held before the settle may be the stale one.
+    ///   because the element held before the settle may be the stale one;
+    /// * **a confirmed replace that waited**, which resolves again before re-entering, because
+    ///   the focus it was handed predates the wait (see `confirmReplacementSelection`).
     private func injectOnMain(_ request: InjectRequest, completion: @escaping InjectionCompletion) {
-        AXContextChecker.shared.queryFocusedElement { focus in
+        focusQuery { focus in
             self.injectWithFocus(request, focus: focus, completion: completion)
         }
     }
@@ -1096,8 +1105,15 @@ public final class TextInjectionPipeline {
     }
 
     /// Confirms a replace's selection on the live field, then re-enters `injectWithFocus` with the
-    /// check cleared so every later gate runs exactly as it does for an insert. Re-entering also
-    /// re-runs the entry gate, which is what covers the time a re-select's read-back waited.
+    /// check cleared so every later gate runs exactly as it does for an insert.
+    ///
+    /// Re-entering re-runs the entry gate, but the gate compares `request.target` against the
+    /// `focus` it is handed, and a confirm that waited (a settle, a re-select's read-back) hands it
+    /// the focus resolved *before* the wait — or, when the confirmer refocused, the very element the
+    /// target was just recaptured from. Either way the comparison is of a reading with itself, so it
+    /// says nothing about the time the wait took. A confirm that waited therefore resolves focus
+    /// afresh and re-enters with that, so the entry gate judges where focus is now; one that
+    /// answered on its first reading has nothing to cover and keeps the focus it already has.
     private func confirmReplacementSelection(
         _ replacement: SelectionReplacement,
         request: InjectRequest,
@@ -1105,14 +1121,47 @@ public final class TextInjectionPipeline {
         element: AXUIElement?,
         completion: @escaping InjectionCompletion
     ) {
+        let startedAt = Date()
+
+        /// The payload is already generated — an AI result, a dictated rewrite. Refusing must not
+        /// cost the user that work, so it goes to the clipboard for a manual ⌘V into a selection
+        /// they can see.
+        func refuse(_ refusal: SelectionReplacementGuard.Refusal, trail: SelectionReplacementGuard.Confirmer.Trail) {
+            let payload = request.preResolvedText ?? request.snippet.replacementText
+            let copied = keepRefusedReplacement(payload)
+            // The roles are what tell "the host answered with the wrong element" apart from "the
+            // right element answered blank" — the report cannot otherwise. `role` is the element
+            // this inject started on; the trail names the one the settle ended on, which after a
+            // refocus is a different element, and how many times it waited.
+            let role = element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) } ?? "none"
+            let confirmMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+            DevTypeLog.inject.notice(
+                "[Inject] replace refused — \(refusal.rawValue, privacy: .public); role=\(role, privacy: .public) \(trail.summary, privacy: .public) confirmMs=\(confirmMs, privacy: .public) result copied=\(copied, privacy: .public)"
+            )
+            refuseInject(
+                refusal.reason,
+                path: SelectionReplacementGuard.refusalPath,
+                swallowed: request.swallowed,
+                allowKeyReplay: false,
+                completion: completion
+            )
+            onSelectionReplaceRefused?(copied)
+        }
+
         selectionConfirmer.confirm(replacement, element: element) { verdict in
+            let confirmMs = Int(Date().timeIntervalSince(startedAt) * 1000)
             switch verdict {
-            case .confirmed(let reselected, let refocusedOn):
+            case .confirmed(let reselected, let refocusedOn, let trail):
                 var confirmed = request.selectionConfirmed()
                 var focus = focus
                 if reselected {
                     DevTypeLog.inject.notice(
                         "[Inject] replace: selection was lost on return to the source app — re-selected the original before pasting"
+                    )
+                }
+                if trail.settles > 0 {
+                    DevTypeLog.inject.info(
+                        "[Inject] replace: selection confirmed after \(confirmMs, privacy: .public) ms; \(trail.summary, privacy: .public)"
                     )
                 }
                 if let refocusedOn {
@@ -1125,32 +1174,31 @@ public final class TextInjectionPipeline {
                         target: PasteboardBroker.PasteTarget.capture(focus: .resolved(refocusedOn ?? element))
                     )
                 }
-                self.injectWithFocus(confirmed, focus: focus, completion: completion)
+                guard reselected || trail.settles > 0 else {
+                    self.injectWithFocus(confirmed, focus: focus, completion: completion)
+                    return
+                }
+                self.focusQuery { live in
+                    // Judged here rather than left to the entry gate, which would drop the
+                    // generated payload; a replace that cannot land keeps it on the clipboard.
+                    let moved = confirmed.target.mismatch(
+                        observing: live.element,
+                        pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                        checkRange: false
+                    )
+                    guard moved == nil else {
+                        refuse(.focusMoved, trail: trail)
+                        return
+                    }
+                    self.injectWithFocus(confirmed, focus: live, completion: completion)
+                }
             case .unverified:
                 DevTypeLog.inject.info(
                     "[Inject] replace: selection unreadable in an app read by copy — delivering unverified"
                 )
                 self.injectWithFocus(request.selectionConfirmed(), focus: focus, completion: completion)
-            case .refused(let refusal):
-                let payload = request.preResolvedText ?? request.snippet.replacementText
-                // The payload is already generated — an AI result, a dictated rewrite. Refusing
-                // must not cost the user that work, so it goes to the clipboard for a manual ⌘V
-                // into a selection they can see.
-                let copied = self.keepRefusedReplacement(payload)
-                // The role is what tells "the host answered with the wrong element" apart from
-                // "the right element answered blank" — the report cannot otherwise.
-                let role = element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) } ?? "none"
-                DevTypeLog.inject.notice(
-                    "[Inject] replace refused — \(refusal.rawValue, privacy: .public); role=\(role, privacy: .public) result copied=\(copied, privacy: .public)"
-                )
-                self.refuseInject(
-                    refusal.reason,
-                    path: SelectionReplacementGuard.refusalPath,
-                    swallowed: request.swallowed,
-                    allowKeyReplay: false,
-                    completion: completion
-                )
-                self.onSelectionReplaceRefused?(copied)
+            case .refused(let refusal, let trail):
+                refuse(refusal, trail: trail)
             }
         }
     }
