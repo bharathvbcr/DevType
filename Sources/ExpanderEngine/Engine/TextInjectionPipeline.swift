@@ -1460,8 +1460,29 @@ public final class TextInjectionPipeline {
         // the remaining backspaces loose on the user's text.
         // The continuation after the erase is a local function, not the call's trailing closure,
         // so a refusal that a second look may clear can re-enter it after a settle.
+        var restoredPartialErase = false
         func afterErase(_ erased: Bool, settleAttempt: Int) {
             guard erased else {
+                // The burst stopped part-way: the keys already posted removed the end of the
+                // trigger, so replaying the swallowed key below would put it after a truncated
+                // head. Put the removed tail back first — only into a field the continue-check
+                // still vouches for, and without replaying the key here: the refusal below does,
+                // after the tail.
+                if !restoredPartialErase, postedBackspaces > 0, canProceedAfterMutation(),
+                   let tail = erasePlan.erasedTail(graphemes: postedBackspaces) {
+                    restoredPartialErase = true
+                    self.restoreTriggerAfterFailedPaste(
+                        erasePlan: tail,
+                        swallowed: .notSwallowed,
+                        focus: FocusedElementSource.resolved(context.focusedElement),
+                        bundleID: context.frontBundleID,
+                        countsAsDuplicateRisk: false,
+                        shouldContinue: canProceedAfterMutation
+                    ) {
+                        afterErase(false, settleAttempt: settleAttempt)
+                    }
+                    return
+                }
                 self.refuseInject(
                     "Trigger erase did not complete — field may hold a partial trigger",
                     path: "eraseIncomplete",
