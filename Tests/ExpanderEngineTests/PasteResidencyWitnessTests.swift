@@ -25,13 +25,18 @@ final class PasteResidencyWitnessTests: XCTestCase {
     private final class Harness {
         let board = NSPasteboard.withUniqueName()
         let broker: PasteboardBroker
-        private(set) var chords = 0
-        private let chordLock = NSLock()
+        /// CGEvents the ⌘V chord has posted so far (Command down, V down, V up, Command up).
+        final class Posted { var events = 0 }
+        let posted = Posted()
 
-        init(snapshot: ((NSPasteboard) -> PasteboardBroker.PasteboardSnapshot?)? = nil) {
+        init(
+            snapshot: ((NSPasteboard) -> PasteboardBroker.PasteboardSnapshot?)? = nil,
+            verifier: DeliveryVerifier? = nil
+        ) {
             let board = board
+            let posted = posted
             let hid = HIDKeyPoster(
-                commandEventIO: .init(canPost: { true }, post: { _ in }, pause: {}),
+                commandEventIO: .init(canPost: { true }, post: { _ in posted.events += 1 }, pause: {}),
                 layout: KeyboardLayoutState(provider: NoLayout())
             )
             var environment = PasteboardBroker.Environment()
@@ -40,7 +45,10 @@ final class PasteResidencyWitnessTests: XCTestCase {
             environment.secureInputActive = { false }
             environment.targetCurrent = { _, _, _ in true }
             if let snapshot { environment.snapshot = snapshot }
-            broker = PasteboardBroker(hid: hid, timing: InjectTimingStore(), environment: environment)
+            broker = PasteboardBroker(
+                hid: hid, verifier: verifier ?? DeliveryVerifier.shared,
+                timing: InjectTimingStore(), environment: environment
+            )
         }
 
         deinit { board.releaseGlobally() }
@@ -238,6 +246,56 @@ final class PasteResidencyWitnessTests: XCTestCase {
         pump(until: secondPostedAt + 1.10)
         XCTAssertEqual(harness.board.string(forType: .string), "USER-OLD",
                        "the user's clipboard — not FIRST — is what comes back at the end")
+    }
+
+    // MARK: - Type-ahead replay
+
+    /// `EventTapEngine.endExpansion` replays the keystrokes it held when the pipeline's completion
+    /// fires. That is only ordering-safe if completion can never precede ⌘V: a replayed key is an
+    /// HID post, and everything posted after the chord is queued behind it in the host's own event
+    /// stream — whenever the host gets round to *reading the board*. (Completion at 350 ms with a
+    /// read at 700 ms does not transpose anything; the key is behind the paste either way.)
+    /// The held keys' surrender deadline matters only before ⌘V, where this does not apply.
+    ///
+    /// Characterization — it passes against the unmodified code. It pins the one property the
+    /// replay's ordering rests on, in both completion paths.
+    func testCompletionIsNeverReportedBeforeTheWholeChordWasPosted() {
+        // Path 1: nothing to verify; completion is reported right after ⌘V.
+        let direct = Harness()
+        direct.seedUserClipboard("USER-OLD")
+        var chordsAtCompletion = -1
+        let reported = expectation(description: "completion")
+        direct.broker.pasteViaClipboard(
+            text: "SNIPPET", expectedText: nil, baseline: nil, focus: .resolved(nil),
+            completeBeforeRestore: true
+        ) { _ in
+            chordsAtCompletion = direct.posted.events
+            reported.fulfill()
+        }
+        wait(for: [reported], timeout: 5)
+        XCTAssertEqual(chordsAtCompletion, 4, "completion preceded the end of the ⌘V chord")
+
+        // Path 2: the hold loop polls AX (here: nothing readable) and gives up unverified.
+        let unreadable = DeliveryVerifier(access: .init(
+            focusedElement: { nil }, numberOfCharacters: { _ in nil }, selectedRange: { _ in nil },
+            stringForRange: { _, _ in nil },
+            observation: { DeliveryVerifier.FocusedTextObservation(value: nil, selectedText: nil, target: $0) }
+        ))
+        let verified = Harness(verifier: unreadable)
+        verified.seedUserClipboard("USER-OLD")
+        var chordsAtVerifiedCompletion = -1
+        var result: PasteboardBroker.PasteDeliveryResult?
+        let verifiedReported = expectation(description: "verified completion")
+        verified.broker.pasteViaClipboard(
+            text: "SNIPPET", expectedText: "SNIPPET", baseline: nil, focus: .resolved(nil)
+        ) {
+            result = $0
+            chordsAtVerifiedCompletion = verified.posted.events
+            verifiedReported.fulfill()
+        }
+        wait(for: [verifiedReported], timeout: 5)
+        XCTAssertEqual(result, .unavailable)
+        XCTAssertEqual(chordsAtVerifiedCompletion, 4, "completion preceded the end of the ⌘V chord")
     }
 
     // MARK: - The user copies something themselves
