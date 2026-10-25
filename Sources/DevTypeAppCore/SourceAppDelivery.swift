@@ -6,11 +6,16 @@ import ExpanderEngine
 /// the app that happens to be frontmost after a fixed delay. The continuation
 /// preserves the original process through the pipeline's later queue/clipboard waits.
 enum SourceAppDelivery {
-    /// Report-ready name of what the focus wait ended on. `.external` is the one settled state;
-    /// every other reading means the budget ran out and the read went ahead anyway.
-    fileprivate static func label(_ focus: SelectionReader.AXFocusObservation) -> String {
+    /// Report-ready name of what the focus wait ended on. Settled means the same element answered
+    /// twice running (`previous == focus`); an `.external` reading that differs from the last one
+    /// was only read because the budget ran out, and says so. Every other reading is the budget
+    /// running out with nothing published, and the read going ahead anyway.
+    fileprivate static func label(
+        _ focus: SelectionReader.AXFocusObservation,
+        previous: SelectionReader.AXFocusObservation
+    ) -> String {
         switch focus {
-        case .external: return "settled on a field"
+        case .external: return focus == previous ? "settled on a field" : "budget spent, field still changing"
         case .unfocused: return "budget spent, no field published (none, or a window-level container)"
         case .ownProcess: return "budget spent, focus still in DevType"
         case .notObserved: return "focus not probed"
@@ -158,7 +163,7 @@ enum SourceAppDelivery {
                 let elapsed = Int(Date().timeIntervalSince(activatedAt) * 1000)
                 let polls = SelectionReader.sourceFocusMaxPolls - remainingPolls
                 DevTypeLog.inject.info(
-                    "[SourceFocus] read after \(elapsed, privacy: .public) ms, \(polls, privacy: .public) polls — \(label(focus), privacy: .public)"
+                    "[SourceFocus] read after \(elapsed, privacy: .public) ms, \(polls, privacy: .public) polls — \(label(focus, previous: previousFocus), privacy: .public)"
                 )
                 operation(shouldContinue)
             case .wait(let next):

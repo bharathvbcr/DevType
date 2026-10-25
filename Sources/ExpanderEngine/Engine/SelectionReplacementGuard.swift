@@ -214,7 +214,9 @@ public enum SelectionReplacementGuard {
     private static func occurrencesNear(
         _ range: NSRange, original: String, in haystack: NSString, canonical: Bool
     ) -> [NSRange] {
-        let reach = (original as NSString).length
+        // A canonically equivalent match can be longer than the needle (decomposed against
+        // composed), so the reach is widened rather than trusted to be one needle length.
+        let reach = (original as NSString).length * (canonical ? 3 : 1)
         let start = max(0, range.location - reach)
         let end = min(haystack.length, NSMaxRange(range) + reach)
         guard end > start else { return [] }
@@ -365,7 +367,9 @@ public enum SelectionReplacementGuard {
         /// answer the original on one rung and leave `kAXSelectedText` blank on the next reading.
         /// Judging the replace on a weaker read than the capture made an intact selection look
         /// unreadable. The ladder is consulted only when the observation has no selected text and
-        /// no range: a caret range is a real answer (the selection collapsed) and stays one.
+        /// no range: a caret range is a real answer (the selection collapsed) and stays one — to the
+        /// ladder. `judge` still waits on a caret it cannot repair, because a host restoring a
+        /// selection reports the caret first, and refuses as `selectionChanged` only if it stays.
         static func fillingSelection(
             _ observation: DeliveryVerifier.FocusedTextObservation,
             ladder: () -> String?
