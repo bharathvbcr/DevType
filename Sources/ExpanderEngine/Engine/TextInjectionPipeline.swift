@@ -904,9 +904,40 @@ public final class TextInjectionPipeline {
     /// * **a confirmed replace that waited**, which resolves again before re-entering, because
     ///   the focus it was handed predates the wait (see `confirmReplacementSelection`).
     private func injectOnMain(_ request: InjectRequest, completion: @escaping InjectionCompletion) {
-        focusQuery { focus in
-            self.injectWithFocus(request, focus: focus, completion: completion)
+        // Something is about to be erased, and a previous expansion's payload may still be waiting
+        // to be read: the paste's own gate would hold *this* one after the erase, past the point
+        // the held type-ahead gives up. Wait first, while the field is untouched — every gate
+        // below (focus, entry, precondition) then runs after the wait. See `BoardHoldOff`.
+        guard !request.erasePlan.isEmpty, !request.secureClipboardPaste else {
+            focusQuery { focus in
+                self.injectWithFocus(request, focus: focus, completion: completion)
+            }
+            return
         }
+        BoardHoldOff.untilFree(
+            remaining: { self.clipboard.publicationGateRemaining(now: InputClock.monotonicNow()) },
+            stillCurrent: {
+                self.operationStateIsCurrent(request.operation, revision: request.inputRevision)
+            },
+            schedule: { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) },
+            proceed: {
+                self.focusQuery { focus in
+                    self.injectWithFocus(request, focus: focus, completion: completion)
+                }
+            },
+            abandon: {
+                // Nothing was erased, so there is nothing to restore; the entry-gate refusal records
+                // which condition ended the wait (input, cancellation, trust, Secure Input).
+                self.refuseEntryGate(
+                    operation: request.operation,
+                    revision: request.inputRevision,
+                    targetMismatch: nil,
+                    allowSecureInput: false,
+                    swallowed: request.swallowed,
+                    completion: completion
+                )
+            }
+        )
     }
 
     private func injectWithFocus(

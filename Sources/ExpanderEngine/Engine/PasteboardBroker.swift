@@ -1606,7 +1606,11 @@ public final class PasteboardBroker {
         return max(0, leaseDeadline - now)
     }
 
-    private func currentPublicationGateWait(pasteboard: NSPasteboard) -> TimeInterval {
+    /// How long a paste started at `now` would wait before it could take the board. Asked rather
+    /// than waited on, so a caller that can hold off *earlier* — the pipeline, before it erases a
+    /// trigger — shares the gate's own answer instead of keeping a second one.
+    func publicationGateRemaining(now: TimeInterval) -> TimeInterval {
+        let pasteboard = environment.pasteboard()
         restoreLock.lock()
         let pending = pendingTicket
         let lease = pendingLeaseDeadline
@@ -1616,8 +1620,12 @@ public final class PasteboardBroker {
             hasWitness: pending?.witness != nil,
             firstRead: pending?.witness?.firstRead,
             leaseDeadline: lease,
-            now: now()
+            now: now
         )
+    }
+
+    private func currentPublicationGateWait(pasteboard: NSPasteboard) -> TimeInterval {
+        publicationGateRemaining(now: now())
     }
 
     /// §8.1 / §8.12: the single pasteboard release. Every path that finishes with our payload on
