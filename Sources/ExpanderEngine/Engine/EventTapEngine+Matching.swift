@@ -108,6 +108,8 @@ extension EventTapEngine {
     }
 
     func endExpansion() {
+        // Before `lock`, like `tryBeginExpansion`: the context has its own lock.
+        let currentPID = frontmostContext.processID
         lock.lock()
         _isExpanding = false
         let holdPID = _typeAhead.holdPID
@@ -115,6 +117,15 @@ extension EventTapEngine {
         ringBuffer.removeAll()
         layoutBuffer.clear()
         lastEventUTF16Count = 1
+        // The replay is posted as synthetic events, which the tap ignores — so the buffer would
+        // never learn of characters that are about to land in the field. Two triggers typed back
+        // to back (`` `slm `` then `` `asu ``) lost the first characters of the second this way.
+        // Seeded under the same lock as the reset, before the replay is posted, so no real key
+        // can be appended ahead of them; and only when the replay will actually be posted.
+        if !replay.isEmpty, TypeAheadBuffer.mayReplay(heldFor: holdPID, intoFrontmost: currentPID) {
+            ringBuffer.append(contentsOf: replay)
+            lastEventUTF16Count = max(1, String(replay.last ?? " ").utf16.count)
+        }
         lock.unlock()
         // §8.3: outside the lock — replaying posts HID events, and the tap callback for those
         // events takes this same lock.

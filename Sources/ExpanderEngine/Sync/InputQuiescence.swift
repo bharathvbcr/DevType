@@ -46,9 +46,35 @@ public final class InputClock: @unchecked Sendable {
         self.clock = now
     }
 
-    public func mark(at eventTime: TimeInterval) {
+    /// What one `mark(at:)` did, so exactly that mark can be taken back by `retract(_:)`.
+    public struct Mark: Equatable {
+        fileprivate let time: TimeInterval
+        fileprivate let previous: TimeInterval?
+    }
+
+    @discardableResult
+    public func mark(at eventTime: TimeInterval) -> Mark {
         lock.lock()
+        let previous = last
         last = Swift.max(last ?? eventTime, eventTime)
+        lock.unlock()
+        return Mark(time: eventTime, previous: previous)
+    }
+
+    /// Takes back a mark for a key that turned out never to reach the field.
+    ///
+    /// The tap marks every key at entry, *before* it knows what becomes of the key: the ordering
+    /// is what lets a debounce timeout prove quiescence (see `expandHeld`). A key that the
+    /// type-ahead buffer then swallows is held and replayed *after* delivery, so it cannot move
+    /// the caret or change the text under the erase the quiescence check protects — counting it
+    /// aborted every expansion whose AX probe was slower than the user's next keystroke.
+    ///
+    /// Only the mark itself is undone: if a later key has marked since, `last` belongs to that
+    /// key and stays. The callback is the sole writer, so this cannot race another mark; a reader
+    /// that lands between mark and retract sees the key, which errs toward aborting.
+    public func retract(_ mark: Mark) {
+        lock.lock()
+        if last == mark.time { last = mark.previous }
         lock.unlock()
     }
 

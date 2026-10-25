@@ -62,10 +62,11 @@ extension EventTapEngine {
         }
 
         let isSynthetic = event.getIntegerValueField(.eventSourceUserData) == SyntheticEventMarker.magicUserData
+        var clockMark: InputClock.Mark?
         if !isSynthetic {
             let eventTime = InputClock.seconds(sinceBootNanos: event.timestamp)
             if EventTapEngine.mouseDownTypes.contains(type) || type == .keyDown {
-                inputClock.mark(at: eventTime)
+                clockMark = inputClock.mark(at: eventTime)
             }
         }
 
@@ -130,6 +131,9 @@ extension EventTapEngine {
                 }
                 switch admission.decision {
                 case .swallow:
+                    // Held for replay after delivery, so it never touches the field under the
+                    // erase: it must not count as input that invalidates the expansion.
+                    if let clockMark { inputClock.retract(clockMark) }
                     return nil
                 case .flushThenPassThrough(let replay):
                     replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
@@ -444,6 +448,7 @@ extension EventTapEngine {
             }
             switch admission.decision {
             case .swallow:
+                if let clockMark { inputClock.retract(clockMark) }
                 return nil
             case .flushThenPassThrough(let replay):
                 replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
