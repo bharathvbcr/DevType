@@ -110,6 +110,7 @@ extension EventTapEngine {
         let enabled = _isEnabled
         let polledSecureFlag = _isSecureInputActive
         let suspended = _matchingSuspendCount > 0
+        let replayInFlight = _replayInFlight
         lock.unlock()
 
         // Pass through while inject+restore owns the critical section.
@@ -154,6 +155,16 @@ extension EventTapEngine {
         if secureFlag, !liveSecureInputProbe() {
             isSecureInputActive = false
             secureFlag = false
+        }
+
+        // A real key while `endExpansion` is still posting the replayed type-ahead lands in the
+        // field before or after those characters, and the ring was seeded as if it knew which.
+        // Matching on it could erase text that is not the trigger, so it bypasses like any other
+        // input the buffer cannot account for.
+        if replayInFlight {
+            TextInjectionPipeline.shared.clearLastExpansion()
+            discardStateForBypassedInput("keystroke raced the type-ahead replay")
+            return Unmanaged.passUnretained(event)
         }
 
         guard enabled && !secureFlag && !suspended else {

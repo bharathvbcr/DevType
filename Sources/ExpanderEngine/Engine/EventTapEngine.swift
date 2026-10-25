@@ -70,6 +70,11 @@ public final class EventTapEngine {
     /// §8.3: keystrokes typed while an expansion is in flight, held so they cannot land ahead of
     /// the paste. Guarded by `lock` — mutated from the tap callback and from `endExpansion`.
     var _typeAhead = TypeAheadBuffer()
+    /// True from the moment `endExpansion` seeds the ring with replayed type-ahead until the last
+    /// of those characters has been posted. A real key in that gap lands in the field before or
+    /// after them, and the buffer cannot know which, so such a key bypasses matching instead.
+    /// Guarded by `lock`.
+    var _replayInFlight = false
     /// Nested suspend depth (fill-in + inline search / AI panels). Matching is skipped while > 0.
     var _matchingSuspendCount: Int = 0
     /// Live suspension owners, newest last, for `matchingSuspensionDiagnostics()`. A leaked
