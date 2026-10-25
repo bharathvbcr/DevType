@@ -62,10 +62,11 @@ extension EventTapEngine {
         }
 
         let isSynthetic = event.getIntegerValueField(.eventSourceUserData) == SyntheticEventMarker.magicUserData
+        var clockMark: InputClock.Mark?
         if !isSynthetic {
             let eventTime = InputClock.seconds(sinceBootNanos: event.timestamp)
             if EventTapEngine.mouseDownTypes.contains(type) || type == .keyDown {
-                inputClock.mark(at: eventTime)
+                clockMark = inputClock.mark(at: eventTime)
             }
         }
 
@@ -106,7 +107,7 @@ extension EventTapEngine {
         lock.lock()
         let expanding = _isExpanding
         let enabled = _isEnabled
-        let secureFlag = _isSecureInputActive
+        let polledSecureFlag = _isSecureInputActive
         let suspended = _matchingSuspendCount > 0
         lock.unlock()
 
@@ -130,6 +131,9 @@ extension EventTapEngine {
                 }
                 switch admission.decision {
                 case .swallow:
+                    // Held for replay after delivery, so it never touches the field under the
+                    // erase: it must not count as input that invalidates the expansion.
+                    if let clockMark { inputClock.retract(clockMark) }
                     return nil
                 case .flushThenPassThrough(let replay):
                     replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
@@ -140,16 +144,22 @@ extension EventTapEngine {
             return Unmanaged.passUnretained(event)
         }
 
+        // The polled flag is refreshed from the main queue after a 350 ms poll, so it can say
+        // "secure" for a while after the system stopped being. Trusting it blindly dropped every
+        // key typed in that window from the buffer — a trigger typed right after leaving a
+        // password field lost its first characters and never matched. One live read, only when
+        // the flag claims secure, settles it and corrects the flag.
+        var secureFlag = polledSecureFlag
+        if secureFlag, !liveSecureInputProbe() {
+            isSecureInputActive = false
+            secureFlag = false
+        }
+
         guard enabled && !secureFlag && !suspended else {
             TextInjectionPipeline.shared.clearLastExpansion()
-            // These keystrokes reach the field but bypass matching entirely. A live hold's
-            // erase is counted from *observed* keystrokes, so anything landing unseen breaks
-            // its integrity — drop the hold rather than fire a miscounted erase later.
-            if heldCoordinator.cancelAll(reason: .unobservedInput) {
-                DevTypeLog.debounce.debug(
-                    "[Debounce] hold cancelled — keystroke bypassed matching (disabled/secure/suspended)"
-                )
-            }
+            discardStateForBypassedInput(
+                "keystroke bypassed matching (disabled/secure/suspended)"
+            )
             return Unmanaged.passUnretained(event)
         }
 
@@ -158,13 +168,12 @@ extension EventTapEngine {
         let isAutorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         if EventTapEngine.shouldIgnoreForMatching(isAutorepeat: isAutorepeat) {
             TextInjectionPipeline.shared.clearLastExpansion()
-            // Autorepeat appends characters the hold never sees (repeats are filtered from
-            // matching). Same integrity rule as above: unobserved input, drop the hold.
-            if heldCoordinator.cancelAll(reason: .unobservedInput) {
-                DevTypeLog.debounce.debug(
-                    "[Debounce] hold cancelled — autorepeat input is invisible to the hold"
-                )
-            }
+            // Autorepeat appends characters the matcher never sees (repeats are filtered from
+            // matching), so from the first repeat on the buffer no longer describes the field:
+            // `` `sl `` + a held `l` leaves the buffer at `` `sl `` while the field reads
+            // `` `slllll ``, and the next `m` would complete a trigger that is not there. Same
+            // integrity rule as above — the hold and the buffer both go.
+            discardStateForBypassedInput("autorepeat input is invisible to matching")
             return Unmanaged.passUnretained(event)
         }
 
@@ -291,6 +300,11 @@ extension EventTapEngine {
         // Hot path: muted check + matcher + sync-safe planner gate only.
         // Heavy AX (secure/IME/focus) stays off-callback; refuse there reinjects the swallow.
         if context.isMuted {
+            // The buffer above stayed in step with the field, but a hold armed before the app
+            // was muted never sees this key, so its erase count is already short.
+            if heldCoordinator.cancelAll(reason: .unobservedInput) {
+                DevTypeLog.debounce.debug("[Debounce] hold cancelled — frontmost app is muted")
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -395,7 +409,7 @@ extension EventTapEngine {
         // is a cheap non-IPC read; pay it once, only after a match (rare), before swallowing.
         // Deliberately does not mutate the polled flag: the monitor is edge-triggered, and
         // forcing it true here could latch matching off until the next real transition.
-        if AXContextChecker.isSecureEventInputEnabledLive() {
+        if liveSecureInputProbe() {
             DevTypeLog.eventTap.notice(
                 "[EventTap] live Secure Input check blocked a swallow (polled flag was stale)"
             )
@@ -434,6 +448,7 @@ extension EventTapEngine {
             }
             switch admission.decision {
             case .swallow:
+                if let clockMark { inputClock.retract(clockMark) }
                 return nil
             case .flushThenPassThrough(let replay):
                 replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")

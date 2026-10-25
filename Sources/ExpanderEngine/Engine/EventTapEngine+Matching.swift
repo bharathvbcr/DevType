@@ -108,6 +108,8 @@ extension EventTapEngine {
     }
 
     func endExpansion() {
+        // Before `lock`, like `tryBeginExpansion`: the context has its own lock.
+        let currentPID = frontmostContext.processID
         lock.lock()
         _isExpanding = false
         let holdPID = _typeAhead.holdPID
@@ -115,6 +117,15 @@ extension EventTapEngine {
         ringBuffer.removeAll()
         layoutBuffer.clear()
         lastEventUTF16Count = 1
+        // The replay is posted as synthetic events, which the tap ignores — so the buffer would
+        // never learn of characters that are about to land in the field. Two triggers typed back
+        // to back (`` `slm `` then `` `asu ``) lost the first characters of the second this way.
+        // Seeded under the same lock as the reset, before the replay is posted, so no real key
+        // can be appended ahead of them; and only when the replay will actually be posted.
+        if !replay.isEmpty, TypeAheadBuffer.mayReplay(heldFor: holdPID, intoFrontmost: currentPID) {
+            ringBuffer.append(contentsOf: replay)
+            lastEventUTF16Count = max(1, String(replay.last ?? " ").utf16.count)
+        }
         lock.unlock()
         // §8.3: outside the lock — replaying posts HID events, and the tap callback for those
         // events takes this same lock.
@@ -226,11 +237,7 @@ extension EventTapEngine {
         // one outcome this design must never produce. A posted key can be dropped by the system,
         // but it is never a lie.
         for character in text {
-            _ = HIDKeyPoster.shared.postUnicodeKeyEvent(
-                unicode: String(character),
-                keyCode: 0,
-                flags: []
-            )
+            typeAheadReplayPoster(String(character))
         }
     }
 
@@ -238,6 +245,12 @@ extension EventTapEngine {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         // Caps Lock (keycode 57) toggles often imply caret/context change — reset.
         if keyCode == 57 {
+            resetBuffer()
+        }
+        // Fn / Globe (keycode 63) is how the emoji picker and dictation open, and both insert text
+        // with no key events at all — the buffer would lack it. Pressing Fn to reach an F-key or
+        // a navigation key costs only a partially typed trigger.
+        if keyCode == Int64(kVK_Function) {
             resetBuffer()
         }
     }
