@@ -24,8 +24,13 @@ struct LiveKeyboardLayoutProvider: KeyboardLayoutProviding {
     }
 
     /// The brute-force scan: up to 128 `UCKeyTranslate` calls.
-    /// The modifier state `keyCode(for:)` translates under.
-    static let chordModifiers: UInt32 = 0
+    /// The modifier state `keyCode(for:)` translates under: Command, because the only thing the
+    /// resolved key is used for is a ⌘C / ⌘V chord, and what a layout calls "v" under Command is
+    /// not always what it types as "v". On the Command-QWERTY layouts (Dvorak - QWERTY ⌘ and
+    /// kin) typing is Dvorak but shortcuts keep their QWERTY positions, so an unmodified scan
+    /// found the period key and posted ⌘. instead of ⌘V. A layout with no Latin "v" at all
+    /// (Russian, Hebrew) types nothing for an unmodified scan but still has ⌘V on a key.
+    static let chordModifiers: UInt32 = UInt32((cmdKey >> 8) & 0xFF)
 
     func keyCode(for targetChar: Character) -> CGKeyCode? {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return nil }
