@@ -212,6 +212,22 @@ public final class DeliveryVerifier {
         return EraseContinuation.framesIdentifySameControl(baselineFrame, liveFrame)
     }
 
+    /// The screen frame of a control, for a caller that will need to vouch for its replacement
+    /// after a wait (see `vouchesAsSameControl`).
+    public func controlFrame(of element: AXUIElement) -> CGRect? { access.frame(element) }
+
+    /// `replacementIsSameControl` over live elements: whether `live` may stand in for `baseline`,
+    /// whose frame `baselineFrame` was read before the node could be swapped. The one owner of
+    /// that rule — callers that need it ask here instead of restating it.
+    public func vouchesAsSameControl(
+        baseline: AXUIElement, baselineFrame: CGRect?, live: AXUIElement
+    ) -> Bool {
+        Self.replacementIsSameControl(
+            baselineFrame: baselineFrame, liveFrame: access.frame(live),
+            baselinePID: access.pid(baseline), livePID: access.pid(live), liveRole: access.role(live)
+        )
+    }
+
     /// §2.2: a documented re-check. The live focus is compared (`CFEqual`) against the baseline's
     /// target on every call — this runs on each paste-hold tick precisely to notice the user
     /// moving, so it must never be handed a threaded element.

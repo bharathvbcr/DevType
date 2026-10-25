@@ -780,14 +780,24 @@ public final class TextInjectionPipeline {
         /// had to re-select: the range moved on purpose, and a range-gated host would otherwise
         /// refuse the paste as "selection changed" against the collapsed caret captured earlier.
         func selectionConfirmed(target newTarget: PasteboardBroker.PasteTarget? = nil) -> InjectRequest {
+            copy(target: newTarget ?? target, replacing: nil)
+        }
+
+        /// The same request aimed at another element, its selection still to be confirmed — for a
+        /// field whose node was replaced while the confirm waited.
+        func retargeted(to newTarget: PasteboardBroker.PasteTarget) -> InjectRequest {
+            copy(target: newTarget, replacing: replacing)
+        }
+
+        private func copy(target newTarget: PasteboardBroker.PasteTarget, replacing newReplacing: SelectionReplacement?) -> InjectRequest {
             InjectRequest(
                 snippet: snippet, erasePlan: erasePlan, clipboardOverride: clipboardOverride,
                 plan: plan, swallowed: swallowed, preResolvedText: preResolvedText,
                 preResolvedCursorOffset: preResolvedCursorOffset, trailingKeys: trailingKeys,
                 snippetLookup: snippetLookup, secureClipboardPaste: secureClipboardPaste,
                 eraseCaretVouched: eraseCaretVouched, operation: operation,
-                inputRevision: inputRevision, target: newTarget ?? target, purpose: purpose,
-                replacing: nil, replacesSelection: replacesSelection
+                inputRevision: inputRevision, target: newTarget, purpose: purpose,
+                replacing: newReplacing, replacesSelection: replacesSelection
             )
         }
     }
@@ -1152,6 +1162,7 @@ public final class TextInjectionPipeline {
         request: InjectRequest,
         focus: AXContextChecker.FocusQueryResult,
         element: AXUIElement?,
+        vouchedRetarget: Bool = false,
         completion: @escaping InjectionCompletion
     ) {
         let startedAt = Date()
@@ -1181,7 +1192,15 @@ public final class TextInjectionPipeline {
             onSelectionReplaceRefused?(copied)
         }
 
-        selectionConfirmer.confirm(replacement, element: element) { verdict in
+        selectionConfirmer.confirm(
+            replacement, element: element,
+            isCurrent: {
+                self.operationStateIsCurrent(
+                    request.operation, revision: request.inputRevision,
+                    allowSecureInput: request.secureClipboardPaste
+                )
+            }
+        ) { verdict in
             let confirmMs = Int(Date().timeIntervalSince(startedAt) * 1000)
             switch verdict {
             case .confirmed(let reselected, let refocusedOn, let trail):
@@ -1211,6 +1230,10 @@ public final class TextInjectionPipeline {
                     self.injectWithFocus(confirmed, focus: focus, completion: completion)
                     return
                 }
+                // Taken now, while the node the confirm just read is certainly alive: a node swap
+                // during the wait below leaves nothing to measure the replacement against.
+                let confirmedElement = confirmed.target.element
+                let confirmedFrame = confirmedElement.flatMap { self.verifier.controlFrame(of: $0) }
                 self.focusQuery { live in
                     // Judged here rather than left to the entry gate, which would drop the
                     // generated payload; a replace that cannot land keeps it on the clipboard.
@@ -1220,6 +1243,30 @@ public final class TextInjectionPipeline {
                         checkRange: false
                     )
                     guard moved == nil else {
+                        // WebKit swaps the focused text node under a selection change: same
+                        // control, new element. That is the one move that is not the user's, and
+                        // it is judged by the verifier's own same-control rule (same process, a
+                        // text-entry role, the same on-screen frame) rather than a second one.
+                        // Vouching proves the control, not the selection in it, so the replace is
+                        // confirmed again on the new node — once: a second swap refuses.
+                        if !vouchedRetarget, moved == .elementChanged,
+                           let confirmedElement, let liveElement = live.element,
+                           self.verifier.vouchesAsSameControl(
+                               baseline: confirmedElement, baselineFrame: confirmedFrame, live: liveElement
+                           ) {
+                            DevTypeLog.inject.notice(
+                                "[Inject] replace: the field's node was replaced while the confirm waited — confirming again on the replacement"
+                            )
+                            self.confirmReplacementSelection(
+                                replacement,
+                                request: request.retargeted(
+                                    to: PasteboardBroker.PasteTarget.capture(focus: .resolved(liveElement))
+                                ),
+                                focus: live, element: liveElement, vouchedRetarget: true,
+                                completion: completion
+                            )
+                            return
+                        }
                         refuse(.focusMoved, trail: trail)
                         return
                     }
