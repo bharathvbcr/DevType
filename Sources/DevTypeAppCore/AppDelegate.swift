@@ -222,6 +222,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // its clear timer, which dies with the process. Still guarded by change-count ownership,
         // so quitting never wipes something the user copied after us.
         SecretClipboard.shared.clearIfStillOurs()
+        // Likewise an expansion's payload still on the board: AppKit would materialise it at exit
+        // and leave the snippet there in place of the user's clipboard.
+        PasteboardBroker.shared.restorePendingClipboardForTermination()
         SnippetStore.shared.flushUsageStats()
         EventTapEngine.shared.shutdownTapThread()
         if let accessibilityObserver {
