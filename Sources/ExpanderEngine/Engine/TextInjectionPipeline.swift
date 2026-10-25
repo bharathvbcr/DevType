@@ -2220,6 +2220,14 @@ public final class TextInjectionPipeline {
             holdTimeoutOverride: underSecureInput ? InjectTiming.secureClipboardPasteHoldTimeout : nil,
             completeBeforeRestore: true,
             allowSecureInput: true,
+            // The witness below keeps judging the field for the miss window after the hold has
+            // answered; the payload stays on the board for that long, so a late paste reads the
+            // result rather than the user's restored clipboard.
+            // Two polls of slack past the window: the witness stops on its own clock at the window,
+            // and its last read can land one poll late.
+            residencyAfterHold: replaceBaseline == nil
+                ? 0
+                : InjectTiming.replacementMissWindow + 2 * InjectTiming.pasteDeliverySettleDelay,
             shouldContinue: shouldContinue
         ) { result in
             guard shouldContinue() else {
@@ -2301,9 +2309,11 @@ public final class TextInjectionPipeline {
     ///   duplicate the result, and the clipboard copy costs nothing if it did land.
     /// - anything else: `postedUnverified`, as before this existed.
     ///
-    /// Bounded by attempt count, not the clock, so a clock that stops cannot make it a loop. The
-    /// operation half of the continue-check ends it: a cancelled or superseded inject, or typing
-    /// since, means the field is no longer ours to judge.
+    /// Bounded by attempt count, so a clock that stops cannot make it a loop, and by the clock, so
+    /// a run loop that fires its polls late cannot stretch it past the window the broker keeps the
+    /// payload on the board for (`residencyAfterHold`). The operation half of the continue-check
+    /// ends it: a cancelled or superseded inject, or typing since, means the field is no longer
+    /// ours to judge.
     private func witnessReplacement(
         payload: String,
         baseline: DeliveryVerifier.FocusedTextObservation,
@@ -2313,6 +2323,7 @@ public final class TextInjectionPipeline {
         shouldContinue: @escaping () -> Bool,
         operationIsCurrent: @escaping () -> Bool,
         attempt: Int = 0,
+        startedAt: TimeInterval = InputClock.monotonicNow(),
         completion: @escaping InjectionCompletion
     ) {
         guard operationIsCurrent() else {
@@ -2332,17 +2343,27 @@ public final class TextInjectionPipeline {
             return
         }
         let budget = Int((InjectTiming.replacementMissWindow / InjectTiming.pasteDeliverySettleDelay).rounded(.up))
-        if attempt < budget {
+        let elapsed = InputClock.monotonicNow() - startedAt
+        if attempt < budget, elapsed >= 0, elapsed < InjectTiming.replacementMissWindow {
             DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteDeliverySettleDelay) {
                 self.witnessReplacement(
                     payload: payload, baseline: baseline, role: role, bundleID: bundleID,
                     trailingKeys: trailingKeys, shouldContinue: shouldContinue,
-                    operationIsCurrent: operationIsCurrent, attempt: attempt + 1, completion: completion
+                    operationIsCurrent: operationIsCurrent, attempt: attempt + 1,
+                    startedAt: startedAt, completion: completion
                 )
             }
             return
         }
-        guard verdict == .notLanded else {
+        // A miss is only called while the result is still the board's content. Once the user's
+        // clipboard is back, a host that pastes late pastes *that* over the selection, and copying
+        // the result now would replace the user's clipboard for a paste that may yet land.
+        guard verdict == .notLanded, clipboard.holdsPublishedPayload() else {
+            if verdict == .notLanded {
+                DevTypeLog.inject.notice(
+                    "[Inject] replace unconfirmed — the board was already restored, so no miss is called"
+                )
+            }
             PermissionCoordinator.shared.recordInjectOutcome(
                 .postedUnverified, refuseContext: nil, path: "secureClipboardPaste"
             )

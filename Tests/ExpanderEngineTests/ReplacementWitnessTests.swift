@@ -192,6 +192,8 @@ final class ReplacementWitnessTests: XCTestCase {
         var events = 0
         var chords: Int { events / 4 }
         var kept: [String] = []
+        /// What the board held at the instant the result was kept — the instant a miss is called.
+        var boardAtKeep: [String?] = []
         var keepAnswer = true
         var toasts: [Bool] = []
         /// Runs once the first chord is out — where a test lets the paste land, or focus slip.
@@ -231,6 +233,7 @@ final class ReplacementWitnessTests: XCTestCase {
                 deliveryTrust: { _, _ in true }
             )
             keeper = { [unowned self] text in
+                self.boardAtKeep.append(self.board.string(forType: .string))
                 self.kept.append(text)
                 return self.keepAnswer
             }
@@ -304,6 +307,67 @@ final class ReplacementWitnessTests: XCTestCase {
         XCTAssertEqual(rig.kept, [result], "the generated result is kept on the clipboard")
         XCTAssertEqual(rig.toasts, [true])
         XCTAssertEqual(rig.chords, 1, "a miss never re-pastes: a late host read would duplicate the result")
+    }
+
+    /// The miss is judged for the miss window *after* the hold answered, and the residency floor
+    /// alone ended before that: the user's clipboard was back on the board while the witness was
+    /// still deciding, so a host that pasted late in the window pasted the user's clipboard over
+    /// the selection. The board must still hold the result when the miss is called.
+    func testTheResultIsStillOnTheBoardWhenTheMissIsCalled() throws {
+        let page = makePage()
+        let rig = try makeRig(page)
+        rig.afterPaste = { [unowned self] rig in
+            page.focused = self.window
+            rig.targetMovedAfterPaste = true
+        }
+        try replace(on: rig)
+        XCTAssertEqual(rig.kept, [result])
+        XCTAssertEqual(rig.boardAtKeep, [result], "the user's clipboard came back before the verdict")
+    }
+
+    /// Once someone else owns the board — the user copied, or it was restored — a late paste
+    /// would paste *that*, so the field cannot say the result never landed, and copying the
+    /// result over the board would throw away what is there now.
+    func testNoMissIsCalledOnceTheBoardIsNoLongerTheResult() throws {
+        let page = makePage()
+        let rig = try makeRig(page)
+        rig.afterPaste = { [unowned self] rig in
+            page.focused = self.window
+            rig.targetMovedAfterPaste = true
+            rig.board.clearContents()
+            rig.board.setString("copied by the user meanwhile", forType: .string)
+        }
+        let outcome = try replace(on: rig)
+        XCTAssertEqual(outcome, .postedUnverified)
+        XCTAssertEqual(rig.kept, [])
+        XCTAssertEqual(rig.toasts, [])
+        XCTAssertEqual(rig.board.string(forType: .string), "copied by the user meanwhile")
+    }
+
+    /// Measured from the hold's answer — where the witness's window starts — and never past the
+    /// payload's hard deadline.
+    func testTheAnswerHoldRunsFromTheAnswerWithinTheHardDeadline() throws {
+        let held = try XCTUnwrap(PasteboardBroker.answerHoldDeadline(answeredAt: 10.35, afterAnswer: 0.6, hardDeadline: 12))
+        XCTAssertEqual(held, 10.95, accuracy: 1e-9)
+        let capped = try XCTUnwrap(PasteboardBroker.answerHoldDeadline(answeredAt: 11.8, afterAnswer: 0.6, hardDeadline: 12))
+        XCTAssertEqual(capped, 12, accuracy: 1e-9)
+        XCTAssertNil(PasteboardBroker.answerHoldDeadline(answeredAt: 10, afterAnswer: 0, hardDeadline: 12))
+        XCTAssertNil(PasteboardBroker.answerHoldDeadline(answeredAt: 10, afterAnswer: .nan, hardDeadline: 12))
+        XCTAssertNil(PasteboardBroker.answerHoldDeadline(answeredAt: 10, afterAnswer: -1, hardDeadline: 12))
+    }
+
+    /// The witness stops on its own clock at the window, inside the time the broker holds for it.
+    func testTheWitnessWindowFitsInsideTheHoldTheBrokerKeeps() {
+        XCTAssertLessThan(
+            InjectTiming.replacementMissWindow,
+            InjectTiming.replacementMissWindow + 2 * InjectTiming.pasteDeliverySettleDelay
+        )
+        XCTAssertLessThan(
+            InjectTiming.pasteDeliveryHoldTimeout + InjectTiming.replacementMissWindow
+                + 2 * InjectTiming.pasteDeliverySettleDelay,
+            InjectTiming.unverifiedPayloadResidencyCeiling,
+            "the longest hold plus the window must fit under the hard deadline"
+        )
     }
 
     func testAKeeperThatCannotCopyIsToldToTheUser() throws {

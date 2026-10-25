@@ -183,6 +183,9 @@ public final class PasteboardBroker {
         /// that would hold every expansion in an AX-dead host to the ceiling.
         let hostRespondedAtPaste: Bool
         let bundleID: String?
+        /// How long past the hold's answer a caller that keeps judging the field needs the payload
+        /// to stay (`residencyAfterHold`); 0 for every other paste.
+        var afterAnswer: TimeInterval = 0
 
         var hardDeadline: TimeInterval { postedAt + max(ceiling, unverifiedHold) }
 
@@ -1074,6 +1077,11 @@ public final class PasteboardBroker {
     ///   - publicationGate: Whether this paste waits out a previous payload's residency before it
     ///     publishes — see `PublicationGate` and `publicationGateRemaining()`. The pending restore
     ///     of the user's real clipboard is inherited whichever it is.
+    ///   - residencyAfterHold: For a caller that keeps judging the field after the hold loop has
+    ///     answered (the replace witness): the payload stays on the board at least this long past
+    ///     the hold's answer, so a host that pastes late in that window reads the payload, not the
+    ///     user's restored clipboard, and the caller's verdict is reached while the board is still
+    ///     ours. Never past the payload's hard deadline (`answerHoldDeadline`).
     func pasteViaClipboard(
         text: String,
         expectedText: String?,
@@ -1089,6 +1097,7 @@ public final class PasteboardBroker {
         allowSecureInput: Bool = false,
         followVouchedReplacement: (() -> PasteTarget?)? = nil,
         publicationGate: PublicationGate = .wait,
+        residencyAfterHold: TimeInterval = 0,
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
@@ -1142,6 +1151,7 @@ public final class PasteboardBroker {
                 allowSecureInput: allowSecureInput,
                 followVouchedReplacement: followVouchedReplacement,
                 publicationGate: publicationGate,
+                residencyAfterHold: residencyAfterHold,
                 shouldContinue: shouldContinue,
                 completion: completion
             )
@@ -1209,7 +1219,8 @@ public final class PasteboardBroker {
                     ceiling: max(InjectTiming.unverifiedPayloadResidencyCeiling, unverifiedHold),
                     targetPID: targetPID,
                     hostRespondedAtPaste: hostRespondedAtPaste,
-                    bundleID: bundleID
+                    bundleID: bundleID,
+                    afterAnswer: residencyAfterHold
                 )
                 self.registerPendingLease(for: ticket, residency: residency)
 
@@ -1681,6 +1692,31 @@ public final class PasteboardBroker {
         return true
     }
 
+    /// When a payload whose caller keeps judging the field after the hold's answer may leave the
+    /// board: `afterAnswer` past `answeredAt`, never past the payload's hard deadline. Measured from
+    /// the answer, not from ⌘V — the caller's window starts when the hold answers, and a hold can
+    /// answer anywhere between its first tick and its timeout. Nothing extra for a non-finite or
+    /// non-positive `afterAnswer`.
+    static func answerHoldDeadline(
+        answeredAt: TimeInterval,
+        afterAnswer: TimeInterval,
+        hardDeadline: TimeInterval
+    ) -> TimeInterval? {
+        guard afterAnswer.isFinite, afterAnswer > 0, answeredAt.isFinite, hardDeadline.isFinite else { return nil }
+        return min(answeredAt + afterAnswer, hardDeadline)
+    }
+
+    /// Whether the board still holds the payload of the last paste, unreplaced and unrestored.
+    /// A caller about to call a delivery a miss asks this first: once the user's clipboard is
+    /// back, a host that pastes now pastes *that*, and nothing seen in the field says which.
+    public func holdsPublishedPayload() -> Bool {
+        restoreLock.lock()
+        let pending = pendingTicket
+        restoreLock.unlock()
+        guard let pending else { return false }
+        return pending.targetChangeCount == environment.pasteboard().changeCount
+    }
+
     private func currentPublicationGateWait(pasteboard: NSPasteboard) -> TimeInterval {
         restoreLock.lock()
         let pending = pendingTicket
@@ -1720,6 +1756,14 @@ public final class PasteboardBroker {
                 unverifiedHold: residency.unverifiedHold
             )
             deadline = max(deadline, (now() + remaining))
+            // A caller that keeps judging the field after this answer needs the payload on the
+            // board for its whole window; a delivered (or never-posted) paste leaves nothing to judge.
+            if result == .unavailable || result == .failed,
+               let answerHold = Self.answerHoldDeadline(
+                   answeredAt: now(), afterAnswer: residency.afterAnswer, hardDeadline: residency.hardDeadline
+               ) {
+                deadline = max(deadline, answerHold)
+            }
         }
         releaseWhenDue(
             ticket,
