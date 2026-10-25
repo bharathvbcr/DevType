@@ -45,6 +45,45 @@ final class ErasePartialRestoreTests: XCTestCase {
         XCTAssertEqual(ErasePlan(text: "TrIg", caseInsensitive: true).erasedTail(graphemes: 2)?.expectedText, "Ig")
     }
 
+    // MARK: - Kept head
+
+    func testTheKeptHeadIsWhatThePostedCountShouldHaveLeft() {
+        let plan = ErasePlan(text: "trig")
+        XCTAssertEqual(plan.keptHead(graphemes: 1)?.expectedText, "tri")
+        XCTAssertEqual(plan.keptHead(graphemes: 3)?.expectedText, "t")
+        XCTAssertEqual(ErasePlan(text: "a😀é").keptHead(graphemes: 2)?.expectedText, "a")
+        XCTAssertEqual(ErasePlan(text: "TrIg", caseInsensitive: true).keptHead(graphemes: 2)?.caseInsensitive, true)
+    }
+
+    func testNoHeadIsClaimedWhereNoReadingCouldConfirmIt() {
+        // A count that covers the whole plan leaves nothing to read back — and is exactly the count
+        // an authorized-but-never-created last pair produces, with one character still in the field.
+        XCTAssertNil(ErasePlan(text: "trig").keptHead(graphemes: 4))
+        XCTAssertNil(ErasePlan(text: "trig").keptHead(graphemes: 9))
+        XCTAssertNil(ErasePlan(text: "trig").keptHead(graphemes: 0))
+        XCTAssertNil(ErasePlan.counted(4).keptHead(graphemes: 2))
+    }
+
+    func testAnOverstatedCountIsCaughtByTheHeadCheck() throws {
+        // Two pairs authorized, one posted: the field holds `tri`, the count says `tr`. `tri` does
+        // not end in `tr`, so the check does not answer `.ok` (it downgrades to `.unavailable` for
+        // text past the expected run, which the erase path treats as best-effort) — and the restore
+        // is admitted only on `.ok`, so the `ig` that would have produced `triig` never goes in.
+        let head = try XCTUnwrap(ErasePlan(text: "trig").keptHead(graphemes: 2))
+        let overstated = ErasePreconditionChecker.evaluate(
+            plan: head, value: "hello tri", caretLocation: 9, selectionLength: 0
+        )
+        XCTAssertNotEqual(overstated, .ok)
+        let unreadable = ErasePreconditionChecker.evaluate(
+            plan: head, value: nil, caretLocation: nil, selectionLength: nil
+        )
+        XCTAssertNotEqual(unreadable, .ok, "An unreadable field must not admit a restore")
+        let exact = ErasePreconditionChecker.evaluate(
+            plan: head, value: "hello tr", caretLocation: 8, selectionLength: 0
+        )
+        XCTAssertEqual(exact, .ok)
+    }
+
     // MARK: - Wiring
 
     func testAnIncompleteEraseRestoresTheTailBeforeTheKeyIsReplayed() throws {
@@ -65,5 +104,12 @@ final class ErasePartialRestoreTests: XCTestCase {
             afterErase.contains("canProceedAfterMutation()"),
             "No restore into a field the continue-check no longer vouches for"
         )
+        let headCheck = try XCTUnwrap(
+            afterErase.range(of: "erasePlan.keptHead(graphemes: postedBackspaces)"),
+            "The restore must be gated on the field holding the head the count implies"
+        )
+        XCTAssertLessThan(restore.lowerBound, headCheck.lowerBound)
+        XCTAssertLessThan(headCheck.lowerBound, refuse.lowerBound)
+        XCTAssertTrue(afterErase.contains("== .ok {"), "Only a confirmed head admits the restore; unavailable does not")
     }
 }

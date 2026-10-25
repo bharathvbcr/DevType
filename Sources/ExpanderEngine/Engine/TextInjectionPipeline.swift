@@ -1515,9 +1515,18 @@ public final class TextInjectionPipeline {
                 // trigger, so replaying the swallowed key below would put it after a truncated
                 // head. Put the removed tail back first — only into a field the continue-check
                 // still vouches for, and without replaying the key here: the refusal below does,
-                // after the tail.
+                // after the tail. `postedBackspaces` counts authorized pairs, one more than were
+                // posted when a CGEvent could not be created, so the field must show exactly the
+                // head that count implies; a restore on a wrong count writes text the user never
+                // typed. An unreadable field gets no restore — the refusal is what it got before.
                 if !restoredPartialErase, postedBackspaces > 0, canProceedAfterMutation(),
-                   let tail = erasePlan.erasedTail(graphemes: postedBackspaces) {
+                   let tail = erasePlan.erasedTail(graphemes: postedBackspaces),
+                   let head = erasePlan.keptHead(graphemes: postedBackspaces),
+                   self.eraser.evaluateErasePrecondition(
+                       plan: head,
+                       focus: FocusedElementSource.resolved(context.focusedElement),
+                       retryOnMismatch: false
+                   ) == .ok {
                     restoredPartialErase = true
                     self.restoreTriggerAfterFailedPaste(
                         erasePlan: tail,
