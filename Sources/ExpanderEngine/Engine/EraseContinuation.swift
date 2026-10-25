@@ -51,6 +51,10 @@ struct EraseContinuationFacts: Equatable {
     var liveRole: String?
     /// Caret-window reading of the live field. Consulted only after the erase.
     var fieldReading: EraseFieldReading?
+    /// After the post: the live field is the pre-delete field with *some but not all* of the
+    /// trigger gone. Every backspace has been posted by then, so this is a mirror still catching
+    /// up, not a verdict — `mayClearOnReread` is what turns it into a second look.
+    var deletionLagging: Bool = false
 }
 
 struct EraseContinuationRefusal: Equatable {
@@ -175,6 +179,75 @@ enum EraseContinuation {
             }
             return .retarget
         }
+    }
+
+    /// How many times a refusal after the erase may be re-read before it stands. Each re-read is
+    /// one `AXSettleRetry.settleDelay`, so the whole wait is bounded at roughly 90 ms — and any
+    /// keystroke in that time moves the input revision, which is a hard stop that is never
+    /// re-read.
+    static let maxSettleRereads = 3
+
+    static func rereadBudgetRemains(attempt: Int) -> Bool {
+        attempt >= 0 && attempt < maxSettleRereads
+    }
+
+    /// Whether a `.beforeInsertion` refusal may be a transient reading rather than a verdict.
+    ///
+    /// By then the trigger is *already gone* from the user's field: refusing leaves them with
+    /// neither the trigger nor the expansion, and no way to restore either into a field that
+    /// cannot be vouched. So before that stands, a reading that WebKit produces while a node is
+    /// being replaced gets another look:
+    ///
+    /// * focus momentarily nothing (`.focusLost`),
+    /// * focus momentarily on something that is not a text field (web area, group, window) or a
+    ///   role that could not be read,
+    /// * a live text field whose value is the pre-delete field with part of the trigger still in
+    ///   it — the AX mirror lagging the backspaces.
+    ///
+    /// This widens nothing: the second look goes back through `decide` with the same vouchers. A
+    /// different field, a secure field, another process, a moved caret, a hard stop and anything
+    /// not a vouched typed expansion are never re-read.
+    static func mayClearOnReread(_ facts: EraseContinuationFacts) -> Bool {
+        guard facts.phase == .beforeInsertion,
+              facts.allowsRetarget,
+              operationRefusal(facts) == nil,
+              let mismatch = facts.mismatch else {
+            return false
+        }
+        switch mismatch {
+        case .focusLost:
+            return true
+        case .elementChanged:
+            if roleAllowsInsertionRetarget(facts.liveRole) {
+                return !facts.deletionMatched && facts.deletionLagging
+            }
+            // A secure field is a destination we never follow, however briefly it is focused.
+            return facts.liveRole != "AXSecureTextField"
+        case .noCapturedProcess, .processChanged, .focusArrived, .rangeChanged:
+            return false
+        }
+    }
+
+    /// Whether the live field is `anchor` with a proper part of the trigger removed — including
+    /// none of it. Only meaningful after the whole post: there, anything short of the full
+    /// deletion is the mirror behind the keys, because the keys themselves are all sent.
+    static func deletionIsLagging(
+        anchor: EraseFieldPicture?,
+        live: EraseFieldPicture?,
+        expectedText: String?,
+        caseInsensitive: Bool
+    ) -> Bool {
+        guard let expectedText,
+              case .progress(let removed)? = deletionMatch(
+                anchor: anchor,
+                live: live,
+                expectedText: expectedText,
+                caseInsensitive: caseInsensitive,
+                maxRemovedGraphemes: expectedText.count
+              ) else {
+            return false
+        }
+        return removed < expectedText.count
     }
 
     /// One AX reading of a field, with the text left out of `EraseContinuationFacts`. The

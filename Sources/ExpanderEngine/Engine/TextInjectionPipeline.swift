@@ -518,6 +518,7 @@ public final class TextInjectionPipeline {
         var liveRole: String?
         var reading: EraseFieldReading?
         var deletionMatched = false
+        var deletionLagging = false
         if !operationBlocked, allows, elementOrRange {
             switch continuation {
             case .beforeErase:
@@ -556,6 +557,14 @@ public final class TextInjectionPipeline {
                         caseInsensitive: context.erasePlan.caseInsensitive,
                         maxRemovedGraphemes: maxRemoved
                     )
+                    if continuation == .beforeInsertion {
+                        deletionLagging = EraseContinuation.deletionIsLagging(
+                            anchor: context.adopted.eraseAnchor,
+                            live: live,
+                            expectedText: context.erasePlan.expectedText,
+                            caseInsensitive: context.erasePlan.caseInsensitive
+                        )
+                    }
                     reading = EraseContinuation.fieldReading(
                         expected: context.erasePlan.expectedText,
                         value: live.value,
@@ -566,7 +575,7 @@ public final class TextInjectionPipeline {
                 }
             }
         }
-        let decision = EraseContinuation.decide(EraseContinuationFacts(
+        let facts = EraseContinuationFacts(
             phase: continuation,
             revisionCurrent: revisionCurrent,
             continuationBlock: block,
@@ -577,8 +586,11 @@ public final class TextInjectionPipeline {
             deletionMatched: deletionMatched,
             livePrecondition: livePrecondition,
             liveRole: liveRole,
-            fieldReading: reading
-        ))
+            fieldReading: reading,
+            deletionLagging: deletionLagging
+        )
+        let decision = EraseContinuation.decide(facts)
+        context.adopted.lastRefusalMayClear = false
         switch decision {
         case .proceed:
             context.adopted.lastRefusal = nil
@@ -603,6 +615,7 @@ public final class TextInjectionPipeline {
             context.adopted.lastRefusal = nil
         case .refuse(let refusal):
             context.adopted.lastRefusal = refusal
+            context.adopted.lastRefusalMayClear = EraseContinuation.mayClearOnReread(facts)
         }
         return decision
     }
@@ -776,6 +789,10 @@ public final class TextInjectionPipeline {
         /// The refusal the pre-write guard records. `canProceed` already made the decision; a
         /// second live read in the guard could name a different instant.
         var lastRefusal: EraseContinuationRefusal?
+        /// Whether `lastRefusal` was a `.beforeInsertion` reading a second look may clear
+        /// (`EraseContinuation.mayClearOnReread`). Set with the refusal from the same facts, so
+        /// the caller never re-derives it from a different instant.
+        var lastRefusalMayClear = false
         /// The field when the first backspace was authorized. Later deletion math stays against
         /// this picture; adopting a mid-erase node must not replace it with the field the
         /// deletes have already changed, or a different control would match itself.
@@ -1489,45 +1506,31 @@ public final class TextInjectionPipeline {
         // The guarded erase collapses any stray selection and re-verifies the trigger is still left
         // of the caret, so a half-applied AX edit above cannot be swallowed by backspace #1 and turn
         // the remaining backspaces loose on the user's text.
-        eraser.performGuardedErase(
-            plan: erasePlan,
-            focus: focus,
-            afterPossibleWrite: attemptedAXWrite,
-            insertionPointFollowsExpectedText: context.eraseCaretVouched,
-            intent: context.purpose.eraseIntent,
-            canProceed: canProceed,
-            postingContinue: postingContinue,
-            onUnverifiableAfterWrite: { why in
-                // Self-healing: an attempted AX write left the field unreadable even after the
-                // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
-                // this on its very first expansion). Strikes escalate rather than condemn
-                // outright: a transient (focus stolen mid-inject) looks identical on one
-                // observation, and a wrong condemnation is effectively permanent. The second
-                // strike condemns, so a genuinely broken shell heals on the user's next retry
-                // and every expansion after that skips the AX write for the HID paste path.
-                // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
-                guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
-                let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
-                let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
-                switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
-                    bundleID: bundleID,
-                    role: focusedRole
-                ) {
-                case .struck(let count):
-                    DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
-                    )
-                case .condemned:
-                    DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
-                    )
-                case .alreadyCondemned:
-                    break
-                }
-            },
-            elementAfterContinue: { context.focusedElement }
-        ) { erased in
+        // The continuation after the erase is a local function, not the call's trailing closure,
+        // so a refusal that a second look may clear can re-enter it after a settle.
+        var restoredPartialErase = false
+        func afterErase(_ erased: Bool, settleAttempt: Int) {
             guard erased else {
+                // The burst stopped part-way: the keys already posted removed the end of the
+                // trigger, so replaying the swallowed key below would put it after a truncated
+                // head. Put the removed tail back first — only into a field the continue-check
+                // still vouches for, and without replaying the key here: the refusal below does,
+                // after the tail.
+                if !restoredPartialErase, postedBackspaces > 0, canProceedAfterMutation(),
+                   let tail = erasePlan.erasedTail(graphemes: postedBackspaces) {
+                    restoredPartialErase = true
+                    self.restoreTriggerAfterFailedPaste(
+                        erasePlan: tail,
+                        swallowed: .notSwallowed,
+                        focus: FocusedElementSource.resolved(context.focusedElement),
+                        bundleID: context.frontBundleID,
+                        countsAsDuplicateRisk: false,
+                        shouldContinue: canProceedAfterMutation
+                    ) {
+                        afterErase(false, settleAttempt: settleAttempt)
+                    }
+                    return
+                }
                 self.refuseInject(
                     "Trigger erase did not complete — field may hold a partial trigger",
                     path: "eraseIncomplete",
@@ -1551,6 +1554,19 @@ public final class TextInjectionPipeline {
                 case .proceed, .retarget:
                     break
                 case .refuse(let refusal):
+                    // The trigger is already gone. A reading WebKit produces while it replaces
+                    // the node (focus nothing, a web area, an AX value still behind the keys)
+                    // gets a bounded second look before it stands — the vouchers are unchanged.
+                    if context.adopted.lastRefusalMayClear,
+                       EraseContinuation.rereadBudgetRemains(attempt: settleAttempt) {
+                        DevTypeLog.inject.info(
+                            "[Inject] focus not yet vouched after the erase — re-reading after settle (attempt \(settleAttempt + 1, privacy: .public)/\(EraseContinuation.maxSettleRereads, privacy: .public))"
+                        )
+                        DispatchQueue.main.asyncAfter(deadline: .now() + AXSettleRetry.settleDelay) {
+                            afterErase(true, settleAttempt: settleAttempt + 1)
+                        }
+                        return
+                    }
                     self.refuseInject(
                         refusal.reason,
                         path: refusal.path,
@@ -1701,6 +1717,47 @@ public final class TextInjectionPipeline {
                     completion: completion
                 )
             }
+        }
+
+        eraser.performGuardedErase(
+            plan: erasePlan,
+            focus: focus,
+            afterPossibleWrite: attemptedAXWrite,
+            insertionPointFollowsExpectedText: context.eraseCaretVouched,
+            intent: context.purpose.eraseIntent,
+            canProceed: canProceed,
+            postingContinue: postingContinue,
+            onUnverifiableAfterWrite: { why in
+                // Self-healing: an attempted AX write left the field unreadable even after the
+                // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
+                // this on its very first expansion). Strikes escalate rather than condemn
+                // outright: a transient (focus stolen mid-inject) looks identical on one
+                // observation, and a wrong condemnation is effectively permanent. The second
+                // strike condemns, so a genuinely broken shell heals on the user's next retry
+                // and every expansion after that skips the AX write for the HID paste path.
+                // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
+                guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
+                let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
+                let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
+                switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
+                    bundleID: bundleID,
+                    role: focusedRole
+                ) {
+                case .struck(let count):
+                    DevTypeLog.inject.notice(
+                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
+                    )
+                case .condemned:
+                    DevTypeLog.inject.notice(
+                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
+                    )
+                case .alreadyCondemned:
+                    break
+                }
+            },
+            elementAfterContinue: { context.focusedElement }
+        ) { erased in
+            afterErase(erased, settleAttempt: 0)
         }
     }
 
@@ -2035,6 +2092,15 @@ public final class TextInjectionPipeline {
         let focus = FocusedElementSource.resolved(context.focusedElement)
         guard canContinue(context) else {
             finishAbandonedPaste(result: result, path: "clipboardAbandoned", completion: completion)
+            // The usual cause in a WebKit field is the paste itself replacing the focused node:
+            // the text is there and the element is not `CFEqual` to the one captured. The
+            // deferred, observation-only read may still prove it on a vouched replacement; for a
+            // different field, or no focus, it proves nothing and leaves the outcome unverified.
+            if result != .notPosted {
+                scheduleDeferredPasteReverify(
+                    context: context, expectedText: expectedText, baseline: baseline, path: path
+                )
+            }
             return
         }
         let safeBundleID = DevTypeLog.boundedPublicIdentifier(
@@ -2087,35 +2153,9 @@ public final class TextInjectionPipeline {
                 ),
                 completion: completion
             )
-            DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteReverifyDelay) {
-                guard self.canContinue(context, observationOnly: true) else { return }
-                let retry = self.verifier.verifyFocusedTextDelivery(
-                    expectedText: expectedText,
-                    baseline: baseline,
-                    staleProbe: context.erasePlan.expectedText,
-                    staleProbeCaseInsensitive: context.erasePlan.caseInsensitive
-                )
-                switch retry {
-                case .delivered:
-                    // Late confirmation upgrades the recorded outcome but deliberately does NOT
-                    // record delivery-read proof: a mirror that confirms only after the hold
-                    // window cannot be trusted to justify in-window corrections next time.
-                    DevTypeLog.inject.info("[Inject] paste re-verify: text confirmed after settle delay")
-                    PermissionCoordinator.shared.recordInjectOutcome(
-                        .succeeded,
-                        refuseContext: nil,
-                        path: context.purpose.deliveryPath(path)
-                    )
-                case .failed, .unavailable:
-                    // Neither provable: AX cannot read this field at all (common for
-                    // Electron/terminal hosts). The outcome stays `postedUnverified` —
-                    // but the ambiguity itself is logged, so a diagnostic report shows
-                    // that this app was never verifiable instead of silently skipping.
-                    DevTypeLog.inject.info(
-                        "[Inject] paste re-verify: field unreadable — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
-                    )
-                }
-            }
+            scheduleDeferredPasteReverify(
+                context: context, expectedText: expectedText, baseline: baseline, path: path
+            )
 
         case .notPosted, .failed:
             DevTypeLog.inject.error(
@@ -2136,6 +2176,71 @@ public final class TextInjectionPipeline {
                     .failedSilent, refuseContext: nil, path: path
                 )
                 completion(.failedSilent)
+            }
+        }
+    }
+
+    /// One owner for the deferred, observation-only re-verification of a posted-but-unverified
+    /// paste. It writes nothing and never re-pastes; the only thing it can do is upgrade the
+    /// recorded outcome, and only on evidence.
+    ///
+    /// Only the operation half of the continue-check gates it (superseded, cancelled, user input
+    /// since, trust, Secure Input). The target half is the verifier's: it compares the live
+    /// element with the baseline's and, because WebKit can swap the node under a paste, accepts a
+    /// replacement that is the same control and holds exactly the text the baseline predicts. A
+    /// different field fails there as `.focusReplaced`, so a click elsewhere never verifies.
+    private func scheduleDeferredPasteReverify(
+        context: InjectContext,
+        expectedText: String,
+        baseline: DeliveryVerifier.FocusedTextObservation?,
+        path: String
+    ) {
+        let safeBundleID = DevTypeLog.boundedPublicIdentifier(context.frontBundleID, label: "bundleID")
+        DispatchQueue.main.asyncAfter(deadline: .now() + InjectTiming.pasteReverifyDelay) {
+            guard self.operationStateIsCurrent(
+                context.operation, revision: context.inputRevision, observationOnly: true
+            ) else { return }
+            let reading = self.verifier.readFocusedTextDelivery(
+                expectedText: expectedText,
+                baseline: baseline,
+                staleProbe: context.erasePlan.expectedText,
+                staleProbeCaseInsensitive: context.erasePlan.caseInsensitive,
+                vouchingReplacement: true
+            )
+            switch reading.verification {
+            case .delivered:
+                // Late confirmation upgrades the recorded outcome but deliberately does NOT
+                // record delivery-read proof: a mirror that confirms only after the hold
+                // window cannot be trusted to justify in-window corrections next time.
+                if reading.replacementElement == nil {
+                    DevTypeLog.inject.info("[Inject] paste re-verify: text confirmed after settle delay")
+                } else {
+                    DevTypeLog.inject.info("[Inject] paste re-verify: text confirmed on the replacement of the focused element")
+                }
+                PermissionCoordinator.shared.recordInjectOutcome(
+                    .succeeded,
+                    refuseContext: nil,
+                    path: context.purpose.deliveryPath(path)
+                )
+            case .failed, .unavailable:
+                // Not provable. The outcome stays `postedUnverified`, but the reason is logged
+                // as what it was: an element that was replaced and could not be vouched is not
+                // a host whose AX cannot be read, and a report must not say so.
+                switch reading.unavailableReason {
+                case .focusReplaced:
+                    DevTypeLog.inject.info(
+                        "[Inject] paste re-verify: focused element was replaced and is not the same control — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
+                    )
+                case .noFocusedElement, .noBaselineTarget:
+                    DevTypeLog.inject.info(
+                        "[Inject] paste re-verify: no focused element to read — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
+                    )
+                case .fieldUnreadable, nil:
+                    // AX cannot read this field at all (common for Electron/terminal hosts).
+                    DevTypeLog.inject.info(
+                        "[Inject] paste re-verify: field unreadable — delivery stays unverified (app=\(safeBundleID, privacy: .public))"
+                    )
+                }
             }
         }
     }
