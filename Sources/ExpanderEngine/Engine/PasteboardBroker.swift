@@ -1071,10 +1071,9 @@ public final class PasteboardBroker {
     ///     control. Returns the control that replaced it if the caller can vouch it is the same
     ///     one (WebKit swaps the text node under a typed expansion), nil otherwise. The answer is
     ///     still checked against the live focus before ⌘V; nil keeps the target pinned.
-    ///   - supersedesOwnPayload: This paste replaces the payload the *same expansion* published
-    ///     (restoring the trigger after a failed paste), so it must not wait out that payload's
-    ///     residency the way a following expansion does — see `publicationGateRemaining()`. The
-    ///     pending restore of the user's real clipboard is inherited either way.
+    ///   - publicationGate: Whether this paste waits out a previous payload's residency before it
+    ///     publishes — see `PublicationGate` and `publicationGateRemaining()`. The pending restore
+    ///     of the user's real clipboard is inherited whichever it is.
     func pasteViaClipboard(
         text: String,
         expectedText: String?,
@@ -1089,7 +1088,7 @@ public final class PasteboardBroker {
         completeBeforeRestore: Bool = false,
         allowSecureInput: Bool = false,
         followVouchedReplacement: (() -> PasteTarget?)? = nil,
-        supersedesOwnPayload: Bool = false,
+        publicationGate: PublicationGate = .wait,
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
@@ -1132,7 +1131,7 @@ public final class PasteboardBroker {
         // Every refusal above comes first, and is made again after any wait: a refused paste must
         // not sit behind another payload's residency, and a paste that waits is judged at the
         // moment it publishes, not at the moment it asked.
-        if deferForPublicationGate(supersedesOwnPayload: supersedesOwnPayload, {
+        if deferForPublicationGate(publicationGate, {
             self.pasteViaClipboard(
                 text: text, expectedText: expectedText, baseline: baseline, focus: focus,
                 bundleID: bundleID, focusedRole: focusedRole, staleProbe: staleProbe,
@@ -1142,7 +1141,7 @@ public final class PasteboardBroker {
                 completeBeforeRestore: completeBeforeRestore,
                 allowSecureInput: allowSecureInput,
                 followVouchedReplacement: followVouchedReplacement,
-                supersedesOwnPayload: supersedesOwnPayload,
+                publicationGate: publicationGate,
                 shouldContinue: shouldContinue,
                 completion: completion
             )
@@ -1347,6 +1346,7 @@ public final class PasteboardBroker {
         imagePath: String? = nil,
         bundleID: String? = nil,
         focus: FocusedElementSource,
+        publicationGate: PublicationGate = .wait,
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
@@ -1379,9 +1379,10 @@ public final class PasteboardBroker {
 
         // Same gate as a text paste, after the same refusals: an image written over a text payload
         // still inside its residency makes that host paste the image.
-        if deferForPublicationGate(supersedesOwnPayload: false, {
+        if deferForPublicationGate(publicationGate, {
             self.pasteImageViaClipboard(
                 image: image, imagePath: imagePath, bundleID: bundleID, focus: focus,
+                publicationGate: publicationGate,
                 shouldContinue: shouldContinue, completion: completion
             )
         }) {
@@ -1646,21 +1647,34 @@ public final class PasteboardBroker {
     /// The pipeline erases the trigger *before* it pastes, so waiting here, inside the paste, leaves
     /// the field without its trigger for that long (and type-ahead keys landing ahead of the
     /// paste). A caller that can wait earlier — before it erases — should wait this long first;
-    /// the paste still honours the gate itself, and re-checks every refusal after waiting, so
-    /// calling this is an optimisation of *where* the wait happens, never a substitute for it.
+    /// the paste still honours the gate itself, and re-checks every refusal after waiting, unless
+    /// the caller hands it `.waivedBeforeErase` — the record that it already waited its share.
     public func publicationGateRemaining() -> TimeInterval {
         currentPublicationGateWait(pasteboard: environment.pasteboard())
+    }
+
+    /// Whether a paste waits out a previous payload's residency before it publishes.
+    public enum PublicationGate: Equatable, Sendable {
+        /// Wait: publishing now would make the previous expansion's host paste this text.
+        case wait
+        /// This paste replaces the payload the *same expansion* published (restoring the trigger
+        /// after a failed paste); waiting out that payload's residency would only stall the restore.
+        case supersedesOwnPayload
+        /// The inject already waited its bounded share before erasing (`BoardHoldOff`) and chose to
+        /// publish over a payload still unread rather than outlast the held type-ahead. Waiting
+        /// again here, after the erase, is the stall that hold exists to keep out of the field.
+        case waivedBeforeErase
     }
 
     /// After the paste's refusals and before it publishes: when the gate says a previous payload
     /// is still inside its residency, `retry` runs once that is over instead (so every check it
     /// makes — target, focus, Secure Input — is made again at the moment of publication) and this
-    /// returns `true`. A paste that supersedes its own expansion's payload never waits.
+    /// returns `true`. Only `.wait` waits.
     private func deferForPublicationGate(
-        supersedesOwnPayload: Bool,
+        _ policy: PublicationGate,
         _ retry: @escaping () -> Void
     ) -> Bool {
-        guard !supersedesOwnPayload else { return false }
+        guard policy == .wait else { return false }
         let gate = publicationGateRemaining()
         guard gate > 0 else { return false }
         DispatchQueue.main.asyncAfter(deadline: .now() + gate, execute: retry)

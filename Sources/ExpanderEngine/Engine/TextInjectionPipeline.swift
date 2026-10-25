@@ -826,6 +826,9 @@ public final class TextInjectionPipeline {
         /// not borrow the typed-expansion retarget: the payload is an already-generated result,
         /// and a replaced AX node is not evidence the selection is still the one that was read.
         let replacesSelection: Bool
+        /// `.waivedBeforeErase` once `BoardHoldOff` spent its budget with a previous payload still
+        /// unread: this inject publishes over it rather than wait again after the erase.
+        var publicationGate: PasteboardBroker.PublicationGate = .wait
 
         /// The request after its selection was confirmed. `target` is recaptured when the guard
         /// had to re-select: the range moved on purpose, and a range-gated host would otherwise
@@ -848,7 +851,8 @@ public final class TextInjectionPipeline {
                 snippetLookup: snippetLookup, secureClipboardPaste: secureClipboardPaste,
                 eraseCaretVouched: eraseCaretVouched, operation: operation,
                 inputRevision: inputRevision, target: newTarget, purpose: purpose,
-                replacing: newReplacing, replacesSelection: replacesSelection
+                replacing: newReplacing, replacesSelection: replacesSelection,
+                publicationGate: publicationGate
             )
         }
     }
@@ -951,7 +955,14 @@ public final class TextInjectionPipeline {
                 self.operationStateIsCurrent(request.operation, revision: request.inputRevision)
             },
             schedule: { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) },
-            proceed: {
+            proceed: { waived in
+                var request = request
+                if waived {
+                    request.publicationGate = .waivedBeforeErase
+                    DevTypeLog.inject.notice(
+                        "[Inject] previous payload still unread after the pre-erase budget — publishing over it"
+                    )
+                }
                 self.focusQuery { focus in
                     self.injectWithFocus(request, focus: focus, completion: completion)
                 }
@@ -1848,6 +1859,7 @@ public final class TextInjectionPipeline {
                 staleProbe: erasePlan.expectedText,
                 staleProbeCaseInsensitive: erasePlan.caseInsensitive,
                 followVouchedReplacement: { self.vouchedPasteTarget(context) },
+                publicationGate: context.request.publicationGate,
                 shouldContinue: canProceedAfterMutation
             ) { result in
                 // #region agent log
@@ -2070,6 +2082,7 @@ public final class TextInjectionPipeline {
                 imagePath: context.snippet.imagePath,
                 bundleID: context.frontBundleID,
                 focus: focus,
+                publicationGate: context.request.publicationGate,
                 shouldContinue: canProceedAfterMutation
             ) { result in
                 guard canProceedAfterMutation() else {
@@ -2579,7 +2592,7 @@ public final class TextInjectionPipeline {
                 followVouchedReplacement: followVouchedReplacement,
                 // The restore replaces this expansion's own payload (or follows an erase that
                 // already waited out the board in `injectOnMain`): it must not sit behind it.
-                supersedesOwnPayload: true,
+                publicationGate: .supersedesOwnPayload,
                 shouldContinue: shouldContinue
             ) { _ in
                 if shouldContinue(), swallowed.mustReinjectOnRefuse {

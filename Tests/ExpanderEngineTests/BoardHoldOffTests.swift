@@ -8,21 +8,31 @@ import XCTest
 /// trigger and then sit in the paste's publication gate. The type-ahead buffer surrenders at 0.35 s,
 /// the gate can wait up to the 2 s residency ceiling, and anything typed after the surrender is
 /// replayed ahead of the paste and moves the input revision — which refuses the expansion with the
-/// trigger already gone. Waiting *before* the erase costs nothing a refusal cannot undo.
+/// trigger already gone. Waiting *before* the erase costs nothing a refusal cannot undo — as long
+/// as the wait itself ends inside the hold, which is what `BoardHoldOff.budget` is for.
 final class BoardHoldOffTests: XCTestCase {
 
     /// A scheduler the test drives by hand: `run()` fires the next scheduled step.
     private final class Steps {
         var queue: [(delay: TimeInterval, work: () -> Void)] = []
-        func schedule(_ delay: TimeInterval, _ work: @escaping () -> Void) { queue.append((delay, work)) }
+        var scheduled: TimeInterval = 0
+        func schedule(_ delay: TimeInterval, _ work: @escaping () -> Void) {
+            scheduled += delay
+            queue.append((delay, work))
+        }
         func run() { queue.removeFirst().work() }
+        func drain(limit: Int = 10_000) -> Int {
+            var runs = 0
+            while !queue.isEmpty, runs < limit { run(); runs += 1 }
+            return runs
+        }
     }
 
     private func hold(
         remaining: [TimeInterval],
         current: @escaping () -> Bool = { true },
         steps: Steps,
-        proceeded: @escaping () -> Void,
+        proceeded: @escaping (Bool) -> Void,
         abandoned: @escaping () -> Void
     ) {
         var readings = remaining
@@ -37,22 +47,22 @@ final class BoardHoldOffTests: XCTestCase {
 
     func testAFreeBoardProceedsAtOnceWithoutSchedulingAnything() {
         let steps = Steps()
-        var proceeded = 0
-        hold(remaining: [0], steps: steps, proceeded: { proceeded += 1 }, abandoned: { XCTFail("abandoned") })
-        XCTAssertEqual(proceeded, 1)
+        var waivers: [Bool] = []
+        hold(remaining: [0], steps: steps, proceeded: { waivers.append($0) }, abandoned: { XCTFail("abandoned") })
+        XCTAssertEqual(waivers, [false], "a free board needs no waiver: the paste's own gate is open too")
         XCTAssertTrue(steps.queue.isEmpty, "a free board costs no hop through the run loop")
     }
 
     func testAnUnreadPayloadHoldsTheEraseBackUntilTheBoardIsFree() {
         let steps = Steps()
-        var proceeded = 0
-        hold(remaining: [1.5, 1.0, 0.4, 0], steps: steps, proceeded: { proceeded += 1 },
+        var waivers: [Bool] = []
+        hold(remaining: [1.5, 1.0, 0.4, 0], steps: steps, proceeded: { waivers.append($0) },
              abandoned: { XCTFail("abandoned") })
-        XCTAssertEqual(proceeded, 0, "the trigger is still in the field while the board is busy")
+        XCTAssertTrue(waivers.isEmpty, "the trigger is still in the field while the board is busy")
         steps.run(); steps.run()
-        XCTAssertEqual(proceeded, 0)
+        XCTAssertTrue(waivers.isEmpty)
         steps.run()
-        XCTAssertEqual(proceeded, 1)
+        XCTAssertEqual(waivers, [false], "freed inside the budget: nothing is published over")
         XCTAssertTrue(steps.queue.isEmpty)
     }
 
@@ -60,10 +70,10 @@ final class BoardHoldOffTests: XCTestCase {
     /// early, and the wait must notice.
     func testEachStepIsOnePollAndNeverTheWholeRemainingWait() {
         let steps = Steps()
-        hold(remaining: [1.5, 1.5], steps: steps, proceeded: {}, abandoned: {})
+        hold(remaining: [1.5, 1.5], steps: steps, proceeded: { _ in }, abandoned: {})
         XCTAssertEqual(steps.queue.first?.delay ?? .infinity, BoardHoldOff.pollInterval, accuracy: 1e-9)
         let brief = Steps()
-        hold(remaining: [0.01, 0], steps: brief, proceeded: {}, abandoned: {})
+        hold(remaining: [0.01, 0], steps: brief, proceeded: { _ in }, abandoned: {})
         XCTAssertEqual(brief.queue.first?.delay ?? .infinity, 0.01, accuracy: 1e-9, "never longer than needed")
     }
 
@@ -73,7 +83,7 @@ final class BoardHoldOffTests: XCTestCase {
         var current = true
         var abandoned = 0
         hold(remaining: [1.5, 1.4, 1.3], current: { current }, steps: steps,
-             proceeded: { XCTFail("proceeded over input") }, abandoned: { abandoned += 1 })
+             proceeded: { _ in XCTFail("proceeded over input") }, abandoned: { abandoned += 1 })
         steps.run()
         current = false
         steps.run()
@@ -81,26 +91,43 @@ final class BoardHoldOffTests: XCTestCase {
         XCTAssertTrue(steps.queue.isEmpty, "an abandoned wait stops polling")
     }
 
-    /// Bounded even if the gate never reports free: past the residency ceiling the expansion is
-    /// refused rather than waiting forever.
-    func testAGateThatNeverOpensIsBounded() {
+    /// A board that stays busy is published over once the budget is spent — never waited out to
+    /// the residency ceiling. The wait used to run to the ceiling and then abandon: past the 0.35 s
+    /// type-ahead deadline the next real key flushed the held keys into the field, moved the
+    /// revision, and the expansion was refused with its swallowed terminator gone for good.
+    func testABoardThatStaysBusyIsPublishedOverWhenTheBudgetIsSpent() {
         let steps = Steps()
-        var abandoned = 0
-        var readings = 0
+        var waivers: [Bool] = []
         BoardHoldOff.untilFree(
-            remaining: { readings += 1; return 1 },
+            remaining: { 1 },
             stillCurrent: { true },
             schedule: steps.schedule,
-            proceed: { XCTFail("proceeded with the board still busy") },
-            abandon: { abandoned += 1 }
+            proceed: { waivers.append($0) },
+            abandon: { XCTFail("abandoned a current expansion over a busy board") }
         )
-        var polls = 0
-        while !steps.queue.isEmpty, polls < 10_000 { steps.run(); polls += 1 }
-        XCTAssertEqual(abandoned, 1)
-        XCTAssertLessThanOrEqual(
-            Double(polls) * BoardHoldOff.pollInterval,
-            InjectTiming.unverifiedPayloadResidencyCeiling + 1
+        _ = steps.drain()
+        XCTAssertEqual(waivers, [true], "the paste is told not to wait again after the erase")
+        XCTAssertLessThanOrEqual(steps.scheduled, BoardHoldOff.budget + 1e-9)
+    }
+
+    /// The budget is what keeps the wait inside the held type-ahead, with room left for the erase
+    /// and the paste that follow it.
+    func testTheBudgetEndsInsideTheTypeAheadHold() {
+        XCTAssertGreaterThan(BoardHoldOff.budget, 0)
+        XCTAssertLessThan(BoardHoldOff.budget, TypeAheadBuffer.defaultDeadline)
+        XCTAssertLessThan(
+            BoardHoldOff.budget, InjectTiming.unverifiedPayloadResidencyFloor,
+            "a budget past the residency floor would be the residency wait again"
         )
+    }
+
+    func testANonFiniteReadingIsNotWaitedOn() {
+        let steps = Steps()
+        var waivers: [Bool] = []
+        hold(remaining: [.infinity], steps: steps, proceeded: { waivers.append($0) },
+             abandoned: { XCTFail("abandoned") })
+        XCTAssertEqual(waivers, [true])
+        XCTAssertTrue(steps.queue.isEmpty)
     }
 
     // MARK: - Wiring
@@ -120,5 +147,11 @@ final class BoardHoldOffTests: XCTestCase {
         XCTAssertLessThan(wait.lowerBound, proceed.lowerBound, "the gated path queries focus only once the board is free")
         XCTAssertTrue(body.contains("publicationGateRemaining()"))
         XCTAssertTrue(body.contains("refuseEntryGate("), "an abandoned wait is recorded like any entry-gate refusal")
+        XCTAssertTrue(body.contains("request.publicationGate = .waivedBeforeErase"),
+                      "a spent budget is carried to the paste so it does not wait again after the erase")
+        XCTAssertEqual(
+            pipeline.components(separatedBy: "publicationGate: context.request.publicationGate").count - 1, 2,
+            "both the text and the image paste of a typed expansion honour the waiver"
+        )
     }
 }

@@ -273,7 +273,7 @@ final class PasteResidencyTests: XCTestCase {
         var postedAt = 0.0
         harness.broker.pasteViaClipboard(
             text: "TRIGGER", expectedText: nil, baseline: nil, focus: .resolved(nil),
-            completeBeforeRestore: true, supersedesOwnPayload: true
+            completeBeforeRestore: true, publicationGate: .supersedesOwnPayload
         ) { _ in
             postedAt = InputClock.monotonicNow()
             posted.fulfill()
