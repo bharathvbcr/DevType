@@ -131,8 +131,17 @@ final class FocusThreadingTests: XCTestCase {
         let end = try XCTUnwrap(source.range(of: "private func finishAbandonedPaste("))
         let inject = String(source[start.lowerBound..<end.lowerBound])
 
-        XCTAssertEqual(inject.components(separatedBy: "queryFocusedElement").count - 1, 1,
-                       "One resolution per inject — the entry re-check's answer is the threaded element")
+        // Every resolution goes through the pipeline's `focusQuery` seam, never straight to the
+        // checker, so a test can see each one. There is one per inject, plus the single documented
+        // re-read a confirmed replace makes after it waited: its entry gate would otherwise compare
+        // the target against a focus that predates the wait (`confirmReplacementSelection`).
+        XCTAssertEqual(inject.components(separatedBy: "queryFocusedElement").count - 1, 0,
+                       "Focus is resolved through the `focusQuery` seam, not by a direct query")
+        XCTAssertEqual(inject.components(separatedBy: "focusQuery {").count - 1, 2,
+                       "One resolution per inject, and one re-read after a replace confirm that waited")
+        let confirmStart = try XCTUnwrap(inject.range(of: "private func confirmReplacementSelection("))
+        XCTAssertEqual(inject[..<confirmStart.lowerBound].components(separatedBy: "focusQuery {").count - 1, 1,
+                       "the entry re-check's answer is the threaded element for every path but a waited replace")
         for untracked in [
             "focusedElement()", "focusedElementRole()", "captureFocusedTextObservation()",
             "isFrontmostShellLikeContext()", "PasteTarget.capture()"

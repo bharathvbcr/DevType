@@ -1,3 +1,4 @@
+import ApplicationServices
 import Foundation
 
 /// Pure policy for "which selection, if any, may an explicit AI / text command act on?".
@@ -180,19 +181,33 @@ public extension SelectionReader {
         public let via: ReadVia
         /// Set only when a non-blank body was over the character cap and was not retained.
         public let oversizedCharacterCount: Int?
+        /// The element that answered, kept for `Result.element`.
+        public let element: AXUIElement?
 
         public init(
             text: String?,
             isOwnProcess: Bool,
             bundleID: String? = nil,
             via: ReadVia = .unknown,
-            oversizedCharacterCount: Int? = nil
+            oversizedCharacterCount: Int? = nil,
+            element: AXUIElement? = nil
         ) {
             self.text = oversizedCharacterCount == nil ? text : nil
             self.isOwnProcess = isOwnProcess
             self.bundleID = bundleID
             self.via = via
             self.oversizedCharacterCount = oversizedCharacterCount
+            self.element = element
+        }
+
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            guard lhs.text == rhs.text, lhs.isOwnProcess == rhs.isOwnProcess, lhs.bundleID == rhs.bundleID,
+                  lhs.via == rhs.via, lhs.oversizedCharacterCount == rhs.oversizedCharacterCount else { return false }
+            switch (lhs.element, rhs.element) {
+            case (nil, nil): return true
+            case let (left?, right?): return CFEqual(left, right)
+            default: return false
+            }
         }
     }
 
@@ -274,7 +289,8 @@ public extension SelectionReader {
                         bundleID: bundleID,
                         isWeakAX: bundleID.map(isWeakAX) ?? false,
                         source: .live,
-                        via: usableLive.via
+                        via: usableLive.via,
+                        element: usableLive.element
                     )
                 )
             }
@@ -316,7 +332,8 @@ public extension SelectionReader {
                         bundleID: own.bundleID ?? frontmostBundleID,
                         isWeakAX: false,
                         source: .live,
-                        via: own.via
+                        via: own.via,
+                        element: own.element
                     )
                 )
             }
@@ -434,7 +451,9 @@ public extension SelectionReader {
     /// *which* process holds focus, because the answer would be misleading — see `.external`.
     enum AXFocusObservation: Equatable, Sendable {
         case notObserved
-        /// AX answered, and nothing anywhere holds focus. Focus has not arrived yet.
+        /// AX answered, and nothing that can take a selection or a paste holds focus: no element
+        /// at all, or only a window-level container (`AXContextChecker.windowLevelContainerRoles`),
+        /// which is what WebKit publishes while it restores a page. Focus has not arrived yet.
         case unfocused
         /// Focus is still inside DevType — our own panel has not given it up.
         case ownProcess
