@@ -92,6 +92,28 @@ public enum SelectionReplacementGuard {
     /// them touches the caret, and a pathological field must not turn into an unbounded list.
     static let maxOccurrences = 64
 
+    /// The selection text the observation actually carries, or nil when it carries none.
+    ///
+    /// `kAXSelectedText` first; hosts that do not answer it still expose value + range. An empty
+    /// answer beside a non-empty range is the host contradicting itself, so the range slice
+    /// decides — otherwise an intact selection could never reach `.proceed`, not even on the
+    /// read-back after a re-select. An empty answer beside nothing is not a selection at all: it
+    /// is what a host returns before it has published one, and it must not be read as a readable
+    /// selection that differs from the original.
+    static func liveSelectionText(of observation: DeliveryVerifier.FocusedTextObservation) -> String? {
+        if let selected = observation.selectedText, !selected.isEmpty { return selected }
+        guard let value = observation.value.map({ $0 as NSString }),
+              let range = validRange(observation.selectedRange),
+              range.length > 0, NSMaxRange(range) <= value.length else { return nil }
+        let sliced = value.substring(with: range)
+        return sliced.isEmpty ? nil : sliced
+    }
+
+    private static func validRange(_ range: NSRange?) -> NSRange? {
+        guard let range, range.location != NSNotFound, range.location >= 0, range.length >= 0 else { return nil }
+        return range
+    }
+
     public static func decide(
         original: String,
         observation: DeliveryVerifier.FocusedTextObservation?
@@ -100,25 +122,8 @@ public enum SelectionReplacementGuard {
         guard let observation else { return .unverifiable }
 
         let value = observation.value.map { $0 as NSString }
-        let range = observation.selectedRange.flatMap { range -> NSRange? in
-            guard range.location != NSNotFound, range.location >= 0, range.length >= 0 else { return nil }
-            return range
-        }
-        // `kAXSelectedText` first; hosts that do not answer it still expose value + range. An
-        // empty answer beside a non-empty range is the host contradicting itself, so the range
-        // slice decides — otherwise an intact selection could never reach `.proceed`, not even
-        // on the read-back after a re-select.
-        let sliced: String? = {
-            guard let value, let range, range.length > 0,
-                  NSMaxRange(range) <= value.length else { return nil }
-            return value.substring(with: range)
-        }()
-        let liveSelection: String?
-        if let selected = observation.selectedText, !selected.isEmpty {
-            liveSelection = selected
-        } else {
-            liveSelection = sliced ?? observation.selectedText
-        }
+        let range = validRange(observation.selectedRange)
+        let liveSelection = liveSelectionText(of: observation)
 
         if let liveSelection, liveSelection == original {
             return .proceed
@@ -132,7 +137,16 @@ public enum SelectionReplacementGuard {
         }
         guard value.length <= maxSearchUTF16 else { return .refuse(.fieldTooLarge) }
 
-        let hits = occurrences(of: original, in: value)
+        // Literal first: an exact match is the strongest evidence and the cheapest search. Only a
+        // field with no exact match is searched again for the same text in another Unicode
+        // normalisation — the one fold `String ==` (and so the `.proceed` test above) already
+        // accepts, and the one a host can apply without anything having been edited.
+        var canonical = false
+        var hits = occurrences(of: original, in: value)
+        if hits.isEmpty {
+            hits = canonicalOccurrences(of: original, in: value, within: NSRange(location: 0, length: value.length))
+            canonical = !hits.isEmpty
+        }
         switch hits.count {
         case 0:
             return .refuse(.originalNotFound)
@@ -141,8 +155,14 @@ public enum SelectionReplacementGuard {
         default:
             // A collapsed caret is the usual shape of a lost selection, and it is left at one
             // edge of what was selected. Only an occurrence that edge identifies is safe to pick.
+            // The scan keeps at most `maxOccurrences`; past that, the occurrences the caret can
+            // touch are searched for directly, because the one it sits against may not be among
+            // the ones kept.
             if let range {
-                let touching = hits.filter { hit in
+                let candidates = hits.count < maxOccurrences
+                    ? hits
+                    : occurrencesNear(range, original: original, in: value, canonical: canonical)
+                let touching = candidates.filter { hit in
                     range.location == hit.location || range.location == NSMaxRange(hit)
                         || NSIntersectionRange(range, hit).length > 0
                 }
@@ -156,16 +176,51 @@ public enum SelectionReplacementGuard {
     static func occurrences(of needle: String, in haystack: NSString) -> [NSRange] {
         let target = needle as NSString
         guard target.length > 0, target.length <= haystack.length else { return [] }
+        return scan(needle, in: haystack, within: NSRange(location: 0, length: haystack.length), options: .literal) { _ in true }
+    }
+
+    /// Occurrences of `needle` that `String ==` calls equal to it, inside `window`, capped at
+    /// `maxOccurrences`. The search itself is Foundation's canonical-equivalence one, whose
+    /// notion of a match is wider than ours (it can step over ignorable characters), so every
+    /// range it returns is re-checked as text before it counts. The needle may be longer than
+    /// the text it matches, so there is no length shortcut here.
+    static func canonicalOccurrences(of needle: String, in haystack: NSString, within window: NSRange) -> [NSRange] {
+        scan(needle, in: haystack, within: window, options: []) { haystack.substring(with: $0) == needle }
+    }
+
+    /// The occurrences around `range`, for a field with more of them than the scan keeps. The
+    /// caret edge decides which one was selected, so what matters is every occurrence it can
+    /// touch — and those all lie within one needle length of the range, wherever in the field.
+    private static func occurrencesNear(
+        _ range: NSRange, original: String, in haystack: NSString, canonical: Bool
+    ) -> [NSRange] {
+        let reach = (original as NSString).length
+        let start = max(0, range.location - reach)
+        let end = min(haystack.length, NSMaxRange(range) + reach)
+        guard end > start else { return [] }
+        let window = NSRange(location: start, length: end - start)
+        if canonical { return canonicalOccurrences(of: original, in: haystack, within: window) }
+        return scan(original, in: haystack, within: window, options: .literal) { _ in true }
+    }
+
+    private static func scan(
+        _ needle: String,
+        in haystack: NSString,
+        within window: NSRange,
+        options: NSString.CompareOptions,
+        accepting: (NSRange) -> Bool
+    ) -> [NSRange] {
+        guard !needle.isEmpty, window.location >= 0, NSMaxRange(window) <= haystack.length else { return [] }
         var hits: [NSRange] = []
-        var searchStart = 0
-        while searchStart <= haystack.length - target.length, hits.count < maxOccurrences {
+        var searchStart = window.location
+        while searchStart < NSMaxRange(window), hits.count < maxOccurrences {
             let found = haystack.range(
                 of: needle,
-                options: .literal,
-                range: NSRange(location: searchStart, length: haystack.length - searchStart)
+                options: options,
+                range: NSRange(location: searchStart, length: NSMaxRange(window) - searchStart)
             )
-            guard found.location != NSNotFound else { break }
-            hits.append(found)
+            guard found.location != NSNotFound, found.length > 0 else { break }
+            if accepting(found) { hits.append(found) }
             searchStart = NSMaxRange(found)
         }
         return hits
@@ -321,11 +376,24 @@ public enum SelectionReplacementGuard {
             element: AXUIElement?,
             refocused: Bool,
             settlesRemaining: Int,
+            lastRefusal: Refusal? = nil,
             completion: @escaping (Verdict) -> Void
         ) {
-            let decision = element.map {
-                SelectionReplacementGuard.decide(original: replacement.original, observation: access.observe($0))
+            let observation = element.map { access.observe($0) }
+            var decision = observation.map {
+                SelectionReplacementGuard.decide(original: replacement.original, observation: $0)
             } ?? .unverifiable
+            // A caret beside a field nobody can read is a mismatch `decide` can name but cannot
+            // repair. It is also what a host reports while it restores a selection, one turn
+            // before the selection itself. So when nothing readable says otherwise it is waited on
+            // like a blank reading, and only the refusal that was actually seen is reported if the
+            // wait runs out. Text that *was* readable and foreign refuses at once.
+            var observedRefusal = lastRefusal
+            if replacement.requiresEvidence, decision == .refuse(.selectionChanged),
+               let observation, SelectionReplacementGuard.liveSelectionText(of: observation) == nil {
+                observedRefusal = .selectionChanged
+                decision = .unverifiable
+            }
             let refocusedOn = refocused ? element : nil
             switch decision {
             case .proceed:
@@ -334,7 +402,7 @@ public enum SelectionReplacementGuard {
                 // Only a replacement that must prove its selection is worth waiting for; one read
                 // by copy is delivered unverified either way.
                 guard replacement.requiresEvidence, settlesRemaining > 0 else {
-                    completion(Self.unjudged(replacement))
+                    completion(observedRefusal.map(Verdict.refused) ?? Self.unjudged(replacement))
                     return
                 }
                 // No element, or a window-level container: the field is whoever holds focus
@@ -362,7 +430,8 @@ public enum SelectionReplacementGuard {
                     }
                     judge(
                         replacement, element: next, refocused: refocused || gained,
-                        settlesRemaining: settlesRemaining - 1, completion: completion
+                        settlesRemaining: settlesRemaining - 1, lastRefusal: observedRefusal,
+                        completion: completion
                     )
                 }
             case .refuse(let refusal):

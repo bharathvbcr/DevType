@@ -168,7 +168,213 @@ final class SelectionReplacementGuardTests: XCTestCase {
         XCTAssertNil(SelectionReplacement(original: ""))
     }
 
+    // MARK: - decide: what a host can do to the text between capture and replace
+
+    /// The host answered `kAXSelectedText` with an empty string and nothing else: no value, no
+    /// range. That is the shape of "not published yet", the one `Confirmer.fillingSelection` sends
+    /// to the ladder as blank. `decide` used to read the empty string as a *readable* selection
+    /// that was not the original and refused at once, which is why a host mid-restore skipped the
+    /// settle entirely.
+    func testEmptySelectedTextWithNothingElseIsUnverifiableNotAMismatch() {
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: nil, selectedText: "", range: nil)
+            ),
+            .unverifiable
+        )
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: "", selectedText: "", range: nil)
+            ),
+            .unverifiable
+        )
+    }
+
+    /// A readable selection that is not the original is still a known mismatch, with or without
+    /// a field to search: the host is saying something else is selected.
+    func testNonEmptyForeignSelectionWithoutAFieldStillRefuses() {
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: nil, selectedText: "something else", range: nil)
+            ),
+            .refuse(.selectionChanged)
+        )
+    }
+
+    /// `String ==` is canonical equivalence, so a host that hands back the selection decomposed
+    /// already proceeds; the search for the original has to agree with it. Pre-fix the search was
+    /// `.literal` and found nothing in a decomposed field, refusing a selection it could re-make.
+    func testReselectFindsACanonicallyEquivalentOriginal() {
+        let nfc = "caf\u{E9} au lait"
+        let nfd = "cafe\u{301} au lait"
+        XCTAssertNotEqual(nfc.utf16.count, nfd.utf16.count)
+        let field = "say: \(nfd)"
+        let decision = SelectionReplacementGuard.decide(
+            original: nfc,
+            observation: observation(value: field, selectedText: "", range: NSRange(location: 0, length: 0))
+        )
+        XCTAssertEqual(decision, .reselect(NSRange(location: 5, length: nfd.utf16.count)))
+
+        let reverse = SelectionReplacementGuard.decide(
+            original: nfd,
+            observation: observation(value: "say: \(nfc)", selectedText: "", range: NSRange(location: 0, length: 0))
+        )
+        XCTAssertEqual(reverse, .reselect(NSRange(location: 5, length: nfc.utf16.count)))
+
+        // And the live selection compared as text, in either normalisation, still proceeds.
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: nfc,
+                observation: observation(value: field, selectedText: nfd, range: NSRange(location: 5, length: nfd.utf16.count))
+            ),
+            .proceed
+        )
+    }
+
+    /// Canonical equivalence is the only fold the search accepts. A host-inserted zero-width
+    /// character, a different quote, a different line ending, a no-break space or a trailing
+    /// newline each make a different selection: pasting over it would consume characters the user
+    /// never selected, which is the same family of corruption this guard exists to stop. A
+    /// refusal costs a manual paste; a wrong replace costs the user's text.
+    func testSearchDoesNotFoldAnythingButCanonicalEquivalence() {
+        let cases: [(original: String, hostText: String, label: String)] = [
+            ("ab", "x a\u{200B}b y", "zero-width"),
+            ("don't stop", "x don\u{2019}t stop y", "smart quote"),
+            ("one\ntwo", "x one\r\ntwo y", "CRLF"),
+            ("one two", "x one\u{A0}two y", "no-break space"),
+            ("Cafe", "x cafe y", "case"),
+        ]
+        for item in cases {
+            XCTAssertEqual(
+                SelectionReplacementGuard.decide(
+                    original: item.original,
+                    observation: observation(
+                        value: item.hostText, selectedText: "", range: NSRange(location: 0, length: 0)
+                    )
+                ),
+                .refuse(.originalNotFound),
+                item.label
+            )
+            // With no field to search, the host's own selection text is compared the same way.
+            XCTAssertEqual(
+                SelectionReplacementGuard.decide(
+                    original: item.original,
+                    observation: observation(value: nil, selectedText: item.hostText, range: nil)
+                ),
+                .refuse(.selectionChanged),
+                item.label
+            )
+        }
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: nil, selectedText: original + "\n", range: nil)
+            ),
+            .refuse(.selectionChanged),
+            "trailing newline the host added"
+        )
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original + "\n",
+                observation: observation(value: nil, selectedText: original, range: nil)
+            ),
+            .refuse(.selectionChanged),
+            "trailing newline the host trimmed"
+        )
+    }
+
+    /// Ranges are UTF-16 units. A selection that follows an astral character is sliced in those
+    /// units and still proceeds; a range that lands inside a surrogate pair is garbage and must
+    /// not be mistaken for the original.
+    func testSurrogatePairsInTheRangeAreSlicedInUTF16Units() {
+        let field = "\u{1F44B} \(original)"
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: field, selectedText: nil, range: NSRange(location: 3, length: 19))
+            ),
+            .proceed
+        )
+        let split = SelectionReplacementGuard.decide(
+            original: "\u{1F44B} x",
+            observation: observation(value: "\u{1F44B} x", selectedText: nil, range: NSRange(location: 1, length: 3))
+        )
+        XCTAssertNotEqual(split, .proceed)
+    }
+
+    /// The scan is capped at `maxOccurrences`, and the caret edge was looked for only inside that
+    /// capped list. On a long field the occurrence the caret sits against can be past the cap, so
+    /// the guard refused as ambiguous a selection the caret identifies exactly.
+    func testCaretEdgeIsFoundPastTheOccurrenceCap() {
+        let unit = "ok, "
+        let count = SelectionReplacementGuard.maxOccurrences * 3
+        let field = String(repeating: unit, count: count)
+        let target = count - 5
+        let end = target * unit.utf16.count + 2
+        let decision = SelectionReplacementGuard.decide(
+            original: "ok",
+            observation: observation(value: field, selectedText: "", range: NSRange(location: end, length: 0))
+        )
+        XCTAssertEqual(decision, .reselect(NSRange(location: end - 2, length: 2)))
+
+        // Between two occurrences, touching neither: still no way to know which.
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: "ok",
+                observation: observation(
+                    value: field, selectedText: "", range: NSRange(location: end + 1, length: 0)
+                )
+            ),
+            .refuse(.originalAmbiguous)
+        )
+        // A selection spanning several occurrences identifies none of them.
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: "ok",
+                observation: observation(
+                    value: field, selectedText: "", range: NSRange(location: end - 12, length: 12)
+                )
+            ),
+            .refuse(.originalAmbiguous)
+        )
+    }
+
     // MARK: - Confirmer
+
+    /// A host mid-restore answers an empty selection beside nothing else. That is a reading to
+    /// wait on, not a verdict: the settle re-reads and the selection arrives.
+    func testConfirmerSettlesOnAnEmptyAnswerBesideNothingElse() {
+        let field = FakeField([
+            observation(value: nil, selectedText: ""),
+            observation(value: nil, selectedText: ""),
+            observation(value: nil, selectedText: original),
+        ])
+        XCTAssertEqual(confirm(field), .confirmed(reselected: false))
+    }
+
+    /// A caret with no field to search cannot be repaired, but a host restoring a selection can
+    /// report the caret first. It waits like any other blank reading, and when the caret never
+    /// moves the refusal is the one that was actually observed, not a claim that nothing was read.
+    func testConfirmerSettlesOnACaretItCannotSearchThenRefusesAsChanged() {
+        let caret = observation(value: nil, selectedText: "", range: NSRange(location: 3, length: 0))
+        let arrives = FakeField([caret, observation(value: nil, selectedText: original)])
+        XCTAssertEqual(confirm(arrives), .confirmed(reselected: false))
+
+        let stays = FakeField([caret])
+        XCTAssertEqual(confirm(stays), .refused(.selectionChanged))
+        XCTAssertEqual(stays.observed, SelectionReplacementGuard.Confirmer.settleAttempts + 1)
+
+        // A clipboard capture is never waited on: it refuses a caret as it always has.
+        let copied = FakeField([caret])
+        XCTAssertEqual(
+            confirm(copied, replacement: SelectionReplacement(original: original, requiresEvidence: false)),
+            .refused(.selectionChanged)
+        )
+        XCTAssertEqual(copied.observed, 1)
+    }
 
     /// Scripted field: each `observe` returns the next reading (the last one repeats).
     private final class FakeField {
