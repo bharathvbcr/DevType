@@ -80,6 +80,17 @@ let package = Package(
                 .linkedFramework("ApplicationServices")
             ]
         ),
+        // `Scripts/safari-harness.sh`. Drives the installed DevType.app in a real Safari; the
+        // user launches it, it never runs in CI. Not part of the app bundle.
+        .executableTarget(
+            name: "SafariHarness",
+            dependencies: ["SafariHarnessCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("ApplicationServices"),
+                .linkedFramework("Carbon")
+            ]
+        ),
         // Test support, not product code: the single reader source-contract tests use so a contract
         // covers a whole `Type.swift` + `Type+*.swift` family. Test targets cannot share a file.
         .target(

@@ -64,8 +64,26 @@ flowchart TD
 | **Asset Verification** | `./Scripts/verify-release-asset-list.sh` | Verifies published GitHub release asset inventories to prevent missing or mismatched assets. |
 | **Publish Verified Draft** | `GH_REPO=owner/repo ./Scripts/publish-release.sh <tag> <dist-dir>` | Requires the remote tag to match HEAD, uploads to a draft, verifies exact notes and downloaded bytes, then publishes and rechecks. Refuses to overwrite a public release. |
 | **Seed Issues** | `./Scripts/seed-good-first-issues.sh` | Seeds curated, self-contained `good first issue` candidates for open-source contributors. |
+| **Safari Live Harness** | `./Scripts/safari-harness.sh --dry-run \| --live \| --add-snippet` | Drives the **installed** `/Applications/DevType.app` in a real Safari with real HID key events against `Tests/Fixtures/SafariHarness/safari-harness.html`, then writes a pass/fail table, field values and DevType log lines to `tmp/`. You launch it; it types for a few minutes. See [Safari live harness](#safari-live-harness). |
 
 The resolver and verification scripts have dedicated self-tests (`test-signing-identity.sh`, `test-release-dmg-select.sh`, `test-release-signing-preflight.sh`, `test-release-preflight.sh`, `test-release-asset-list.sh`, `test-release-guard.sh`, `test-release-version.sh`, `test-export-lcov.sh`) that run inside local CI with stubbed environments.
+
+### Safari live harness
+
+`Scripts/safari-harness.sh` (SwiftPM targets `SafariHarness` and `SafariHarnessCore`; pure logic is covered by `./Scripts/test.sh --filter SafariHarnessCoreTests`) exists because the unit tests never run against a real Safari. It is developer tooling, is not in the app bundle, and never runs in CI.
+
+**Run it**
+
+1. `Scripts/install-app.sh release`, then relaunch DevType, so the running process is the build of this checkout. The harness refuses unless `CFBundleVersion` equals `git rev-list --count HEAD`, the running process is `/Applications/DevType.app` and started after that binary was written.
+2. Add the harness snippet once: `Scripts/safari-harness.sh --add-snippet` opens DevType's editor pre-filled (trigger `;dtharness`, text `[[DT-HARNESS-OK-7Q4X]]`); press Save. `devtype://` URLs only open the editor and the library is watched live, so there is no supported way to add it silently. The harness reads the library read-only, checks the snippet and that no other trigger collides, and never writes it; it records the library's SHA-256 and byte-compares it after the run.
+3. `Scripts/safari-harness.sh --dry-run`: preflight, library check, page, key plans and logs, nothing posted, clipboard replaced by an in-memory stand-in.
+4. `Scripts/safari-harness.sh --live`: five-second countdown, then real key events. Keep your hands off the keyboard. Escape, Ctrl-C or the run deadline (`--timeout`, default 600 s) stops posting at once.
+
+**Permissions** (macOS attributes them to the app you launched the script from, not to `SafariHarness`): Accessibility for that terminal app (also gates posting key events). Optional: Input Monitoring for it, to record the paste chord DevType itself posts in the held-modifier cases; Safari's Develop > Developer Settings > Allow JavaScript from Apple Events (and the Automation prompt) for a second read of every field through the page. Without those two the harness runs AX-only and says so. The AI case also needs Preferences > AI on and the palette hotkey enabled; otherwise it is reported `SKIP`, never `PASS`.
+
+**Safety**: before every key event the frontmost app must be Safari, the focused element's `AXDOMIdentifier` must start `dth-` and sit in the fixture's web area (path compared), else the run aborts and the remaining cases are `NOT RUN`. The one exception is the AI case, which types `proofread` and Return into DevType's own palette after confirming that DevType process has focus. The clipboard is snapshotted before each case, compared after (types, sizes and a digest only are reported, never contents), and restored if DevType left something else on it.
+
+**Output**: `tmp/safari-harness-<live|dry>-<time>.txt`, with the case table, each field's AX and page value, the page's own per-input event log, DevType's `[SourceFocus]`, settle-trail, `[Debounce]` and `[Inject] outcome=` lines per case (from `/usr/bin/log show`, filtered to the running DevType pid), and the once-per-launch `[Debounce] event timestamp units ratio=` line, asserted to be about 1. Exit code 0 = every case passed (skips allowed and listed), 1 = a failure or inconclusive case, 2 = preflight refused, 3 = aborted or cases not run.
 
 ---
 
