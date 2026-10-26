@@ -368,6 +368,18 @@ public final class TextInjectionPipeline {
     @discardableResult
     public func reinjectSwallowedKey(_ swallowed: SwallowedKey) -> Bool {
         guard swallowed.hasPayload else { return false }
+        // A hold surrender may already have put this key back, ahead of the keys it released.
+        // Posting it again here would type the terminator twice, after them.
+        guard ledger.consumeTerminator(matching: swallowed) else { return false }
+        return repostSettledKey(swallowed)
+    }
+
+    /// Posts `swallowed` unconditionally: the caller holds the debt for it already (the tap's
+    /// hold surrender, which `ExpansionLedger.surrenderHold` handed the key to). Every other
+    /// path goes through `reinjectSwallowedKey`, which refuses a key already put back.
+    @discardableResult
+    func repostSettledKey(_ swallowed: SwallowedKey) -> Bool {
+        guard swallowed.hasPayload else { return false }
 
         if CGPreflightPostEventAccess() {
             if hid.postUnicodeKeyEvent(
@@ -472,6 +484,42 @@ public final class TextInjectionPipeline {
     /// that reached the field would be real input the delivery could not account for.
     func isRepeatOfDeliveryChord(_ chord: DeliveryChord) -> Bool {
         ledger.isDeliveryChord(chord)
+    }
+
+    /// Closes the window `beginDeliveryWindow` opened. Called on every path that ends the
+    /// expansion (`EventTapEngine.endExpansion`).
+    public func endDeliveryWindow() {
+        ledger.endDeliveryWindow()
+    }
+
+    /// The tap swallowed `key` for the delivery whose window is open: it is owed back to the field
+    /// exactly once — by a hold surrender (`surrenderHold`) or by whichever refusal gets there
+    /// first (`reinjectSwallowedKey`), never both.
+    public func oweSwallowedKey(_ key: SwallowedKey) {
+        ledger.oweTerminator(key)
+    }
+
+    /// The type-ahead hold gave up on this delivery. See `ExpansionLedger.surrenderHold`.
+    func surrenderHold() -> ExpansionLedger.HoldSurrender {
+        ledger.surrenderHold()
+    }
+
+    /// A key reached the field mid-delivery that no unit count can describe. See
+    /// `ExpansionLedger.noteUncountedDeliveryKey`.
+    public func noteUncountedDeliveryKey() {
+        ledger.noteUncountedDeliveryKey()
+    }
+
+    /// The gate in front of a field write that owns no claimed operation (the typed AI
+    /// transform's trigger erase). `false` once the hold has surrendered.
+    public func beginUnclaimedMutation() -> Bool {
+        ledger.beginUnclaimedMutation()
+    }
+
+    /// Test seam: the pipeline's own `beginMutation`, for an operation claimed by
+    /// `claimOperationForTesting`.
+    func beginMutationForTesting(_ operation: InjectCompletionGuard, revision: UInt64) -> Bool {
+        ledger.beginMutation(operation, revision: revision)
     }
 
     /// Invalidates queued work as well as callbacks already scheduled on main.
@@ -1474,7 +1522,20 @@ public final class TextInjectionPipeline {
         // the box already accepted. A failed focus read is the replacement, and snapshotting
         // that read would let the replacement match itself.
         var postedBackspaces = 0
+        // The claim "the field is about to be written", made at the instant a write is first
+        // issued — never earlier. The tap's hold surrender reads it: before the claim a surrender
+        // abandons this inject and puts the swallowed terminator back first; after it, the
+        // expansion is already mutating and nothing changes. Claiming at an earlier gate left a
+        // window (the erase precondition's reads and its settle) in which the field was untouched
+        // yet no surrender could cancel, and the terminator was lost. Idempotent for this
+        // operation and revision; `false` once input landed, the operation was superseded or the
+        // hold has surrendered.
+        let beginWrite: () -> Bool = {
+            self.ledger.beginMutation(context.operation, revision: context.inputRevision)
+        }
         let postingContinue: () -> Bool = {
+            // The first backspace pair is the first write of an HID erase.
+            if postedBackspaces == 0, !beginWrite() { return false }
             if self.canContinue(context, phase: .afterMutation) {
                 if context.adopted.eraseAnchor == nil, let element = context.focusedElement {
                     context.adopted.eraseAnchor = self.eraseFieldPicture(element, attributes: context.adopted.baseline)
@@ -1561,7 +1622,7 @@ public final class TextInjectionPipeline {
         )
         // #endregion
 
-        guard canProceed() else {
+        func refuseBeforeFirstWrite() {
             let refusal = context.adopted.lastRefusal ?? EraseContinuationRefusal(
                 path: "eraseContextChanged",
                 reason: "Expansion cancelled — input or target application changed before erase",
@@ -1578,6 +1639,9 @@ public final class TextInjectionPipeline {
                 ),
                 completion: completion
             )
+        }
+        guard canProceed() else {
+            refuseBeforeFirstWrite()
             return
         }
 
@@ -1618,6 +1682,10 @@ public final class TextInjectionPipeline {
             // AX only — no HID. Range replace + optional AX caret; never erase-less direct inject.
             // A known-lying app has no fallback here, so this correctly refuses rather than
             // pretending the expand happened.
+            if !(shellLike || preferHID), !beginWrite() {
+                refuseBeforeFirstWrite()
+                return
+            }
             let axOnlyOutcome = (shellLike || preferHID)
                 ? AXTextWriter.AXReplaceOutcome.notAttempted(shellLike ? "shell-like context" : "weak AX app")
                 : ax.performAXRangeReplace(
@@ -1626,39 +1694,51 @@ public final class TextInjectionPipeline {
                     bundleID: context.frontBundleID,
                     focus: focus
                 )
-            if axOnlyOutcome == .replaced {
-                // #region agent log
-                TextInjectionPipeline.debugLogInject(
-                    hypothesisId: "M3",
-                    message: "inject path",
-                    data: ["frontmostBundle": frontBundle, "path": "axOnlyRange", "outcome": "degradedAXOnly"]
-                )
-                // #endregion
-                positionCursorIfNeeded(
-                    text: textToInject,
-                    cursorOffset: cursorOffset,
-                    totalUTF16Length: totalUTF16,
-                    allowHID: false,
-                    focus: focus,
-                    shouldContinue: canProceed
-                ) {
-                    self.finishSucceeded(
-                        outcome: .degradedAXOnly,
-                        path: "axOnlyRange",
-                        context: context,
-                        injectedText: textToInject,
-                        undoable: resolved.undoable,
-                        completion: completion
+            func finishAXOnly(_ outcome: AXTextWriter.AXReplaceOutcome) {
+                if outcome == .replaced {
+                    // #region agent log
+                    TextInjectionPipeline.debugLogInject(
+                        hypothesisId: "M3",
+                        message: "inject path",
+                        data: ["frontmostBundle": frontBundle, "path": "axOnlyRange", "outcome": "degradedAXOnly"]
                     )
+                    // #endregion
+                    positionCursorIfNeeded(
+                        text: textToInject,
+                        cursorOffset: cursorOffset,
+                        totalUTF16Length: totalUTF16,
+                        allowHID: false,
+                        focus: focus,
+                        shouldContinue: canProceed
+                    ) {
+                        self.finishSucceeded(
+                            outcome: .degradedAXOnly,
+                            path: "axOnlyRange",
+                            context: context,
+                            injectedText: textToInject,
+                            undoable: resolved.undoable,
+                            completion: completion
+                        )
+                    }
+                    return
+                }
+                refuseInject(
+                    "AX-only inject failed — range replace required (no erase-less direct inject); Post Events needed for HID fallback",
+                    path: "axOnlyRange",
+                    swallowed: swallowed,
+                    completion: completion
+                )
+            }
+            // A first read that shows no change is not yet a verdict (see `.unconfirmed`): the
+            // judgement, the selection restore and the capability verdict wait for the host to
+            // settle, off the synchronous path.
+            if case .unconfirmed(let pending) = axOnlyOutcome {
+                AXSettleRetry.live.afterSettle {
+                    finishAXOnly(self.ax.confirmRangeReplace(pending))
                 }
                 return
             }
-            refuseInject(
-                "AX-only inject failed — range replace required (no erase-less direct inject); Post Events needed for HID fallback",
-                path: "axOnlyRange",
-                swallowed: swallowed,
-                completion: completion
-            )
+            finishAXOnly(axOnlyOutcome)
             return
 
         case .axPlusHID:
@@ -1673,7 +1753,45 @@ public final class TextInjectionPipeline {
         // as "may have mutated" refused every expand in AX-opaque hosts — a Chrome PWA cannot
         // verify the field either, so the guard tripped on a write that never happened.
         var attemptedAXWrite = false
+        func finishAXRange() {
+            // #region agent log
+            TextInjectionPipeline.debugLogInject(
+                hypothesisId: "M3",
+                message: "inject path",
+                data: ["frontmostBundle": frontBundle, "path": "axRange", "outcome": "succeeded"]
+            )
+            // #endregion
+            positionCursorIfNeeded(
+                text: textToInject,
+                cursorOffset: cursorOffset,
+                totalUTF16Length: totalUTF16,
+                allowHID: true,
+                focus: focus,
+                shouldContinue: canProceed
+            ) {
+                self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceed)
+                self.finishSucceeded(
+                    outcome: .succeeded,
+                    path: "axRange",
+                    context: context,
+                    injectedText: textToInject,
+                    undoable: resolved.undoable,
+                    completion: completion
+                )
+            }
+        }
+        // A write whose first read showed no change: not yet judged. The guarded erase below does
+        // not start until the host has settled and `confirmRangeReplace` has said whether the
+        // text landed (finish as an AX success) or provably did not (the HID fallback, as ever) —
+        // an erase issued on the unsettled read would delete the end of an expansion that had
+        // already landed.
+        var unconfirmedAXWrite: AXTextWriter.PendingRangeReplace?
         if InjectionPlanner.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID) {
+            // The AX range replace is a write (a widened selection at the least).
+            guard beginWrite() else {
+                refuseBeforeFirstWrite()
+                return
+            }
             let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
                 eraseCount: erasePlan.utf16Count,
@@ -1682,32 +1800,11 @@ public final class TextInjectionPipeline {
             )
             attemptedAXWrite = axOutcome.fieldMayHaveMutated
             if axOutcome == .replaced {
-                // #region agent log
-                TextInjectionPipeline.debugLogInject(
-                    hypothesisId: "M3",
-                    message: "inject path",
-                    data: ["frontmostBundle": frontBundle, "path": "axRange", "outcome": "succeeded"]
-                )
-                // #endregion
-                positionCursorIfNeeded(
-                    text: textToInject,
-                    cursorOffset: cursorOffset,
-                    totalUTF16Length: totalUTF16,
-                    allowHID: true,
-                    focus: focus,
-                    shouldContinue: canProceed
-                ) {
-                    self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceed)
-                    self.finishSucceeded(
-                        outcome: .succeeded,
-                        path: "axRange",
-                        context: context,
-                        injectedText: textToInject,
-                        undoable: resolved.undoable,
-                        completion: completion
-                    )
-                }
+                finishAXRange()
                 return
+            }
+            if case .unconfirmed(let pending) = axOutcome {
+                unconfirmedAXWrite = pending
             }
             // Range replace did not apply. If this call just condemned the control (falseSuccess)
             // or the role was already marked weak, skip AX direct after erase — that path can
@@ -1936,8 +2033,6 @@ public final class TextInjectionPipeline {
                 focus: focus,
                 bundleID: context.frontBundleID,
                 focusedRole: focusedRole,
-                staleProbe: erasePlan.expectedText,
-                staleProbeCaseInsensitive: erasePlan.caseInsensitive,
                 followVouchedReplacement: { self.vouchedPasteTarget(context) },
                 publicationGate: context.request.publicationGate,
                 shouldContinue: canProceedAfterMutation
@@ -1968,45 +2063,64 @@ public final class TextInjectionPipeline {
             }
         }
 
-        eraser.performGuardedErase(
-            plan: erasePlan,
-            focus: focus,
-            afterPossibleWrite: attemptedAXWrite,
-            insertionPointFollowsExpectedText: context.eraseCaretVouched,
-            intent: context.purpose.eraseIntent,
-            canProceed: canProceed,
-            postingContinue: postingContinue,
-            onUnverifiableAfterWrite: { why in
-                // Self-healing: an attempted AX write left the field unreadable even after the
-                // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
-                // this on its very first expansion). Strikes escalate rather than condemn
-                // outright: a transient (focus stolen mid-inject) looks identical on one
-                // observation, and a wrong condemnation is effectively permanent. The second
-                // strike condemns, so a genuinely broken shell heals on the user's next retry
-                // and every expansion after that skips the AX write for the HID paste path.
-                // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
-                guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
-                let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
-                let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
-                switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
-                    bundleID: bundleID,
-                    role: focusedRole
-                ) {
-                case .struck(let count):
-                    DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
-                    )
-                case .condemned:
-                    DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
-                    )
-                case .alreadyCondemned:
-                    break
-                }
-            },
-            elementAfterContinue: { context.focusedElement }
-        ) { erased in
-            afterErase(erased, settleAttempt: 0)
+        func beginGuardedErase() {
+            eraser.performGuardedErase(
+                plan: erasePlan,
+                focus: focus,
+                afterPossibleWrite: attemptedAXWrite,
+                insertionPointFollowsExpectedText: context.eraseCaretVouched,
+                intent: context.purpose.eraseIntent,
+                canProceed: canProceed,
+                postingContinue: postingContinue,
+                onUnverifiableAfterWrite: { why in
+                    // Self-healing: an attempted AX write left the field unreadable even after the
+                    // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
+                    // this on its very first expansion). Strikes escalate rather than condemn
+                    // outright: a transient (focus stolen mid-inject) looks identical on one
+                    // observation, and a wrong condemnation is effectively permanent. The second
+                    // strike condemns, so a genuinely broken shell heals on the user's next retry
+                    // and every expansion after that skips the AX write for the HID paste path.
+                    // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
+                    guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
+                    let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
+                    let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
+                    switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
+                        bundleID: bundleID,
+                        role: focusedRole
+                    ) {
+                    case .struck(let count):
+                        DevTypeLog.inject.notice(
+                            "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
+                        )
+                    case .condemned:
+                        DevTypeLog.inject.notice(
+                            "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
+                        )
+                    case .alreadyCondemned:
+                        break
+                    }
+                },
+                elementAfterContinue: { context.focusedElement }
+            ) { erased in
+                afterErase(erased, settleAttempt: 0)
+            }
+        }
+
+        guard let pendingAXWrite = unconfirmedAXWrite else {
+            beginGuardedErase()
+            return
+        }
+        AXSettleRetry.live.afterSettle {
+            switch self.ax.confirmRangeReplace(pendingAXWrite) {
+            case .replaced:
+                finishAXRange()
+            default:
+                // Provably did not land (the writer has restored the selection and recorded the
+                // verdict): the same fallback a condemned write has always taken, without the AX
+                // direct insert afterwards.
+                preferHID = true
+                beginGuardedErase()
+            }
         }
     }
 
@@ -2612,8 +2726,6 @@ public final class TextInjectionPipeline {
             let reading = self.verifier.readFocusedTextDelivery(
                 expectedText: expectedText,
                 baseline: baseline,
-                staleProbe: context.erasePlan.expectedText,
-                staleProbeCaseInsensitive: context.erasePlan.caseInsensitive,
                 vouchingReplacement: true
             )
             switch reading.verification {

@@ -256,6 +256,15 @@ public final class EventTapEngine {
         _ = HIDKeyPoster.shared.postUnicodeKeyEvent(unicode: character, keyCode: 0, flags: [])
     }
 
+    /// Puts the swallowed terminator back when the type-ahead hold surrenders before the
+    /// expansion wrote anything. Injectable for the same reason as `typeAheadReplayPoster`.
+    /// Production posts it as the key it was (code and flags, with the AX-insert fallback that
+    /// `reinjectSwallowedKey` carries); the pipeline's ledger has already settled the debt by the
+    /// time this runs, so it posts through `repostSettledKey`, not the debt-checked entry.
+    var swallowedKeyPoster: (SwallowedKey) -> Void = { key in
+        _ = TextInjectionPipeline.shared.repostSettledKey(key)
+    }
+
     /// The non-IPC Secure Input read the tap trusts over its polled flag. Injectable so a test can
     /// stage "the flag says secure, the system says otherwise" without owning the real state.
     var liveSecureInputProbe: () -> Bool = { AXContextChecker.isSecureEventInputEnabledLive() }

@@ -25,6 +25,7 @@ class TapEventTestCase: XCTestCase {
         engine.snippets = [prefixTriggerSnippet("`slm"), prefixTriggerSnippet("`slmabout")]
         // No test may post a keystroke to the machine it runs on.
         engine.typeAheadReplayPoster = { _ in }
+        engine.swallowedKeyPoster = { _ in }
         // The engine's initialiser queues a layout refresh and app-context priming on main; each
         // ends in `resetBuffer()`. Let them land now so none arrives in the middle of a test.
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
@@ -120,6 +121,7 @@ class TapEventTestCase: XCTestCase {
         engine.lock.lock()
         defer { engine.lock.unlock() }
         engine._isExpanding = false
+        TextInjectionPipeline.shared.endDeliveryWindow()
         return engine._typeAhead.endExpansion()
     }
 }

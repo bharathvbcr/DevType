@@ -1062,9 +1062,6 @@ public final class PasteboardBroker {
     ///     paste time rather than read here, so an app switch mid-paste cannot mislabel the sample.
     ///   - focusedRole: AX role of the original field, used with `bundleID` for delivery-trust
     ///     (range gate and confirmation). Historical confirmation counts never authorize replay.
-    ///   - staleProbe: text the caller *removed* from the field just before this paste (the
-    ///     erased trigger). If a verification read still shows it, the mirror is stale by
-    ///     construction and its "missing" answer is discarded.
     ///   - leaveClipboardOnFailure: When true, skip immediate restore on `.notPosted` / `.failed` so the
     ///     concealed payload remains for a manual ⌘V (secure clipboard paste under Secure Input).
     ///   - holdTimeoutOverride: Optional longer hold (e.g. secure clipboard paste under SI).
@@ -1089,8 +1086,6 @@ public final class PasteboardBroker {
         focus: FocusedElementSource,
         bundleID: String? = nil,
         focusedRole: String? = nil,
-        staleProbe: String? = nil,
-        staleProbeCaseInsensitive: Bool = false,
         leaveClipboardOnFailure: Bool = false,
         holdTimeoutOverride: TimeInterval? = nil,
         completeBeforeRestore: Bool = false,
@@ -1143,8 +1138,7 @@ public final class PasteboardBroker {
         if deferForPublicationGate(publicationGate, {
             self.pasteViaClipboard(
                 text: text, expectedText: expectedText, baseline: baseline, focus: focus,
-                bundleID: bundleID, focusedRole: focusedRole, staleProbe: staleProbe,
-                staleProbeCaseInsensitive: staleProbeCaseInsensitive,
+                bundleID: bundleID, focusedRole: focusedRole,
                 leaveClipboardOnFailure: leaveClipboardOnFailure,
                 holdTimeoutOverride: holdTimeoutOverride,
                 completeBeforeRestore: completeBeforeRestore,
@@ -1246,8 +1240,6 @@ public final class PasteboardBroker {
                     baseline: baseline,
                     bundleID: bundleID,
                     focusedRole: focusedRole,
-                    staleProbe: staleProbe,
-                    staleProbeCaseInsensitive: staleProbeCaseInsensitive,
                     pasteAttemptsCompleted: 1,
                     holdStarted: self.now(),
                     holdTimeout: holdTimeoutValue,
@@ -1269,8 +1261,6 @@ public final class PasteboardBroker {
         baseline: DeliveryVerifier.FocusedTextObservation?,
         bundleID: String?,
         focusedRole: String?,
-        staleProbe: String?,
-        staleProbeCaseInsensitive: Bool,
         pasteAttemptsCompleted: Int,
         holdStarted: TimeInterval,
         holdTimeout: TimeInterval,
@@ -1287,9 +1277,7 @@ public final class PasteboardBroker {
             }
             let delivery = self.verifier.verifyFocusedTextDelivery(
                 expectedText: expectedText,
-                baseline: baseline,
-                staleProbe: staleProbe,
-                staleProbeCaseInsensitive: staleProbeCaseInsensitive
+                baseline: baseline
             )
             let elapsed = (self.now() - holdStarted)
             let decision = PasteboardBroker.decidePasteHold(
@@ -1323,8 +1311,6 @@ public final class PasteboardBroker {
                     baseline: baseline,
                     bundleID: bundleID,
                     focusedRole: focusedRole,
-                    staleProbe: staleProbe,
-                    staleProbeCaseInsensitive: staleProbeCaseInsensitive,
                     pasteAttemptsCompleted: pasteAttemptsCompleted,
                     holdStarted: holdStarted,
                     holdTimeout: holdTimeout,

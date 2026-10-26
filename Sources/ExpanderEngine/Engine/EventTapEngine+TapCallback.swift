@@ -86,8 +86,14 @@ extension EventTapEngine {
             // wherever the user just clicked.
             lock.lock()
             let holdPID = _typeAhead.holdPID
+            let wasHolding = _typeAhead.isHolding
             let stranded = _typeAhead.flushForCaretChange()
             lock.unlock()
+            // The terminator was typed before every held key, at the caret the click is about to
+            // move: it goes back first, and only while the inject has not begun writing.
+            if wasHolding {
+                surrenderHoldPuttingTerminatorBack(heldFor: holdPID, reason: "caret moved (click)")
+            }
             replayTypeAhead(stranded, heldFor: holdPID, reason: "caret moved (click)")
             resetBuffer()
             // §3.1: same rule as escape/arrows below — the caret moved, so the recorded expansion
@@ -138,6 +144,11 @@ extension EventTapEngine {
                 )
                 if units > 0 {
                     TextInjectionPipeline.shared.noteDeliveryInput(units: units)
+                } else if admission.decision != .swallow {
+                    // A key that reaches the field but that no unit count describes (a dead
+                    // key's marked accent, an F-key) is still not the field the erase was
+                    // planned against. Move the revision; leave the undo counters alone.
+                    TextInjectionPipeline.shared.noteUncountedDeliveryKey()
                 }
                 switch admission.decision {
                 case .swallow:
@@ -146,6 +157,10 @@ extension EventTapEngine {
                     if let clockMark { inputClock.retract(clockMark) }
                     return nil
                 case .flushThenPassThrough(let replay):
+                    // Before the held keys: the terminator was typed before all of them.
+                    surrenderHoldPuttingTerminatorBack(
+                        heldFor: admission.holdPID, reason: "hold released early"
+                    )
                     replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
                 case .passThrough:
                     break
@@ -482,12 +497,18 @@ extension EventTapEngine {
             )
             if units > 0 {
                 TextInjectionPipeline.shared.noteDeliveryInput(units: units)
+            } else if admission.decision != .swallow {
+                TextInjectionPipeline.shared.noteUncountedDeliveryKey()
             }
             switch admission.decision {
             case .swallow:
                 if let clockMark { inputClock.retract(clockMark) }
                 return nil
             case .flushThenPassThrough(let replay):
+                // The expansion this key lost the claim to may itself owe a terminator.
+                surrenderHoldPuttingTerminatorBack(
+                    heldFor: admission.holdPID, reason: "hold released early"
+                )
                 replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
             case .passThrough:
                 break
@@ -498,6 +519,8 @@ extension EventTapEngine {
         let utf16Trigger = match.eraseCount
         let charCount = lastUTF16Count
         let swallowed = SwallowedKey(didSwallow: true, unicode: unicodeStr, keyCode: keyCode, flags: flags)
+        // Same thread as every later key event, so none can reach `admit` before this is owed.
+        TextInjectionPipeline.shared.oweSwallowedKey(swallowed)
         let terminator = match.terminator
         let eraseOverride = match.source == .physical ? match.eraseCount : nil
         // Exact text expected left of the caret. Carries both unit systems (UTF-16 for AX

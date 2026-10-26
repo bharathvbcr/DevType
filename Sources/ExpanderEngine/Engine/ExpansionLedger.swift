@@ -47,6 +47,28 @@ extension TextInjectionPipeline {
         private var deliveryChord: DeliveryChord?
         static let acceptChordWindow: TimeInterval = 3
 
+        /// The trigger's final key, which the tap ate on this delivery's behalf: owed back to the
+        /// field exactly once, by whichever path gets there first.
+        private enum TerminatorDebt {
+            case none
+            case owed(SwallowedKey)
+            case settled(SwallowedKey)
+        }
+
+        /// §8.3 hold surrender, per delivery window (`beginDeliveryWindow` … `endDeliveryWindow`).
+        ///
+        /// The type-ahead hold gives up on its first real key past the deadline, and the key (or the
+        /// keys it flushes) reaches the field before whatever the expansion has yet to write. If
+        /// the expansion has not yet mutated the field, that is harmless to give up on: nothing
+        /// was erased, so the right answer is to abandon it and put the user's own keystrokes back
+        /// in the order they were typed, terminator first. Once it *has* begun mutating, the
+        /// terminator's place is no longer defined and the old behaviour stands. Those two
+        /// outcomes race — the pipeline on main, the tap thread — so they are one test-and-set
+        /// each under this lock: `beginMutation` and `surrenderHold` can never both win.
+        private var deliveryMutated = false
+        private var deliverySurrendered = false
+        private var terminatorDebt = TerminatorDebt.none
+
         init(defaults: UserDefaults) {
             self.defaults = defaults
         }
@@ -88,6 +110,10 @@ extension TextInjectionPipeline {
                     deliveryChord = nil
                 }
                 pendingAcceptChord = nil
+                // A hold that surrendered before this inject existed (the gap between the tap's
+                // claim and the pipeline's is a focus query and a render long) has already put
+                // the user's keys back; this operation must not run over them.
+                if deliverySurrendered { operation.cancel() }
                 return inputRevision
             }
         }
@@ -138,7 +164,102 @@ extension TextInjectionPipeline {
 
         /// §3.1d: opens the delivery-input window for one expansion.
         func beginDeliveryWindow() {
-            lock.withLock { deliveryInputUnits = 0 }
+            lock.withLock {
+                deliveryInputUnits = 0
+                deliveryMutated = false
+                deliverySurrendered = false
+                terminatorDebt = .none
+            }
+        }
+
+        /// Closes the window `beginDeliveryWindow` opened, on every path that ends the expansion,
+        /// so a surrender recorded for this delivery cannot suppress a later, unrelated key
+        /// replay (an undo's held backspace, for one).
+        func endDeliveryWindow() {
+            lock.withLock {
+                deliveryMutated = false
+                deliverySurrendered = false
+                terminatorDebt = .none
+            }
+        }
+
+        /// The tap swallowed `key` for the delivery whose window is open. Owed back once.
+        func oweTerminator(_ key: SwallowedKey) {
+            lock.withLock { terminatorDebt = .owed(key) }
+        }
+
+        /// Called by every path that is about to post the swallowed key back. `true` means the
+        /// caller may post it (and, if it was the owed key, now has the debt); `false` means a
+        /// hold surrender already put it back, so posting again would type it twice. A key that
+        /// was never owed (an undo's held backspace) is not this ledger's to withhold.
+        func consumeTerminator(matching key: SwallowedKey) -> Bool {
+            lock.withLock {
+                switch terminatorDebt {
+                case .owed(let owed) where owed == key:
+                    terminatorDebt = .settled(owed)
+                    return true
+                case .settled(let settled) where settled == key:
+                    return false
+                default:
+                    return true
+                }
+            }
+        }
+
+        /// The pipeline is about to write to the field (an AX range replace or the first
+        /// backspace). `false` when the operation is no longer the one allowed to, input has
+        /// landed since its revision, or the hold has already surrendered — in all three the
+        /// caller must not mutate. Winning is what stops a later `surrenderHold` from abandoning
+        /// the inject: the two cannot both succeed.
+        func beginMutation(_ operation: InjectCompletionGuard, revision: UInt64) -> Bool {
+            lock.withLock {
+                guard !deliverySurrendered, activeOperation === operation,
+                      inputRevision == revision else { return false }
+                deliveryMutated = true
+                return true
+            }
+        }
+
+        /// `beginMutation` for a mutation that owns no claimed operation (the typed AI
+        /// transform's trigger erase): only the surrender can refuse it.
+        func beginUnclaimedMutation() -> Bool {
+            lock.withLock {
+                guard !deliverySurrendered else { return false }
+                deliveryMutated = true
+                return true
+            }
+        }
+
+        /// What the tap does about a hold giving up.
+        enum HoldSurrender: Equatable {
+            /// The expansion is already mutating the field; the old behaviour stands.
+            case mutationBegun
+            /// The in-flight inject is cancelled before it wrote anything. `replay` is the
+            /// terminator it owed the field, to post ahead of the held keys; `nil` when none was
+            /// swallowed or it was already put back.
+            case abandoned(replay: SwallowedKey?)
+        }
+
+        /// The type-ahead hold surrendered. Atomic with `beginMutation`; when the surrender
+        /// wins, the revision moves so every queued continue-check of the in-flight inject
+        /// refuses, and the owed terminator is handed to the caller exactly once.
+        func surrenderHold() -> HoldSurrender {
+            lock.withLock {
+                guard !deliveryMutated else { return .mutationBegun }
+                deliverySurrendered = true
+                inputRevision &+= 1
+                guard case .owed(let key) = terminatorDebt else { return .abandoned(replay: nil) }
+                terminatorDebt = .settled(key)
+                return .abandoned(replay: key.hasPayload ? key : nil)
+            }
+        }
+
+        /// A key reached the field mid-delivery that no unit count can describe (a dead key, an
+        /// F-key: no character, no caret move the tap can name). It still may have edited the
+        /// field, so the erase must not run over it, but it is not typed text and must not cost
+        /// the undo record: the revision moves, the counters do not.
+        func noteUncountedDeliveryKey() {
+            lock.withLock { inputRevision &+= 1 }
         }
 
         /// §3.1d: one real, field-touching event was observed while an expansion is being

@@ -170,4 +170,132 @@ final class ExpansionLedgerTests: XCTestCase {
         }
         XCTAssertEqual(Set(taken).count, taken.count, "A record was claimed by two undo attempts")
     }
+
+    // MARK: - Hold surrender vs. the first write
+
+    private let terminator = SwallowedKey(didSwallow: true, unicode: " ", keyCode: 49, flags: [])
+
+    func testSurrenderBeforeTheFirstWriteAbandonsAndHandsBackTheTerminatorOnce() throws {
+        let ledger = try ledger()
+        ledger.beginDeliveryWindow()
+        ledger.oweTerminator(terminator)
+        let operation = InjectCompletionGuard()
+        let revision = ledger.claim(operation, consumingUndo: false)
+
+        XCTAssertEqual(ledger.surrenderHold(), .abandoned(replay: terminator))
+        XCTAssertFalse(ledger.isCurrent(operation, revision: revision))
+        XCTAssertFalse(ledger.beginMutation(operation, revision: revision), "an abandoned inject cannot write")
+        XCTAssertEqual(ledger.surrenderHold(), .abandoned(replay: nil), "the debt is paid once")
+        XCTAssertFalse(ledger.consumeTerminator(matching: terminator), "no refusal may post it again")
+    }
+
+    func testSurrenderAfterTheFirstWriteBeganChangesNothing() throws {
+        let ledger = try ledger()
+        ledger.beginDeliveryWindow()
+        ledger.oweTerminator(terminator)
+        let operation = InjectCompletionGuard()
+        let revision = ledger.claim(operation, consumingUndo: false)
+
+        XCTAssertTrue(ledger.beginMutation(operation, revision: revision))
+        XCTAssertEqual(ledger.surrenderHold(), .mutationBegun)
+        XCTAssertTrue(ledger.isCurrent(operation, revision: revision), "the surrender itself moves nothing")
+        XCTAssertTrue(ledger.consumeTerminator(matching: terminator), "the refusal path still owns the key")
+    }
+
+    /// A hold that surrenders in the gap between the tap's claim and the pipeline's (a focus
+    /// query and a render) must still abandon the inject that claims afterwards.
+    func testASurrenderBeforeTheClaimCancelsTheLateOperation() throws {
+        let ledger = try ledger()
+        ledger.beginDeliveryWindow()
+        ledger.oweTerminator(terminator)
+        XCTAssertEqual(ledger.surrenderHold(), .abandoned(replay: terminator))
+
+        let late = InjectCompletionGuard()
+        let revision = ledger.claim(late, consumingUndo: false)
+        XCTAssertFalse(late.allowsContinuation(), "the late operation is cancelled at birth")
+        XCTAssertFalse(ledger.beginMutation(late, revision: revision))
+    }
+
+    func testBeginMutationRefusesAStaleRevisionAndASupersededOperation() throws {
+        let ledger = try ledger()
+        ledger.beginDeliveryWindow()
+        let first = InjectCompletionGuard()
+        let revision = ledger.claim(first, consumingUndo: false)
+        ledger.noteDeliveryInput(units: 1)
+        XCTAssertFalse(ledger.beginMutation(first, revision: revision), "input landed since the claim")
+
+        let second = InjectCompletionGuard()
+        let secondRevision = ledger.claim(second, consumingUndo: false)
+        XCTAssertFalse(ledger.beginMutation(first, revision: secondRevision), "superseded")
+        XCTAssertTrue(ledger.beginMutation(second, revision: secondRevision))
+    }
+
+    func testClosingTheWindowReleasesTheSurrenderAndTheDebt() throws {
+        let ledger = try ledger()
+        ledger.beginDeliveryWindow()
+        ledger.oweTerminator(terminator)
+        _ = ledger.surrenderHold()
+        ledger.endDeliveryWindow()
+
+        XCTAssertTrue(ledger.consumeTerminator(matching: terminator),
+                      "a later replay of an equal key (an undo's held backspace) is not withheld")
+        let next = InjectCompletionGuard()
+        _ = ledger.claim(next, consumingUndo: false)
+        XCTAssertTrue(next.allowsContinuation(), "and a later inject is not born cancelled")
+    }
+
+    func testOnlyTheOwedKeyIsWithheld() throws {
+        let ledger = try ledger()
+        ledger.beginDeliveryWindow()
+        ledger.oweTerminator(terminator)
+        _ = ledger.surrenderHold()
+        let backspace = SwallowedKey(didSwallow: true, unicode: "\u{7F}", keyCode: 51, flags: [])
+        XCTAssertTrue(ledger.consumeTerminator(matching: backspace))
+    }
+
+    func testAKeyThatNeverReachedTheFieldOwesNothing() throws {
+        let ledger = try ledger()
+        ledger.beginDeliveryWindow()
+        ledger.oweTerminator(SwallowedKey(didSwallow: false))
+        XCTAssertEqual(ledger.surrenderHold(), .abandoned(replay: nil))
+    }
+
+    func testAnUncountedKeyMovesTheRevisionButNotTheCounters() throws {
+        let ledger = try ledger()
+        ledger.beginDeliveryWindow()
+        let operation = InjectCompletionGuard()
+        let revision = ledger.claim(operation, consumingUndo: false)
+        ledger.noteUncountedDeliveryKey()
+        XCTAssertFalse(ledger.isCurrent(operation, revision: revision))
+        XCTAssertEqual(ledger.currentDeliveryInputUnits, 0)
+    }
+
+    /// The pipeline (main) and the tap thread race for the same fact. Exactly one may win, every
+    /// time: a write that began is never abandoned, and an abandoned inject never writes.
+    func testBeginMutationAndSurrenderNeverBothWin() throws {
+        for round in 0..<400 {
+            let ledger = try ledger()
+            ledger.beginDeliveryWindow()
+            ledger.oweTerminator(terminator)
+            let operation = InjectCompletionGuard()
+            let revision = ledger.claim(operation, consumingUndo: false)
+            let results = NSLock()
+            var wrote = false
+            var surrendered: TextInjectionPipeline.ExpansionLedger.HoldSurrender?
+            DispatchQueue.concurrentPerform(iterations: 2) { index in
+                if index == 0 {
+                    let won = ledger.beginMutation(operation, revision: revision)
+                    results.lock(); wrote = won; results.unlock()
+                } else {
+                    let outcome = ledger.surrenderHold()
+                    results.lock(); surrendered = outcome; results.unlock()
+                }
+            }
+            if wrote {
+                XCTAssertEqual(surrendered, .mutationBegun, "round \(round): wrote and was abandoned")
+            } else {
+                XCTAssertEqual(surrendered, .abandoned(replay: terminator), "round \(round): neither won")
+            }
+        }
+    }
 }

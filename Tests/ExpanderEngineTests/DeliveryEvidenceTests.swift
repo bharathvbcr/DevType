@@ -129,15 +129,14 @@ final class DeliveryEvidenceTests: XCTestCase {
             XCTAssertNotEqual(decision, .failConfirmed, "tick \(tick)")
         }
 
-        // And the staleness oracle catches the same mirror one layer earlier: a read that still
-        // shows the just-erased trigger is discarded before trust is even consulted.
+        // And the verifier itself never calls a mirror that did not change a miss: a read
+        // identical to the baseline is discarded before trust is even consulted.
         let stale = DeliveryVerifier.FocusedTextObservation(value: "notes slml", selectedText: nil)
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "expansion body",
                 baseline: stale,
-                after: stale,
-                staleProbe: "slml"
+                after: stale
             ),
             .unavailable
         )
@@ -265,11 +264,12 @@ final class DeliveryEvidenceTests: XCTestCase {
         )
     }
 
-    // MARK: - The staleness oracle
+    // MARK: - A mirror that did not change is never a miss
 
-    /// The erase removed the trigger with counted backspaces immediately before the paste. Any
-    /// read still showing the trigger therefore describes a field state that no longer exists —
-    /// it must be discarded as `.unavailable`, never believed as a miss.
+    /// The verifier never read a stale-trigger probe (the parameter was threaded through three
+    /// signatures and the paste-hold loop and dropped on the floor). What keeps a stale mirror
+    /// from being believed is structural: a read identical to the baseline is `.unavailable`,
+    /// whatever text it still shows — the erased trigger included.
     func testReadStillShowingTheErasedTriggerIsStaleByConstruction() {
         let stale = DeliveryVerifier.FocusedTextObservation(
             value: "some earlier prose slml",
@@ -279,48 +279,23 @@ final class DeliveryEvidenceTests: XCTestCase {
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "the full expansion text",
                 baseline: stale,
-                after: stale,
-                staleProbe: "slml"
+                after: stale
             ),
             .unavailable,
             "The mirror still shows the erased trigger — its 'missing' answer is testimony"
                 + " about the past."
         )
-        // Absence is inconclusive even when a stale-text probe was not supplied.
-        XCTAssertEqual(
-            DeliveryVerifier.verifyTextDelivery(
-                expectedText: "the full expansion text",
-                baseline: stale,
-                after: stale,
-                staleProbe: nil
-            ),
-            .unavailable
-        )
     }
 
-    /// Case-insensitive snippets store the snippet's casing in the plan while the field held the
-    /// user's casing. The probe must fold case exactly like the erase precondition does, or a
-    /// user who typed "SLML" gets no staleness protection for trigger "slml".
-    func testStaleProbeFoldsCaseForCaseInsensitiveTriggers() {
+    /// The same holds whatever case the user typed the trigger in: casing never reached the
+    /// verifier, so a differently-cased stale mirror is the same `.unavailable`.
+    func testAnUnchangedMirrorIsUnavailableWhateverTheTriggerCase() {
         let stale = DeliveryVerifier.FocusedTextObservation(value: "notes SLML", selectedText: nil)
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "expansion body",
                 baseline: stale,
-                after: stale,
-                staleProbe: "slml",
-                staleProbeCaseInsensitive: true
-            ),
-            .unavailable
-        )
-        // Case-sensitive absence likewise cannot prove non-application.
-        XCTAssertEqual(
-            DeliveryVerifier.verifyTextDelivery(
-                expectedText: "expansion body",
-                baseline: stale,
-                after: stale,
-                staleProbe: "slml",
-                staleProbeCaseInsensitive: false
+                after: stale
             ),
             .unavailable
         )
@@ -339,8 +314,7 @@ final class DeliveryEvidenceTests: XCTestCase {
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "expansion body",
                 baseline: DeliveryVerifier.FocusedTextObservation(value: "prose ", selectedText: nil),
-                after: afterRetype,
-                staleProbe: "slml"
+                after: afterRetype
             ),
             .unavailable,
             "Whether this read is stale or freshly shows a retyped trigger, corrective writes"
@@ -348,25 +322,23 @@ final class DeliveryEvidenceTests: XCTestCase {
         )
     }
 
-    func testFreshReadsStillProduceHonestVerdictsWithProbePresent() {
+    func testFreshReadsStillProduceHonestVerdicts() {
         let baseline = DeliveryObservationFixture.at("prose ", 6)
         // Erased trigger and absent payload still cannot exclude pending delivery.
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "expansion",
                 baseline: baseline,
-                after: baseline,
-                staleProbe: "slml"
+                after: baseline
             ),
             .unavailable
         )
-        // Delivered text wins regardless of the probe.
+        // Delivered text is delivered.
         XCTAssertEqual(
             DeliveryVerifier.verifyTextDelivery(
                 expectedText: "expansion",
                 baseline: baseline,
-                after: DeliveryObservationFixture.at("prose expansion", 15),
-                staleProbe: "slml"
+                after: DeliveryObservationFixture.at("prose expansion", 15)
             ),
             .delivered
         )

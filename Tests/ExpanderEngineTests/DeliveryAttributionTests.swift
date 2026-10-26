@@ -22,8 +22,7 @@ final class DeliveryAttributionTests: XCTestCase {
         let value = String(repeating: "İ", count: 1024) + String(repeating: "a", count: 33_000) + "TrIgGeR"
         let before = DeliveryVerifier.FocusedTextObservation(value: value, selectedText: nil, caretLocation: value.utf16.count)
         XCTAssertEqual(DeliveryVerifier.verifyTextDelivery(
-            expectedText: "replacement", baseline: before, after: before,
-            staleProbe: "trigger", staleProbeCaseInsensitive: true
+            expectedText: "replacement", baseline: before, after: before
         ), .unavailable)
         XCTAssertEqual(DeliveryVerifier.boundedContains(
             "trigger", in: value, caretLocation: value.utf16.count, caseInsensitive: true
