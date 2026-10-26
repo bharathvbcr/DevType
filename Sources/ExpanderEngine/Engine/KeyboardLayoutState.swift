@@ -24,9 +24,24 @@ struct LiveKeyboardLayoutProvider: KeyboardLayoutProviding {
     }
 
     /// The brute-force scan: up to 128 `UCKeyTranslate` calls.
+    /// The modifier state `keyCode(for:)` translates under: Command, because the only thing the
+    /// resolved key is used for is a ⌘C / ⌘V chord, and what a layout calls "v" under Command is
+    /// not always what it types as "v". On the Command-QWERTY layouts (Dvorak - QWERTY ⌘ and
+    /// kin) typing is Dvorak but shortcuts keep their QWERTY positions, so an unmodified scan
+    /// found the period key and posted ⌘. instead of ⌘V. A layout with no Latin "v" at all
+    /// (Russian, Hebrew) types nothing for an unmodified scan but still has ⌘V on a key.
+    static let chordModifiers: UInt32 = UInt32((cmdKey >> 8) & 0xFF)
+
     func keyCode(for targetChar: Character) -> CGKeyCode? {
-        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-              let layoutData = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return nil }
+        return Self.keyCode(for: targetChar, in: source, modifiers: Self.chordModifiers)
+    }
+
+    /// The scan itself, over any installed layout (reading a non-selected source does not
+    /// switch it). `modifiers` is the Carbon modifier word shifted down a byte, as
+    /// `UCKeyTranslate` takes it.
+    static func keyCode(for targetChar: Character, in source: TISInputSource, modifiers: UInt32) -> CGKeyCode? {
+        guard let layoutData = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
             return nil
         }
         let data = unsafeBitCast(layoutData, to: CFData.self)
@@ -39,7 +54,7 @@ struct LiveKeyboardLayoutProvider: KeyboardLayoutProviding {
             for code: CGKeyCode in 0..<128 {
                 var deadKeyState: UInt32 = 0
                 let status = UCKeyTranslate(
-                    keyboardLayout, code, UInt16(kUCKeyActionDisplay), 0,
+                    keyboardLayout, code, UInt16(kUCKeyActionDisplay), modifiers,
                     UInt32(KBGetLayoutType(0)), OptionBits(kUCKeyTranslateNoDeadKeysBit),
                     &deadKeyState, 4, &realLength, &chars
                 )

@@ -270,7 +270,7 @@ final class EraseContinuationTests: XCTestCase {
 
     func testAfterEraseTriggerAbsentOrUnreadableWithoutADeletionMatchRefuses() {
         for reading: EraseFieldReading in [.triggerAbsent, .unreadable] {
-            for role in EraseContinuation.insertionRetargetRoles {
+            for role in ControlIdentity.insertionRetargetRoles {
                 let decision = refuse(facts(
                     phase: .beforeInsertion, mismatch: .elementChanged, allowsRetarget: true,
                     livePrecondition: .mismatch("gone"), liveRole: role, fieldReading: reading,
@@ -285,7 +285,7 @@ final class EraseContinuationTests: XCTestCase {
 
     func testAfterEraseAConfirmedDeletionOnATextRoleRetargets() {
         for reading: EraseFieldReading? in [.triggerAbsent, .unreadable, nil] {
-            for role in EraseContinuation.insertionRetargetRoles {
+            for role in ControlIdentity.insertionRetargetRoles {
                 XCTAssertEqual(
                     EraseContinuation.decide(facts(
                         phase: .beforeInsertion, mismatch: .elementChanged, allowsRetarget: true,
@@ -390,16 +390,16 @@ final class EraseContinuationTests: XCTestCase {
 
     func testInsertionRolesAreTheStableNonSecureTextRoles() {
         XCTAssertEqual(
-            EraseContinuation.insertionRetargetRoles,
+            ControlIdentity.insertionRetargetRoles,
             ["AXTextField", "AXTextArea", "AXSearchField"]
         )
         XCTAssertTrue(
-            EraseContinuation.insertionRetargetRoles.isDisjoint(with: AXWriteCapabilityStore.axWriteUnstableRoles)
+            ControlIdentity.insertionRetargetRoles.isDisjoint(with: AXWriteCapabilityStore.axWriteUnstableRoles)
         )
-        XCTAssertFalse(EraseContinuation.insertionRetargetRoles.contains("AXSecureTextField"))
+        XCTAssertFalse(ControlIdentity.insertionRetargetRoles.contains("AXSecureTextField"))
         XCTAssertEqual(
             AXWriteCapabilityStore.textEntryRoles.subtracting(["AXSecureTextField"]),
-            EraseContinuation.insertionRetargetRoles
+            ControlIdentity.insertionRetargetRoles
         )
     }
 
@@ -1034,17 +1034,17 @@ final class EraseContinuationTests: XCTestCase {
             }
             switch row.phase {
             case .beforeErase:
-                XCTAssertTrue(EraseContinuation.roleAllowsInsertionRetarget(row.liveRole), label(row))
+                XCTAssertTrue(ControlIdentity.roleAllowsInsertionRetarget(row.liveRole), label(row))
                 guard case .ok = row.livePrecondition else {
                     return XCTFail("before-erase retarget without a live .ok \(label(row))")
                 }
             case .duringErase:
                 XCTAssertEqual(row.mismatch, .elementChanged, label(row))
-                XCTAssertTrue(EraseContinuation.roleAllowsInsertionRetarget(row.liveRole), label(row))
+                XCTAssertTrue(ControlIdentity.roleAllowsInsertionRetarget(row.liveRole), label(row))
                 XCTAssertTrue(row.deletionMatched, label(row))
             case .beforeInsertion:
                 XCTAssertEqual(row.mismatch, .elementChanged, label(row))
-                XCTAssertTrue(EraseContinuation.roleAllowsInsertionRetarget(row.liveRole), label(row))
+                XCTAssertTrue(ControlIdentity.roleAllowsInsertionRetarget(row.liveRole), label(row))
                 XCTAssertTrue(row.deletionMatched, label(row))
                 XCTAssertNotEqual(row.fieldReading, .triggerPresent, label(row))
             }
@@ -1324,17 +1324,17 @@ final class EraseContinuationTests: XCTestCase {
         guard row.allowsRetarget else { return .refuse(refusal) }
         switch row.phase {
         case .beforeErase:
-            guard EraseContinuation.roleAllowsInsertionRetarget(row.liveRole) else { return .refuse(refusal) }
+            guard ControlIdentity.roleAllowsInsertionRetarget(row.liveRole) else { return .refuse(refusal) }
             guard case .ok = row.livePrecondition else { return .refuse(refusal) }
             return .retarget
         case .duringErase:
             guard mismatch == .elementChanged else { return .refuse(refusal) }
-            guard EraseContinuation.roleAllowsInsertionRetarget(row.liveRole) else { return .refuse(refusal) }
+            guard ControlIdentity.roleAllowsInsertionRetarget(row.liveRole) else { return .refuse(refusal) }
             guard row.deletionMatched else { return .refuse(refusal) }
             return .retarget
         case .beforeInsertion:
             guard mismatch == .elementChanged else { return .refuse(refusal) }
-            guard EraseContinuation.roleAllowsInsertionRetarget(row.liveRole) else { return .refuse(refusal) }
+            guard ControlIdentity.roleAllowsInsertionRetarget(row.liveRole) else { return .refuse(refusal) }
             guard row.deletionMatched else { return .refuse(refusal) }
             if row.fieldReading == .triggerPresent { return .refuse(refusal) }
             return .retarget

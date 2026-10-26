@@ -17,10 +17,20 @@ public final class DeliveryVerifier {
         /// element's count only when this equals `value`'s UTF-16 length, i.e. the host is shown
         /// to count in the same units the window offsets use.
         public let numberOfCharacters: Int?
+        /// Screen frame of `target` when the baseline was taken. The only evidence that can tie a
+        /// *replacement* node back to this field after WebKit swaps the element under the paste
+        /// (see `readFocusedTextDelivery`). Not part of `==`: it identifies the control, it is not
+        /// field content.
+        public let frame: CGRect?
+        /// What the host published about which control `target` is, read with the baseline for the
+        /// same reason as `frame`: once the node is swapped there is nothing left to read it from.
+        /// Not part of `==`.
+        public let attributes: ControlIdentity.Attributes
 
         public init(
             value: String?, selectedText: String?, caretLocation: Int? = nil,
-            selectedRange: NSRange? = nil, target: AXUIElement? = nil, numberOfCharacters: Int? = nil
+            selectedRange: NSRange? = nil, target: AXUIElement? = nil, numberOfCharacters: Int? = nil,
+            frame: CGRect? = nil, attributes: ControlIdentity.Attributes = .none
         ) {
             self.value = value
             self.selectedText = selectedText
@@ -28,6 +38,8 @@ public final class DeliveryVerifier {
             self.selectedRange = selectedRange
             self.target = target
             self.numberOfCharacters = numberOfCharacters
+            self.frame = frame
+            self.attributes = attributes
         }
 
         public static func == (lhs: Self, rhs: Self) -> Bool {
@@ -68,6 +80,13 @@ public final class DeliveryVerifier {
         var stringForRange: (AXUIElement, NSRange) -> String?
         /// The full read the windowed path falls back to.
         var observation: (AXUIElement) -> FocusedTextObservation
+        /// Screen frame, role and owning process of an element — the three facts a replaced node
+        /// must share with the baseline before its text may count as this field's — and the
+        /// identity attributes the host publishes, which may say it is not (`ControlIdentity`).
+        var frame: (AXUIElement) -> CGRect? = { _ in nil }
+        var role: (AXUIElement) -> String? = { _ in nil }
+        var pid: (AXUIElement) -> pid_t? = { _ in nil }
+        var attributes: (AXUIElement) -> ControlIdentity.Attributes = { _ in .none }
 
         static let live = TextAccess(
             focusedElement: { AXContextChecker.shared.focusedElement() },
@@ -84,7 +103,18 @@ public final class DeliveryVerifier {
                 guard let parameter = AXValueCreate(.cfRange, &cfRange) else { return nil }
                 return SelectionReader.copyStringForRange(element, parameter, attributed: false)
             },
-            observation: { DeliveryVerifier.fullObservation(for: $0) }
+            observation: { DeliveryVerifier.fullObservation(for: $0) },
+            frame: { AXContextChecker.elementFrame($0) },
+            role: { AXContextChecker.shared.focusedElementRole(element: $0) },
+            pid: { element in
+                var pid: pid_t = 0
+                guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
+                return pid
+            },
+            attributes: { element in
+                AXContextChecker.applyMessagingTimeout(to: element)
+                return ControlIdentity.readAttributes(of: element)
+            }
         )
     }
 
@@ -102,7 +132,8 @@ public final class DeliveryVerifier {
         return FocusedTextObservation(
             value: observed.value, selectedText: observed.selectedText,
             caretLocation: observed.caretLocation, selectedRange: observed.selectedRange,
-            target: observed.target, numberOfCharacters: access.numberOfCharacters(axElement)
+            target: observed.target, numberOfCharacters: access.numberOfCharacters(axElement),
+            frame: access.frame(axElement), attributes: access.attributes(axElement)
         )
     }
 
@@ -154,27 +185,177 @@ public final class DeliveryVerifier {
 
     // MARK: - Verification
 
+    /// Why a focused-field read produced no verdict. `.unavailable` alone conflated four different
+    /// facts, and the one that matters to a WebKit field — the element was *replaced* under the
+    /// paste — printed as "field unreadable".
+    public enum UnavailableReason: String, Equatable {
+        /// The baseline never captured a target element, so there is nothing to compare.
+        case noBaselineTarget
+        /// The focus query returned nothing now.
+        case noFocusedElement
+        /// A different element is focused and was not vouched as the same control. It may be a
+        /// field the user clicked into, so it is never evidence either way.
+        case focusReplaced
+        /// The baseline element (or its vouched replacement) is focused but its value, caret or
+        /// range could not prove the insertion.
+        case fieldUnreadable
+    }
+
+    public struct FocusedDeliveryReading {
+        public let verification: TextDeliveryVerification
+        /// Non-nil exactly when `verification` is `.unavailable`.
+        public let unavailableReason: UnavailableReason?
+        /// Set only when delivery was proven on a node that replaced the baseline target.
+        public let replacementElement: AXUIElement?
+    }
+
+    /// The screen frame of a control, read through this verifier's access.
+    func controlFrame(of element: AXUIElement) -> CGRect? { access.frame(element) }
+
+    /// The identity attributes a control publishes, read through this verifier's access.
+    func controlAttributes(of element: AXUIElement) -> ControlIdentity.Attributes { access.attributes(element) }
+
+    /// What `element` is, as `ControlIdentity` compares it. Read *before* the node can be swapped
+    /// by a caller that will need to vouch for its replacement after a wait (see
+    /// `vouchesAsSameControl`).
+    func controlIdentity(of element: AXUIElement) -> ControlIdentity {
+        ControlIdentity(
+            pid: access.pid(element), role: access.role(element),
+            frame: controlFrame(of: element), attributes: controlAttributes(of: element)
+        )
+    }
+
+    /// Whether `live` may stand in for the control `baseline` was read from — `ControlIdentity`'s
+    /// rule over a live element, which is the only owner of it. Callers ask here instead of
+    /// restating it.
+    func sameControlVerdict(baseline: ControlIdentity, live: AXUIElement) -> ControlIdentity.Verdict {
+        ControlIdentity.compare(baseline: baseline, live: controlIdentity(of: live))
+    }
+
+    func vouchesAsSameControl(baseline: ControlIdentity, live: AXUIElement) -> Bool {
+        sameControlVerdict(baseline: baseline, live: live).isSameControl
+    }
+
     /// §2.2: a documented re-check. The live focus is compared (`CFEqual`) against the baseline's
     /// target on every call — this runs on each paste-hold tick precisely to notice the user
     /// moving, so it must never be handed a threaded element.
     public func verifyFocusedTextDelivery(
         expectedText: String,
-        baseline: FocusedTextObservation?,
-        staleProbe: String? = nil,
-        staleProbeCaseInsensitive: Bool = false
+        baseline: FocusedTextObservation?
     ) -> TextDeliveryVerification {
-        guard let target = baseline?.target,
-              let current = access.focusedElement(), CFEqual(target, current) else {
-            return .unavailable
+        readFocusedTextDelivery(expectedText: expectedText, baseline: baseline).verification
+    }
+
+    /// `verifyFocusedTextDelivery` with the reason an answer was unavailable kept.
+    ///
+    /// - Parameter vouchingReplacement: WebKit can replace the focused text node when a paste
+    ///   lands, so the baseline's element is no longer `CFEqual` to focus even though the text is
+    ///   in the field. With this set, a replacement that is the same control
+    ///   (`replacementIsSameControl`) is read in the baseline's place; the comparison against the
+    ///   baseline value, insertion window and caret is unchanged, so a different field cannot
+    ///   verify. Off by default: the paste-hold tick keeps its strict identity gate, and only the
+    ///   deferred, observation-only re-verification — which writes nothing — opts in.
+    public func readFocusedTextDelivery(
+        expectedText: String,
+        baseline: FocusedTextObservation?,
+        vouchingReplacement: Bool = false
+    ) -> FocusedDeliveryReading {
+        func unavailable(_ reason: UnavailableReason) -> FocusedDeliveryReading {
+            FocusedDeliveryReading(verification: .unavailable, unavailableReason: reason, replacementElement: nil)
         }
-        if let windowed = verifyDeliveryByWindow(expectedText: expectedText, baseline: baseline, target: target) {
-            return windowed
+        guard let baseline, let target = baseline.target else { return unavailable(.noBaselineTarget) }
+        guard let current = access.focusedElement() else { return unavailable(.noFocusedElement) }
+
+        let isReplacement = !CFEqual(target, current)
+        if isReplacement {
+            let baselineIdentity = ControlIdentity(
+                pid: access.pid(target), frame: baseline.frame, attributes: baseline.attributes
+            )
+            guard vouchingReplacement,
+                  vouchesAsSameControl(baseline: baselineIdentity, live: current) else {
+                return unavailable(.focusReplaced)
+            }
         }
-        return Self.verifyTextDelivery(
-            expectedText: expectedText, baseline: baseline,
-            after: focusedTextObservation(for: target), staleProbe: staleProbe,
-            staleProbeCaseInsensitive: staleProbeCaseInsensitive
+
+        // One comparison for the baseline's own element and for a vouched replacement of it: the
+        // windowed read first, the whole-field read where that cannot answer. The replacement's
+        // read is re-pinned to the baseline target, because `verifyTextDelivery` demands the same
+        // element and the vouch above is what licenses reading the replacement as it.
+        let verdict: TextDeliveryVerification
+        if let windowed = verifyDeliveryByWindow(expectedText: expectedText, baseline: baseline, target: current) {
+            verdict = windowed
+        } else {
+            let observed = focusedTextObservation(for: current)
+            verdict = Self.verifyTextDelivery(
+                expectedText: expectedText, baseline: baseline,
+                after: FocusedTextObservation(
+                    value: observed.value, selectedText: observed.selectedText,
+                    selectedRange: observed.selectedRange, target: target
+                )
+            )
+        }
+        return FocusedDeliveryReading(
+            verification: verdict,
+            unavailableReason: verdict == .unavailable ? .fieldUnreadable : nil,
+            replacementElement: isReplacement && verdict == .delivered ? current : nil
         )
+    }
+
+    /// What the field says about a selection replace, after the ⌘V was posted.
+    public enum ReplacementOutcome: Equatable {
+        /// The field holds the result where the selection was (a node swap is vouched, as in
+        /// `readFocusedTextDelivery`).
+        case landed
+        /// The baseline's own field was read, and it is exactly as it was before the paste: the
+        /// original text is still where the result belonged. Positive evidence about the field,
+        /// not an absence read through whatever happens to be focused.
+        case notLanded
+        /// Anything else — unreadable, changed in some other way, a different field focused with
+        /// nothing to compare. The caller stays where it was before this read existed.
+        case unverified
+    }
+
+    /// Judges a selection replace, read-only. `readFocusedTextDelivery` can only say "delivered",
+    /// so a paste that went nowhere and a field AX cannot read were the same `.unavailable`; the
+    /// second half of this tells them apart.
+    ///
+    /// The miss is read on the baseline's **target element directly**, never through focus. The
+    /// case this exists for is focus slipping to the window after the selection was confirmed:
+    /// the focused element is then the window, which fails the `CFEqual` and the same-control
+    /// vouch, so a focus-based read has nothing to say — while the field itself still answers, and
+    /// still holds the original.
+    ///
+    /// Fails closed to `.unverified` where an unchanged field would prove nothing:
+    /// - `mirrorTrusted` is false (a host whose AX value lags its own edits reads unchanged for a
+    ///   paste that landed — `AXWriteCapabilityStore.mayTrustDeliveryMirror`);
+    /// - the baseline never read the field's value or selection;
+    /// - the result reads the same as the text it replaces, so a paste that landed leaves the
+    ///   field as it was;
+    /// - the field's value is unreadable now, or is anything but the baseline's, byte for byte.
+    public func readReplacementOutcome(
+        expectedText: String,
+        baseline: FocusedTextObservation,
+        mirrorTrusted: Bool
+    ) -> ReplacementOutcome {
+        let reading = readFocusedTextDelivery(
+            expectedText: expectedText, baseline: baseline, vouchingReplacement: true
+        )
+        if reading.verification == .delivered { return .landed }
+        guard mirrorTrusted, !expectedText.isEmpty,
+              let target = baseline.target,
+              let beforeValue = baseline.value, let selection = baseline.selectedRange else {
+            return .unverified
+        }
+        let before = beforeValue as NSString
+        guard Self.validRange(selection, length: before.length) else { return .unverified }
+        if selection.length > 0,
+           before.substring(with: selection).normalizedWhitespace == expectedText.normalizedWhitespace {
+            return .unverified
+        }
+        guard let now = focusedTextObservation(for: target).value, now == beforeValue else {
+            return .unverified
+        }
+        return .notLanded
     }
 
     /// Verifies against `kAXNumberOfCharacters` plus a `kAXStringForRange` read over the insertion
@@ -215,9 +396,7 @@ public final class DeliveryVerifier {
     public static func verifyTextDelivery(
         expectedText: String,
         baseline: FocusedTextObservation?,
-        after: FocusedTextObservation?,
-        staleProbe: String? = nil,
-        staleProbeCaseInsensitive: Bool = false
+        after: FocusedTextObservation?
     ) -> TextDeliveryVerification {
         guard !expectedText.isEmpty else { return .delivered }
         guard let baseline, let after,

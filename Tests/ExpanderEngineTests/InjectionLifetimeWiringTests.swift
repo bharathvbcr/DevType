@@ -1,29 +1,53 @@
 import Foundation
 import XCTest
-import SourceTreeTestSupport
 
-final class InjectionLifetimeWiringTests: XCTestCase {
-    private func source(_ name: String) throws -> String {
-        return try SourceTree.text("Sources/ExpanderEngine/Engine/\(name).swift")
+@testable import ExpanderEngine
+
+/// The owner of "which injection is the live one" is the pipeline's ledger. A new claim and the
+/// engine stopping both cancel the one operation it holds, so neither can leave a second running.
+/// Driven on a real engine with its own pipeline, not by reading the source for the call.
+final class InjectionLifetimeWiringTests: TapEventTestCase {
+    private func isCurrent(_ claim: (operation: InjectCompletionGuard, revision: UInt64)) -> Bool {
+        pipeline.operationIsCurrentForTesting(claim.operation, revision: claim.revision)
     }
 
-    func testQueuedOperationsAndEngineStopUseTheSameCancellationOwner() throws {
-        let pipeline = try source("TextInjectionPipeline")
-        // The owner is the ledger: claiming a new operation and stopping the engine both cancel
-        // the one `activeOperation` it holds, so neither path can leave a second one running.
-        let ledger = try source("ExpansionLedger")
-        XCTAssertEqual(ledger.components(separatedBy: "activeOperation?.cancel()").count - 1, 2,
-                       "claim and cancelCurrent must both cancel the ledger's current operation")
-        XCTAssertTrue(pipeline.contains("let revision = ledger.claim(operation, consumingUndo: purpose.consumesUndo)"))
-        XCTAssertTrue(pipeline.contains("ledger.cancelCurrent()"))
-        XCTAssertTrue(pipeline.contains("let completionGuard = operation"))
-        XCTAssertTrue(try source("EventTapEngine").contains("TextInjectionPipeline.shared.cancelCurrentInjection()"))
+    func testAClaimCancelsTheOperationItSupersedes() {
+        let first = pipeline.claimOperationForTesting()
+        XCTAssertTrue(isCurrent(first))
+        let second = pipeline.claimOperationForTesting()
+        XCTAssertFalse(isCurrent(first), "two operations must never both be live")
+        XCTAssertEqual(first.operation.continuationBlock(), .cancelled,
+                       "a superseded operation already queued or scheduled must stop itself")
+        XCTAssertTrue(isCurrent(second))
     }
 
-    func testEmptyEraseCannotBypassContinuationAndDelayedCursorMustCheckIt() throws {
-        let pipeline = try source("TextInjectionPipeline")
-        XCTAssertFalse(pipeline.contains("erasePlan.isEmpty || self.eraseContextIsCurrent"))
-        XCTAssertTrue(pipeline.contains("sendLeftArrowsAsync(count: arrowCount, shouldContinue: shouldContinue"))
-        XCTAssertTrue(pipeline.contains("canContinue(context, observationOnly: true)"))
+    func testStoppingTheEngineCancelsTheOperationInFlight() {
+        let claim = pipeline.claimOperationForTesting()
+        XCTAssertTrue(isCurrent(claim))
+        engine.stop()
+        XCTAssertFalse(isCurrent(claim), "stop() must reach the same ledger a claim does")
+        XCTAssertEqual(claim.operation.continuationBlock(), .cancelled)
+    }
+
+    /// The undo record is of the app the user was in: switching apps drops it, on the pipeline this
+    /// engine drives.
+    func testAnAppSwitchDropsTheUndoRecordOfThePipelineTheEngineDrives() {
+        pipeline.recordUndoExpansion(.init(
+            erasePlan: ErasePlan(text: "ab"), injectedText: "expanded", triggerText: "abc", bundleID: "test.editor"
+        ), target: .init(pid: 735, element: nil, range: nil))
+        XCTAssertNotNil(pipeline.lastExpansion)
+
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.didActivateApplicationNotification, object: nil
+        )
+
+        XCTAssertNil(pipeline.lastExpansion)
+    }
+
+    func testCancellingTheCurrentInjectionCancelsTheOperationInFlight() {
+        let claim = pipeline.claimOperationForTesting()
+        pipeline.cancelCurrentInjection()
+        XCTAssertFalse(isCurrent(claim))
+        XCTAssertEqual(claim.operation.continuationBlock(), .cancelled)
     }
 }

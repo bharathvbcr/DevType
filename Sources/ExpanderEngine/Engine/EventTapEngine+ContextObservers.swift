@@ -74,7 +74,7 @@ extension EventTapEngine {
             queue: nil
         ) { [weak self] note in
             guard let self else { return }
-            TextInjectionPipeline.shared.clearLastExpansion()
+            pipeline.clearLastExpansion()
             // §2.3: refresh the cache here rather than calling NSWorkspace from the tap thread.
             // The notification already carries the application that just activated.
             if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {

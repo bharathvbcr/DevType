@@ -524,6 +524,40 @@ public final class AXWriteCapabilityStore {
         return hasProvenDeliveryReads(bundleID: bundleID, role: role)
     }
 
+    /// May this app's AX mirror be believed when it says a paste did *not* land, for a correction
+    /// that adds nothing to the field — keeping an AI result on the clipboard and saying so?
+    ///
+    /// Requires observation: a paste here was AX-confirmed inside the hold window
+    /// (`hasProvenDeliveryReads`), and no condemnation has been *observed* since (one revokes the
+    /// proof; the explicit check covers a condemnation recorded under another key shape).
+    ///
+    /// Proof alone is not enough. A Chromium/Electron mirror confirms *some* pastes in-window and
+    /// lags on others — the Antigravity incident's app holds a confirmed read on a real install —
+    /// and a lagging mirror reads "unchanged" for a paste that landed. So a seeded verdict still
+    /// vetoes, except for a host in `seedsWithTrustworthyReadMirror`: one seeded only because its
+    /// AX *writes* lie, whose read mirror the field has shown to be sound. An unstable role (combo
+    /// box, menu) vetoes regardless. `mayActOnDeliveryFailure` stays the gate for re-pastes and
+    /// trigger restores, which add text and keep every seed's veto.
+    public func mayTrustDeliveryMirror(bundleID: String?, role: String?) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else { return false }
+        if observedVerdict(bundleID: bundleID, role: role) == .falseSuccess { return false }
+        if Self.seedVerdict(bundleID: bundleID, role: role) == .falseSuccess {
+            guard !Self.isAXWriteUnstableRole(role),
+                  Self.seedsWithTrustworthyReadMirror.contains(Self.canonicalBundleID(bundleID)) else {
+                return false
+            }
+        }
+        return hasProvenDeliveryReads(bundleID: bundleID, role: role)
+    }
+
+    /// Seeded hosts whose AX *read* mirror is sound even though their writes lie. Each entry needs
+    /// field evidence, not a guess:
+    /// - `com.apple.Safari` — native WebKit, seeded for `kAXSelectedText` writes that report success
+    ///   without mutating. Field report 2026-10-25 (build 389): 14 Safari pastes AX-confirmed
+    ///   inside the hold window, and confirmed reads recorded for its text field, text area and
+    ///   combo box.
+    static let seedsWithTrustworthyReadMirror: Set<String> = ["com.apple.Safari"]
+
     // MARK: - Learning
 
     /// Record that AX claimed success but the field did not change. Sticky across launches.

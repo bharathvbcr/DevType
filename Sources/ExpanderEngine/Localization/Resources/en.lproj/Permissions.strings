@@ -281,6 +281,8 @@
 "recovery.refuse.selectionReplace" = "The result was not pasted because the text it was meant to replace was no longer selected — pasting would have added it beside your original. It is on the clipboard: select the original text and press ⌘V.";
 "inject.selectionReplaceRefused" = "Selection changed — result copied. Select the original text and press ⌘V.";
 "inject.selectionReplaceRefusedNoCopy" = "Selection changed — nothing was pasted, and the result could not be copied.";
+"inject.replaceNotLanded" = "Couldn't confirm the result was pasted — it's copied. If it isn't there, select the original text and press ⌘V.";
+"inject.replaceNotLandedNoCopy" = "Couldn't confirm the result was pasted, and it could not be copied.";
 "recovery.health.idle" = "Inject health: idle";
 "recovery.health.tapExpected" = "Tap expected but not running — the UI will not show a stale Active.";
 "recovery.health.full" = "Inject path: full (AX + HID).";

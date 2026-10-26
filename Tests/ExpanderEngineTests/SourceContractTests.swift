@@ -164,6 +164,22 @@ final class SourceContractTests: XCTestCase {
         )
     }
 
+    /// The paste asks `PasteboardBroker.Environment` rather than naming the system queries inline.
+    /// That is only a refactor while the production environment answers exactly what the inline
+    /// calls did. The pasteboard is a real identity check. The Post Events and Secure Input
+    /// bindings cannot be: they are closures (not comparable) over system state a test can neither
+    /// set nor assume (comparing `live.canPostEvents()` with `CGPreflightPostEventAccess()` is the
+    /// same call twice), so they are pinned in the source that binds them. What the paste *does*
+    /// with each answer is driven in `PasteGateTests`, through the same environment.
+    func testLivePasteEnvironmentIsBoundToTheRealSystemQueries() throws {
+        let live = PasteboardBroker.Environment.live
+        XCTAssertTrue(live.pasteboard() === NSPasteboard.general, "the live paste board is the user's clipboard")
+        let broker = try source("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
+        XCTAssertTrue(broker.contains("var canPostEvents: () -> Bool = { CGPreflightPostEventAccess() }"))
+        XCTAssertTrue(broker.contains("AXContextChecker.isSecureEventInputEnabledLive() }"))
+        XCTAssertTrue(broker.contains("target.isCurrent(checkRange: checkRange, checkElement: checkElement)"))
+    }
+
     func testPasteRefusalsLogDistinctReasonsInsteadOfACombinedPostEventsMessage() throws {
         let broker = try source("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
         let textPaste = try XCTUnwrap(broker.range(of: "expectedText: String?,"))
@@ -176,48 +192,22 @@ final class SourceContractTests: XCTestCase {
             ("text", textBody, "[Inject] paste refused"),
             ("image", imageBody, "[Inject] image paste refused"),
         ] {
-            XCTAssertTrue(
-                body.contains("guard shouldContinue()"),
-                "\(label) paste must refuse cancelled or superseded work before posting"
-            )
-            XCTAssertTrue(
-                body.contains("guard CGPreflightPostEventAccess()"),
-                "\(label) paste must re-check Post Events at paste time"
-            )
-            XCTAssertTrue(
-                body.contains("AXContextChecker.isSecureEventInputEnabledLive()"),
-                "\(label) paste must re-read Secure Input at paste time"
-            )
-            XCTAssertTrue(
-                body.contains("verifySelectionRange("),
-                "\(label) paste must use the shared selection-range policy"
-            )
-            XCTAssertTrue(
-                body.contains("phase: .afterMutation"),
-                "\(label) paste runs after HID erase; AX selectedRange is not a same-caret signal"
-            )
-            XCTAssertTrue(
-                body.contains("verifyFocusedElement("),
-                "\(label) paste must not treat combo-box AX retarget as a field switch after HID erase"
-            )
-            XCTAssertTrue(
-                body.contains("target.isCurrent(checkRange: verifySelection"),
-                "\(label) paste must not require a stable AX range after our own mutation"
-            )
-            XCTAssertFalse(
-                body.contains("target.isCurrent(checkRange: true)"),
-                "\(label) paste must not hardcode a selection-range check that aborts Electron HID paste after erase"
-            )
-            XCTAssertTrue(
-                body.contains("pasteContinuation(ticket: ticket, target: target, checkRange: verifySelection"),
-                "\(label) Cmd+V continuation must use the same post-mutation policy as the immediate gate"
-            )
-            XCTAssertFalse(
-                PasteboardBroker.verifySelectionRange(
-                    verdict: .unknown, bundleKnown: true, phase: .afterMutation
-                ),
-                "\(label) post-mutation policy must ignore AX range even for unclassified hosts"
-            )
+            if label == "text" {
+                // The text paste's identity check is `PasteboardBroker.targetIsCurrent`: still the
+                // environment's `targetCurrent` and nothing else judges what is focused — a caller's
+                // vouched replacement is verified through the same call, never trusted.
+                let source = SourceContractTests.strippingComments(
+                    try SourceTree.text("Sources/ExpanderEngine/Engine/PasteboardBroker.swift")
+                )
+                let judge = try SourceTree.functionBody("private func targetIsCurrent(", in: source)
+                XCTAssertEqual(judge.components(separatedBy: "environment.targetCurrent(").count - 1, 2,
+                               "the captured target and an offered replacement go through the one judge")
+                XCTAssertFalse(body.contains("environment.targetCurrent("),
+                               "text paste must not judge the target outside `targetIsCurrent`")
+            }
+            // Each refusal is its own sentence. The conditions themselves are driven in
+            // `PasteGateTests`; what they log cannot be observed (os.Logger has no capture seam),
+            // so the sentences are pinned here, in the source that writes them.
             XCTAssertTrue(body.contains("\(prefix) — cancelled or superseded"))
             XCTAssertTrue(body.contains("\(prefix) — Post Events denied at paste time"))
             XCTAssertTrue(body.contains("\(prefix) — Secure Input active at paste time"))

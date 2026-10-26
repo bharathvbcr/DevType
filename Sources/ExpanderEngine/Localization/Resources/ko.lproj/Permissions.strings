@@ -273,6 +273,8 @@
 "recovery.refuse.selectionReplace" = "바꿀 텍스트가 더 이상 선택되어 있지 않아 결과를 붙여넣지 않았습니다(붙여넣으면 원본 옆에 추가되었을 것입니다). 결과는 클립보드에 있습니다. 원본 텍스트를 선택하고 ⌘V를 누르세요.";
 "inject.selectionReplaceRefused" = "선택 영역이 바뀌었습니다 — 결과를 복사했습니다. 원본 텍스트를 선택하고 ⌘V를 누르세요.";
 "inject.selectionReplaceRefusedNoCopy" = "선택 영역이 바뀌었습니다 — 아무것도 붙여넣지 않았고 결과를 복사하지 못했습니다.";
+"inject.replaceNotLanded" = "결과가 붙여넣어졌는지 확인하지 못했습니다 — 결과를 복사했습니다. 없으면 원본 텍스트를 선택하고 ⌘V를 누르세요.";
+"inject.replaceNotLandedNoCopy" = "결과가 붙여넣어졌는지 확인하지 못했고 결과를 복사하지도 못했습니다.";
 "recovery.health.idle" = "삽입 상태: 유휴";
 "recovery.health.tapExpected" = "탭이 필요하지만 실행 중이 아닙니다 — 오래된 활성 상태는 표시되지 않습니다.";
 "recovery.health.full" = "삽입 경로: 전체 (AX + HID).";

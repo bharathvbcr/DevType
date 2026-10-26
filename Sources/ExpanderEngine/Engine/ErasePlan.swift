@@ -68,6 +68,29 @@ public struct ErasePlan: Equatable {
         return nil
     }
 
+    /// The part of the plan that `graphemes` posted backspaces have already removed: the last
+    /// `graphemes` grapheme clusters of `expectedText`, clamped to the plan. For restoring a
+    /// burst that stopped part-way, where the field now holds the head of the trigger and the
+    /// caller owes it the tail back. Nil when nothing was posted or the plan has no text (a
+    /// count-only path cannot say what it removed).
+    public func erasedTail(graphemes posted: Int) -> ErasePlan? {
+        guard posted > 0, let expectedText, !expectedText.isEmpty else { return nil }
+        return ErasePlan(
+            text: String(expectedText.suffix(min(posted, expectedText.count))),
+            caseInsensitive: caseInsensitive
+        )
+    }
+
+    /// What `graphemes` posted backspaces should have left of the plan: the head a partial-erase
+    /// restore puts the tail back after. The count is of pairs the continue-check *authorized*,
+    /// which overstates the posted ones by one when a CGEvent could not be created, so the field
+    /// has to prove it holds this head before anything is restored. Nil when nothing was posted,
+    /// nothing remains, or the plan has no text — none of which a field reading could confirm.
+    public func keptHead(graphemes posted: Int) -> ErasePlan? {
+        guard posted > 0, let expectedText, posted < expectedText.count else { return nil }
+        return ErasePlan(text: String(expectedText.dropLast(posted)), caseInsensitive: caseInsensitive)
+    }
+
     /// Builds the plan from the text the user actually typed.
     ///
     /// DevType swallows the final trigger key, so that key never reaches the field:

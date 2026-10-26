@@ -96,29 +96,57 @@ extension EventTapEngine {
         _isExpanding = true
         // §8.3: from here until `endExpansion`, keys the user types are held rather than passed
         // through, so they cannot overtake the paste still in flight.
-        _typeAhead.beginExpansion(focusPID: focusPID)
+        _typeAhead.beginExpansion(focusPID: focusPID, now: now())
         // §3.1d: open the delivery-input window *before* the expanding flag is visible to the
         // tap thread. Resetting it after the flag was observable raced: a pass-through key could
         // increment the counter and then be wiped by the reset, losing exactly the contamination
         // evidence the window exists to keep. Nesting order is one-directional (engine →
         // pipeline); no path holds `lastExpansionLock` while taking this engine lock.
-        TextInjectionPipeline.shared.beginDeliveryWindow()
+        pipeline.beginDeliveryWindow()
         lock.unlock()
         return true
     }
 
     func endExpansion() {
+        // Before `lock`, like `tryBeginExpansion`: the context has its own lock.
+        let currentPID = frontmostContext.processID
+        // Before `lock`, for the same reason: the physical-layout buffer is cleared here and never
+        // seeded, so on that path the ring must not claim text the layout buffer does not.
+        contextLock.lock()
+        let physicalLayoutPath = _allowPhysicalFallback
+        contextLock.unlock()
         lock.lock()
         _isExpanding = false
         let holdPID = _typeAhead.holdPID
         let replay = _typeAhead.endExpansion()
+        // Same nesting as `tryBeginExpansion` (engine → pipeline). A surrender recorded for this
+        // delivery must not outlive it and withhold an unrelated key replay later.
+        pipeline.endDeliveryWindow()
         ringBuffer.removeAll()
         layoutBuffer.clear()
         lastEventUTF16Count = 1
+        // The replay is posted as synthetic events, which the tap ignores — so the buffer would
+        // never learn of characters that are about to land in the field. Two triggers typed back
+        // to back (`` `slm `` then `` `asu ``) lost the first characters of the second this way.
+        // Seeded only when the replay will actually be posted, and only while the ring is the
+        // whole story: `_replayInFlight` keeps a real key that races the posts out of it (see the
+        // tap callback), so the ring is never in an order the field may not share.
+        let seeded = !replay.isEmpty && !physicalLayoutPath
+            && TypeAheadBuffer.mayReplay(heldFor: holdPID, intoFrontmost: currentPID)
+        if seeded {
+            ringBuffer.append(contentsOf: replay)
+            lastEventUTF16Count = max(1, String(replay.last ?? " ").utf16.count)
+            _replayInFlight = true
+        }
         lock.unlock()
         // §8.3: outside the lock — replaying posts HID events, and the tap callback for those
         // events takes this same lock.
         replayTypeAhead(replay, heldFor: holdPID, reason: "expansion complete")
+        if seeded {
+            lock.lock()
+            _replayInFlight = false
+            lock.unlock()
+        }
     }
 
     /// Decides one keystroke against the type-ahead hold. Runs on the tap thread, so it reads the
@@ -155,7 +183,8 @@ extension EventTapEngine {
             unicode: unicode,
             isSynthetic: false,
             resetsBuffer: resets,
-            focusPID: focusPID
+            focusPID: focusPID,
+            now: now()
         )
         lock.unlock()
 
@@ -169,6 +198,46 @@ extension EventTapEngine {
             unicodeCount: length
         )
         return (decision, decision != .swallow && contaminates, holdPID)
+    }
+
+    /// The type-ahead hold has surrendered (`.flushThenPassThrough`, or a click flushing it). If
+    /// the in-flight inject has not begun mutating the field, it is abandoned here and the
+    /// terminator it swallowed is put back first, so the user's keystrokes reach the field in
+    /// the order they typed them: terminator, then the keys the hold released, then the key that
+    /// forced the surrender. Once the pipeline has begun mutating, nothing changes: that
+    /// expansion is already past the point where the terminator's place is defined.
+    ///
+    /// Must be called on the tap thread, before `replayTypeAhead` posts the released keys and
+    /// before the surrendering event is handed back. `reason` is a bounded label for the log.
+    ///
+    /// `postTerminator` false is the click: the surrender still abandons the inject, but the
+    /// terminator is settled without being typed. A post from inside the callback may reach the
+    /// app *after* the event being handed back — unverified either way until a live run settles
+    /// it — and after a click that event has moved the caret, so a Return terminator could submit
+    /// whatever field the user just clicked into. Losing it is what a click did before.
+    func surrenderHoldPuttingTerminatorBack(heldFor sourcePID: pid_t?, reason: String, postTerminator: Bool = true) {
+        // The surrender exists to keep the terminator ahead of the held keys *in the field they
+        // were typed in*. A hold that ends because focus left that app — DevType's own fill-in
+        // panel, which the expansion opened and will paste after, or another app — is not that:
+        // the inject's own focus gates judge it, and its owed terminator stays with the refusal
+        // that checks the target. Surrendering there cancelled every fill-in snippet the moment
+        // its panel took a key. Only an app *known* to be the same counts: an unknown hold or
+        // frontmost process is not evidence the field is the one the keys were held for.
+        guard let sourcePID, let frontPID = frontmostContext.processID, sourcePID == frontPID else {
+            return
+        }
+        guard case .abandoned(let terminator?) = pipeline.surrenderHold() else {
+            return
+        }
+        guard postTerminator else {
+            DevTypeLog.inject.notice("[TypeAhead] hold surrendered by a click — terminator not typed after the caret moved")
+            return
+        }
+        let safeReason = DevTypeLog.boundedPublicIdentifier(reason, label: "replayReason")
+        DevTypeLog.inject.notice(
+            "[TypeAhead] hold surrendered before the erase — terminator put back ahead of the held keys, reason=\(safeReason, privacy: .public)"
+        )
+        postSurrenderedTerminator(terminator)
     }
 
     /// Re-posts keystrokes held during an expansion, in the order they were typed.
@@ -219,18 +288,14 @@ extension EventTapEngine {
         // synthetically so the tap's counter hook never sees them. Count them here or a blind
         // undo would under-count what sits between the injected text and the caret. Replays that
         // fire before a record exists are a harmless no-op.
-        TextInjectionPipeline.shared.noteInputAfterExpansion(units: text.count)
+        pipeline.noteInputAfterExpansion(units: text.count)
         // HID only — deliberately *not* `attemptAXDirectInjection`. That call reports success
         // without writing in the whole Chromium/Electron false-success class, which is exactly
         // where this bug occurs, so an AX replay would silently eat the user's keystrokes: the
         // one outcome this design must never produce. A posted key can be dropped by the system,
         // but it is never a lie.
         for character in text {
-            _ = HIDKeyPoster.shared.postUnicodeKeyEvent(
-                unicode: String(character),
-                keyCode: 0,
-                flags: []
-            )
+            typeAheadReplayPoster(String(character))
         }
     }
 
@@ -238,6 +303,12 @@ extension EventTapEngine {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         // Caps Lock (keycode 57) toggles often imply caret/context change — reset.
         if keyCode == 57 {
+            resetBuffer()
+        }
+        // Fn / Globe (keycode 63) is how the emoji picker and dictation open, and both insert text
+        // with no key events at all — the buffer would lack it. Pressing Fn to reach an F-key or
+        // a navigation key costs only a partially typed trigger.
+        if keyCode == Int64(kVK_Function) {
             resetBuffer()
         }
     }

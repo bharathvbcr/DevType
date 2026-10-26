@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DevType Live Harness</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Fixture for `Scripts/safari-harness.sh`. Opened from file:// in Safari by the harness, never served.
+
+  Every control carries a stable id with the `dth-` prefix. The harness refuses to post a keystroke
+  unless the focused element's AXDOMIdentifier starts with that prefix and its web area is this
+  file, so do not rename an id without changing `PageField` in SafariHarnessCore.
+
+  The page keeps a log of what each field held after every input event (`window.__dth`), readable
+  through "Allow JavaScript from Apple Events". The harness works without it; AX is the primary read.
+-->
+<style>
+  :root { color-scheme: light dark; font: 15px/1.4 -apple-system, system-ui, sans-serif; }
+  body { margin: 24px; max-width: 760px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.note { margin: 0 0 16px; opacity: .75; }
+  section { margin: 0 0 14px; }
+  label { display: block; font-weight: 600; margin-bottom: 3px; }
+  /* One frame for every control, including the two SPA states, so a swap changes nothing visible. */
+  .frame { box-sizing: border-box; width: 440px; height: 36px; padding: 5px 9px; font: 15px ui-monospace, Menlo, monospace;
+           border: 1px solid #888; border-radius: 6px; background: Field; color: FieldText; overflow: hidden; resize: none; display: block; }
+  .tall { height: 84px; }
+  [contenteditable] { white-space: pre-wrap; }
+  #dth-state { margin-top: 18px; font: 12px ui-monospace, Menlo, monospace; opacity: .8; white-space: pre-wrap; }
+  button { font: inherit; padding: 4px 12px; }
+</style>
+</head>
+<body>
+<h1>DevType Live Harness</h1>
+<p class="note">Driven by <code>Scripts/safari-harness.sh</code>. Keep your hands off the keyboard while it runs; press Escape to abort.</p>
+
+<section><label for="dth-plain">Plain input</label>
+  <input id="dth-plain" class="frame" type="text" aria-label="dth-plain" autocomplete="off" autocapitalize="off" spellcheck="false"></section>
+
+<section><label for="dth-area">Textarea</label>
+  <textarea id="dth-area" class="frame tall" aria-label="dth-area" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></section>
+
+<section><label id="dth-editable-label">Contenteditable</label>
+  <div id="dth-editable" class="frame tall" contenteditable="true" role="textbox" aria-multiline="true" aria-label="dth-editable" spellcheck="false"></div></section>
+
+<section><label>Re-rendering input (replaces its DOM node on every input event)</label>
+  <div id="dth-rerender-host"></div></section>
+
+<section><label>SPA swap, immediate (becomes a textarea on the last trigger character)</label>
+  <div id="dth-spa-immediate-host"></div></section>
+
+<section><label>SPA swap, delayed 60 ms (becomes a textarea while the expansion is in flight)</label>
+  <div id="dth-spa-delayed-host"></div></section>
+
+<section><label for="dth-password">Password input (Secure Event Input)</label>
+  <input id="dth-password" class="frame" type="password" aria-label="dth-password" autocomplete="off"></section>
+
+<section><label for="dth-ai">AI selection target (pre-filled; the harness selects it, it never types here)</label>
+  <textarea id="dth-ai" class="frame tall" aria-label="dth-ai" spellcheck="false"></textarea></section>
+
+<section><button id="dth-reset" type="button" aria-label="dth-reset">Reset fields</button></section>
+<div id="dth-state" role="status" aria-label="dth-state"></div>
+
+<script>
+(function () {
+  'use strict';
+  var AI_TEXT = 'teh quick brown fox jumpd over teh lazy dog';
+  var params = new URLSearchParams(location.search);
+  var triggerLen = parseInt(params.get('triggerLen') || '10', 10);
+  var t0 = performance.now();
+  var log = [];
+  var swaps = [];
+  var state = { rerenders: 0 };
+
+  function now() { return Math.round(performance.now() - t0); }
+  function byId(id) { return document.getElementById(id); }
+  function valueOf(el) {
+    if (!el) return null;
+    if (el.isContentEditable && !('value' in el)) return el.innerText;
+    return el.value;
+  }
+  function note(kind, id, extra) {
+    var entry = { t: now(), kind: kind, id: id };
+    var el = byId(id);
+    if (el) entry.value = valueOf(el);
+    if (extra) for (var k in extra) entry[k] = extra[k];
+    log.push(entry);
+    if (log.length > 400) log.shift();
+    render();
+  }
+  function render() {
+    var out = byId('dth-state');
+    if (!out) return;
+    var last = log.slice(-6).map(function (e) { return e.t + 'ms ' + e.kind + ' ' + e.id + (e.value !== undefined ? ' = ' + JSON.stringify(e.value) : ''); });
+    out.textContent = 'events: ' + log.length + ' swaps: ' + swaps.length + ' rerenders: ' + state.rerenders + '\n' + last.join('\n');
+  }
+  function frame(el, id, label, tall) {
+    el.id = id;
+    el.className = 'frame' + (tall ? ' tall' : '');
+    el.setAttribute('aria-label', label);
+    el.setAttribute('autocomplete', 'off');
+    el.setAttribute('autocapitalize', 'off');
+    el.setAttribute('spellcheck', 'false');
+    return el;
+  }
+
+  // Plain controls: log every input event so the page can say what a field held after each one.
+  ['dth-plain', 'dth-area', 'dth-editable', 'dth-password', 'dth-ai'].forEach(function (id) {
+    var el = byId(id);
+    el.addEventListener('input', function () { note('input', id); });
+    el.addEventListener('focus', function () { note('focus', id); });
+  });
+  byId('dth-ai').value = AI_TEXT;
+
+  // The WebKit node-swap case: every input event replaces the control with a fresh node that has
+  // the same value, caret and focus. An AX element captured before the event is dead afterwards.
+  function mountRerender(value, caret, focus) {
+    var host = byId('dth-rerender-host');
+    var input = frame(document.createElement('input'), 'dth-rerender', 'dth-rerender', false);
+    input.type = 'text';
+    input.value = value;
+    input.addEventListener('input', onRerenderInput);
+    host.replaceChildren(input);
+    if (focus) {
+      input.focus();
+      try { input.setSelectionRange(caret, caret); } catch (e) {}
+    }
+  }
+  function onRerenderInput(e) {
+    var old = e.target;
+    var value = old.value;
+    var caret = old.selectionStart == null ? value.length : old.selectionStart;
+    state.rerenders += 1;
+    mountRerender(value, caret, true);
+    note('input', 'dth-rerender', { rerenders: state.rerenders });
+  }
+
+  // The SPA case: when the field reaches the trigger length the component is replaced by a
+  // different control (textarea) in the same frame, value carried over and focus moved to it.
+  // An expansion that was verified against the input must not land in the textarea.
+  function mountSpa(name, delayMs) {
+    var host = byId('dth-spa-' + name + '-host');
+    var swapped = false;
+    var a = frame(document.createElement('input'), 'dth-spa-' + name + '-a', 'dth-spa-' + name + '-a', false);
+    a.type = 'text';
+    a.addEventListener('input', function () {
+      note('input', a.id);
+      if (swapped || a.value.length < triggerLen) return;
+      swapped = true;
+      setTimeout(function () {
+        var b = frame(document.createElement('textarea'), 'dth-spa-' + name + '-b', 'dth-spa-' + name + '-b', false);
+        b.value = a.value;
+        b.addEventListener('input', function () { note('input', b.id); });
+        host.replaceChildren(b);
+        b.focus();
+        b.setSelectionRange(b.value.length, b.value.length);
+        swaps.push({ name: name, t: now(), carried: b.value });
+        note('swap', b.id, { carried: b.value, delayMs: delayMs });
+      }, delayMs);
+    });
+    host.replaceChildren(a);
+  }
+
+  function reset() {
+    ['dth-plain', 'dth-area', 'dth-password'].forEach(function (id) { byId(id).value = ''; });
+    byId('dth-editable').textContent = '';
+    byId('dth-ai').value = AI_TEXT;
+    state.rerenders = 0;
+    swaps.length = 0;
+    mountRerender('', 0, false);
+    mountSpa('immediate', 0);
+    mountSpa('delayed', 60);
+    log.length = 0;
+    if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    note('reset', 'dth-reset');
+  }
+
+  byId('dth-reset').addEventListener('click', reset);
+  reset();
+
+  window.__dth = {
+    version: 1,
+    triggerLen: triggerLen,
+    aiText: AI_TEXT,
+    reset: reset,
+    // What every control holds right now, by id. Controls that were swapped out are simply absent.
+    snapshot: function () {
+      var fields = {};
+      ['dth-plain', 'dth-area', 'dth-editable', 'dth-rerender', 'dth-spa-immediate-a', 'dth-spa-immediate-b',
+       'dth-spa-delayed-a', 'dth-spa-delayed-b', 'dth-password', 'dth-ai'].forEach(function (id) {
+        var el = byId(id);
+        if (el) fields[id] = { value: valueOf(el), tag: el.tagName.toLowerCase() };
+      });
+      return { fields: fields, swaps: swaps.slice(), rerenders: state.rerenders,
+               active: document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : null };
+    },
+    // Returns and clears the event log.
+    drain: function () { var out = log.slice(); log.length = 0; return out; }
+  };
+})();
+</script>
+</body>
+</html>

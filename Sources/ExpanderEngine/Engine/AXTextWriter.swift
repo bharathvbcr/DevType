@@ -31,21 +31,101 @@ public final class AXTextWriter {
         /// A `kAXSelectedText` write was issued but its effect cannot be judged. The field may
         /// have mutated.
         case unavailable(String)
+        /// A write was issued and the first read showed no change. Neither a lie nor a landing
+        /// yet: the selection is still widened, no verdict is recorded, and the caller owes a
+        /// `confirmRangeReplace` after the host settles. The field may have mutated.
+        case unconfirmed(PendingRangeReplace)
 
         /// True when a text write reached the field, so downstream destructive steps must treat
         /// unverifiable state as "may already contain the expansion".
         public var fieldMayHaveMutated: Bool {
             switch self {
             case .notAttempted: return false
-            case .replaced, .falseSuccess, .unavailable: return true
+            case .replaced, .falseSuccess, .unavailable, .unconfirmed: return true
             }
         }
     }
 
-    private let verifier: DeliveryVerifier
+    /// Everything `confirmRangeReplace` needs to judge a write again later.
+    public struct PendingRangeReplace: Equatable {
+        let element: AXUIElement
+        let text: String
+        let beforeValue: String?
+        let role: String
+        let bundleID: String?
+        /// The caret as found, before the range was widened over the trigger.
+        let originalRange: CFRange
 
-    public init(verifier: DeliveryVerifier = DeliveryVerifier.shared) {
+        public static func == (lhs: PendingRangeReplace, rhs: PendingRangeReplace) -> Bool {
+            CFEqual(lhs.element, rhs.element) && lhs.text == rhs.text
+                && lhs.beforeValue == rhs.beforeValue && lhs.role == rhs.role
+                && lhs.bundleID == rhs.bundleID
+                && lhs.originalRange.location == rhs.originalRange.location
+                && lhs.originalRange.length == rhs.originalRange.length
+        }
+    }
+
+    /// The AX attribute surface the range replace reads and writes, injectable so a host whose
+    /// tree lags a real edit can be scripted without a live application.
+    struct ElementAccess {
+        var role: (AXUIElement) -> String?
+        var selectedRange: (AXUIElement) -> CFRange?
+        var setSelectedRange: (AXUIElement, CFRange) -> AXError
+        var value: (AXUIElement) -> String?
+        var setSelectedText: (AXUIElement, String) -> AXError
+        var selectedText: (AXUIElement) -> String?
+
+        static let live = ElementAccess(
+            role: { element in
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &ref) == .success else {
+                    return nil
+                }
+                return ref as? String
+            },
+            selectedRange: { element in
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &ref) == .success,
+                      let rangeValue = ref, CFGetTypeID(rangeValue) == AXValueGetTypeID() else { return nil }
+                var range = CFRange(location: 0, length: 0)
+                guard AXValueGetValue(unsafeBitCast(rangeValue, to: AXValue.self), .cfRange, &range) else { return nil }
+                return range
+            },
+            setSelectedRange: { element, range in
+                var range = range
+                guard let value = AXValueCreate(.cfRange, &range) else { return .failure }
+                return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value)
+            },
+            value: { element in
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &ref) == .success else {
+                    return nil
+                }
+                return ref as? String
+            },
+            setSelectedText: { element, text in
+                AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
+            },
+            selectedText: { element in
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &ref) == .success else {
+                    return nil
+                }
+                return ref as? String
+            }
+        )
+    }
+
+    private let verifier: DeliveryVerifier
+    private let access: ElementAccess
+
+    public convenience init(verifier: DeliveryVerifier = DeliveryVerifier.shared) {
+        self.init(verifier: verifier, access: .live)
+    }
+
+    init(verifier: DeliveryVerifier = DeliveryVerifier.shared, access: ElementAccess) {
         self.verifier = verifier
+        self.access = access
     }
 
     // MARK: - Hostile range validation
@@ -115,10 +195,18 @@ public final class AXTextWriter {
 
     /// Transactional AX replace.
     ///
-    /// Contract: when this returns anything other than `.replaced`, the field and its selection are
-    /// left **exactly** as they were found. Callers fall back to HID backspace + paste, which
-    /// assumes an untouched field — leaving a widened selection behind is what caused backspace #1
-    /// to eat the selection and the remaining backspaces to eat the user's preceding text.
+    /// Contract: when this returns `.notAttempted`, `.falseSuccess` or `.unavailable`, the
+    /// field and its selection are left **exactly** as they were found. Callers fall back to
+    /// HID backspace + paste, which assumes an untouched field — leaving a widened selection
+    /// behind is what caused backspace #1 to eat the selection and the remaining backspaces to
+    /// eat the user's preceding text.
+    ///
+    /// `.unconfirmed` is the one outcome that leaves both alone on purpose: the write was issued
+    /// and the field showed no change on the first read, which a host that lies and a host whose
+    /// AX tree has not caught up with a real edit both produce. Judging it now condemned honest
+    /// but slow apps (a wrong verdict is effectively permanent), put the caret back *inside* an
+    /// expansion that had landed, and sent the HID fallback at the new text. The caller waits
+    /// out `AXSettleRetry.settleDelay` and asks `confirmRangeReplace`.
     public func performAXRangeReplace(
         text: String,
         eraseCount: Int,
@@ -137,11 +225,7 @@ public final class AXTextWriter {
             return .notAttempted("no focused element")
         }
 
-        var roleRef: CFTypeRef?
-        let role: String =
-            (AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleRef) == .success)
-            ? ((roleRef as? String) ?? "")
-            : ""
+        let role = access.role(axElement) ?? ""
 
         // §3.3: the store is keyed on `(bundleID, role)`. The caller's pre-check only knows the
         // bundle, so this is the first point where a verdict learned for *this* control — a
@@ -163,80 +247,27 @@ public final class AXTextWriter {
             return .notAttempted("learned false-success for \(bundleID) role \(role.isEmpty ? "(unreadable)" : role)")
         }
 
-        var rangeRef: CFTypeRef?
-        let rangeCopy = AXUIElementCopyAttributeValue(
-            axElement,
-            kAXSelectedTextRangeAttribute as CFString,
-            &rangeRef
-        )
-        guard rangeCopy == .success,
-              let rangeValue = rangeRef,
-              CFGetTypeID(rangeValue) == AXValueGetTypeID() else {
+        guard let range = access.selectedRange(axElement) else {
             // #region agent log
             TextInjectionPipeline.debugLogInject(
                 hypothesisId: "M3",
                 message: "axRangeReplace",
                 location: "AXTextWriter",
-                data: [
-                    "ok": false,
-                    "fail": "selectedTextRange",
-                    "rangeAXError": Int(rangeCopy.rawValue),
-                    "role": role
-                ]
+                data: ["ok": false, "fail": "selectedTextRange", "role": role]
             )
             // #endregion
-            return .notAttempted("AXSelectedTextRange unreadable (\(rangeCopy.rawValue))")
-        }
-
-        let axRangeValue = unsafeBitCast(rangeValue, to: AXValue.self)
-        var range = CFRange(location: 0, length: 0)
-        guard AXValueGetValue(axRangeValue, .cfRange, &range) else {
-            // #region agent log
-            TextInjectionPipeline.debugLogInject(
-                hypothesisId: "M3",
-                message: "axRangeReplace",
-                location: "AXTextWriter",
-                data: ["ok": false, "fail": "rangeDecode", "role": role]
-            )
-            // #endregion
-            return .notAttempted("AXSelectedTextRange undecodable")
-        }
-
-        // Caller falls back to HID backspace + paste when this returns false. That fallback assumes
-        // the field is untouched, so every failure path below MUST undo the widened selection —
-        // otherwise backspace #1 eats the selection and the rest eat preceding user text.
-        let originalRange = range
-        func restoreOriginalSelection() {
-            var restore = originalRange
-            guard let restoreValue = AXValueCreate(.cfRange, &restore) else { return }
-            let status = AXUIElementSetAttributeValue(
-                axElement,
-                kAXSelectedTextRangeAttribute as CFString,
-                restoreValue
-            )
-            if status != .success {
-                // A failed restore leaves the widened selection in place; the HID fallback's
-                // first backspace would then eat it. Hosts whose range-set lies twice are a real
-                // observed shape — surface it so field reports can identify them.
-                DevTypeLog.inject.error(
-                    "[Inject] AX selection restore failed after range-replace attempt (\(status.rawValue, privacy: .public)) — widened selection left behind"
-                )
-            }
+            return .notAttempted("AXSelectedTextRange unreadable")
         }
 
         // Baseline value: the only reliable way to tell "AX reported success but did not mutate"
         // (Messages / Electron) apart from a real edit we simply cannot re-read.
-        var beforeValueRef: CFTypeRef?
-        let beforeValue: String? =
-            (AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &beforeValueRef) == .success)
-            ? (beforeValueRef as? String)
-            : nil
+        let beforeValue = access.value(axElement)
 
         let erase = max(0, eraseCount)
         // The erase precondition checker refuses negative/overflowing ranges ("we do not know
         // where the caret is"); the writer must refuse them too. Widening from such a range
         // previously produced {0, L-1} — the start of the document — or trapped on overflow.
-        guard var expanded = Self.widenedRange(from: range, eraseCount: eraseCount) else {
+        guard let expanded = Self.widenedRange(from: range, eraseCount: eraseCount) else {
             TextInjectionPipeline.debugLogInject(
                 hypothesisId: "M3",
                 message: "axRangeReplace",
@@ -252,14 +283,7 @@ public final class AXTextWriter {
             return .notAttempted("unusable selected-text range (\(range.location), \(range.length))")
         }
 
-        guard let newRangeValue = AXValueCreate(.cfRange, &expanded) else {
-            return .notAttempted("AXValueCreate failed for widened range")
-        }
-        let setRange = AXUIElementSetAttributeValue(
-            axElement,
-            kAXSelectedTextRangeAttribute as CFString,
-            newRangeValue
-        )
+        let setRange = access.setSelectedRange(axElement, expanded)
         guard setRange == .success else {
             // #region agent log
             TextInjectionPipeline.debugLogInject(
@@ -281,85 +305,126 @@ public final class AXTextWriter {
             return .notAttempted("setSelectedTextRange failed (\(setRange.rawValue))")
         }
 
-        let setResult = AXUIElementSetAttributeValue(axElement, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
-        var valueLen = -1
-        /// Only a read-back comparison is evidence about this app's AX behaviour. Assuming success
-        /// because we could not read the field must never be recorded as trust — that would
-        /// overwrite a seeded `.falseSuccess` verdict and re-enable the broken path for the session.
-        var verdictIsEvidence = false
+        let pending = PendingRangeReplace(
+            element: axElement, text: text, beforeValue: beforeValue, role: role,
+            bundleID: bundleID, originalRange: range
+        )
+        let setResult = access.setSelectedText(axElement, text)
         let outcome: AXReplaceOutcome
-
         if setResult != .success {
             outcome = .unavailable("setSelectedText failed (\(setResult.rawValue))")
+            restoreOriginalSelection(pending)
         } else {
             // Reject false AX success: setSelectedText can return `.success` without mutating
-            // (Messages, Chromium/Electron web views). The test is "did the field change", NOT
-            // "can we find `text` in the value" — some hosts return a stale or virtualised AXValue
-            // right after a real edit, and treating that as failure sends the HID fallback at an
-            // already-mutated field, which duplicates text or deletes past the trigger.
-            var valueRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success,
-               let value = valueRef as? String {
-                valueLen = value.utf16.count
-                verdictIsEvidence = true
-                if let beforeValue {
-                    outcome = value == beforeValue ? .falseSuccess : .replaced
-                } else {
-                    // No baseline to compare against — fall back to containment. Compare with
-                    // whitespace normalized: rich-text hosts (ProseMirror in Claude Desktop)
-                    // store a trailing typed space as U+00A0, and a raw miss here would record
-                    // `.falseSuccess` for a write that actually landed — condemning the AX path
-                    // and sending the HID fallback at an already-mutated field.
-                    outcome = value.normalizedWhitespace.contains(text.normalizedWhitespace)
-                        ? .replaced : .falseSuccess
-                }
-            } else {
-                // AXValue is unreadable (e.g. complex document views like Word or unseeded custom editors).
-                // Check if kAXSelectedTextAttribute is readable: if the write succeeded, the selection
-                // should have collapsed (empty) or become the replacement text. If it is still non-empty
-                // and does NOT contain the replacement text (e.g. still holds the widened trigger),
-                // the write provably failed to mutate.
-                var selectedTextRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-                   let afterSelected = selectedTextRef as? String,
-                   !afterSelected.isEmpty {
-                    if !afterSelected.normalizedWhitespace.contains(text.normalizedWhitespace) {
-                        outcome = .falseSuccess
-                        verdictIsEvidence = true
-                    } else {
-                        outcome = .replaced
-                    }
-                } else {
-                    // AX write claimed success and we cannot read the field back. We must not assume it
-                    // was a no-op (that would double-apply); treat it as applied but unverified, and
-                    // learn nothing about the app from it.
-                    outcome = .replaced
-                }
+            // (Messages, Chromium/Electron web views) — but only a *settled* read may say so.
+            outcome = conclude(judgeReadback(pending), pending: pending, settled: false)
+        }
+
+        logRangeReplace(outcome, setResult: setResult, role: role, range: range, erase: erase,
+                        textLength: text.utf16.count, valueLength: -1)
+        return outcome
+    }
+
+    /// What a write that returned `.unconfirmed` turned out to be, read again after the host had
+    /// time to settle. The final judgement `performAXRangeReplace` withheld: a field still
+    /// showing no change is a lie (selection restored, verdict recorded); a changed one landed.
+    /// Never returns `.unconfirmed`.
+    public func confirmRangeReplace(_ pending: PendingRangeReplace) -> AXReplaceOutcome {
+        let outcome = conclude(judgeReadback(pending), pending: pending, settled: true)
+        logRangeReplace(outcome, setResult: .success, role: pending.role, range: pending.originalRange,
+                        erase: -1, textLength: pending.text.utf16.count, valueLength: -1)
+        return outcome
+    }
+
+    /// What one read of the field says about the write that was just issued.
+    private enum Readback {
+        /// The field changed (`learn`: the evidence is a value comparison, which may be recorded
+        /// as trust for this app — a selection-only reading may not).
+        case landed(learn: Bool)
+        /// The field is byte-identical (or, with no baseline, lacks the text).
+        case unchanged
+        /// Nothing readable: applied but unverified, and nothing to learn from it.
+        case unreadable
+    }
+
+    /// The test is "did the field change", NOT "can we find `text` in the value" — some hosts
+    /// return a stale or virtualised AXValue right after a real edit.
+    private func judgeReadback(_ pending: PendingRangeReplace) -> Readback {
+        if let value = access.value(pending.element) {
+            if let beforeValue = pending.beforeValue {
+                return value == beforeValue ? .unchanged : .landed(learn: true)
+            }
+            // No baseline to compare against — fall back to containment. Compare with
+            // whitespace normalized: rich-text hosts (ProseMirror in Claude Desktop) store a
+            // trailing typed space as U+00A0, and a raw miss here would read a write that
+            // landed as a no-op.
+            return value.normalizedWhitespace.contains(pending.text.normalizedWhitespace)
+                ? .landed(learn: true) : .unchanged
+        }
+        // AXValue is unreadable (complex document views like Word or unseeded custom editors).
+        // If the write succeeded, the selection should have collapsed (empty) or become the
+        // replacement text; still non-empty without the replacement means it provably did not
+        // mutate.
+        if let afterSelected = access.selectedText(pending.element), !afterSelected.isEmpty {
+            return afterSelected.normalizedWhitespace.contains(pending.text.normalizedWhitespace)
+                ? .landed(learn: false) : .unchanged
+        }
+        // The write claimed success and the field cannot be read back. It must not be assumed a
+        // no-op (that would double-apply); applied but unverified, and nothing learned.
+        return .unreadable
+    }
+
+    private func conclude(_ readback: Readback, pending: PendingRangeReplace, settled: Bool) -> AXReplaceOutcome {
+        let outcome: AXReplaceOutcome
+        switch readback {
+        case .landed(let learn):
+            outcome = .replaced
+            // Only a read-back comparison is evidence about this app's AX behaviour. Assuming
+            // success because the field could not be read must never be recorded as trust — that
+            // would overwrite a seeded `.falseSuccess` verdict and re-enable the broken path.
+            if learn, let bundleID = pending.bundleID, !bundleID.isEmpty {
+                AXWriteCapabilityStore.shared.recordTrusted(bundleID: bundleID, role: pending.role)
+            }
+        case .unreadable:
+            outcome = .replaced
+        case .unchanged:
+            guard settled else { return .unconfirmed(pending) }
+            outcome = .falseSuccess
+            restoreOriginalSelection(pending)
+            if let bundleID = pending.bundleID, !bundleID.isEmpty {
+                // §3.3: the role has always been read here and passed to the debug log but not
+                // to the store, so a Chromium web view's lie condemned that app's native text
+                // fields too.
+                AXWriteCapabilityStore.shared.recordFalseSuccess(bundleID: bundleID, role: pending.role)
             }
         }
+        return outcome
+    }
 
-        if outcome != .replaced {
-            restoreOriginalSelection()
+    /// Every failure path must undo the widened selection — otherwise backspace #1 eats the
+    /// selection and the rest eat preceding user text.
+    private func restoreOriginalSelection(_ pending: PendingRangeReplace) {
+        let status = access.setSelectedRange(pending.element, pending.originalRange)
+        if status != .success {
+            // A failed restore leaves the widened selection in place; the HID fallback's
+            // first backspace would then eat it. Hosts whose range-set lies twice are a real
+            // observed shape — surface it so field reports can identify them.
+            DevTypeLog.inject.error(
+                "[Inject] AX selection restore failed after range-replace attempt (\(status.rawValue, privacy: .public)) — widened selection left behind"
+            )
         }
+    }
 
-        if let bundleID, !bundleID.isEmpty, verdictIsEvidence {
-            // §3.3: the role has always been read here and passed to the debug log but not to the
-            // store, so a Chromium web view's lie condemned that app's native text fields too.
-            switch outcome {
-            case .replaced:
-                AXWriteCapabilityStore.shared.recordTrusted(bundleID: bundleID, role: role)
-            case .falseSuccess:
-                AXWriteCapabilityStore.shared.recordFalseSuccess(bundleID: bundleID, role: role)
-            case .notAttempted, .unavailable:
-                break
-            }
-        }
-
+    private func logRangeReplace(
+        _ outcome: AXReplaceOutcome, setResult: AXError, role: String, range: CFRange,
+        erase: Int, textLength: Int, valueLength: Int
+    ) {
         // #region agent log
         let failLabel: String
         switch outcome {
         case .replaced: failLabel = "none"
         case .falseSuccess: failLabel = "valueVerifyFailed"
+        case .unconfirmed: failLabel = "unconfirmedUnsettledRead"
         case .notAttempted(let why): failLabel = why
         case .unavailable(let why): failLabel = why
         }
@@ -375,12 +440,11 @@ public final class AXTextWriter {
                 "loc": range.location,
                 "len": range.length,
                 "erase": erase,
-                "textLen": text.utf16.count,
-                "valueLen": valueLen
+                "textLen": textLength,
+                "valueLen": valueLength
             ]
         )
         // #endregion
-        return outcome
     }
 
     // MARK: - Direct insert

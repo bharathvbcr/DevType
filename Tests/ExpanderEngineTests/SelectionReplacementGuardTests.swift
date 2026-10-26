@@ -168,7 +168,213 @@ final class SelectionReplacementGuardTests: XCTestCase {
         XCTAssertNil(SelectionReplacement(original: ""))
     }
 
+    // MARK: - decide: what a host can do to the text between capture and replace
+
+    /// The host answered `kAXSelectedText` with an empty string and nothing else: no value, no
+    /// range. That is the shape of "not published yet", the one `Confirmer.fillingSelection` sends
+    /// to the ladder as blank. `decide` used to read the empty string as a *readable* selection
+    /// that was not the original and refused at once, which is why a host mid-restore skipped the
+    /// settle entirely.
+    func testEmptySelectedTextWithNothingElseIsUnverifiableNotAMismatch() {
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: nil, selectedText: "", range: nil)
+            ),
+            .unverifiable
+        )
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: "", selectedText: "", range: nil)
+            ),
+            .unverifiable
+        )
+    }
+
+    /// A readable selection that is not the original is still a known mismatch, with or without
+    /// a field to search: the host is saying something else is selected.
+    func testNonEmptyForeignSelectionWithoutAFieldStillRefuses() {
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: nil, selectedText: "something else", range: nil)
+            ),
+            .refuse(.selectionChanged)
+        )
+    }
+
+    /// `String ==` is canonical equivalence, so a host that hands back the selection decomposed
+    /// already proceeds; the search for the original has to agree with it. Pre-fix the search was
+    /// `.literal` and found nothing in a decomposed field, refusing a selection it could re-make.
+    func testReselectFindsACanonicallyEquivalentOriginal() {
+        let nfc = "caf\u{E9} au lait"
+        let nfd = "cafe\u{301} au lait"
+        XCTAssertNotEqual(nfc.utf16.count, nfd.utf16.count)
+        let field = "say: \(nfd)"
+        let decision = SelectionReplacementGuard.decide(
+            original: nfc,
+            observation: observation(value: field, selectedText: "", range: NSRange(location: 0, length: 0))
+        )
+        XCTAssertEqual(decision, .reselect(NSRange(location: 5, length: nfd.utf16.count)))
+
+        let reverse = SelectionReplacementGuard.decide(
+            original: nfd,
+            observation: observation(value: "say: \(nfc)", selectedText: "", range: NSRange(location: 0, length: 0))
+        )
+        XCTAssertEqual(reverse, .reselect(NSRange(location: 5, length: nfc.utf16.count)))
+
+        // And the live selection compared as text, in either normalisation, still proceeds.
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: nfc,
+                observation: observation(value: field, selectedText: nfd, range: NSRange(location: 5, length: nfd.utf16.count))
+            ),
+            .proceed
+        )
+    }
+
+    /// Canonical equivalence is the only fold the search accepts. A host-inserted zero-width
+    /// character, a different quote, a different line ending, a no-break space or a trailing
+    /// newline each make a different selection: pasting over it would consume characters the user
+    /// never selected, which is the same family of corruption this guard exists to stop. A
+    /// refusal costs a manual paste; a wrong replace costs the user's text.
+    func testSearchDoesNotFoldAnythingButCanonicalEquivalence() {
+        let cases: [(original: String, hostText: String, label: String)] = [
+            ("ab", "x a\u{200B}b y", "zero-width"),
+            ("don't stop", "x don\u{2019}t stop y", "smart quote"),
+            ("one\ntwo", "x one\r\ntwo y", "CRLF"),
+            ("one two", "x one\u{A0}two y", "no-break space"),
+            ("Cafe", "x cafe y", "case"),
+        ]
+        for item in cases {
+            XCTAssertEqual(
+                SelectionReplacementGuard.decide(
+                    original: item.original,
+                    observation: observation(
+                        value: item.hostText, selectedText: "", range: NSRange(location: 0, length: 0)
+                    )
+                ),
+                .refuse(.originalNotFound),
+                item.label
+            )
+            // With no field to search, the host's own selection text is compared the same way.
+            XCTAssertEqual(
+                SelectionReplacementGuard.decide(
+                    original: item.original,
+                    observation: observation(value: nil, selectedText: item.hostText, range: nil)
+                ),
+                .refuse(.selectionChanged),
+                item.label
+            )
+        }
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: nil, selectedText: original + "\n", range: nil)
+            ),
+            .refuse(.selectionChanged),
+            "trailing newline the host added"
+        )
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original + "\n",
+                observation: observation(value: nil, selectedText: original, range: nil)
+            ),
+            .refuse(.selectionChanged),
+            "trailing newline the host trimmed"
+        )
+    }
+
+    /// Ranges are UTF-16 units. A selection that follows an astral character is sliced in those
+    /// units and still proceeds; a range that lands inside a surrogate pair is garbage and must
+    /// not be mistaken for the original.
+    func testSurrogatePairsInTheRangeAreSlicedInUTF16Units() {
+        let field = "\u{1F44B} \(original)"
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: original,
+                observation: observation(value: field, selectedText: nil, range: NSRange(location: 3, length: 19))
+            ),
+            .proceed
+        )
+        let split = SelectionReplacementGuard.decide(
+            original: "\u{1F44B} x",
+            observation: observation(value: "\u{1F44B} x", selectedText: nil, range: NSRange(location: 1, length: 3))
+        )
+        XCTAssertNotEqual(split, .proceed)
+    }
+
+    /// The scan is capped at `maxOccurrences`, and the caret edge was looked for only inside that
+    /// capped list. On a long field the occurrence the caret sits against can be past the cap, so
+    /// the guard refused as ambiguous a selection the caret identifies exactly.
+    func testCaretEdgeIsFoundPastTheOccurrenceCap() {
+        let unit = "ok, "
+        let count = SelectionReplacementGuard.maxOccurrences * 3
+        let field = String(repeating: unit, count: count)
+        let target = count - 5
+        let end = target * unit.utf16.count + 2
+        let decision = SelectionReplacementGuard.decide(
+            original: "ok",
+            observation: observation(value: field, selectedText: "", range: NSRange(location: end, length: 0))
+        )
+        XCTAssertEqual(decision, .reselect(NSRange(location: end - 2, length: 2)))
+
+        // Between two occurrences, touching neither: still no way to know which.
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: "ok",
+                observation: observation(
+                    value: field, selectedText: "", range: NSRange(location: end + 1, length: 0)
+                )
+            ),
+            .refuse(.originalAmbiguous)
+        )
+        // A selection spanning several occurrences identifies none of them.
+        XCTAssertEqual(
+            SelectionReplacementGuard.decide(
+                original: "ok",
+                observation: observation(
+                    value: field, selectedText: "", range: NSRange(location: end - 12, length: 12)
+                )
+            ),
+            .refuse(.originalAmbiguous)
+        )
+    }
+
     // MARK: - Confirmer
+
+    /// A host mid-restore answers an empty selection beside nothing else. That is a reading to
+    /// wait on, not a verdict: the settle re-reads and the selection arrives.
+    func testConfirmerSettlesOnAnEmptyAnswerBesideNothingElse() {
+        let field = FakeField([
+            observation(value: nil, selectedText: ""),
+            observation(value: nil, selectedText: ""),
+            observation(value: nil, selectedText: original),
+        ])
+        XCTAssertEqual(confirm(field), .confirmed(reselected: false))
+    }
+
+    /// A caret with no field to search cannot be repaired, but a host restoring a selection can
+    /// report the caret first. It waits like any other blank reading, and when the caret never
+    /// moves the refusal is the one that was actually observed, not a claim that nothing was read.
+    func testConfirmerSettlesOnACaretItCannotSearchThenRefusesAsChanged() {
+        let caret = observation(value: nil, selectedText: "", range: NSRange(location: 3, length: 0))
+        let arrives = FakeField([caret, observation(value: nil, selectedText: original)])
+        XCTAssertEqual(confirm(arrives), .confirmed(reselected: false))
+
+        let stays = FakeField([caret])
+        XCTAssertEqual(confirm(stays), .refused(.selectionChanged))
+        XCTAssertEqual(stays.observed, SelectionReplacementGuard.Confirmer.settleAttempts + 1)
+
+        // A clipboard capture is never waited on: it refuses a caret as it always has.
+        let copied = FakeField([caret])
+        XCTAssertEqual(
+            confirm(copied, replacement: SelectionReplacement(original: original, requiresEvidence: false)),
+            .refused(.selectionChanged)
+        )
+        XCTAssertEqual(copied.observed, 1)
+    }
 
     /// Scripted field: each `observe` returns the next reading (the last one repeats).
     private final class FakeField {
@@ -565,6 +771,347 @@ final class SelectionReplacementGuardTests: XCTestCase {
         ) { verdict = $0 }
         XCTAssertEqual(verdict, .unverified)
         XCTAssertEqual(lookups, 0)
+    }
+
+    // MARK: - Where the settle died
+
+    private func trail(
+        of verdict: SelectionReplacementGuard.Confirmer.Verdict?
+    ) -> SelectionReplacementGuard.Confirmer.Trail? {
+        switch verdict {
+        case .refused(_, let trail), .confirmed(_, _, let trail): return trail
+        default: return nil
+        }
+    }
+
+    /// The refuse line used to log the role of the element the inject *started* on, so after the
+    /// settle left a window for a web area that stayed blank it still said `role=AXWindow` — the
+    /// one thing the report could not afford to get wrong. The trail names the last reading's
+    /// element and counts what the settle did.
+    func testRefusalTrailNamesTheElementTheSettleEndedOn() {
+        let window = AXUIElementCreateApplication(1)
+        let web = element
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in self.observation(value: nil) },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: { web },
+            role: { candidate in CFEqual(candidate, web) ? "AXWebArea" : "AXWindow" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .refused(.unreadable))
+        let settle = trail(of: verdict)
+        XCTAssertEqual(settle?.startRole, "AXWindow")
+        XCTAssertEqual(settle?.endRole, "AXWebArea")
+        XCTAssertEqual(settle?.settles, SelectionReplacementGuard.Confirmer.settleAttempts)
+        XCTAssertEqual(settle?.refocuses, 1, "the web area is waited on, not followed away from")
+        XCTAssertEqual(
+            settle?.summary,
+            "settles=4 refocuses=1 startRole=AXWindow endRole=AXWebArea"
+        )
+    }
+
+    func testRefusalTrailCountsEveryRefocusOfAWindowThatNeverYieldsAField() {
+        let window = AXUIElementCreateApplication(1)
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in self.observation(value: nil) },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: { window },
+            role: { _ in "AXWindow" }
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original)!, element: window
+        ) { verdict = $0 }
+        let settle = trail(of: verdict)
+        XCTAssertEqual(settle?.refocuses, SelectionReplacementGuard.Confirmer.settleAttempts)
+        XCTAssertEqual(settle?.endRole, "AXWindow")
+    }
+
+    func testTrailOfAFocuslessInjectSaysSoAndAnImmediateAnswerRanNoSettle() {
+        let blind = FakeField([observation(value: nil)])
+        let none = trail(of: confirm(blind, element: .some(nil)))
+        XCTAssertEqual(none?.startRole, "none")
+        XCTAssertEqual(none?.endRole, "none")
+        XCTAssertEqual(none?.settles, SelectionReplacementGuard.Confirmer.settleAttempts)
+
+        let intact = FakeField([observation(value: nil, selectedText: original)])
+        XCTAssertEqual(trail(of: confirm(intact))?.settles, 0)
+
+        let late = FakeField([observation(value: nil), observation(value: nil, selectedText: original)])
+        XCTAssertEqual(trail(of: confirm(late))?.settles, 1)
+    }
+
+    /// A refusal for the same cause is the same refusal however the settle got there.
+    func testTrailDoesNotTakePartInVerdictEquality() {
+        var longer = SelectionReplacementGuard.Confirmer.Trail()
+        longer.settles = 4
+        XCTAssertEqual(
+            SelectionReplacementGuard.Confirmer.Verdict.refused(.unreadable, trail: longer),
+            .refused(.unreadable)
+        )
+    }
+
+    /// After a confirm that waited the entry gate is shown where focus is *now*. Handed the focus
+    /// the inject resolved before the wait — or the element the target was just recaptured from —
+    /// it compared a reading with itself and passed whatever the host had done in between.
+    func testAConfirmThatWaitedResolvesFocusAgainBeforeTheEntryGate() throws {
+        let suite = "SelectionReplacementGuardTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let field = element
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { candidate in
+                CFEqual(candidate, field)
+                    ? self.observation(value: nil, selectedText: self.original)
+                    : self.observation(value: nil)
+            },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            refocus: { field },
+            role: { _ in "AXTextArea" }
+        )
+        var queries = 0
+        var kept: [String] = []
+        let pipeline = TextInjectionPipeline(
+            defaults: defaults,
+            selectionConfirmer: SelectionReplacementGuard.Confirmer(access: access),
+            keepRefusedReplacement: { kept.append($0); return true },
+            focusQuery: { completion in
+                queries += 1
+                // The inject resolved no element; by the time the confirm is done the host has
+                // lost focus again. Nothing may be pasted on the strength of the confirm.
+                completion(.missing)
+            }
+        )
+
+        let result = "the quick brown fox"
+        var outcome: PermissionCoordinator.InjectOutcome?
+        let done = expectation(description: "inject completed")
+        pipeline.inject(
+            snippet: SnippetModel(title: "AI", triggerKeyword: "", replacementText: result),
+            triggerLength: 0,
+            swallowed: .notSwallowed,
+            erasePlan: .empty,
+            preResolvedText: result,
+            secureClipboardPaste: true,
+            targetFocus: .resolved(nil),
+            replacingSelection: SelectionReplacement(original: original)
+        ) {
+            outcome = $0
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+
+        if queries < 2 {
+            throw XCTSkip("entry gate refused before the confirm ran: \(String(describing: outcome))")
+        }
+        XCTAssertEqual(queries, 2, "one query for the inject, one after the confirm waited")
+        XCTAssertEqual(outcome, .refused(SelectionReplacementGuard.Refusal.focusMoved.reason))
+        XCTAssertEqual(kept, [result], "the generated payload survives the refusal")
+    }
+
+    // MARK: - The element the selection was read from
+
+    /// Everything a `restoreFocus` scenario scripts: the window the host answers with, the field
+    /// the selection was read from, and what each hook did.
+    private final class CapturedScenario {
+        let window = AXUIElementCreateApplication(1)
+        let field: AXUIElement
+        /// Whether the host honours the focus request: true moves `focused` to the field.
+        var hostHonoursFocus = true
+        var focusRequests: [AXUIElement] = []
+        var focused: AXUIElement
+        var refocuses = 0
+        var fieldReadings: [DeliveryVerifier.FocusedTextObservation]
+
+        init(field: AXUIElement, fieldReadings: [DeliveryVerifier.FocusedTextObservation]) {
+            self.field = field
+            self.fieldReadings = fieldReadings
+            focused = window
+        }
+
+        func access(
+            observe: @escaping (DeliveryVerifier.FocusedTextObservation) -> DeliveryVerifier.FocusedTextObservation = { $0 },
+            focusAccepted: Bool = true
+        ) -> SelectionReplacementGuard.Confirmer.Access {
+            SelectionReplacementGuard.Confirmer.Access(
+                observe: { candidate in
+                    guard CFEqual(candidate, self.field) else { return DeliveryVerifier.FocusedTextObservation(value: nil, selectedText: nil) }
+                    let reading = self.fieldReadings.count > 1 ? self.fieldReadings.removeFirst() : self.fieldReadings[0]
+                    return observe(reading)
+                },
+                select: { _, _ in false },
+                schedule: { _, action in action() },
+                refocus: {
+                    self.refocuses += 1
+                    return self.focused
+                },
+                role: { CFEqual($0, self.field) ? "AXTextArea" : "AXWindow" },
+                focus: { element in
+                    self.focusRequests.append(element)
+                    if focusAccepted, self.hostHonoursFocus { self.focused = element }
+                    return focusAccepted
+                }
+            )
+        }
+    }
+
+    /// The replace-time focus query resolves from scratch and, while WebKit restores a page,
+    /// answers with the window every time. The element the 67 characters were read from is not
+    /// that window. With the window still in front after a refocus, the guard asks focus to go
+    /// back to the field, resolves focus again, and only when the host's own answer names the
+    /// field does it confirm there — so the paste lands where the confirm looked.
+    func testConfirmerRestoresFocusToTheCapturedFieldWhenFocusStaysOnTheWindow() {
+        let scenario = CapturedScenario(
+            field: element, fieldReadings: [observation(value: nil, selectedText: original)]
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: scenario.access()).confirm(
+            SelectionReplacement(original: original, capturedElement: scenario.field)!,
+            element: scenario.window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: false, refocusedOn: scenario.field))
+        XCTAssertEqual(scenario.focusRequests.count, 1)
+        XCTAssertTrue(CFEqual(scenario.focusRequests[0], scenario.field))
+        XCTAssertEqual(trail(of: verdict)?.capturedFocusAttempts, 1)
+    }
+
+    /// Also for an inject that resolved no element at all.
+    func testConfirmerRestoresFocusWhenTheInjectResolvedNoElement() {
+        let scenario = CapturedScenario(
+            field: element, fieldReadings: [observation(value: nil, selectedText: original)]
+        )
+        scenario.focused = scenario.window
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: scenario.access()).confirm(
+            SelectionReplacement(original: original, capturedElement: scenario.field)!, element: nil
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: false, refocusedOn: scenario.field))
+    }
+
+    /// A host that accepts the focus request and ignores it is the case the comparison exists
+    /// for. The field still reports the original selected, and confirming on that alone would
+    /// paste into the window: it must refuse, and stop asking within the settle budget.
+    func testConfirmerNeverConfirmsOnAFieldFocusDidNotReach() {
+        let scenario = CapturedScenario(
+            field: element, fieldReadings: [observation(value: nil, selectedText: original)]
+        )
+        scenario.hostHonoursFocus = false
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: scenario.access()).confirm(
+            SelectionReplacement(original: original, capturedElement: scenario.field)!,
+            element: scenario.window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .refused(.unreadable))
+        XCTAssertEqual(scenario.focusRequests.count, SelectionReplacementGuard.Confirmer.settleAttempts)
+        XCTAssertEqual(trail(of: verdict)?.endRole, "AXWindow")
+    }
+
+    func testConfirmerRefusesWhenTheHostDeclinesToMoveFocus() {
+        let scenario = CapturedScenario(
+            field: element, fieldReadings: [observation(value: nil, selectedText: original)]
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: scenario.access(focusAccepted: false)).confirm(
+            SelectionReplacement(original: original, capturedElement: scenario.field)!,
+            element: scenario.window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .refused(.unreadable))
+    }
+
+    /// Focus comes back, but the selection in the field is no longer the original: the usual
+    /// judgement applies on the restored element, including its refusals.
+    func testConfirmerJudgesTheRestoredFieldLikeAnyOther() {
+        let scenario = CapturedScenario(
+            field: element,
+            fieldReadings: [observation(value: "something else entirely", selectedText: "", range: NSRange(location: 4, length: 0))]
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: scenario.access()).confirm(
+            SelectionReplacement(original: original, capturedElement: scenario.field)!,
+            element: scenario.window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .refused(.originalNotFound))
+    }
+
+    /// The captured element is the last resort, not the first: a refocus that finds a field that
+    /// can hold a selection is judged as it always was, and never has focus moved under it.
+    func testConfirmerLeavesFocusAloneWhenTheRefocusFindsAField() {
+        let scenario = CapturedScenario(
+            field: element, fieldReadings: [observation(value: nil, selectedText: original)]
+        )
+        let other = AXUIElementCreateApplication(2)
+        scenario.focused = other
+        var access = scenario.access()
+        let inner = access.observe
+        access.observe = { candidate in
+            CFEqual(candidate, other)
+                ? self.observation(value: nil, selectedText: self.original)
+                : inner(candidate)
+        }
+        access.role = { CFEqual($0, scenario.window) ? "AXWindow" : "AXTextArea" }
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: access).confirm(
+            SelectionReplacement(original: original, capturedElement: scenario.field)!,
+            element: scenario.window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .confirmed(reselected: false, refocusedOn: other))
+        XCTAssertTrue(scenario.focusRequests.isEmpty)
+    }
+
+    /// A copy capture cannot be confirmed through AX, so nothing here moves focus for one.
+    func testConfirmerNeverMovesFocusForAReplacementThatDoesNotRequireEvidence() {
+        let scenario = CapturedScenario(
+            field: element, fieldReadings: [observation(value: nil, selectedText: original)]
+        )
+        var verdict: SelectionReplacementGuard.Confirmer.Verdict?
+        SelectionReplacementGuard.Confirmer(access: scenario.access()).confirm(
+            SelectionReplacement(original: original, requiresEvidence: false, capturedElement: scenario.field)!,
+            element: scenario.window
+        ) { verdict = $0 }
+        XCTAssertEqual(verdict, .unverified)
+        XCTAssertTrue(scenario.focusRequests.isEmpty)
+    }
+
+    /// With no `focus` hook an `Access` cannot move focus, so it never claims to have.
+    func testAccessThatCannotMoveFocusDeclines() {
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in self.observation(value: nil) },
+            select: { _, _ in false },
+            schedule: { _, action in action() }
+        )
+        XCTAssertFalse(access.focus(element))
+    }
+
+    /// Capture to replacement: the element a live read came from rides along, and a read that
+    /// never touched one (cache recovery, ⌘C) carries none.
+    func testCapturedElementRidesFromTheLiveReadIntoTheReplacement() throws {
+        func resolve(
+            _ candidates: [SelectionReader.Candidate],
+            cached: SelectionMonitor.CachedSelection? = nil
+        ) -> SelectionReader.Result? {
+            SelectionReader.evaluate(
+                axTrusted: true, secureInputActive: false, frontmostBundleID: "com.apple.Safari",
+                frontmostIsOwnProcess: false, focusAvailable: true, candidates: candidates, cached: cached,
+                isMuted: { _ in false }, isWeakAX: { _ in false }
+            ).result
+        }
+        let live = try XCTUnwrap(resolve([
+            SelectionReader.Candidate(text: original, isOwnProcess: false, bundleID: "com.apple.Safari", element: element),
+        ]))
+        let captured = try XCTUnwrap(live.replacement?.capturedElement)
+        XCTAssertTrue(CFEqual(captured, element))
+
+        let copied = SelectionReader.outcomeForClipboardCapture(
+            text: original, bundleID: "com.example", isWeakAX: { _ in false }
+        )?.result
+        XCTAssertNil(copied?.replacement?.capturedElement)
+        XCTAssertNil(SelectionReader.Result(text: original, bundleID: nil, isWeakAX: false, source: .cached).replacement?.capturedElement)
     }
 
     func testBlankReadingAbandonsOnlyWindowLevelContainers() {

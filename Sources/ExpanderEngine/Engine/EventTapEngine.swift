@@ -70,6 +70,11 @@ public final class EventTapEngine {
     /// §8.3: keystrokes typed while an expansion is in flight, held so they cannot land ahead of
     /// the paste. Guarded by `lock` — mutated from the tap callback and from `endExpansion`.
     var _typeAhead = TypeAheadBuffer()
+    /// True from the moment `endExpansion` seeds the ring with replayed type-ahead until the last
+    /// of those characters has been posted. A real key in that gap lands in the field before or
+    /// after them, and the buffer cannot know which, so such a key bypasses matching instead.
+    /// Guarded by `lock`.
+    var _replayInFlight = false
     /// Nested suspend depth (fill-in + inline search / AI panels). Matching is skipped while > 0.
     var _matchingSuspendCount: Int = 0
     /// Live suspension owners, newest last, for `matchingSuspensionDiagnostics()`. A leaked
@@ -244,6 +249,43 @@ public final class EventTapEngine {
     static let mouseDownTypes: Set<CGEventType> = [
         .leftMouseDown, .rightMouseDown, .otherMouseDown
     ]
+
+    /// Posts one replayed type-ahead character. Injectable so a test can observe the replay
+    /// without sending keystrokes to the machine it runs on; production always uses the HID poster.
+    var typeAheadReplayPoster: (String) -> Void = { character in
+        _ = HIDKeyPoster.shared.postUnicodeKeyEvent(unicode: character, keyCode: 0, flags: [])
+    }
+
+    /// The injection pipeline this engine drives: the one whose ledger its input revision, delivery
+    /// window and undo record live in. A seam so a test owns that ledger instead of sharing the
+    /// process-wide one.
+    var pipeline: TextInjectionPipeline = .shared
+
+    /// The wall clock the type-ahead hold is measured against. A seam so a test steps a window past
+    /// its deadline instead of sleeping through it.
+    var now: () -> Date = { Date() }
+
+    /// Puts the swallowed terminator back when the type-ahead hold surrenders before the
+    /// expansion wrote anything. Injectable for the same reason as `typeAheadReplayPoster`.
+    /// Production posts it as the key it was (code and flags) through this engine's own
+    /// `pipeline`, by HID only: this runs on the tap thread, where the AX-insert fallback's
+    /// synchronous focus query must not. Its ledger has already settled the debt by the time this
+    /// runs, so it posts through `repostSettledKey`, not the debt-checked entry. Nil uses that
+    /// default.
+    var swallowedKeyPoster: ((SwallowedKey) -> Void)?
+
+    func postSurrenderedTerminator(_ key: SwallowedKey) {
+        if let swallowedKeyPoster {
+            swallowedKeyPoster(key)
+        } else {
+            // Runs inside the tap callback: HID only, never the AX fallback's synchronous IPC.
+            _ = pipeline.repostSettledKey(key, allowAXFallback: false)
+        }
+    }
+
+    /// The non-IPC Secure Input read the tap trusts over its polled flag. Injectable so a test can
+    /// stage "the flag says secure, the system says otherwise" without owning the real state.
+    var liveSecureInputProbe: () -> Bool = { AXContextChecker.isSecureEventInputEnabledLive() }
 
     let matchDropLock = UnfairLock()
     var _matchDrops = MatchDropCounters()

@@ -61,7 +61,7 @@ public final class HIDKeyPoster: BackspacePosting {
     /// Posts a keyDown/keyUp carrying `unicode` (best-effort delivery; post ≠ guaranteed delivery).
     @discardableResult
     public func postUnicodeKeyEvent(unicode: String, keyCode: CGKeyCode, flags: CGEventFlags) -> Bool {
-        guard CGPreflightPostEventAccess() else { return false }
+        guard commandEventIO.canPost() else { return false }
         // §1.2: was a bare `CGEventSource(stateID:)` — the reinjected trigger key was therefore
         // seen by our own tap as user input and could re-trigger the same expansion.
         let source = makeTaggedEventSource()
@@ -80,8 +80,8 @@ public final class HIDKeyPoster: BackspacePosting {
                 }
             }
         }
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        commandEventIO.post(down)
+        commandEventIO.post(up)
         return true
     }
 
@@ -159,16 +159,19 @@ public final class HIDKeyPoster: BackspacePosting {
         _ events: [UnicodeInsertEvent],
         shouldContinue: () -> Bool = { true }
     ) -> Int {
-        guard !events.isEmpty, CGPreflightPostEventAccess() else { return 0 }
+        let io = commandEventIO
+        guard !events.isEmpty, io.canPost() else { return 0 }
         let source = makeTaggedEventSource()
         return Self.deliverUnicodeInsert(events: events, shouldContinue: {
-            CGPreflightPostEventAccess() && shouldContinue()
+            commandEventIO.canPost() && shouldContinue()
         }) { event in
-            Self.postInsertEvent(event, source: source)
+            Self.postInsertEvent(event, source: source, post: io.post)
         }
     }
 
-    private static func postInsertEvent(_ event: UnicodeInsertEvent, source: CGEventSource?) -> Bool {
+    private static func postInsertEvent(
+        _ event: UnicodeInsertEvent, source: CGEventSource?, post: (CGEvent) -> Void
+    ) -> Bool {
         let keyCode: CGKeyCode
         let unicode: String
         switch event {
@@ -192,8 +195,8 @@ public final class HIDKeyPoster: BackspacePosting {
                 }
             }
         }
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        post(down)
+        post(up)
         return true
     }
 
@@ -201,16 +204,16 @@ public final class HIDKeyPoster: BackspacePosting {
 
     /// Posts `%key:` trailing keys after successful inject (enter/tab/…).
     public func postTrailingKeys(_ names: [String], shouldContinue: () -> Bool = { true }) {
-        guard !names.isEmpty, CGPreflightPostEventAccess() else { return }
+        guard !names.isEmpty, commandEventIO.canPost() else { return }
         let source = makeTaggedEventSource()
         _ = Self.postKeyPairs(count: names.count, shouldContinue: {
-            CGPreflightPostEventAccess() && shouldContinue()
+            commandEventIO.canPost() && shouldContinue()
         }) { index in
             guard let keyCode = Self.keyCode(forTrailingKeyName: names[index]) else { return false }
             if let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
                let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) {
-                down.post(tap: .cghidEventTap)
-                up.post(tap: .cghidEventTap)
+                commandEventIO.post(down)
+                commandEventIO.post(up)
                 return true
             }
             return false
@@ -370,7 +373,7 @@ public final class HIDKeyPoster: BackspacePosting {
     @discardableResult
     public func sendBackspaces(count: Int, shouldContinue: () -> Bool) -> Int {
         guard count > 0 else { return 0 }
-        guard CGPreflightPostEventAccess() else {
+        guard commandEventIO.canPost() else {
             DevTypeLog.inject.error(
                 "[Inject] backspace refused — CGPreflightPostEventAccess false at post time count=\(count, privacy: .public)"
             )
@@ -378,12 +381,12 @@ public final class HIDKeyPoster: BackspacePosting {
         }
         let source = makeTaggedEventSource()
         let posted = Self.postKeyPairs(count: count, shouldContinue: {
-            CGPreflightPostEventAccess() && shouldContinue()
+            commandEventIO.canPost() && shouldContinue()
         }) { _ in
             if let bDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Delete), keyDown: true),
                let bUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Delete), keyDown: false) {
-                bDown.post(tap: .cghidEventTap)
-                bUp.post(tap: .cghidEventTap)
+                commandEventIO.post(bDown)
+                commandEventIO.post(bUp)
                 return true
             }
             return false
@@ -431,7 +434,7 @@ public final class HIDKeyPoster: BackspacePosting {
 
     public func sendLeftArrows(count: Int, shouldContinue: () -> Bool = { true }) {
         guard count > 0 else { return }
-        guard CGPreflightPostEventAccess() else {
+        guard commandEventIO.canPost() else {
             DevTypeLog.inject.error(
                 "[Inject] left-arrow refused — CGPreflightPostEventAccess false at post time count=\(count, privacy: .public)"
             )
@@ -440,12 +443,12 @@ public final class HIDKeyPoster: BackspacePosting {
         // §1.2: was a bare `CGEventSource(stateID:)`. Untagged arrows are visible to our own tap.
         let source = makeTaggedEventSource()
         let posted = Self.postKeyPairs(count: count, shouldContinue: {
-            CGPreflightPostEventAccess() && shouldContinue()
+            commandEventIO.canPost() && shouldContinue()
         }) { _ in
             if let aDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_LeftArrow), keyDown: true),
                let aUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_LeftArrow), keyDown: false) {
-                aDown.post(tap: .cghidEventTap)
-                aUp.post(tap: .cghidEventTap)
+                commandEventIO.post(aDown)
+                commandEventIO.post(aUp)
                 return true
             }
             return false

@@ -45,6 +45,16 @@ extension EventTapEngine {
     }
 
 
+    /// A real key the tap hands to the field without matching it (matching suspended or disabled,
+    /// Secure Input, autorepeat, a caret-moving or chorded key, a key racing the type-ahead
+    /// replay). It reaches the field, so an operation in flight — an AI delivery, whose matching
+    /// suspension is exactly why this branch is taken, or a replace confirm about to write focus —
+    /// must see the input revision move. Only a key swallowed into type-ahead never does, and that
+    /// path returns before any of these.
+    private func noteBypassedRealKey() {
+        pipeline.noteDeliveryInput()
+    }
+
     /// The whole tap hot path. Extracted from the C callback so it can use `autoreleasepool`,
     /// early `return`s and instance state directly.
     ///
@@ -62,10 +72,10 @@ extension EventTapEngine {
         }
 
         let isSynthetic = event.getIntegerValueField(.eventSourceUserData) == SyntheticEventMarker.magicUserData
+        var clockMark: InputClock.Mark?
         if !isSynthetic {
-            let eventTime = InputClock.seconds(sinceBootNanos: event.timestamp)
             if EventTapEngine.mouseDownTypes.contains(type) || type == .keyDown {
-                inputClock.mark(at: eventTime)
+                clockMark = inputClock.mark(at: inputClock.seconds(fromEventTimestamp: event.timestamp))
             }
         }
 
@@ -76,20 +86,29 @@ extension EventTapEngine {
             // wherever the user just clicked.
             lock.lock()
             let holdPID = _typeAhead.holdPID
+            let wasHolding = _typeAhead.isHolding
             let stranded = _typeAhead.flushForCaretChange()
             lock.unlock()
+            // The click abandons an inject that has not begun writing. Its terminator is settled,
+            // not typed: whether a post from here lands before or after the click is unverified,
+            // and after it the caret is wherever the user clicked (see the surrender's doc).
+            if wasHolding {
+                surrenderHoldPuttingTerminatorBack(
+                    heldFor: holdPID, reason: "caret moved (click)", postTerminator: false
+                )
+            }
             replayTypeAhead(stranded, heldFor: holdPID, reason: "caret moved (click)")
             resetBuffer()
             // §3.1: same rule as escape/arrows below — the caret moved, so the recorded expansion
             // no longer describes what sits in front of it. Clicks were the one caret move that
             // kept the record alive, which let a click + backspace within the undo window fire a
             // blind erase at the click position in AX-opaque hosts.
-            TextInjectionPipeline.shared.clearLastExpansion()
+            pipeline.clearLastExpansion()
             // §3.1d: a click during an *in-flight* delivery moves the caret around text whose
             // final geometry the record cannot know. The counter is drained into that record's
             // input count when delivery completes; outside a delivery it is discarded at the next
             // `beginDeliveryWindow()`.
-            TextInjectionPipeline.shared.noteDeliveryInput()
+            pipeline.noteDeliveryInput()
             return Unmanaged.passUnretained(event)
         }
 
@@ -106,8 +125,9 @@ extension EventTapEngine {
         lock.lock()
         let expanding = _isExpanding
         let enabled = _isEnabled
-        let secureFlag = _isSecureInputActive
+        let polledSecureFlag = _isSecureInputActive
         let suspended = _matchingSuspendCount > 0
+        let replayInFlight = _replayInFlight
         lock.unlock()
 
         // Pass through while inject+restore owns the critical section.
@@ -126,12 +146,24 @@ extension EventTapEngine {
                     flushReplayCount: admission.decision.replayCount
                 )
                 if units > 0 {
-                    TextInjectionPipeline.shared.noteDeliveryInput(units: units)
+                    pipeline.noteDeliveryInput(units: units)
+                } else if admission.decision != .swallow {
+                    // A key that reaches the field but that no unit count describes (a dead
+                    // key's marked accent, an F-key) is still not the field the erase was
+                    // planned against. Move the revision; leave the undo counters alone.
+                    pipeline.noteUncountedDeliveryKey()
                 }
                 switch admission.decision {
                 case .swallow:
+                    // Held for replay after delivery, so it never touches the field under the
+                    // erase: it must not count as input that invalidates the expansion.
+                    if let clockMark { inputClock.retract(clockMark) }
                     return nil
                 case .flushThenPassThrough(let replay):
+                    // Before the held keys: the terminator was typed before all of them.
+                    surrenderHoldPuttingTerminatorBack(
+                        heldFor: admission.holdPID, reason: "hold released early"
+                    )
                     replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
                 case .passThrough:
                     break
@@ -140,16 +172,47 @@ extension EventTapEngine {
             return Unmanaged.passUnretained(event)
         }
 
+        // The polled flag is refreshed from the main queue after a 350 ms poll, so it can say
+        // "secure" for a while after the system stopped being. Trusting it blindly dropped every
+        // key typed in that window from the buffer — a trigger typed right after leaving a
+        // password field lost its first characters and never matched. One live read, only when
+        // the flag claims secure, settles it and corrects the flag.
+        var secureFlag = polledSecureFlag
+        if secureFlag, !liveSecureInputProbe() {
+            isSecureInputActive = false
+            secureFlag = false
+        }
+
+        // A real key while `endExpansion` is still posting the replayed type-ahead lands in the
+        // field before or after those characters, and the ring was seeded as if it knew which.
+        // Matching on it could erase text that is not the trigger, so it bypasses like any other
+        // input the buffer cannot account for.
+        if replayInFlight {
+            noteBypassedRealKey()
+            pipeline.clearLastExpansion()
+            discardStateForBypassedInput("keystroke raced the type-ahead replay")
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Holding the chord that accepted an AI result repeats it into the app while the result is
+        // being delivered. That is the same press the panel already consumed, so the repeat is
+        // swallowed here — before every bypass branch below would count it as input the delivery
+        // could not account for and abort the replace as `.focusMoved`. Only the chord that began
+        // the delivery in flight, and only its autorepeat: a fresh press, or any other key,
+        // is real input and takes the normal path.
+        if event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
+           pipeline.isRepeatOfDeliveryChord(DeliveryChord(
+               keyCode: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags
+           )) {
+            return nil
+        }
+
         guard enabled && !secureFlag && !suspended else {
-            TextInjectionPipeline.shared.clearLastExpansion()
-            // These keystrokes reach the field but bypass matching entirely. A live hold's
-            // erase is counted from *observed* keystrokes, so anything landing unseen breaks
-            // its integrity — drop the hold rather than fire a miscounted erase later.
-            if heldCoordinator.cancelAll(reason: .unobservedInput) {
-                DevTypeLog.debounce.debug(
-                    "[Debounce] hold cancelled — keystroke bypassed matching (disabled/secure/suspended)"
-                )
-            }
+            noteBypassedRealKey()
+            pipeline.clearLastExpansion()
+            discardStateForBypassedInput(
+                "keystroke bypassed matching (disabled/secure/suspended)"
+            )
             return Unmanaged.passUnretained(event)
         }
 
@@ -157,23 +220,24 @@ extension EventTapEngine {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let isAutorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         if EventTapEngine.shouldIgnoreForMatching(isAutorepeat: isAutorepeat) {
-            TextInjectionPipeline.shared.clearLastExpansion()
-            // Autorepeat appends characters the hold never sees (repeats are filtered from
-            // matching). Same integrity rule as above: unobserved input, drop the hold.
-            if heldCoordinator.cancelAll(reason: .unobservedInput) {
-                DevTypeLog.debounce.debug(
-                    "[Debounce] hold cancelled — autorepeat input is invisible to the hold"
-                )
-            }
+            noteBypassedRealKey()
+            pipeline.clearLastExpansion()
+            // Autorepeat appends characters the matcher never sees (repeats are filtered from
+            // matching), so from the first repeat on the buffer no longer describes the field:
+            // `` `sl `` + a held `l` leaves the buffer at `` `sl `` while the field reads
+            // `` `slllll ``, and the next `m` would complete a trigger that is not there. Same
+            // integrity rule as above — the hold and the buffer both go.
+            discardStateForBypassedInput("autorepeat input is invisible to matching")
             return Unmanaged.passUnretained(event)
         }
 
         if EventTapEngine.shouldResetBuffer(flags: flags, keyCode: keyCode) {
+            noteBypassedRealKey()
             resetBuffer()
             // §3.1: escape / arrows / chorded keys mean the caret probably moved, so the recorded
             // expansion no longer describes the text sitting in front of the caret. Undoing after
             // that would erase whatever happens to be there now — drop the record instead.
-            TextInjectionPipeline.shared.clearLastExpansion()
+            pipeline.clearLastExpansion()
             return Unmanaged.passUnretained(event)
         }
 
@@ -224,7 +288,7 @@ extension EventTapEngine {
         // Later input revokes queued undo through the shared injection continuation guard.
         if keyAction == .deleteLast,
            flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty,
-           TextInjectionPipeline.shared.undoLastExpansion(
+           pipeline.undoLastExpansion(
                heldBackspace: SwallowedKey(
                    didSwallow: true,
                    unicode: unicodeStr.isEmpty ? "\u{7F}" : unicodeStr,
@@ -242,7 +306,7 @@ extension EventTapEngine {
         // refuses at a non-zero count. Runs after the undo check so the backspace that *is* the
         // undo never counts against the record it just consumed. No-op when no record exists.
         if keyAction == .deleteLast || length > 0 {
-            TextInjectionPipeline.shared.noteInputAfterExpansion()
+            pipeline.noteInputAfterExpansion()
         }
 
         // §2.3: cached frontmost facts, read before the layout buffer is touched. The mute
@@ -291,6 +355,11 @@ extension EventTapEngine {
         // Hot path: muted check + matcher + sync-safe planner gate only.
         // Heavy AX (secure/IME/focus) stays off-callback; refuse there reinjects the swallow.
         if context.isMuted {
+            // The buffer above stayed in step with the field, but a hold armed before the app
+            // was muted never sees this key, so its erase count is already short.
+            if heldCoordinator.cancelAll(reason: .unobservedInput) {
+                DevTypeLog.debounce.debug("[Debounce] hold cancelled — frontmost app is muted")
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -395,7 +464,7 @@ extension EventTapEngine {
         // is a cheap non-IPC read; pay it once, only after a match (rare), before swallowing.
         // Deliberately does not mutate the polled flag: the monitor is edge-triggered, and
         // forcing it true here could latch matching off until the next real transition.
-        if AXContextChecker.isSecureEventInputEnabledLive() {
+        if liveSecureInputProbe() {
             DevTypeLog.eventTap.notice(
                 "[EventTap] live Secure Input check blocked a swallow (polled flag was stale)"
             )
@@ -430,12 +499,19 @@ extension EventTapEngine {
                 flushReplayCount: admission.decision.replayCount
             )
             if units > 0 {
-                TextInjectionPipeline.shared.noteDeliveryInput(units: units)
+                pipeline.noteDeliveryInput(units: units)
+            } else if admission.decision != .swallow {
+                pipeline.noteUncountedDeliveryKey()
             }
             switch admission.decision {
             case .swallow:
+                if let clockMark { inputClock.retract(clockMark) }
                 return nil
             case .flushThenPassThrough(let replay):
+                // The expansion this key lost the claim to may itself owe a terminator.
+                surrenderHoldPuttingTerminatorBack(
+                    heldFor: admission.holdPID, reason: "hold released early"
+                )
                 replayTypeAhead(replay, heldFor: admission.holdPID, reason: "hold released early")
             case .passThrough:
                 break
@@ -446,6 +522,8 @@ extension EventTapEngine {
         let utf16Trigger = match.eraseCount
         let charCount = lastUTF16Count
         let swallowed = SwallowedKey(didSwallow: true, unicode: unicodeStr, keyCode: keyCode, flags: flags)
+        // Same thread as every later key event, so none can reach `admit` before this is owed.
+        pipeline.oweSwallowedKey(swallowed)
         let terminator = match.terminator
         let eraseOverride = match.source == .physical ? match.eraseCount : nil
         // Exact text expected left of the caret. Carries both unit systems (UTF-16 for AX

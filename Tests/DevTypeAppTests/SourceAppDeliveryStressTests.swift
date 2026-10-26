@@ -1,3 +1,4 @@
+import ApplicationServices
 import XCTest
 import ExpanderEngine
 @testable import DevTypeAppCore
@@ -346,6 +347,126 @@ final class SourceAppDeliveryStressTests: XCTestCase {
             SourceAppDelivery.classifyFocus(elementOwner: nil, elementIdentity: 3, ownPID: Self.ownPID),
             .external(element: 3)
         )
+    }
+
+    // MARK: - A window is not a field
+
+    private static let containerRoles = [
+        kAXApplicationRole, kAXWindowRole, kAXSheetRole, kAXDrawerRole, kAXPopoverRole,
+    ].map { $0 as String }
+
+    /// Field report (1.3.0 build 389, Safari proofread): the focus wait settled on the browser's
+    /// AXWindow after two polls — its identity is stable, and `classifyFocus` looked at identity
+    /// and owner only — so the window became the captured paste target and the replace guard
+    /// had to undo that inside its own 200 ms. A window-level container cannot hold a selection
+    /// or take a paste; the wait has to keep polling until something that can does answer.
+    func testAWindowLevelContainerIsFocusThatHasNotArrivedYet() {
+        for role in Self.containerRoles {
+            XCTAssertEqual(
+                SourceAppDelivery.classifyFocus(
+                    elementOwner: Self.sourcePID, elementIdentity: 7, ownPID: Self.ownPID, elementRole: role
+                ),
+                .unfocused,
+                role
+            )
+        }
+        // Everything else, including a role that could not be read, is still a candidate target:
+        // failing closed on an unreadable role would stall deliveries into apps that never
+        // answer it, for no safety gain (the entry gate and the replace guard still verify).
+        for role in ["AXTextArea", "AXTextField", "AXWebArea", "AXGroup", "AXScrollArea", "", nil] as [String?] {
+            XCTAssertEqual(
+                SourceAppDelivery.classifyFocus(
+                    elementOwner: Self.sourcePID, elementIdentity: 7, ownPID: Self.ownPID, elementRole: role
+                ),
+                .external(element: 7),
+                role ?? "nil"
+            )
+        }
+        // Our own panel's window stays `.ownProcess`: that is a different wait.
+        XCTAssertEqual(
+            SourceAppDelivery.classifyFocus(
+                elementOwner: Self.ownPID, elementIdentity: 7, ownPID: Self.ownPID, elementRole: kAXWindowRole as String
+            ),
+            .ownProcess
+        )
+    }
+
+    /// The whole loop with the field report's focus history: a stable window, then — a few polls
+    /// later — the field. Delivery must wait for the field to answer twice, not settle on the
+    /// window's second answer.
+    func testTheWaitOutlastsAStableWindowAndSettlesOnTheField() {
+        let trace = Trace()
+        trace.frontmost = Self.sourcePID
+        let window = (identity: UInt64(100), role: kAXWindowRole as String)
+        let field = (identity: UInt64(200), role: "AXTextArea")
+        let fieldArrivesAtProbe = 6
+        var deliveredAtProbe: Int?
+        var deliveredFocus: SelectionReader.AXFocusObservation?
+
+        SourceAppDelivery.perform(
+            sourcePID: Self.sourcePID,
+            ownPID: Self.ownPID,
+            environment: .init(
+                frontmostPID: { trace.frontmost },
+                sourceTerminated: { false },
+                activate: {},
+                schedule: { _, action in trace.pending.append(action) },
+                axFocus: {
+                    trace.focusProbes += 1
+                    let shown = trace.focusProbes >= fieldArrivesAtProbe ? field : window
+                    let focus = SourceAppDelivery.classifyFocus(
+                        elementOwner: Self.sourcePID, elementIdentity: shown.identity,
+                        ownPID: Self.ownPID, elementRole: shown.role
+                    )
+                    trace.lastFocus = focus
+                    return focus
+                }
+            ),
+            onUnavailable: { _ in trace.failures += 1 },
+            operation: { _ in
+                deliveredAtProbe = trace.focusProbes
+                deliveredFocus = trace.lastFocus
+            }
+        )
+        while !trace.pending.isEmpty { trace.pending.removeFirst()() }
+
+        XCTAssertEqual(trace.failures, 0)
+        XCTAssertEqual(deliveredAtProbe, fieldArrivesAtProbe + 1)
+        XCTAssertEqual(deliveredFocus, .external(element: field.identity))
+    }
+
+    /// The contract the wait has always had: it prefers a field and never insists on one. An app
+    /// whose only focus is its window still gets its payload delivered when the budget runs out,
+    /// for the replace guard to judge — it is never refused from the wait.
+    func testAWindowThatNeverYieldsAFieldStillReadsAtTheEndOfTheBudget() {
+        let trace = Trace()
+        trace.frontmost = Self.sourcePID
+        var deliveries = 0
+
+        SourceAppDelivery.perform(
+            sourcePID: Self.sourcePID,
+            ownPID: Self.ownPID,
+            environment: .init(
+                frontmostPID: { trace.frontmost },
+                sourceTerminated: { false },
+                activate: {},
+                schedule: { _, action in trace.pending.append(action) },
+                axFocus: {
+                    trace.focusProbes += 1
+                    return SourceAppDelivery.classifyFocus(
+                        elementOwner: Self.sourcePID, elementIdentity: 100,
+                        ownPID: Self.ownPID, elementRole: kAXWindowRole as String
+                    )
+                }
+            ),
+            onUnavailable: { _ in trace.failures += 1 },
+            operation: { _ in deliveries += 1 }
+        )
+        while !trace.pending.isEmpty { trace.pending.removeFirst()() }
+
+        XCTAssertEqual(deliveries, 1)
+        XCTAssertEqual(trace.failures, 0)
+        XCTAssertEqual(trace.focusProbes, SelectionReader.sourceFocusMaxPolls + 1)
     }
 
     private var ownPIDValue: pid_t? { Self.ownPID }
