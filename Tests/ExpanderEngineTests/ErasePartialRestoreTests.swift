@@ -247,6 +247,11 @@ final class ErasePartialRestoreTests: XCTestCase {
         XCTAssertTrue(before.contains("settledPartialErase = true"))
         XCTAssertTrue(before.contains("AXSettleRetry.settleDelay"), "the existing settle, not a new constant")
         XCTAssertTrue(before.contains("afterErase(false, settleAttempt: settleAttempt)"), "re-enters the whole chain")
-        XCTAssertTrue(before.contains("canProceedAfterMutation()"))
+        let continueCheck = try XCTUnwrap(before.range(of: "canProceedAfterMutation()"))
+        let lagRead = try XCTUnwrap(before.range(of: "self.partialEraseMayLag("))
+        XCTAssertLessThan(
+            continueCheck.lowerBound, lagRead.lowerBound,
+            "the continue-check adopts a vouched replacement; the lag must be read from the adopted element"
+        )
     }
 }

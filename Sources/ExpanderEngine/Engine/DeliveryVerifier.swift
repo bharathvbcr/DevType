@@ -228,8 +228,12 @@ public final class DeliveryVerifier {
     /// Whether `live` may stand in for the control `baseline` was read from — `ControlIdentity`'s
     /// rule over a live element, which is the only owner of it. Callers ask here instead of
     /// restating it.
+    func sameControlVerdict(baseline: ControlIdentity, live: AXUIElement) -> ControlIdentity.Verdict {
+        ControlIdentity.compare(baseline: baseline, live: controlIdentity(of: live))
+    }
+
     func vouchesAsSameControl(baseline: ControlIdentity, live: AXUIElement) -> Bool {
-        ControlIdentity.compare(baseline: baseline, live: controlIdentity(of: live)).isSameControl
+        sameControlVerdict(baseline: baseline, live: live).isSameControl
     }
 
     /// §2.2: a documented re-check. The live focus is compared (`CFEqual`) against the baseline's

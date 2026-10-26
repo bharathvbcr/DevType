@@ -1404,9 +1404,11 @@ public final class TextInjectionPipeline {
                         // confirmed again on the new node — once: a second swap refuses.
                         if !vouchedRetarget, moved == .elementChanged,
                            let confirmedIdentity, let liveElement = live.element,
-                           self.verifier.vouchesAsSameControl(baseline: confirmedIdentity, live: liveElement) {
+                           case let verdict = self.verifier.sameControlVerdict(
+                               baseline: confirmedIdentity, live: liveElement
+                           ), verdict.isSameControl {
                             DevTypeLog.inject.notice(
-                                "[Inject] replace: the field's node was replaced while the confirm waited — confirming again on the replacement"
+                                "[Inject] replace: the field's node was replaced while the confirm waited — confirming again on the replacement (\(verdict.label, privacy: .public))"
                             )
                             self.confirmReplacementSelection(
                                 replacement,
@@ -1743,10 +1745,12 @@ public final class TextInjectionPipeline {
                 // deleted than the count says gets one look after the mirror settles: only a
                 // lagging one has caught up to exactly the count by then, so the checks below run
                 // unchanged on that second reading, and an overstated one is refused as before.
-                // A keystroke in the wait fails `canProceedAfterMutation` on re-entry.
+                // A keystroke in the wait fails `canProceedAfterMutation` on re-entry. That check
+                // runs first here too: it is what adopts a vouched replacement, and the lag is
+                // read from the adopted element, not from a node a swap has already killed.
                 if !restoredPartialErase, !settledPartialErase, postedBackspaces > 0,
-                   self.partialEraseMayLag(context, posted: postedBackspaces),
-                   canProceedAfterMutation() {
+                   canProceedAfterMutation(),
+                   self.partialEraseMayLag(context, posted: postedBackspaces) {
                     settledPartialErase = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + AXSettleRetry.settleDelay) {
                         afterErase(false, settleAttempt: settleAttempt)

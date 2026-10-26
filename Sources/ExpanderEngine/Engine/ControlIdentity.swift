@@ -43,18 +43,21 @@ public struct ControlIdentity: Equatable {
         public let identifier: String?
         /// `AXPlaceholderValue`.
         public let placeholder: String?
-        /// `AXDOMClassList` — the DOM class names, unordered.
+        /// `AXDOMClassList` — the DOM class names, unordered. Corroboration only: classes encode
+        /// a control's *state* (`has-value` / `is-empty`, `pristine` / `dirty`, focused), which an
+        /// erase itself changes, so two different lists are no evidence either way.
         public let domClassList: Set<String>?
         /// Role of the parent element (`AXParent`). A parent's wrapper is regenerated along with
-        /// the child's, so the parent is compared by role and frame, never by element identity.
+        /// the child's, so the parent is compared by role, never by element identity. Its frame is
+        /// deliberately not read: it moves with the child when the view scrolls, which the erase
+        /// match tolerates, and the child's own frame is already the geometry signal.
         public let parentRole: String?
-        public let parentFrame: CGRect?
 
         public static let none = Attributes()
 
         public init(
             domIdentifier: String? = nil, identifier: String? = nil, placeholder: String? = nil,
-            domClassList: [String]? = nil, parentRole: String? = nil, parentFrame: CGRect? = nil
+            domClassList: [String]? = nil, parentRole: String? = nil
         ) {
             func present(_ text: String?) -> String? {
                 guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -66,12 +69,11 @@ public struct ControlIdentity: Equatable {
             let classes = Set((domClassList ?? []).compactMap(present))
             self.domClassList = classes.isEmpty ? nil : classes
             self.parentRole = present(parentRole)
-            self.parentFrame = ControlIdentity.usableFrame(parentFrame)
         }
     }
 
     public enum Mark: String, Equatable {
-        case domIdentifier, identifier, placeholder, domClassList, parent
+        case domIdentifier, identifier, placeholder, parent
     }
 
     /// What `compare` concluded.
@@ -85,6 +87,17 @@ public struct ControlIdentity: Equatable {
         case contradicted(Mark)
         /// Process, role or frame does not hold, or one could not be read.
         case notSame
+
+        /// For the log line: whether the host published identity that agreed, or only the frame did.
+        /// This is how a live run tells whether a host serves the attributes to a real client.
+        public var label: String {
+            switch self {
+            case .frameOnly: return "frame only"
+            case .corroborated: return "identity corroborated"
+            case .contradicted(let mark): return "contradicted by \(mark.rawValue)"
+            case .notSame: return "not the same control"
+            }
+        }
 
         public var isSameControl: Bool {
             switch self {
@@ -152,17 +165,8 @@ public struct ControlIdentity: Equatable {
         if let left = baseline.placeholder, let right = live.placeholder, left != right {
             return .placeholder
         }
-        // A control's classes move with its state (focused, invalid, hovered), so one list
-        // containing the other is the same control in another state. Two lists that each have
-        // a class the other lacks name different controls.
-        if let left = baseline.domClassList, let right = live.domClassList,
-           !left.isSubset(of: right), !right.isSubset(of: left) {
-            return .domClassList
-        }
+        // Class lists are not compared: they encode state, and the erase changes state.
         if let left = baseline.parentRole, let right = live.parentRole, left != right {
-            return .parent
-        }
-        if let left = baseline.parentFrame, let right = live.parentFrame, !framesMatch(left, right) {
             return .parent
         }
         return nil
@@ -213,21 +217,18 @@ public struct ControlIdentity: Equatable {
             return ref
         }
         var parentRole: String?
-        var parentFrame: CGRect?
         if let parentRef = copy(kAXParentAttribute, from: element),
            CFGetTypeID(parentRef) == AXUIElementGetTypeID() {
             let parent = unsafeBitCast(parentRef, to: AXUIElement.self)
             AXContextChecker.applyMessagingTimeout(to: parent)
             parentRole = AXContextChecker.shared.focusedElementRole(element: parent)
-            parentFrame = AXContextChecker.elementFrame(parent)
         }
         return Attributes(
             domIdentifier: copy(domIdentifierAttribute, from: element) as? String,
             identifier: copy(kAXIdentifierAttribute, from: element) as? String,
             placeholder: copy(kAXPlaceholderValueAttribute, from: element) as? String,
             domClassList: copy(domClassListAttribute, from: element) as? [String],
-            parentRole: parentRole,
-            parentFrame: parentFrame
+            parentRole: parentRole
         )
     }
 }

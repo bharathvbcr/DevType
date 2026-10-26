@@ -43,9 +43,7 @@ final class ControlIdentityTests: XCTestCase {
             (.init(domIdentifier: "search"), .init(domIdentifier: "inline-editor"), .domIdentifier),
             (.init(identifier: "a"), .init(identifier: "b"), .identifier),
             (.init(placeholder: "Search"), .init(placeholder: "Reply"), .placeholder),
-            (.init(domClassList: ["search"]), .init(domClassList: ["editor"]), .domClassList),
             (.init(parentRole: "AXGroup"), .init(parentRole: "AXScrollArea"), .parent),
-            (.init(parentFrame: frame), .init(parentFrame: frame.offsetBy(dx: 0, dy: 200)), .parent),
         ]
         for (baseline, live, mark) in cases {
             XCTAssertEqual(
@@ -98,15 +96,17 @@ final class ControlIdentityTests: XCTestCase {
         XCTAssertEqual(ControlIdentity.Attributes(domClassList: ["", " "]), .none)
     }
 
-    /// A control's classes move with its state, so one list holding the other is the same control.
-    func testClassListsThatOnlyGainOrLoseStateClassesAreTheSameControl() {
+    /// Classes encode state, so they can corroborate (the same set, in any order) and never refuse.
+    func testClassListsOnlyCorroborate() {
         let resting = ControlIdentity.Attributes(domClassList: ["field", "search"])
-        let focused = ControlIdentity.Attributes(domClassList: ["search", "field", "is-focused"])
-        XCTAssertNil(ControlIdentity.conflict(resting, focused))
-        XCTAssertNil(ControlIdentity.conflict(focused, resting))
         XCTAssertEqual(
-            ControlIdentity.conflict(resting, .init(domClassList: ["field", "inline-editor"])), .domClassList
+            ControlIdentity.compare(
+                baseline: identity(resting), live: identity(.init(domClassList: ["search", "field"]))
+            ),
+            .corroborated
         )
+        XCTAssertNil(ControlIdentity.conflict(resting, .init(domClassList: ["field", "search", "is-focused"])))
+        XCTAssertNil(ControlIdentity.conflict(resting, .init(domClassList: ["field", "inline-editor"])))
     }
 
     func testAMatchingIdentityNeverRelaxesTheFrameOrTheOtherGates() {
@@ -333,6 +333,51 @@ final class ControlIdentityTests: XCTestCase {
         ))
     }
 
+    /// `kAXParent` is published by essentially every host, so the parent is present on both sides in
+    /// production. A scroll moves the parent with the child, and the erase match deliberately
+    /// tolerates a scrolled child frame when the remainder names the field. (This was red while the
+    /// parent's frame was part of the attributes: the parent moved by the same offset and refused
+    /// the match. The frame is no longer read, so only the parent's role can take part.)
+    func testAScrolledViewIsNotAContradictionJustBecauseTheParentMovedWithTheField() {
+        let anchor = EraseContinuation.EraseFieldPicture(
+            value: "hello sig", caretLocation: 9, selectionLength: 0, frame: frame,
+            attributes: .init(parentRole: "AXGroup")
+        )
+        let scrolled = EraseContinuation.EraseFieldPicture(
+            value: "hello ", caretLocation: 6, selectionLength: 0, frame: frame.offsetBy(dx: 40, dy: 40),
+            attributes: .init(parentRole: "AXGroup")
+        )
+        XCTAssertEqual(
+            EraseContinuation.deletionMatch(
+                anchor: anchor, live: scrolled, expectedText: "sig", caseInsensitive: false, maxRemovedGraphemes: 3
+            ),
+            .progress(removedGraphemes: 3)
+        )
+    }
+
+    /// Form libraries toggle state classes (`has-value` / `is-empty`, `pristine` / `dirty`) on
+    /// every edit, so the erase itself swaps one class for another on the same control. Classes
+    /// encode state, not identity: equal ones corroborate, different ones say nothing.
+    func testStateClassesThatChangeWithTheEraseAreNotAContradiction() {
+        let anchor = picture("hello sig", attributes: .init(domClassList: ["field", "has-value"]))
+        let erased = picture("hello ", caret: 6, attributes: .init(domClassList: ["field", "is-empty"]))
+        XCTAssertEqual(
+            EraseContinuation.deletionMatch(
+                anchor: anchor, live: erased, expectedText: "sig", caseInsensitive: false, maxRemovedGraphemes: 3
+            ),
+            .progress(removedGraphemes: 3)
+        )
+        XCTAssertNil(ControlIdentity.conflict(
+            .init(domClassList: ["field", "has-value"]), .init(domClassList: ["field", "is-empty"])
+        ))
+        XCTAssertEqual(
+            ControlIdentity.compare(
+                baseline: identity(.init(domClassList: ["search"])), live: identity(.init(domClassList: ["editor"]))
+            ),
+            .frameOnly
+        )
+    }
+
     func testTheSameDOMIdentifierOnTheReplacementNodeIsStillTheFieldTheEraseStartedIn() {
         let anchor = picture("hello sig", attributes: .init(domIdentifier: "search"))
         let swapped = picture("hello ", caret: 6, attributes: .init(domIdentifier: "search"))
@@ -410,7 +455,7 @@ final class ControlIdentityTests: XCTestCase {
         XCTAssertTrue(adopt.contains("identityContradicted: identityContradicted"))
         XCTAssertTrue(pipeline.contains("baseline: allowsEraseRetarget(request)"), "the baseline is read ahead of the erase")
         XCTAssertTrue(
-            pipeline.contains("self.verifier.vouchesAsSameControl(baseline: confirmedIdentity, live: liveElement)"),
+            pipeline.contains("self.verifier.sameControlVerdict("),
             "the AI replace confirm judges a swapped node by the same owner"
         )
         let verifier = SourceContractTests.strippingComments(
