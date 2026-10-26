@@ -125,7 +125,15 @@ final class InjectionHarness {
         case key(Int)
         /// The refused-replacement keeper was asked to hold this text.
         case keep(String)
+        /// A scripted confirmer read the selection from the live field (`note(_:)`).
+        case selectionRead
+        /// The board still had this long to run on a previous payload's lease when the pipeline
+        /// asked the focus query — nonzero means it did not wait for the board.
+        case boardBusy(Bool)
     }
+
+    /// Lets a scripted collaborator (a confirmer's reads, say) put itself in the ordered log.
+    func note(_ event: Event) { log.append(event) }
 
     // MARK: - Fixed cast
 
@@ -150,6 +158,12 @@ final class InjectionHarness {
     // MARK: - What the test observes
 
     private(set) var log: [Event] = []
+    /// `log` without the board probes: the order things were done in.
+    var order: [Event] {
+        log.filter { if case .boardBusy = $0 { return false } else { return true } }
+    }
+    /// How many focus queries were asked while a previous payload was still waiting to be read.
+    var focusQueriesWhileBoardBusy: Int { log.filter { $0 == .boardBusy(true) }.count }
     var backspaces: Int { log.filter { $0 == .backspace }.count }
     var chords: Int { log.filter { $0 == .chordDone }.count }
     var kept: [String] { log.compactMap { if case .keep(let text) = $0 { text } else { nil } } }
@@ -302,6 +316,7 @@ final class InjectionHarness {
         }
         focusQuery = { [unowned self] completion in
             self.log.append(.focusQuery)
+            self.log.append(.boardBusy(self.broker.publicationGateRemaining() > 0))
             let index = self.focusQueries
             if let scripted = self.focusAnswer(index) {
                 completion(scripted)

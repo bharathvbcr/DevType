@@ -1,6 +1,5 @@
 import ApplicationServices
 import XCTest
-import SourceTreeTestSupport
 @testable import ExpanderEngine
 
 /// §2.2: an expansion resolves the focused element once and threads it through.
@@ -9,10 +8,11 @@ import SourceTreeTestSupport
 /// re-checks that exist to catch the user moving (`PasteTarget.liveMismatch`,
 /// `DeliveryVerifier.verifyFocusedTextDelivery`) and the erase guard's settle retry.
 ///
-/// No test here drives a whole inject — that needs AX trust and a live host. The budget is held
-/// compositionally instead: `FocusQueryProbe` counts at the single choke point every query passes
-/// through, every collaborator the inject hands its element to is shown to issue **zero** queries
-/// with it, and the pipeline source is shown to resolve focus in exactly one place.
+/// The budget is held two ways. Compositionally: `FocusQueryProbe` counts at the single choke point
+/// every query passes through, and every collaborator the inject hands its element to is shown to
+/// issue **zero** queries with it. And end to end: a whole inject runs through the pipeline's
+/// `focusQuery:` seam on the shared `InjectionHarness`, which counts the actual queries and places
+/// them in the ordered log relative to the confirm, the erase and the paste.
 final class FocusThreadingTests: XCTestCase {
 
     private let element = AXUIElementCreateApplication(1234)
@@ -121,42 +121,84 @@ final class FocusThreadingTests: XCTestCase {
 
     // MARK: - The pipeline resolves once
 
-    private func pipelineSource() throws -> String {
-        SourceContractTests.strippingComments(try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift"))
+    /// A confirmer whose first reading of the field is blank (the host publishing the selection a
+    /// moment late), so the confirm waits a settle. Every read it makes lands in the harness's
+    /// ordered log, which is what places the focus queries relative to the confirm.
+    private func makeReplaceHarness(readsBlankOnce: Bool, original: String) throws -> InjectionHarness {
+        final class Link { var harness: InjectionHarness? }
+        let link = Link()
+        var reads = 0
+        let access = SelectionReplacementGuard.Confirmer.Access(
+            observe: { _ in
+                link.harness?.note(.selectionRead)
+                reads += 1
+                return readsBlankOnce && reads == 1
+                    ? .init(value: nil, selectedText: nil)
+                    : .init(value: nil, selectedText: original)
+            },
+            select: { _, _ in false },
+            schedule: { _, action in action() },
+            role: { _ in "AXTextArea" }
+        )
+        let harness = try InjectionHarness(selectionConfirmer: SelectionReplacementGuard.Confirmer(access: access))
+        link.harness = harness
+        return harness
     }
 
-    func testTheInjectResolvesFocusInExactlyOnePlace() throws {
-        let source = try pipelineSource()
-        let start = try XCTUnwrap(source.range(of: "private func injectOnMain("))
-        let end = try XCTUnwrap(source.range(of: "private func finishAbandonedPaste("))
-        let inject = String(source[start.lowerBound..<end.lowerBound])
+    private func firstIndex(of event: InjectionHarness.Event, in order: [InjectionHarness.Event]) -> Int? {
+        order.firstIndex(of: event)
+    }
 
-        // Every resolution goes through the pipeline's `focusQuery` seam, never straight to the
-        // checker, so a test can see each one. There is one per inject, plus the single documented
-        // re-read a confirmed replace makes after it waited: its entry gate would otherwise compare
-        // the target against a focus that predates the wait (`confirmReplacementSelection`).
-        XCTAssertEqual(inject.components(separatedBy: "queryFocusedElement").count - 1, 0,
-                       "Focus is resolved through the `focusQuery` seam, not by a direct query")
-        // `injectOnMain` names it twice: the inject that erases nothing resolves at once, and the one
-        // that does waits out `BoardHoldOff` first. They are the two arms of one `guard … else`
-        // (the early-return arm and the `proceed` of the wait), so an inject still resolves once.
-        XCTAssertEqual(inject.components(separatedBy: "focusQuery {").count - 1, 3,
-                       "One resolution per inject (two exclusive arms), and one re-read after a replace confirm that waited")
-        let confirmStart = try XCTUnwrap(inject.range(of: "private func confirmReplacementSelection("))
-        let beforeConfirm = String(inject[..<confirmStart.lowerBound])
-        XCTAssertEqual(beforeConfirm.components(separatedBy: "focusQuery {").count - 1, 2,
-                       "the entry re-check's answer is the threaded element for every path but a waited replace")
-        let wait = try XCTUnwrap(beforeConfirm.range(of: "BoardHoldOff.untilFree("))
-        let bypass = try XCTUnwrap(beforeConfirm.range(of: "focusQuery {"))
-        XCTAssertLessThan(bypass.lowerBound, wait.lowerBound, "the unwaited arm is the early return before the wait")
-        XCTAssertTrue(beforeConfirm[bypass.lowerBound..<wait.lowerBound].contains("return\n"),
-                      "the unwaited arm returns, so it and the waited arm never both resolve")
-        for untracked in [
-            "focusedElement()", "focusedElementRole()", "captureFocusedTextObservation()",
-            "isFrontmostShellLikeContext()", "PasteTarget.capture()"
-        ] {
-            XCTAssertFalse(inject.contains(untracked), "\(untracked) re-resolves focus behind the threaded element")
-        }
-        XCTAssertFalse(inject.contains("focus: .live"), "A collaborator inside the inject must be handed the element")
+    /// A typed expansion resolves focus once, and does it before anything is erased: every gate,
+    /// the precondition, the erase and the paste are handed that element, none re-queries.
+    func testATypedExpansionResolvesFocusOnceAndBeforeItErasesAnything() throws {
+        let harness = try InjectionHarness()
+        let run = harness.typeExpansion(in: self)
+
+        XCTAssertNotNil(run.outcome)
+        XCTAssertEqual(run.text, "say: Sincerely, Slim", "the run reached the paste, so the budget covers all of it")
+        XCTAssertEqual(harness.focusQueries, 1, "\(harness.order)")
+        XCTAssertEqual(harness.order.first, .focusQuery, "focus is resolved before the first backspace")
+        XCTAssertLessThan(
+            try XCTUnwrap(firstIndex(of: .focusQuery, in: harness.order)),
+            try XCTUnwrap(firstIndex(of: .backspace, in: harness.order))
+        )
+    }
+
+    /// A replace whose selection is read correctly the first time has nothing to cover: it keeps
+    /// the focus it resolved and queries once.
+    func testAReplaceThatConfirmedAtOnceResolvesFocusOnce() throws {
+        let original = "teh quick brown fox"
+        let harness = try makeReplaceHarness(readsBlankOnce: false, original: original)
+        harness.seed("say: \(original) now", caret: 5, selection: (original as NSString).length)
+        let outcome = harness.injectReplace(in: self, original: original, result: "the quick brown fox")
+
+        XCTAssertEqual(outcome, .succeeded)
+        XCTAssertEqual(harness.focusQueries, 1, "\(harness.order)")
+        XCTAssertLessThan(
+            try XCTUnwrap(firstIndex(of: .selectionRead, in: harness.order)),
+            try XCTUnwrap(harness.order.firstIndex { if case .paste = $0 { true } else { false } }),
+            "the selection is confirmed before ⌘V can go out"
+        )
+    }
+
+    /// A confirm that waited resolves focus again — the focus it was handed predates the wait —
+    /// and does it after the confirm's own reads and before ⌘V, so the entry gate judges where
+    /// focus is now. That is the documented second query; there is no third.
+    func testAReplaceThatWaitedResolvesFocusAgainAfterTheConfirmAndBeforeThePaste() throws {
+        let original = "teh quick brown fox"
+        let harness = try makeReplaceHarness(readsBlankOnce: true, original: original)
+        harness.seed("say: \(original) now", caret: 5, selection: (original as NSString).length)
+        let outcome = harness.injectReplace(in: self, original: original, result: "the quick brown fox")
+
+        XCTAssertEqual(outcome, .succeeded)
+        XCTAssertEqual(harness.focusQueries, 2, "\(harness.order)")
+        let order = harness.order
+        let queries = order.indices.filter { order[$0] == .focusQuery }
+        let lastRead = try XCTUnwrap(order.lastIndex(of: .selectionRead))
+        let paste = try XCTUnwrap(order.firstIndex { if case .paste = $0 { true } else { false } })
+        XCTAssertLessThan(queries[0], order.firstIndex(of: .selectionRead)!, "the inject's own query comes first")
+        XCTAssertGreaterThan(queries[1], lastRead, "the re-read follows the confirm that waited")
+        XCTAssertLessThan(queries[1], paste, "and precedes the paste")
     }
 }
