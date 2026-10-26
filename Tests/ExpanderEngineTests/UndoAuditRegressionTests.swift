@@ -96,7 +96,9 @@ final class UndoAuditRegressionTests: XCTestCase {
             XCTAssertTrue(source[start.upperBound..<end.lowerBound].contains("clearLastExpansion()"))
         }
         let observer = try SourceTree.functionBody("func installAppSwitchObserver()", in: source)
-        XCTAssertTrue(observer.contains("TextInjectionPipeline.shared.clearLastExpansion()"))
+        // The engine holds the pipeline it drives (`pipeline`, `.shared` in production), so the
+        // observer clears that one's record; the behaviour is driven in `InjectionLifetimeWiringTests`.
+        XCTAssertTrue(observer.contains("pipeline.clearLastExpansion()"))
         let pause = try XCTUnwrap(source.range(of: "public var isEnabled: Bool"))
         let end = try XCTUnwrap(source.range(of: "UserDefaults.standard.set(!newValue", range: pause.upperBound..<source.endIndex))
         XCTAssertTrue(source[pause.upperBound..<end.lowerBound].contains("cancelCurrentInjection()"))

@@ -115,7 +115,7 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
     /// The page holds the original in both the field and the replacement node, so a paste that
     /// follows the swap lands in the node it was sent to.
     private func replaceThenSwap(
-        _ harness: InjectionHarness, to live: AXUIElement, frameOfLive: CGRect, confirmedOn: Box
+        _ harness: InjectionHarness, to live: AXUIElement, frameOfLive: CGRect, confirmedOn: Reads
     ) -> Outcome {
         let text = "say: \(original) now"
         let selection = NSRange(location: 5, length: (original as NSString).length)
@@ -141,18 +141,21 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
         )
     }
 
-    final class Box { var elements: [String] = [] }
+    /// What the scripted confirmer saw: every element it read the selection from, and the field it blanks once.
+    final class Reads {
+        var elements: [String] = []
+        var field: AXUIElement?
+    }
 
     /// A confirmer that blanks the field once — the host publishing the selection a moment late —
     /// so the confirm waits a settle and the live re-check runs; every other read answers the
     /// original. `confirmedOn` records every element the selection was read from.
-    private func makeHarness(confirmedOn: Box) throws -> InjectionHarness {
+    private func makeHarness(confirmedOn: Reads) throws -> InjectionHarness {
         var observedField = 0
-        let probeHarness = Box2()
         let access = SelectionReplacementGuard.Confirmer.Access(
             observe: { [original] candidate in
                 confirmedOn.elements.append(String(describing: candidate))
-                if let first = probeHarness.field, CFEqual(candidate, first) {
+                if let first = confirmedOn.field, CFEqual(candidate, first) {
                     observedField += 1
                     return observedField == 1
                         ? .init(value: nil, selectedText: nil)
@@ -165,18 +168,16 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
             role: { _ in "AXTextArea" }
         )
         let harness = try InjectionHarness(selectionConfirmer: SelectionReplacementGuard.Confirmer(access: access))
-        probeHarness.field = harness.field
+        confirmedOn.field = harness.field
         return harness
     }
-
-    private final class Box2 { var field: AXUIElement? }
 
     /// The proceed branch. The harness's host really pastes where focus is, so the assertions are
     /// about what the gate decided and what the field holds afterwards: the node swap is not
     /// refused as a move, the result is not diverted to the clipboard, the selection was
     /// confirmed again on the new node, and the result is in the node the paste was sent to.
     func testASwappedNodeOfTheSameControlIsConfirmedAgainNotRefused() throws {
-        let confirmedOn = Box()
+        let confirmedOn = Reads()
         let harness = try makeHarness(confirmedOn: confirmedOn)
         let run = replaceThenSwap(
             harness, to: harness.replacementNode,
@@ -193,7 +194,7 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
     }
 
     func testAnotherFieldIsStillAMoveAndKeepsTheResult() throws {
-        let confirmedOn = Box()
+        let confirmedOn = Reads()
         let harness = try makeHarness(confirmedOn: confirmedOn)
         let run = replaceThenSwap(
             harness, to: harness.elsewhere,

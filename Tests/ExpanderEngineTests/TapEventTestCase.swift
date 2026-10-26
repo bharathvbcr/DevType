@@ -27,8 +27,12 @@ class TapEventTestCase: XCTestCase {
         _ = EventTapEngine.shared
         let suite = "TapEventTestCase.\(UUID().uuidString)"
         pipelineSuite = suite
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            // Never fall back to the standard defaults: the pipeline writes its undo preference there.
+            preconditionFailure("could not create a private defaults suite")
+        }
         pipeline = TextInjectionPipeline(
-            defaults: UserDefaults(suiteName: suite) ?? .standard,
+            defaults: defaults,
             selectionConfirmer: SelectionReplacementGuard.Confirmer(),
             keepRefusedReplacement: { _ in false }
         )
