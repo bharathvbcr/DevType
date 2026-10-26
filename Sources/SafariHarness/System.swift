@@ -108,10 +108,11 @@ enum SystemFacts {
         return "the app you launched this from (Terminal, iTerm2, ...)"
     }
 
+    /// The active keyboard layout id, read from HIToolbox's preference rather than the Text Input
+    /// Source API: those calls trap off the main queue on macOS 27 and DevType's source contract
+    /// (`SourceContractTests`) keeps them in `KeyboardLayoutState` alone.
     static func keyboardLayoutID() -> String? {
-        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
-              let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
-        return Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
+        CFPreferencesCopyAppValue("AppleCurrentKeyboardLayoutInputSourceID" as CFString, "com.apple.HIToolbox" as CFString) as? String
     }
 
     /// DevType's preferences, read through CFPreferences so the domain is DevType's, not this tool's.

@@ -408,6 +408,14 @@ public final class Runner {
 
         for event in context.hotkey.events { try post(event, policy: pagePolicy) }
 
+        if context.mode == .dryRun {
+            // The palette never opens without a posted hotkey, and the focus gate would rightly refuse
+            // keys aimed at it. Record what would be typed so the plan and counts are complete.
+            for character in "proofread" { for event in try KeyPlan.events(for: character) { try keyboard.post(event); posted += 1 } }
+            for down in [true, false] { try keyboard.post(KeyEvent(keyCode: KeyPlan.returnKey, down: down)); posted += 1 }
+            return
+        }
+
         guard try waitUntil(timeout: 3.0, { isAllowed(palettePolicy) }) else {
             throw CaseError(message: "DevType's AI palette did not open within 3 s of \(context.hotkey.label) (hotkey taken by another app, or Preferences changed since the harness read it)")
         }

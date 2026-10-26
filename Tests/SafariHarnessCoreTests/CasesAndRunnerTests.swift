@@ -371,6 +371,16 @@ final class RunnerTests: XCTestCase {
         XCTAssertTrue(results.allSatisfy { $0.summary.hasPrefix("dry run:") })
     }
 
+    func testDryRunOfTheAICaseRecordsItsKeysAndDoesNotWaitForAPaletteThatNeverOpens() {
+        let r = rig(mode: .dryRun, ai: .available)
+        let result = r.runner.run(only("ai-proofread")).results[0]
+        XCTAssertEqual(result.status, .dryRun, result.summary)
+        // hotkey chord (6) + "proofread" (9 chars x 2) + Return (2)
+        XCTAssertEqual(r.keyboard.events.count, AIHotkey.default.events.count + 18 + 2)
+        XCTAssertEqual(result.plannedEvents, r.keyboard.events.count)
+        XCTAssertEqual(result.plannedEvents, Planner.plannedEventCount(only("ai-proofread")[0], spec: spec, hotkey: .default))
+    }
+
     func testSpaCaseSimulatedLandingFailsAndSimulatedRefusalPasses() {
         let landed = rig()
         landed.keyboard.onPost = { [unowned landed] e in

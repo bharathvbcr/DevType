@@ -35,9 +35,14 @@ final class HIDKeyboard: KeyboardPort {
         guard let cg = CGEvent(keyboardEventSource: source, virtualKey: event.keyCode, keyDown: event.down) else {
             throw HIDError.eventCreationFailed(event.keyCode)
         }
-        cg.flags = CGEventFlags(rawValue: event.flags.rawValue)
+        let modifier = Modifier.allCases.first(where: { $0.keyCode == event.keyCode })
+        // CGEvent already builds a modifier keycode as a `.flagsChanged` event whose flags carry the
+        // device-dependent left/right bits (checked offline: key code 56 gives type 12, not keyDown).
+        // Overwriting those flags would drop the bits some apps use to tell the sides apart, so only
+        // ordinary keys get explicit flags.
+        if modifier == nil { cg.flags = CGEventFlags(rawValue: event.flags.rawValue) }
         cg.post(tap: .cghidEventTap)
-        if let modifier = Modifier.allCases.first(where: { $0.keyCode == event.keyCode }) {
+        if let modifier {
             if event.down { heldModifierKeys.insert(modifier.keyCode) } else { heldModifierKeys.remove(modifier.keyCode) }
         }
     }
