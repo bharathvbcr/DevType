@@ -252,4 +252,40 @@ final class InjectSilentAbortTests: XCTestCase {
         _ = guardUnderTest.allowsContinuation()
         XCTAssertEqual(counter.calls, 1, "cancelled guard must short-circuit before the caller's closure")
     }
+
+    // MARK: - AI result refused by the planner
+
+    /// The planner refusing an AI transform's finished result used to be one log line: the result
+    /// was dropped and the matched-then-dropped counters, which the diagnostic report prints,
+    /// read "none". It must be counted like every other abort of an AI transform.
+    func testPlannerRefusalOfAnAIResultIsCounted() {
+        let engine = EventTapEngine()
+        let blind = PermissionSnapshot(canListenTap: true, canUseAX: false, canPostEvents: true)
+        XCTAssertTrue(engine.matchDropCounters.isEmpty)
+
+        let plan = engine.planAITransformInject(
+            text: "result", snapshot: blind, shellLike: false, bundleID: "com.apple.Safari"
+        )
+
+        XCTAssertNil(plan, "a refused plan is not handed on to the inject")
+        let drops = engine.matchDropCounters
+        XCTAssertEqual(drops.aiTransformRefused, 1)
+        XCTAssertEqual(drops.total, 1)
+        XCTAssertEqual(drops.lastReason, "aiTransformRefused")
+        XCTAssertEqual(drops.lastBundleID, "com.apple.Safari")
+        XCTAssertFalse(engine.matchDropDiagnostics().contains("Matched-then-dropped: none"))
+    }
+
+    /// And a plan the planner allows is handed back untouched with nothing recorded.
+    func testAnAllowedAIResultPlanRecordsNoDrop() {
+        let engine = EventTapEngine()
+        let capable = PermissionSnapshot(canListenTap: true, canUseAX: true, canPostEvents: true)
+        XCTAssertEqual(
+            engine.planAITransformInject(
+                text: "result", snapshot: capable, shellLike: false, bundleID: nil
+            ),
+            .axPlusHID
+        )
+        XCTAssertTrue(engine.matchDropCounters.isEmpty)
+    }
 }

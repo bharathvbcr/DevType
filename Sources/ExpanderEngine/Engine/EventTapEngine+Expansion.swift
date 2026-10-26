@@ -408,26 +408,16 @@ extension EventTapEngine {
                 sourceApp.activate()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                guard self != nil else {
+                guard let self else {
                     completion?()
                     return
                 }
                 let snapshot = PermissionCoordinator.shared.cachedSnapshot
                 let shellLike = AXContextChecker.shared.isFrontmostShellLikeContext(focus: .live)
-                let plan = InjectionPlanner().plan(
-                    snapshot: snapshot,
-                    isTerminal: shellLike,
-                    needsCursorHID: false,
-                    isMultiLine: text.contains(where: \.isNewline)
-                )
-                if case .refuse(let reason) = plan {
-                    let safeReason = DevTypeLog.boundedPublicIdentifier(
-                        reason,
-                        label: "injectRefusal"
-                    )
-                    DevTypeLog.eventTap.notice(
-                        "[EventTap] AI inject refused — \(safeReason, privacy: .public)"
-                    )
+                guard let plan = self.planAITransformInject(
+                    text: text, snapshot: snapshot, shellLike: shellLike,
+                    bundleID: self.cachedFrontmostBundleID
+                ) else {
                     completion?()
                     return
                 }
@@ -458,6 +448,45 @@ extension EventTapEngine {
         } else {
             DispatchQueue.main.async(execute: work)
         }
+    }
+
+    /// The planner's verdict on an AI transform's finished result, or `nil` after a refusal has
+    /// been recorded.
+    ///
+    /// This refusal used to be a log line and a bare `completion?()`: the generated result was
+    /// dropped and neither the matched-then-dropped counters nor the inject-outcome ring held any
+    /// trace, so a report showed a transform that succeeded with no attempt to deliver it. It now
+    /// lands in both, like every other abort of an AI transform (`aiTransformRefused`), with the
+    /// planner's own reason on the outcome. No trigger key is owed back here — the trigger was
+    /// erased before the model ran — so this is the recording half of `refuseAfterSwallow` only.
+    func planAITransformInject(
+        text: String,
+        snapshot: PermissionSnapshot,
+        shellLike: Bool,
+        bundleID: String?
+    ) -> InjectionPlan? {
+        let plan = InjectionPlanner().plan(
+            snapshot: snapshot,
+            isTerminal: shellLike,
+            needsCursorHID: false,
+            isMultiLine: text.contains(where: \.isNewline)
+        )
+        guard case .refuse(let reason) = plan else { return plan }
+        let safeReason = DevTypeLog.boundedPublicIdentifier(reason, label: "injectRefusal")
+        DevTypeLog.eventTap.notice(
+            "[EventTap] AI inject refused — \(safeReason, privacy: .public)"
+        )
+        recordMatchDrop(
+            reason: MatchDropReason.aiTransformRefused.rawValue,
+            trigger: nil,
+            bundleID: bundleID
+        )
+        PermissionCoordinator.shared.recordInjectOutcome(
+            .refused(reason),
+            refuseContext: nil,
+            path: "aiTransformPlannerRefused"
+        )
+        return nil
     }
 
     func finishDeferredInject(
