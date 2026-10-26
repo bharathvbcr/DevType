@@ -74,10 +74,8 @@ extension EventTapEngine {
         let isSynthetic = event.getIntegerValueField(.eventSourceUserData) == SyntheticEventMarker.magicUserData
         var clockMark: InputClock.Mark?
         if !isSynthetic {
-            let eventTime = InputClock.seconds(sinceBootNanos: event.timestamp)
             if EventTapEngine.mouseDownTypes.contains(type) || type == .keyDown {
-                clockMark = inputClock.mark(at: eventTime)
-                inputClock.noteTimestampUnitsOnce(eventNanos: event.timestamp)
+                clockMark = inputClock.mark(at: inputClock.seconds(fromEventTimestamp: event.timestamp))
             }
         }
 
