@@ -65,6 +65,22 @@ final class InputClockTimestampUnitsTests: XCTestCase {
         XCTAssertEqual(clock.eventTimestampUnit, .machTicks)
     }
 
+    /// One event stamped in the future (a nanosecond stamp after the clock settled on ticks reads
+    /// ~41× ahead) must not latch the input clock past every later arm.
+    func testAFutureStampedEventIsReadAsNow() {
+        let clock = InputClock(now: { 0 })
+        _ = clock.seconds(fromEventTimestamp: ticks, machNow: { self.ticks }, uptimeNanosNow: { self.uptimeNanos })
+        let future = clock.seconds(
+            fromEventTimestamp: uptimeNanos, machNow: { self.ticks }, uptimeNanosNow: { self.uptimeNanos }
+        )
+        XCTAssertEqual(future, InputClock.seconds(sinceBootNanos: uptimeNanos), accuracy: 1e-9,
+                       "converted as ticks it would be ~41× uptime; it is clamped to now")
+        clock.mark(at: future)
+        let armedAfter = InputQuiescenceGuard(armedAt: InputClock.seconds(sinceBootNanos: uptimeNanos) + 0.01)
+        XCTAssertEqual(armedAfter.decide(lastInputAt: clock.lastInputAt), .proceed,
+                       "an expansion armed after that event is not aborted by it")
+    }
+
     func testAConstructedEventsZeroTimestampDecidesNothing() {
         let clock = InputClock(now: { 0 })
         XCTAssertEqual(clock.seconds(fromEventTimestamp: 0), 0)

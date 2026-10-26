@@ -88,6 +88,11 @@ public final class InputClock: @unchecked Sendable {
     /// wrong assumption the other way would put every key in the future and abort every
     /// expansion — the unit is measured on the first real event, logged once, and used from then
     /// on. A constructed event's 0 is passed through as 0 without deciding anything.
+    ///
+    /// Never later than now. `mark(at:)` keeps the latest mark it has seen, so one event stamped in
+    /// the future — a third party posting a nanosecond timestamp after this process settled on
+    /// ticks reads ~41× ahead — would sit after every `arm()` until restart and abort every
+    /// deferred expansion. A key cannot have been typed after the moment it is being read.
     public func seconds(
         fromEventTimestamp raw: UInt64,
         machNow: () -> UInt64 = { mach_absolute_time() },
@@ -115,9 +120,8 @@ public final class InputClock: @unchecked Sendable {
                 )
             }
         }
-        return Self.seconds(
-            sinceBootNanos: Self.nanoseconds(fromEventTimestamp: raw, unit: unit, timebase: Self.timebase)
-        )
+        let nanos = Self.nanoseconds(fromEventTimestamp: raw, unit: unit, timebase: Self.timebase)
+        return Self.seconds(sinceBootNanos: Swift.min(nanos, uptimeNanosNow()))
     }
 
     /// The unit decided so far, for the diagnostic report and tests; nil before the first real event.
