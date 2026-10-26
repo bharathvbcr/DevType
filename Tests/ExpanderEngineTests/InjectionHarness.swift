@@ -41,11 +41,15 @@ final class InjectionHarness {
             .init(
                 focusedElement: { [unowned self] in self.focused },
                 numberOfCharacters: { [unowned self] element in
-                    self.values[self.key(element)].map { ($0 as NSString).length }
+                    guard !self.unreadable.contains(self.key(element)) else { return nil }
+                    return self.values[self.key(element)].map { ($0 as NSString).length }
                 },
-                selectedRange: { [unowned self] element in self.selections[self.key(element)] },
+                selectedRange: { [unowned self] element in
+                    self.unreadable.contains(self.key(element)) ? nil : self.selections[self.key(element)]
+                },
                 stringForRange: { [unowned self] element, range in
-                    guard let value = self.values[self.key(element)] else { return nil }
+                    guard !self.unreadable.contains(self.key(element)),
+                          let value = self.values[self.key(element)] else { return nil }
                     let text = value as NSString
                     guard range.location >= 0, NSMaxRange(range) <= text.length else { return nil }
                     return text.substring(with: range)
@@ -146,7 +150,9 @@ final class InjectionHarness {
     let elsewhere = AXUIElementCreateApplication(5104)
     let frame = CGRect(x: 40, y: 80, width: 600, height: 300)
     static let hostPID: pid_t = 900
-    static let hostBundleID = "dev.devtype.injection-harness"
+    /// Unique per harness: the capability store the broker writes to (`AXWriteCapabilityStore.shared`)
+    /// keys what it learns by bundle, so a shared name would let one test's run steer the next.
+    static func makeHostBundleID() -> String { "dev.devtype.injection-harness.\(UUID().uuidString)" }
 
     // MARK: - Machine state the test scripts
 
@@ -156,7 +162,7 @@ final class InjectionHarness {
     var secureInput = false
     var canPostEvents = true
     var frontmostPID: pid_t? = InjectionHarness.hostPID
-    var frontmostBundleID: String? = InjectionHarness.hostBundleID
+    var frontmostBundleID: String? = InjectionHarness.makeHostBundleID()
 
     // MARK: - What the test observes
 
@@ -222,6 +228,9 @@ final class InjectionHarness {
     var hostPastes = true
     /// Runs on every backspace, with the number of backspaces so far, after the host acted.
     var onBackspace: (InjectionHarness, Int) -> Void = { _, _ in }
+    /// Runs on every live focus read the pipeline makes, before it is answered — where a test makes
+    /// the world change between one continue-check and the next.
+    var onFocusRead: (InjectionHarness) -> Void = { _ in }
     /// Runs once the first ⌘V chord is out — where a test lets the paste land, or focus slip.
     var afterPaste: (InjectionHarness) -> Void = { _ in }
     /// Marks the broker's pre-⌘V target check as failing without the page moving.
@@ -320,8 +329,10 @@ final class InjectionHarness {
             .init(processIdentifier: box.harness?.frontmostPID, bundleIdentifier: box.harness?.frontmostBundleID)
         }
         environment.focusedElement = {
-            box.harness?.note(.focusRead)
-            return box.harness?.page.focused
+            guard let harness = box.harness else { return nil }
+            harness.note(.focusRead)
+            harness.onFocusRead(harness)
+            return harness.page.focused
         }
         environment.focusedRole = { element in box.harness?.page.roles[box.harness?.page.key(element) ?? ""] }
         environment.imeMarkedText = { _ in false }
@@ -478,6 +489,7 @@ final class InjectionHarness {
         result: String = "Sincerely, Slim",
         erasing: Bool = true,
         swallowed: SwallowedKey = .notSwallowed,
+        cursorFromEnd: Int? = nil,
         operationStillOurs: @escaping () -> Bool = { true },
         timeout: TimeInterval = 10
     ) -> Run {
@@ -491,6 +503,7 @@ final class InjectionHarness {
             swallowed: swallowed,
             erasePlan: erasing ? ErasePlan(text: trigger) : .empty,
             preResolvedText: result,
+            preResolvedCursorOffset: cursorFromEnd.map { (result as NSString).length - $0 },
             shouldContinue: { [unowned self] in !self.targetMovedAfterPaste && operationStillOurs() },
             targetFocus: .resolved(field),
             completion: { outcome = $0; finished = true }
