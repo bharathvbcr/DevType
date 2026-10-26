@@ -95,7 +95,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/ci.yml", workflow)
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("workflow_call:", ci)
-        self.assertIn("needs: [test, test-macos26]", ci)
+        # One matrix job, both images. `needs: [test]` waits for every leg, and
+        # fail-fast stays off so a macOS 14 failure still reports macOS 26.
+        self.assertIn("- runner: macos-14", ci)
+        self.assertIn("- runner: macos-26", ci)
+        self.assertIn("fail-fast: false", ci)
+        package = ci.split("\n  package:\n", 1)[1].split("\n  lint:\n", 1)[0]
+        self.assertIn("needs: [test]", package)
         # Reusable workflows inherit github.workflow from the caller. A distinct
         # group avoids cancelling/deadlocking the parent Release workflow.
         self.assertIn("group: ci-${{ github.workflow }}-${{ github.ref }}", ci)
@@ -114,7 +120,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("swift test", workflow)
         self.assertIn("./Scripts/ci-release-fixtures.sh", workflow)
         lint = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertIn("./Scripts/ci-release-fixtures.sh", lint)
+        self.assertIn("./Scripts/ci-hygiene.sh", lint)
+        hygiene = (ROOT / "Scripts/ci-hygiene.sh").read_text()
+        self.assertIn("./Scripts/ci-release-fixtures.sh", hygiene)
+        self.assertNotIn("swift test", hygiene)
+        self.assertNotIn("swift build", hygiene)
 
     def test_workflow_uses_the_tested_publication_owner(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
@@ -122,7 +132,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('./Scripts/publish-release.sh "${GITHUB_REF_NAME}"', workflow)
         fixtures = (ROOT / "Scripts/ci-release-fixtures.sh").read_text()
         self.assertIn("test-release-publication.py", fixtures)
-        self.assertIn("ci-release-fixtures.sh", (ROOT / "Scripts/ci-local.sh").read_text())
+        local = (ROOT / "Scripts/ci-local.sh").read_text()
+        self.assertIn("ci-hygiene.sh", local)
+        hygiene = (ROOT / "Scripts/ci-hygiene.sh").read_text()
+        self.assertIn("ci-release-fixtures.sh", hygiene)
 
 
 class PublicationTests(unittest.TestCase):

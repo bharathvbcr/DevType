@@ -21,46 +21,12 @@ swift --version
 xcodebuild -version
 
 echo "==> 0. Stale module-cache preflight"
-# A checkout moved between directories poisons SwiftPM's clang module cache:
-# every PCM embeds the absolute ModuleCache path it was built with, so after a
-# move clang aborts C/ObjC compiles with "was compiled with module cache path
-# ... but the path is currently ..." buried under a _DarwinFoundation* cascade.
-# Purge any cache containing a PCM whose embedded path is not under ROOT.
-stale_pcm_found=0
-while IFS= read -r pcm; do
-  [[ -f "${pcm}" ]] || continue
-  # Bound the scan: sampling the first 200 PCMs is enough to catch a wholesale
-  # stale cache, and keeps this preflight O(few hundred MB of grep) worst case.
-  if ! grep -aq -- "${ROOT}" "${pcm}" && grep -aq "/.build/" "${pcm}"; then
-    echo "  stale PCM (built elsewhere): ${pcm}"
-    stale_pcm_found=1
-    break
-  fi
-done < <(find .build -type f -name '*.pcm' 2>/dev/null | head -n 200)
-if [[ "${stale_pcm_found}" -eq 1 ]]; then
-  find .build -type d -name ModuleCache -prune -exec rm -rf {} +
-  echo "  purged ModuleCache dirs; they will be rebuilt during this run"
-else
-  echo "  ok: no stale module caches"
-fi
+# A checkout moved between directories poisons SwiftPM's clang module cache.
+# Hosted CI runs the same script after restoring .build.
+"${ROOT}/Scripts/purge-stale-module-cache.sh"
 
 echo "==> 1. Linting & Repo Hygiene"
-echo "  - Checking shell scripts syntax..."
-for f in Scripts/*.sh; do
-  bash -n "$f" || { echo "error: syntax check failed for $f" >&2; exit 1; }
-done
-if [[ -f "./ci:local" ]]; then
-  bash -n "./ci:local" || { echo "error: syntax check failed for ./ci:local" >&2; exit 1; }
-fi
-
-echo "  - Checking property lists..."
-plutil -lint Resources/Info.plist
-plutil -lint Resources/DevType.entitlements
-for f in Resources/*.lproj/InfoPlist.strings; do
-  plutil -lint "$f"
-done
-
-"${ROOT}/Scripts/ci-release-fixtures.sh"
+"${ROOT}/Scripts/ci-hygiene.sh"
 
 echo "==> 2. Running SwiftPM Unit Tests"
 # Debug timings are not the gate. Step 2b is the release ceiling, and only when
@@ -91,51 +57,10 @@ echo "==> 5. Packaging .app bundle (release)"
 "${ROOT}/Scripts/package-app.sh" release
 
 echo "==> 6. Verifying bundle identity & version stamping"
-APP=".build/DevType.app"
-if [[ ! -d "$APP" ]]; then
-  echo "error: no bundle produced at $APP" >&2
-  exit 1
-fi
-
-BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
-VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
-LOCAL_NETWORKING="$(/usr/libexec/PlistBuddy -c \
-  'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "$APP/Contents/Info.plist")"
-
-echo "  Bundle Identifier: $BUNDLE_ID"
-echo "  Stamped Version:   $VER (build $BUILD)"
-
-PLACEHOLDER_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${ROOT}/Resources/Info.plist")"
-PLACEHOLDER_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${ROOT}/Resources/Info.plist")"
-"${ROOT}/Scripts/verify-stamped-version.sh" "$VER" "$BUILD" "$PLACEHOLDER_VER" "$PLACEHOLDER_BUILD"
-
-if [[ "${LOCAL_NETWORKING}" != "true" ]]; then
-  echo "error: packaged Info.plist does not allow narrowly scoped local networking" >&2
-  exit 1
-fi
-for ATS_KEY in NSAllowsArbitraryLoads NSAllowsArbitraryLoadsForMedia NSAllowsArbitraryLoadsInWebContent; do
-  if /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:${ATS_KEY}" \
-    "$APP/Contents/Info.plist" >/dev/null 2>&1; then
-    echo "error: packaged Info.plist contains broad ATS exception ${ATS_KEY}" >&2
-    exit 1
-  fi
-done
-
-for TOOLCHAIN_KEY in DTXcode DTXcodeBuild DTSDKName DTPlatformVersion; do
-  if ! /usr/libexec/PlistBuddy -c "Print :${TOOLCHAIN_KEY}" "$APP/Contents/Info.plist" >/dev/null 2>&1; then
-    echo "error: packaged Info.plist missing toolchain key ${TOOLCHAIN_KEY}" >&2
-    exit 1
-  fi
-done
-
-# Foundation Models linkage. Unset by default so a developer on an older Xcode is not
-# blocked, and the script says out loud when it skipped rather than printing nothing —
-# a check that could not run must not read like a check that passed. The macos-26
-# packaging job and every tagged release set the gate.
-"${ROOT}/Scripts/verify-release-capabilities.sh" "$APP"
-
-codesign --verify --strict --verbose=2 "$APP"
+# Foundation Models linkage stays off unless the caller set
+# DEVTYPE_REQUIRE_FOUNDATION_MODELS=1. The macos-26 packaging job and every
+# tagged release set it; a local run on an older Xcode announces the skip.
+"${ROOT}/Scripts/verify-packaged-bundle.sh" "${ROOT}/.build/DevType.app"
 
 echo "=========================================="
 echo "==> Local CI PASSED SUCCESSFULLY! ✓"

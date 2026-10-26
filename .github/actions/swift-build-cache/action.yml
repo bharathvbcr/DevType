@@ -1,0 +1,47 @@
+name: Swift build cache
+description: >
+  Select Xcode, restore a .build cache scoped to this runner label and Xcode
+  version, and drop module caches compiled in a different checkout.
+
+inputs:
+  runner:
+    description: Runner label (macos-14 or macos-26). This label isolates the cache.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Select Xcode
+      id: toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+        swift --version
+        xcodebuild -version
+        ver="$(xcodebuild -version | awk 'NR==1 { print $2 }')"
+        if [[ -z "${ver}" ]]; then
+          echo "error: xcodebuild did not report a version" >&2
+          exit 1
+        fi
+        echo "xcode=${ver}" >> "${GITHUB_OUTPUT}"
+
+    - name: Cache key
+      id: cachekey
+      shell: bash
+      run: |
+        set -euo pipefail
+        id="$(./Scripts/ci-cache-key.sh "${{ inputs.runner }}" "${{ steps.toolchain.outputs.xcode }}")"
+        echo "id=${id}" >> "${GITHUB_OUTPUT}"
+
+    - name: Cache SwiftPM build
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .build
+        key: ${{ steps.cachekey.outputs.id }}-${{ hashFiles('Package.resolved') }}
+        restore-keys: |
+          ${{ steps.cachekey.outputs.id }}-
+
+    - name: Drop stale module caches
+      shell: bash
+      run: ./Scripts/purge-stale-module-cache.sh
