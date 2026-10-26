@@ -1622,39 +1622,51 @@ public final class TextInjectionPipeline {
                     bundleID: context.frontBundleID,
                     focus: focus
                 )
-            if axOnlyOutcome == .replaced {
-                // #region agent log
-                TextInjectionPipeline.debugLogInject(
-                    hypothesisId: "M3",
-                    message: "inject path",
-                    data: ["frontmostBundle": frontBundle, "path": "axOnlyRange", "outcome": "degradedAXOnly"]
-                )
-                // #endregion
-                positionCursorIfNeeded(
-                    text: textToInject,
-                    cursorOffset: cursorOffset,
-                    totalUTF16Length: totalUTF16,
-                    allowHID: false,
-                    focus: focus,
-                    shouldContinue: canProceed
-                ) {
-                    self.finishSucceeded(
-                        outcome: .degradedAXOnly,
-                        path: "axOnlyRange",
-                        context: context,
-                        injectedText: textToInject,
-                        undoable: resolved.undoable,
-                        completion: completion
+            func finishAXOnly(_ outcome: AXTextWriter.AXReplaceOutcome) {
+                if outcome == .replaced {
+                    // #region agent log
+                    TextInjectionPipeline.debugLogInject(
+                        hypothesisId: "M3",
+                        message: "inject path",
+                        data: ["frontmostBundle": frontBundle, "path": "axOnlyRange", "outcome": "degradedAXOnly"]
                     )
+                    // #endregion
+                    positionCursorIfNeeded(
+                        text: textToInject,
+                        cursorOffset: cursorOffset,
+                        totalUTF16Length: totalUTF16,
+                        allowHID: false,
+                        focus: focus,
+                        shouldContinue: canProceed
+                    ) {
+                        self.finishSucceeded(
+                            outcome: .degradedAXOnly,
+                            path: "axOnlyRange",
+                            context: context,
+                            injectedText: textToInject,
+                            undoable: resolved.undoable,
+                            completion: completion
+                        )
+                    }
+                    return
+                }
+                refuseInject(
+                    "AX-only inject failed — range replace required (no erase-less direct inject); Post Events needed for HID fallback",
+                    path: "axOnlyRange",
+                    swallowed: swallowed,
+                    completion: completion
+                )
+            }
+            // A first read that shows no change is not yet a verdict (see `.unconfirmed`): the
+            // judgement, the selection restore and the capability verdict wait for the host to
+            // settle, off the synchronous path.
+            if case .unconfirmed(let pending) = axOnlyOutcome {
+                AXSettleRetry.live.afterSettle {
+                    finishAXOnly(self.ax.confirmRangeReplace(pending))
                 }
                 return
             }
-            refuseInject(
-                "AX-only inject failed — range replace required (no erase-less direct inject); Post Events needed for HID fallback",
-                path: "axOnlyRange",
-                swallowed: swallowed,
-                completion: completion
-            )
+            finishAXOnly(axOnlyOutcome)
             return
 
         case .axPlusHID:
@@ -1669,6 +1681,39 @@ public final class TextInjectionPipeline {
         // as "may have mutated" refused every expand in AX-opaque hosts — a Chrome PWA cannot
         // verify the field either, so the guard tripped on a write that never happened.
         var attemptedAXWrite = false
+        func finishAXRange() {
+            // #region agent log
+            TextInjectionPipeline.debugLogInject(
+                hypothesisId: "M3",
+                message: "inject path",
+                data: ["frontmostBundle": frontBundle, "path": "axRange", "outcome": "succeeded"]
+            )
+            // #endregion
+            positionCursorIfNeeded(
+                text: textToInject,
+                cursorOffset: cursorOffset,
+                totalUTF16Length: totalUTF16,
+                allowHID: true,
+                focus: focus,
+                shouldContinue: canProceed
+            ) {
+                self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceed)
+                self.finishSucceeded(
+                    outcome: .succeeded,
+                    path: "axRange",
+                    context: context,
+                    injectedText: textToInject,
+                    undoable: resolved.undoable,
+                    completion: completion
+                )
+            }
+        }
+        // A write whose first read showed no change: not yet judged. The guarded erase below does
+        // not start until the host has settled and `confirmRangeReplace` has said whether the
+        // text landed (finish as an AX success) or provably did not (the HID fallback, as ever) —
+        // an erase issued on the unsettled read would delete the end of an expansion that had
+        // already landed.
+        var unconfirmedAXWrite: AXTextWriter.PendingRangeReplace?
         if InjectionPlanner.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID) {
             let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
@@ -1678,32 +1723,11 @@ public final class TextInjectionPipeline {
             )
             attemptedAXWrite = axOutcome.fieldMayHaveMutated
             if axOutcome == .replaced {
-                // #region agent log
-                TextInjectionPipeline.debugLogInject(
-                    hypothesisId: "M3",
-                    message: "inject path",
-                    data: ["frontmostBundle": frontBundle, "path": "axRange", "outcome": "succeeded"]
-                )
-                // #endregion
-                positionCursorIfNeeded(
-                    text: textToInject,
-                    cursorOffset: cursorOffset,
-                    totalUTF16Length: totalUTF16,
-                    allowHID: true,
-                    focus: focus,
-                    shouldContinue: canProceed
-                ) {
-                    self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceed)
-                    self.finishSucceeded(
-                        outcome: .succeeded,
-                        path: "axRange",
-                        context: context,
-                        injectedText: textToInject,
-                        undoable: resolved.undoable,
-                        completion: completion
-                    )
-                }
+                finishAXRange()
                 return
+            }
+            if case .unconfirmed(let pending) = axOutcome {
+                unconfirmedAXWrite = pending
             }
             // Range replace did not apply. If this call just condemned the control (falseSuccess)
             // or the role was already marked weak, skip AX direct after erase — that path can
@@ -1943,45 +1967,64 @@ public final class TextInjectionPipeline {
             }
         }
 
-        eraser.performGuardedErase(
-            plan: erasePlan,
-            focus: focus,
-            afterPossibleWrite: attemptedAXWrite,
-            insertionPointFollowsExpectedText: context.eraseCaretVouched,
-            intent: context.purpose.eraseIntent,
-            canProceed: canProceed,
-            postingContinue: postingContinue,
-            onUnverifiableAfterWrite: { why in
-                // Self-healing: an attempted AX write left the field unreadable even after the
-                // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
-                // this on its very first expansion). Strikes escalate rather than condemn
-                // outright: a transient (focus stolen mid-inject) looks identical on one
-                // observation, and a wrong condemnation is effectively permanent. The second
-                // strike condemns, so a genuinely broken shell heals on the user's next retry
-                // and every expansion after that skips the AX write for the HID paste path.
-                // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
-                guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
-                let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
-                let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
-                switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
-                    bundleID: bundleID,
-                    role: focusedRole
-                ) {
-                case .struck(let count):
-                    DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
-                    )
-                case .condemned:
-                    DevTypeLog.inject.notice(
-                        "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
-                    )
-                case .alreadyCondemned:
-                    break
-                }
-            },
-            elementAfterContinue: { context.focusedElement }
-        ) { erased in
-            afterErase(erased, settleAttempt: 0)
+        func beginGuardedErase() {
+            eraser.performGuardedErase(
+                plan: erasePlan,
+                focus: focus,
+                afterPossibleWrite: attemptedAXWrite,
+                insertionPointFollowsExpectedText: context.eraseCaretVouched,
+                intent: context.purpose.eraseIntent,
+                canProceed: canProceed,
+                postingContinue: postingContinue,
+                onUnverifiableAfterWrite: { why in
+                    // Self-healing: an attempted AX write left the field unreadable even after the
+                    // settle retry — the Chromium/Electron signature (a fresh web-app shell hits
+                    // this on its very first expansion). Strikes escalate rather than condemn
+                    // outright: a transient (focus stolen mid-inject) looks identical on one
+                    // observation, and a wrong condemnation is effectively permanent. The second
+                    // strike condemns, so a genuinely broken shell heals on the user's next retry
+                    // and every expansion after that skips the AX write for the HID paste path.
+                    // `.mismatch` never reaches here, so a moved caret cannot strike a healthy app.
+                    guard let bundleID = context.frontBundleID, !bundleID.isEmpty else { return }
+                    let safeBundleID = DevTypeLog.boundedPublicIdentifier(bundleID, label: "bundleID")
+                    let safeWhy = DevTypeLog.boundedPublicIdentifier(why, label: "eraseOutcome")
+                    switch AXWriteCapabilityStore.shared.recordUnverifiableAfterWrite(
+                        bundleID: bundleID,
+                        role: focusedRole
+                    ) {
+                    case .struck(let count):
+                        DevTypeLog.inject.notice(
+                            "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — strike \(count, privacy: .public)/\(AXWriteCapabilityStore.unverifiableStrikesToCondemn, privacy: .public) for \(safeBundleID, privacy: .public)"
+                        )
+                    case .condemned:
+                        DevTypeLog.inject.notice(
+                            "[Inject] unverifiable after AX write (\(safeWhy, privacy: .public)) — verdict learned for \(safeBundleID, privacy: .public); this expansion is refused, the next uses HID paste"
+                        )
+                    case .alreadyCondemned:
+                        break
+                    }
+                },
+                elementAfterContinue: { context.focusedElement }
+            ) { erased in
+                afterErase(erased, settleAttempt: 0)
+            }
+        }
+
+        guard let pendingAXWrite = unconfirmedAXWrite else {
+            beginGuardedErase()
+            return
+        }
+        AXSettleRetry.live.afterSettle {
+            switch self.ax.confirmRangeReplace(pendingAXWrite) {
+            case .replaced:
+                finishAXRange()
+            default:
+                // Provably did not land (the writer has restored the selection and recorded the
+                // verdict): the same fallback a condemned write has always taken, without the AX
+                // direct insert afterwards.
+                preferHID = true
+                beginGuardedErase()
+            }
         }
     }
 
