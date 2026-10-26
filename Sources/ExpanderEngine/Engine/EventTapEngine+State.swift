@@ -125,7 +125,7 @@ extension EventTapEngine {
                 // hold armed moments ago still has a live debounce timer, and firing it would
                 // expand text while the user believes DevType is off.
                 heldCoordinator.cancelAll(reason: .unobservedInput)
-                TextInjectionPipeline.shared.cancelCurrentInjection()
+                pipeline.cancelCurrentInjection()
             }
             UserDefaults.standard.set(!newValue, forKey: ProcessIdentity.userPausedDefaultsKey)
         }

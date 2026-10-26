@@ -102,156 +102,145 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
 
     // MARK: A node swapped while the confirm waited
 
-    private let replacementNode = AXUIElementCreateApplication(6003)
-    private let elsewhere = AXUIElementCreateApplication(6004)
-
-    private final class Page {
-        var frames: [String: CGRect] = [:]
-        var roles: [String: String] = [:]
-        var pids: [String: pid_t] = [:]
-        var attributes: [String: ControlIdentity.Attributes] = [:]
-        func key(_ element: AXUIElement) -> String { String(describing: element) }
-        func access() -> DeliveryVerifier.TextAccess {
-            .init(
-                focusedElement: { nil },
-                numberOfCharacters: { _ in nil },
-                selectedRange: { _ in nil },
-                stringForRange: { _, _ in nil },
-                observation: { .init(value: nil, selectedText: nil, target: $0) },
-                frame: { [unowned self] in self.frames[self.key($0)] },
-                role: { [unowned self] in self.roles[self.key($0)] },
-                pid: { [unowned self] in self.pids[self.key($0)] },
-                attributes: { [unowned self] in self.attributes[self.key($0)] ?? .none }
-            )
-        }
-    }
-
     private struct Outcome {
         var outcome: PermissionCoordinator.InjectOutcome?
         var kept: [String]
         var confirmedOn: [String]
         var queries: Int
+        var finalText: String?
     }
 
-    /// Replace in `field`; the confirm has to wait one settle, and by the time it is done the
-    /// host's focus is `liveAfterWait`. `frameOfLive` decides whether that node is the same control.
+    /// Replace in the harness's field; the confirm has to wait one settle, and by the time it is
+    /// done the host's focus is `live`. `frameOfLive` and the host-published identity of each node
+    /// decide whether that node is the same control. The page holds the original in both the field
+    /// and the replacement node, so a paste that follows the swap lands in the node it was sent to.
     private func replaceThenSwap(
-        to live: AXUIElement, frameOfLive: CGRect,
+        _ harness: InjectionHarness, to live: AXUIElement, frameOfLive: CGRect, confirmedOn: Reads,
         attributesOfField: ControlIdentity.Attributes = .none,
         attributesOfLive: ControlIdentity.Attributes = .none
-    ) throws -> Outcome {
-        let page = Page()
-        page.attributes[page.key(field)] = attributesOfField
-        page.attributes[page.key(live)] = attributesOfLive
+    ) -> Outcome {
+        let text = "say: \(original) now"
+        let selection = NSRange(location: 5, length: (original as NSString).length)
+        harness.page.attributes[harness.page.key(harness.field)] = attributesOfField
+        harness.page.attributes[harness.page.key(live)] = attributesOfLive
         let controlFrame = CGRect(x: 10, y: 20, width: 500, height: 200)
-        for element in [field, replacementNode, elsewhere] {
-            page.roles[page.key(element)] = "AXTextArea"
-            page.pids[page.key(element)] = 321
+        harness.page.frames[harness.page.key(harness.field)] = controlFrame
+        harness.page.frames[harness.page.key(harness.replacementNode)] = frameOfLive
+        harness.page.frames[harness.page.key(harness.elsewhere)] = frameOfLive
+        for element in [harness.field, harness.replacementNode] {
+            harness.page.values[harness.page.key(element)] = text
+            harness.page.selections[harness.page.key(element)] = selection
         }
-        page.frames[page.key(field)] = controlFrame
-        page.frames[page.key(replacementNode)] = frameOfLive
-        page.frames[page.key(elsewhere)] = frameOfLive
+        harness.page.focused = harness.field
+        harness.focusAnswer = { index in
+            // The first query is the inject's own; every later one is after the confirm waited.
+            if index > 1 { harness.page.focused = live }
+            return .available(index == 1 ? harness.field : live)
+        }
 
+        let outcome = harness.injectReplace(in: self, original: original, result: result)
+        return Outcome(
+            outcome: outcome, kept: harness.kept, confirmedOn: confirmedOn.elements,
+            queries: harness.focusQueries, finalText: harness.page.value(of: live)
+        )
+    }
+
+    /// What the scripted confirmer saw: every element it read the selection from, and the field it blanks once.
+    final class Reads {
+        var elements: [String] = []
+        var field: AXUIElement?
+    }
+
+    /// A confirmer that blanks the field once — the host publishing the selection a moment late —
+    /// so the confirm waits a settle and the live re-check runs; every other read answers the
+    /// original. `confirmedOn` records every element the selection was read from.
+    private func makeHarness(confirmedOn: Reads) throws -> InjectionHarness {
         var observedField = 0
-        var confirmedOn: [String] = []
         let access = SelectionReplacementGuard.Confirmer.Access(
-            observe: { [unowned self] candidate in
-                confirmedOn.append(page.key(candidate))
-                if CFEqual(candidate, self.field) {
-                    // Blank once — the host publishing the selection a moment late — so the
-                    // confirm waits a settle and the live re-check runs.
+            observe: { [original] candidate in
+                confirmedOn.elements.append(String(describing: candidate))
+                if let first = confirmedOn.field, CFEqual(candidate, first) {
                     observedField += 1
                     return observedField == 1
                         ? .init(value: nil, selectedText: nil)
-                        : .init(value: nil, selectedText: self.original)
+                        : .init(value: nil, selectedText: original)
                 }
-                return .init(value: nil, selectedText: self.original)
+                return .init(value: nil, selectedText: original)
             },
             select: { _, _ in false },
             schedule: { _, action in action() },
             role: { _ in "AXTextArea" }
         )
-
-        let suite = "ReplaceFocusIntegrityTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        var kept: [String] = []
-        var queries = 0
-        let pipeline = TextInjectionPipeline(
-            defaults: defaults,
-            selectionConfirmer: SelectionReplacementGuard.Confirmer(access: access),
-            keepRefusedReplacement: { kept.append($0); return true },
-            focusQuery: { completion in
-                queries += 1
-                completion(queries == 1 ? .available(self.field) : .available(live))
-            },
-            verifier: DeliveryVerifier(access: page.access())
-        )
-
-        var outcome: PermissionCoordinator.InjectOutcome?
-        let done = expectation(description: "inject completed")
-        pipeline.inject(
-            snippet: SnippetModel(title: "AI", triggerKeyword: "", replacementText: result),
-            triggerLength: 0,
-            swallowed: .notSwallowed,
-            erasePlan: .empty,
-            preResolvedText: result,
-            secureClipboardPaste: true,
-            targetFocus: .resolved(field),
-            replacingSelection: SelectionReplacement(original: original)
-        ) {
-            outcome = $0
-            done.fulfill()
-        }
-        wait(for: [done], timeout: 10)
-        if queries < 2 {
-            throw XCTSkip("entry gate refused before the confirm ran: \(String(describing: outcome))")
-        }
-        return Outcome(outcome: outcome, kept: kept, confirmedOn: confirmedOn, queries: queries)
+        let harness = try InjectionHarness(selectionConfirmer: SelectionReplacementGuard.Confirmer(access: access))
+        confirmedOn.field = harness.field
+        return harness
     }
 
-    /// The proceed branch. Where the paste itself goes after that depends on this machine's
-    /// permissions, so the assertions are about what this change decides: the node swap is not
-    /// refused as a move, the result is not diverted to the clipboard, and the selection was
-    /// confirmed again on the new node.
+    /// The proceed branch. The harness's host really pastes where focus is, so the assertions are
+    /// about what the gate decided and what the field holds afterwards: the node swap is not
+    /// refused as a move, the result is not diverted to the clipboard, the selection was
+    /// confirmed again on the new node, and the result is in the node the paste was sent to.
     func testASwappedNodeOfTheSameControlIsConfirmedAgainNotRefused() throws {
-        let run = try replaceThenSwap(to: replacementNode, frameOfLive: CGRect(x: 10, y: 20, width: 500, height: 200))
-        XCTAssertNotEqual(run.outcome, .refused(SelectionReplacementGuard.Refusal.focusMoved.reason))
+        let confirmedOn = Reads()
+        let harness = try makeHarness(confirmedOn: confirmedOn)
+        let run = replaceThenSwap(
+            harness, to: harness.replacementNode,
+            frameOfLive: CGRect(x: 10, y: 20, width: 500, height: 200), confirmedOn: confirmedOn
+        )
+        XCTAssertGreaterThanOrEqual(run.queries, 2, "the confirm waited, so focus was resolved again")
+        XCTAssertEqual(run.outcome, .succeeded)
         XCTAssertEqual(run.kept, [])
         XCTAssertTrue(
-            run.confirmedOn.contains(String(describing: replacementNode)),
+            run.confirmedOn.contains(String(describing: harness.replacementNode)),
             "vouching proves the control, not the selection in it: the replace is confirmed on the new node"
         )
+        XCTAssertEqual(run.finalText, "say: \(result) now", "the result replaced the selection in the node swapped in")
     }
 
     /// A single-page app re-renders another control at the very same frame while the confirm waits.
     /// Frame, role and process all agree; the DOM identifier is the only thing that does not.
     func testAnotherControlAtTheSameFrameIsAMoveAndKeepsTheResult() throws {
-        let run = try replaceThenSwap(
-            to: replacementNode, frameOfLive: CGRect(x: 10, y: 20, width: 500, height: 200),
+        let confirmedOn = Reads()
+        let harness = try makeHarness(confirmedOn: confirmedOn)
+        let run = replaceThenSwap(
+            harness, to: harness.replacementNode,
+            frameOfLive: CGRect(x: 10, y: 20, width: 500, height: 200), confirmedOn: confirmedOn,
             attributesOfField: .init(domIdentifier: "search"),
             attributesOfLive: .init(domIdentifier: "inline-editor")
         )
         XCTAssertEqual(run.outcome, .refused(SelectionReplacementGuard.Refusal.focusMoved.reason))
         XCTAssertEqual(run.kept, [result], "the generated result is kept for a manual paste")
-        XCTAssertFalse(run.confirmedOn.contains(String(describing: replacementNode)))
+        XCTAssertFalse(run.confirmedOn.contains(String(describing: harness.replacementNode)))
+        XCTAssertEqual(harness.chords, 0, "nothing was pasted into the control the page swapped in")
+        XCTAssertEqual(run.finalText, "say: \(original) now", "the other control was left untouched")
     }
 
     func testTheSameDOMIdentifierOnTheSwappedNodeIsConfirmedAgainNotRefused() throws {
-        let run = try replaceThenSwap(
-            to: replacementNode, frameOfLive: CGRect(x: 10, y: 20, width: 500, height: 200),
+        let confirmedOn = Reads()
+        let harness = try makeHarness(confirmedOn: confirmedOn)
+        let run = replaceThenSwap(
+            harness, to: harness.replacementNode,
+            frameOfLive: CGRect(x: 10, y: 20, width: 500, height: 200), confirmedOn: confirmedOn,
             attributesOfField: .init(domIdentifier: "search"),
             attributesOfLive: .init(domIdentifier: "search")
         )
-        XCTAssertNotEqual(run.outcome, .refused(SelectionReplacementGuard.Refusal.focusMoved.reason))
+        XCTAssertEqual(run.outcome, .succeeded)
         XCTAssertEqual(run.kept, [])
-        XCTAssertTrue(run.confirmedOn.contains(String(describing: replacementNode)))
+        XCTAssertTrue(run.confirmedOn.contains(String(describing: harness.replacementNode)))
+        XCTAssertEqual(run.finalText, "say: \(result) now")
     }
 
     func testAnotherFieldIsStillAMoveAndKeepsTheResult() throws {
-        let run = try replaceThenSwap(to: elsewhere, frameOfLive: CGRect(x: 10, y: 400, width: 500, height: 200))
+        let confirmedOn = Reads()
+        let harness = try makeHarness(confirmedOn: confirmedOn)
+        let run = replaceThenSwap(
+            harness, to: harness.elsewhere,
+            frameOfLive: CGRect(x: 10, y: 400, width: 500, height: 200), confirmedOn: confirmedOn
+        )
+        XCTAssertGreaterThanOrEqual(run.queries, 2)
         XCTAssertEqual(run.outcome, .refused(SelectionReplacementGuard.Refusal.focusMoved.reason))
         XCTAssertEqual(run.kept, [result])
-        XCTAssertFalse(run.confirmedOn.contains(String(describing: elsewhere)))
+        XCTAssertFalse(run.confirmedOn.contains(String(describing: harness.elsewhere)))
+        XCTAssertEqual(harness.chords, 0, "nothing was pasted into a field the user had left")
     }
 }

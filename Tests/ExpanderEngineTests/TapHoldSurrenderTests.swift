@@ -32,7 +32,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
 
     override func tearDown() {
         abandonExpansion()
-        TextInjectionPipeline.shared.cancelCurrentInjection()
+        pipeline.cancelCurrentInjection()
         claimed = nil
         super.tearDown()
     }
@@ -45,13 +45,13 @@ final class TapHoldSurrenderTests: TapEventTestCase {
         engine._typeAhead = TypeAheadBuffer(capacity: capacity, holdWindow: holdWindow)
         engine._typeAhead.beginExpansion(focusPID: 735)
         engine.lock.unlock()
-        TextInjectionPipeline.shared.oweSwallowedKey(terminator)
-        claimed = TextInjectionPipeline.shared.claimOperationForTesting()
+        pipeline.oweSwallowedKey(terminator)
+        claimed = pipeline.claimOperationForTesting()
         posted = []
     }
 
     private var stillCurrent: Bool {
-        TextInjectionPipeline.shared.operationIsCurrentForTesting(claimed.operation, revision: claimed.revision)
+        pipeline.operationIsCurrentForTesting(claimed.operation, revision: claimed.revision)
     }
 
     private var order: [String] { posted.map(\.what) }
@@ -75,7 +75,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
                        "terminator first, then the held keys, in the order typed")
         XCTAssertEqual(posted.map(\.injectStillCurrent), [false, false, false],
                        "the inject is already abandoned by the time the first key goes back")
-        XCTAssertFalse(TextInjectionPipeline.shared.beginMutationForTesting(claimed.operation, revision: claimed.revision),
+        XCTAssertFalse(pipeline.beginMutationForTesting(claimed.operation, revision: claimed.revision),
                        "an abandoned inject can never start writing")
     }
 
@@ -128,7 +128,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
     func testSurrenderAfterTheFirstWriteKeepsTodaysBehaviour() {
         beginDelivery(holdWindow: 0.04)
         for character in "ab" { XCTAssertNil(key(String(character))) }
-        XCTAssertTrue(TextInjectionPipeline.shared.beginMutationForTesting(claimed.operation, revision: claimed.revision))
+        XCTAssertTrue(pipeline.beginMutationForTesting(claimed.operation, revision: claimed.revision))
         Thread.sleep(forTimeInterval: 0.08)
         key("c")
         XCTAssertEqual(order, ["a", "b"], "mid-erase the terminator's place is undefined: only the held keys go back")
@@ -141,7 +141,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
     func testASurrenderedTerminatorIsNotReinjectedByARefusal() {
         key("", keyCode: Int64(kVK_LeftArrow))
         XCTAssertEqual(order, ["terminator: "])
-        XCTAssertFalse(TextInjectionPipeline.shared.reinjectSwallowedKey(terminator),
+        XCTAssertFalse(pipeline.reinjectSwallowedKey(terminator),
                        "already put back ahead of the held keys — posting it again would type it twice")
     }
 
@@ -151,7 +151,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
         key("y")
         XCTAssertEqual(order, [], "replaying either into the app that took focus would leak the user's typing")
         XCTAssertFalse(stillCurrent)
-        XCTAssertFalse(TextInjectionPipeline.shared.reinjectSwallowedKey(terminator),
+        XCTAssertFalse(pipeline.reinjectSwallowedKey(terminator),
                        "the debt is settled, not left for a refusal to post into the wrong app")
     }
 
@@ -162,7 +162,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
         XCTAssertNil(key("b"))
         XCTAssertEqual(order, [])
         XCTAssertTrue(stillCurrent)
-        XCTAssertTrue(TextInjectionPipeline.shared.beginMutationForTesting(claimed.operation, revision: claimed.revision))
+        XCTAssertTrue(pipeline.beginMutationForTesting(claimed.operation, revision: claimed.revision))
     }
 
     func testOurOwnSyntheticKeysNeverSurrender() {
@@ -183,15 +183,15 @@ final class TapHoldSurrenderTests: TapEventTestCase {
 
         // After the first write begins the surrender no longer cancels, but the revision still moves.
         beginDelivery()
-        XCTAssertTrue(TextInjectionPipeline.shared.beginMutationForTesting(claimed.operation, revision: claimed.revision))
+        XCTAssertTrue(pipeline.beginMutationForTesting(claimed.operation, revision: claimed.revision))
         deadKey()
         XCTAssertFalse(stillCurrent, "a mid-erase dead key must abort the rest of the erase")
     }
 
     func testACharacterlessKeyDoesNotCostTheUndoCounters() {
-        let before = TextInjectionPipeline.shared.deliveryInputUnitsForTesting
+        let before = pipeline.deliveryInputUnitsForTesting
         deadKey()
-        XCTAssertEqual(TextInjectionPipeline.shared.deliveryInputUnitsForTesting, before)
+        XCTAssertEqual(pipeline.deliveryInputUnitsForTesting, before)
     }
 
     /// A keyDown that produces no character and is not navigation or a chord — what a dead key

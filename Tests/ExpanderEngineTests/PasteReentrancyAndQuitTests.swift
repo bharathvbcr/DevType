@@ -152,10 +152,15 @@ final class PasteReentrancyAndQuitTests: XCTestCase {
         XCTAssertEqual(harness.board.changeCount, before)
     }
 
+    /// What the restore *does* is driven above (`testQuittingMidHoldPutsTheUsersClipboardBack` and its
+    /// siblings, on a private board). That `applicationWillTerminate` calls it is the one thing
+    /// those cannot reach: the call is on `PasteboardBroker.shared`, whose board is the user's real
+    /// clipboard, and invoking the delegate's termination path headlessly would stop the live
+    /// engine and write that board. So the call site is read from the source, on purpose — scoped
+    /// to the termination function's own body.
     func testTheAppRestoresTheClipboardInItsTerminationPath() throws {
         let delegate = try SourceTree.text("Sources/DevTypeAppCore/AppDelegate.swift")
-        let start = try XCTUnwrap(delegate.range(of: "func applicationWillTerminate("))
-        let body = String(delegate[start.lowerBound...])
+        let body = try SourceTree.functionBody("func applicationWillTerminate(", in: delegate)
         XCTAssertTrue(
             body.contains("PasteboardBroker.shared.restorePendingClipboardForTermination()"),
             "quitting inside a paste hold leaves the snippet as the user's clipboard"

@@ -256,13 +256,29 @@ public final class EventTapEngine {
         _ = HIDKeyPoster.shared.postUnicodeKeyEvent(unicode: character, keyCode: 0, flags: [])
     }
 
+    /// The injection pipeline this engine drives: the one whose ledger its input revision, delivery
+    /// window and undo record live in. A seam so a test owns that ledger instead of sharing the
+    /// process-wide one.
+    var pipeline: TextInjectionPipeline = .shared
+
+    /// The wall clock the type-ahead hold is measured against. A seam so a test steps a window past
+    /// its deadline instead of sleeping through it.
+    var now: () -> Date = { Date() }
+
     /// Puts the swallowed terminator back when the type-ahead hold surrenders before the
     /// expansion wrote anything. Injectable for the same reason as `typeAheadReplayPoster`.
     /// Production posts it as the key it was (code and flags, with the AX-insert fallback that
-    /// `reinjectSwallowedKey` carries); the pipeline's ledger has already settled the debt by the
-    /// time this runs, so it posts through `repostSettledKey`, not the debt-checked entry.
-    var swallowedKeyPoster: (SwallowedKey) -> Void = { key in
-        _ = TextInjectionPipeline.shared.repostSettledKey(key)
+    /// `reinjectSwallowedKey` carries) through this engine's own `pipeline`; its ledger has
+    /// already settled the debt by the time this runs, so it posts through `repostSettledKey`, not
+    /// the debt-checked entry. Nil uses that default.
+    var swallowedKeyPoster: ((SwallowedKey) -> Void)?
+
+    func postSurrenderedTerminator(_ key: SwallowedKey) {
+        if let swallowedKeyPoster {
+            swallowedKeyPoster(key)
+        } else {
+            _ = pipeline.repostSettledKey(key)
+        }
     }
 
     /// The non-IPC Secure Input read the tap trusts over its polled flag. Injectable so a test can

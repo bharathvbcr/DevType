@@ -52,7 +52,7 @@ extension EventTapEngine {
     /// must see the input revision move. Only a key swallowed into type-ahead never does, and that
     /// path returns before any of these.
     private func noteBypassedRealKey() {
-        TextInjectionPipeline.shared.noteDeliveryInput()
+        pipeline.noteDeliveryInput()
     }
 
     /// The whole tap hot path. Extracted from the C callback so it can use `autoreleasepool`,
@@ -100,12 +100,12 @@ extension EventTapEngine {
             // no longer describes what sits in front of it. Clicks were the one caret move that
             // kept the record alive, which let a click + backspace within the undo window fire a
             // blind erase at the click position in AX-opaque hosts.
-            TextInjectionPipeline.shared.clearLastExpansion()
+            pipeline.clearLastExpansion()
             // §3.1d: a click during an *in-flight* delivery moves the caret around text whose
             // final geometry the record cannot know. The counter is drained into that record's
             // input count when delivery completes; outside a delivery it is discarded at the next
             // `beginDeliveryWindow()`.
-            TextInjectionPipeline.shared.noteDeliveryInput()
+            pipeline.noteDeliveryInput()
             return Unmanaged.passUnretained(event)
         }
 
@@ -143,12 +143,12 @@ extension EventTapEngine {
                     flushReplayCount: admission.decision.replayCount
                 )
                 if units > 0 {
-                    TextInjectionPipeline.shared.noteDeliveryInput(units: units)
+                    pipeline.noteDeliveryInput(units: units)
                 } else if admission.decision != .swallow {
                     // A key that reaches the field but that no unit count describes (a dead
                     // key's marked accent, an F-key) is still not the field the erase was
                     // planned against. Move the revision; leave the undo counters alone.
-                    TextInjectionPipeline.shared.noteUncountedDeliveryKey()
+                    pipeline.noteUncountedDeliveryKey()
                 }
                 switch admission.decision {
                 case .swallow:
@@ -186,7 +186,7 @@ extension EventTapEngine {
         // input the buffer cannot account for.
         if replayInFlight {
             noteBypassedRealKey()
-            TextInjectionPipeline.shared.clearLastExpansion()
+            pipeline.clearLastExpansion()
             discardStateForBypassedInput("keystroke raced the type-ahead replay")
             return Unmanaged.passUnretained(event)
         }
@@ -198,7 +198,7 @@ extension EventTapEngine {
         // the delivery in flight, and only its autorepeat: a fresh press, or any other key,
         // is real input and takes the normal path.
         if event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
-           TextInjectionPipeline.shared.isRepeatOfDeliveryChord(DeliveryChord(
+           pipeline.isRepeatOfDeliveryChord(DeliveryChord(
                keyCode: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags
            )) {
             return nil
@@ -206,7 +206,7 @@ extension EventTapEngine {
 
         guard enabled && !secureFlag && !suspended else {
             noteBypassedRealKey()
-            TextInjectionPipeline.shared.clearLastExpansion()
+            pipeline.clearLastExpansion()
             discardStateForBypassedInput(
                 "keystroke bypassed matching (disabled/secure/suspended)"
             )
@@ -218,7 +218,7 @@ extension EventTapEngine {
         let isAutorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         if EventTapEngine.shouldIgnoreForMatching(isAutorepeat: isAutorepeat) {
             noteBypassedRealKey()
-            TextInjectionPipeline.shared.clearLastExpansion()
+            pipeline.clearLastExpansion()
             // Autorepeat appends characters the matcher never sees (repeats are filtered from
             // matching), so from the first repeat on the buffer no longer describes the field:
             // `` `sl `` + a held `l` leaves the buffer at `` `sl `` while the field reads
@@ -234,7 +234,7 @@ extension EventTapEngine {
             // §3.1: escape / arrows / chorded keys mean the caret probably moved, so the recorded
             // expansion no longer describes the text sitting in front of the caret. Undoing after
             // that would erase whatever happens to be there now — drop the record instead.
-            TextInjectionPipeline.shared.clearLastExpansion()
+            pipeline.clearLastExpansion()
             return Unmanaged.passUnretained(event)
         }
 
@@ -285,7 +285,7 @@ extension EventTapEngine {
         // Later input revokes queued undo through the shared injection continuation guard.
         if keyAction == .deleteLast,
            flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty,
-           TextInjectionPipeline.shared.undoLastExpansion(
+           pipeline.undoLastExpansion(
                heldBackspace: SwallowedKey(
                    didSwallow: true,
                    unicode: unicodeStr.isEmpty ? "\u{7F}" : unicodeStr,
@@ -303,7 +303,7 @@ extension EventTapEngine {
         // refuses at a non-zero count. Runs after the undo check so the backspace that *is* the
         // undo never counts against the record it just consumed. No-op when no record exists.
         if keyAction == .deleteLast || length > 0 {
-            TextInjectionPipeline.shared.noteInputAfterExpansion()
+            pipeline.noteInputAfterExpansion()
         }
 
         // §2.3: cached frontmost facts, read before the layout buffer is touched. The mute
@@ -496,9 +496,9 @@ extension EventTapEngine {
                 flushReplayCount: admission.decision.replayCount
             )
             if units > 0 {
-                TextInjectionPipeline.shared.noteDeliveryInput(units: units)
+                pipeline.noteDeliveryInput(units: units)
             } else if admission.decision != .swallow {
-                TextInjectionPipeline.shared.noteUncountedDeliveryKey()
+                pipeline.noteUncountedDeliveryKey()
             }
             switch admission.decision {
             case .swallow:
@@ -520,7 +520,7 @@ extension EventTapEngine {
         let charCount = lastUTF16Count
         let swallowed = SwallowedKey(didSwallow: true, unicode: unicodeStr, keyCode: keyCode, flags: flags)
         // Same thread as every later key event, so none can reach `admit` before this is owed.
-        TextInjectionPipeline.shared.oweSwallowedKey(swallowed)
+        pipeline.oweSwallowedKey(swallowed)
         let terminator = match.terminator
         let eraseOverride = match.source == .physical ? match.eraseCount : nil
         // Exact text expected left of the caret. Carries both unit systems (UTF-16 for AX

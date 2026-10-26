@@ -36,19 +36,19 @@ final class TapEraseGuardTests: TapEventTestCase {
         super.setUp()
         engine.swallowedKeyPoster = { _ in }
         XCTAssertTrue(engine.tryBeginExpansion())
-        TextInjectionPipeline.shared.oweSwallowedKey(terminator)
-        claimed = TextInjectionPipeline.shared.claimOperationForTesting()
+        pipeline.oweSwallowedKey(terminator)
+        claimed = pipeline.claimOperationForTesting()
     }
 
     override func tearDown() {
         abandonExpansion()
-        TextInjectionPipeline.shared.cancelCurrentInjection()
+        pipeline.cancelCurrentInjection()
         claimed = nil
         super.tearDown()
     }
 
     private var injectIsCurrent: Bool {
-        TextInjectionPipeline.shared.operationIsCurrentForTesting(claimed.operation, revision: claimed.revision)
+        pipeline.operationIsCurrentForTesting(claimed.operation, revision: claimed.revision)
     }
 
     /// An executor whose field reads say `abctrigx`, caret at the end; `onFirstRead` runs inside
@@ -77,7 +77,7 @@ final class TapEraseGuardTests: TapEventTestCase {
         var result = false
         executor.performGuardedErase(
             plan: ErasePlan(text: "trig"), focus: .resolved(element),
-            canProceed: { self.injectIsCurrent && TextInjectionPipeline.shared.beginMutationForTesting(
+            canProceed: { self.injectIsCurrent && self.pipeline.beginMutationForTesting(
                 self.claimed.operation, revision: self.claimed.revision
             ) }
         ) { erased in
@@ -113,8 +113,8 @@ final class TapEraseGuardTests: TapEventTestCase {
         for (name, route) in routes {
             abandonExpansion()
             XCTAssertTrue(engine.tryBeginExpansion(), name)
-            TextInjectionPipeline.shared.oweSwallowedKey(terminator)
-            claimed = TextInjectionPipeline.shared.claimOperationForTesting()
+            pipeline.oweSwallowedKey(terminator)
+            claimed = pipeline.claimOperationForTesting()
 
             route()
 
@@ -161,7 +161,7 @@ final class TapEraseGuardTests: TapEventTestCase {
             plan: ErasePlan(text: "trig"), focus: .resolved(element),
             canProceed: { self.injectIsCurrent },
             postingContinue: {
-                TextInjectionPipeline.shared.beginMutationForTesting(self.claimed.operation, revision: self.claimed.revision)
+                self.pipeline.beginMutationForTesting(self.claimed.operation, revision: self.claimed.revision)
             }
         ) { erased in
             result = erased

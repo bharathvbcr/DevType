@@ -14,299 +14,135 @@ import XCTest
 // clipboard.
 //
 // The first half drives `DeliveryVerifier.readReplacementOutcome` against a scripted field; the
-// second drives the real broker (private pasteboard, ⌘V counted, never posted) and the real
-// pipeline method against the same field, with the clipboard keeper recorded.
+// second drives the real broker (private pasteboard, ⌘V recorded, never posted) and the real
+// pipeline method against the same field, with the clipboard keeper recorded. Both run on the
+// shared `InjectionHarness`: trust and Secure Input are the harness's to script, so no test here
+// depends on the session it runs in.
 final class ReplacementWitnessTests: XCTestCase {
-
-    private let field = AXUIElementCreateApplication(5101)
-    private let window = AXUIElementCreateApplication(5102)
-    private let replacementNode = AXUIElementCreateApplication(5103)
-    private let frame = CGRect(x: 40, y: 80, width: 600, height: 300)
 
     private let selected = "teh quick brwon fox"
     private let result = "the quick brown fox"
     private var before: String { "say: \(selected) now" }
-    private var selection: NSRange { NSRange(location: 5, length: (selected as NSString).length) }
+    private var selectionLength: Int { (selected as NSString).length }
 
-    /// One page: which element is focused, and what each element reports.
-    private final class Page {
-        var focused: AXUIElement?
-        var values: [String: String] = [:]
-        var selections: [String: NSRange] = [:]
-        var frames: [String: CGRect] = [:]
-        var roles: [String: String] = [:]
-        var pids: [String: pid_t] = [:]
-        var unreadable: Set<String> = []
-
-        func key(_ element: AXUIElement) -> String { String(describing: element) }
-
-        func access() -> DeliveryVerifier.TextAccess {
-            .init(
-                focusedElement: { [unowned self] in self.focused },
-                numberOfCharacters: { [unowned self] element in
-                    self.values[self.key(element)].map { ($0 as NSString).length }
-                },
-                selectedRange: { [unowned self] element in self.selections[self.key(element)] },
-                stringForRange: { _, _ in nil },
-                observation: { [unowned self] element in
-                    let k = self.key(element)
-                    if self.unreadable.contains(k) {
-                        return .init(value: nil, selectedText: nil, selectedRange: nil, target: element)
-                    }
-                    return .init(value: self.values[k], selectedText: nil,
-                                 selectedRange: self.selections[k], target: element)
-                },
-                frame: { [unowned self] element in self.frames[self.key(element)] },
-                role: { [unowned self] element in self.roles[self.key(element)] },
-                pid: { [unowned self] element in self.pids[self.key(element)] }
-            )
-        }
+    /// A harness whose field holds `before` with the misspelt words selected.
+    private func makeHarness() throws -> InjectionHarness {
+        let harness = try InjectionHarness()
+        harness.seed(before, caret: 5, selection: selectionLength)
+        return harness
     }
 
-    private func makePage() -> Page {
-        let page = Page()
-        for element in [field, replacementNode] {
-            let k = page.key(element)
-            page.roles[k] = "AXTextArea"
-            page.pids[k] = 900
-            page.frames[k] = frame
-        }
-        page.roles[page.key(window)] = "AXWindow"
-        page.pids[page.key(window)] = 900
-        page.focused = field
-        page.values[page.key(field)] = before
-        page.selections[page.key(field)] = selection
-        return page
+    /// Taken before the paste, as the pipeline does; the page is then mutated by the caller.
+    private func baseline(_ harness: InjectionHarness) -> DeliveryVerifier.FocusedTextObservation {
+        harness.verifier.captureFocusedTextObservation(focus: .resolved(harness.field))!
+    }
+
+    private func reading(
+        _ harness: InjectionHarness, baseline: DeliveryVerifier.FocusedTextObservation,
+        mirrorTrusted: Bool = true, expected: String? = nil
+    ) -> DeliveryVerifier.ReplacementOutcome {
+        harness.verifier.readReplacementOutcome(
+            expectedText: expected ?? result, baseline: baseline, mirrorTrusted: mirrorTrusted
+        )
+    }
+
+    private func landOnField(_ harness: InjectionHarness, _ element: AXUIElement) {
+        let k = harness.page.key(element)
+        harness.page.values[k] = "say: \(result) now"
+        harness.page.selections[k] = NSRange(location: 5 + (result as NSString).length, length: 0)
     }
 
     // MARK: - The reading
 
-    private func reading(
-        _ page: Page, mirrorTrusted: Bool = true, expected: String? = nil
-    ) -> DeliveryVerifier.ReplacementOutcome {
-        let verifier = DeliveryVerifier(access: page.access())
-        // Taken before the paste, as the pipeline does; the page is then mutated by the caller.
-        return verifier.readReplacementOutcome(
-            expectedText: expected ?? result, baseline: baseline(page), mirrorTrusted: mirrorTrusted
-        )
+    func testAResultThatReplacedTheSelectionLanded() throws {
+        let harness = try makeHarness()
+        let base = baseline(harness)
+        landOnField(harness, harness.field)
+        XCTAssertEqual(reading(harness, baseline: base), .landed)
     }
 
-    private var capturedBaseline: DeliveryVerifier.FocusedTextObservation?
-    private func baseline(_ page: Page) -> DeliveryVerifier.FocusedTextObservation {
-        if let capturedBaseline { return capturedBaseline }
-        let captured = DeliveryVerifier(access: page.access()).captureFocusedTextObservation(focus: .resolved(field))!
-        capturedBaseline = captured
-        return captured
-    }
-
-    func testAResultThatReplacedTheSelectionLanded() {
-        let page = makePage()
-        _ = baseline(page)
-        page.values[page.key(field)] = "say: \(result) now"
-        page.selections[page.key(field)] = NSRange(location: 5 + (result as NSString).length, length: 0)
-        XCTAssertEqual(reading(page), .landed)
-    }
-
-    func testAResultOnAReplacedNodeOfTheSameControlLanded() {
-        let page = makePage()
-        _ = baseline(page)
-        page.focused = replacementNode
-        page.values[page.key(replacementNode)] = "say: \(result) now"
-        page.selections[page.key(replacementNode)] = NSRange(location: 5 + (result as NSString).length, length: 0)
-        XCTAssertEqual(reading(page), .landed)
+    func testAResultOnAReplacedNodeOfTheSameControlLanded() throws {
+        let harness = try makeHarness()
+        let base = baseline(harness)
+        harness.page.focused = harness.replacementNode
+        landOnField(harness, harness.replacementNode)
+        XCTAssertEqual(reading(harness, baseline: base), .landed)
     }
 
     /// The report's own shape: focus is the window, so a focus-based read has nothing to say, but
     /// the field the selection came from still answers and still holds the original.
-    func testAFieldStillHoldingTheOriginalWhileFocusIsTheWindowDidNotLand() {
-        let page = makePage()
-        _ = baseline(page)
-        page.focused = window
-        XCTAssertEqual(reading(page), .notLanded)
+    func testAFieldStillHoldingTheOriginalWhileFocusIsTheWindowDidNotLand() throws {
+        let harness = try makeHarness()
+        let base = baseline(harness)
+        harness.page.focused = harness.window
+        XCTAssertEqual(reading(harness, baseline: base), .notLanded)
     }
 
-    func testAFieldStillHoldingTheOriginalWhileItIsFocusedDidNotLand() {
-        let page = makePage()
-        _ = baseline(page)
-        XCTAssertEqual(reading(page), .notLanded)
+    func testAFieldStillHoldingTheOriginalWhileItIsFocusedDidNotLand() throws {
+        let harness = try makeHarness()
+        XCTAssertEqual(reading(harness, baseline: baseline(harness)), .notLanded)
     }
 
-    func testAMirrorThatCannotBeTrustedNeverProvesAMiss() {
-        let page = makePage()
-        _ = baseline(page)
-        page.focused = window
-        XCTAssertEqual(reading(page, mirrorTrusted: false), .unverified)
+    func testAMirrorThatCannotBeTrustedNeverProvesAMiss() throws {
+        let harness = try makeHarness()
+        let base = baseline(harness)
+        harness.page.focused = harness.window
+        XCTAssertEqual(reading(harness, baseline: base, mirrorTrusted: false), .unverified)
     }
 
-    func testAFieldThatCannotBeReadNowIsNotAMiss() {
-        let page = makePage()
-        _ = baseline(page)
-        page.focused = window
-        page.unreadable.insert(page.key(field))
-        XCTAssertEqual(reading(page), .unverified)
+    func testAFieldThatCannotBeReadNowIsNotAMiss() throws {
+        let harness = try makeHarness()
+        let base = baseline(harness)
+        harness.page.focused = harness.window
+        harness.page.unreadable.insert(harness.page.key(harness.field))
+        XCTAssertEqual(reading(harness, baseline: base), .unverified)
     }
 
-    func testAFieldThatChangedInSomeOtherWayIsNotAMiss() {
-        let page = makePage()
-        _ = baseline(page)
-        page.focused = window
-        page.values[page.key(field)] = before + "!"
-        XCTAssertEqual(reading(page), .unverified, "the user typed — the field is no longer the one that was read")
+    func testAFieldThatChangedInSomeOtherWayIsNotAMiss() throws {
+        let harness = try makeHarness()
+        let base = baseline(harness)
+        harness.page.focused = harness.window
+        harness.page.values[harness.page.key(harness.field)] = before + "!"
+        XCTAssertEqual(reading(harness, baseline: base), .unverified, "the user typed — the field is no longer the one that was read")
     }
 
-    func testAResultThatReadsLikeTheSelectionProvesNothingByLeavingTheFieldAlone() {
-        let page = makePage()
-        _ = baseline(page)
-        page.focused = window
-        XCTAssertEqual(reading(page, expected: selected), .unverified)
+    func testAResultThatReadsLikeTheSelectionProvesNothingByLeavingTheFieldAlone() throws {
+        let harness = try makeHarness()
+        let base = baseline(harness)
+        harness.page.focused = harness.window
+        XCTAssertEqual(reading(harness, baseline: base, expected: selected), .unverified)
         XCTAssertEqual(
-            reading(page, expected: selected.replacingOccurrences(of: " ", with: "\u{00A0}")), .unverified,
+            reading(harness, baseline: base, expected: selected.replacingOccurrences(of: " ", with: "\u{00A0}")),
+            .unverified,
             "a difference the field's own whitespace folding erases is not a difference"
         )
     }
 
-    func testABaselineThatNeverReadTheFieldCannotJudgeAMiss() {
-        let page = makePage()
-        page.values[page.key(field)] = nil
-        capturedBaseline = nil
-        _ = baseline(page)
-        page.focused = window
-        XCTAssertEqual(reading(page), .unverified)
+    func testABaselineThatNeverReadTheFieldCannotJudgeAMiss() throws {
+        let harness = try makeHarness()
+        harness.page.values[harness.page.key(harness.field)] = nil
+        let base = baseline(harness)
+        harness.page.focused = harness.window
+        XCTAssertEqual(reading(harness, baseline: base), .unverified)
     }
 
     // MARK: - The pipeline, end to end
 
-    private struct NoLayout: KeyboardLayoutProviding {
-        func currentSourceID() -> String? { nil }
-        func keyCode(for character: Character) -> CGKeyCode? { nil }
-    }
-
-    /// A broker on a private pasteboard whose ⌘V is counted, never posted, plus the pipeline
-    /// wired to it. `chords` is how many full ⌘V chords went out (four events each).
-    private final class Rig {
-        let board = NSPasteboard.withUniqueName()
-        let broker: PasteboardBroker
-        let pipeline: TextInjectionPipeline
-        let defaults: UserDefaults
-        let suite: String
-        var events = 0
-        var chords: Int { events / 4 }
-        var kept: [String] = []
-        /// What the board held at the instant the result was kept — the instant a miss is called.
-        var boardAtKeep: [String?] = []
-        var keepAnswer = true
-        var toasts: [Bool] = []
-        /// Runs once the first chord is out — where a test lets the paste land, or focus slip.
-        var afterPaste: (Rig) -> Void = { _ in }
-        var targetMovedAfterPaste = false
-        /// Makes the broker's own pre-⌘V target check fail — ⌘V is then never posted — while the
-        /// pipeline's continue-check still passes.
-        var brokerRefusesTarget = false
-
-        init(verifier: DeliveryVerifier, defaults: UserDefaults, suite: String) {
-            self.defaults = defaults
-            self.suite = suite
-            let board = board
-            var env = PasteboardBroker.Environment()
-            env.pasteboard = { board }
-            env.canPostEvents = { true }
-            env.secureInputActive = { false }
-            let selfBox = Box()
-            env.targetCurrent = { _, _, _ in
-                guard let rig = selfBox.rig else { return false }
-                return !(rig.targetMovedAfterPaste || rig.brokerRefusesTarget)
-            }
-            let hid = HIDKeyPoster(
-                commandEventIO: .init(canPost: { true }, post: { _ in selfBox.rig!.noteEvent() }, pause: {}),
-                layout: KeyboardLayoutState(provider: NoLayout())
-            )
-            broker = PasteboardBroker(
-                hid: hid, verifier: verifier, timing: InjectTimingStore(), environment: env
-            )
-            var keeper: ((String) -> Bool)!
-            pipeline = TextInjectionPipeline(
-                defaults: defaults,
-                selectionConfirmer: SelectionReplacementGuard.Confirmer(),
-                keepRefusedReplacement: { keeper($0) },
-                clipboard: broker,
-                verifier: verifier,
-                deliveryTrust: { _, _ in true }
-            )
-            keeper = { [unowned self] text in
-                self.boardAtKeep.append(self.board.string(forType: .string))
-                self.kept.append(text)
-                return self.keepAnswer
-            }
-            selfBox.rig = self
-            pipeline.onReplaceNotLanded = { [unowned self] copied in self.toasts.append(copied) }
-        }
-
-        final class Box { weak var rig: Rig? }
-
-        func noteEvent() {
-            events += 1
-            if events == 4 { afterPaste(self) }
-        }
-
-        deinit {
-            board.releaseGlobally()
-            defaults.removePersistentDomain(forName: suite)
-        }
-    }
-
-    private func makeRig(_ page: Page) throws -> Rig {
-        let suite = "ReplacementWitnessTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        return Rig(verifier: DeliveryVerifier(access: page.access()), defaults: defaults, suite: suite)
-    }
-
-    /// Runs one replace through the secure-paste path and returns how it ended.
-    @discardableResult
-    private func replace(
-        on rig: Rig, replacesSelection: Bool = true,
-        operationStillOurs: @escaping () -> Bool = { true }
-    ) throws -> PermissionCoordinator.InjectOutcome? {
-        try XCTSkipIf(
-            AXContextChecker.isSecureEventInputEnabledLive(),
-            "Secure Input is on in this session; the path under test is the one it bypasses"
-        )
-        rig.board.clearContents()
-        rig.board.setString("the user's own clipboard", forType: .string)
-        var outcome: PermissionCoordinator.InjectOutcome?
-        let done = expectation(description: "replace finished")
-        let rigRef = rig
-        rig.pipeline.injectSecureClipboardPasteOnMain(
-            snippet: SnippetModel(title: "AI", triggerKeyword: "", replacementText: result),
-            clipboardOverride: nil,
-            swallowed: .notSwallowed,
-            preResolvedText: result,
-            trailingKeys: [],
-            snippetLookup: nil,
-            focus: .resolved(field),
-            replacesSelection: replacesSelection,
-            shouldContinue: { !rigRef.targetMovedAfterPaste && operationStillOurs() },
-            operationIsCurrent: operationStillOurs,
-            completion: { outcome = $0; done.fulfill() }
-        )
-        wait(for: [done], timeout: 10)
-        return outcome
-    }
-
     /// The field report's failure: ⌘V goes out, focus has slipped back to the window, nothing is
     /// pasted. Pre-fix this ended `postedUnverified` with the result nowhere.
     func testAPasteThatLandedNowhereKeepsTheResultAndSaysSo() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
-        rig.afterPaste = { [unowned self] rig in
-            page.focused = self.window
-            rig.targetMovedAfterPaste = true
+        let harness = try makeHarness()
+        harness.hostPastes = false
+        harness.afterPaste = { harness in
+            harness.page.focused = harness.window
+            harness.targetMovedAfterPaste = true
         }
-        let outcome = try replace(on: rig)
+        let outcome = harness.replaceSelection(in: self, result: result)
 
         XCTAssertEqual(outcome, .refused(SelectionReplacementGuard.Refusal.notLanded.reason))
-        XCTAssertEqual(rig.kept, [result], "the generated result is kept on the clipboard")
-        XCTAssertEqual(rig.toasts, [true])
-        XCTAssertEqual(rig.chords, 1, "a miss never re-pastes: a late host read would duplicate the result")
+        XCTAssertEqual(harness.kept, [result], "the generated result is kept on the clipboard")
+        XCTAssertEqual(harness.toasts, [true])
+        XCTAssertEqual(harness.chords, 1, "a miss never re-pastes: a late host read would duplicate the result")
     }
 
     /// The miss is judged for the miss window *after* the hold answered, and the residency floor
@@ -314,34 +150,34 @@ final class ReplacementWitnessTests: XCTestCase {
     /// still deciding, so a host that pasted late in the window pasted the user's clipboard over
     /// the selection. The board must still hold the result when the miss is called.
     func testTheResultIsStillOnTheBoardWhenTheMissIsCalled() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
-        rig.afterPaste = { [unowned self] rig in
-            page.focused = self.window
-            rig.targetMovedAfterPaste = true
+        let harness = try makeHarness()
+        harness.hostPastes = false
+        harness.afterPaste = { harness in
+            harness.page.focused = harness.window
+            harness.targetMovedAfterPaste = true
         }
-        try replace(on: rig)
-        XCTAssertEqual(rig.kept, [result])
-        XCTAssertEqual(rig.boardAtKeep, [result], "the user's clipboard came back before the verdict")
+        harness.replaceSelection(in: self, result: result)
+        XCTAssertEqual(harness.kept, [result])
+        XCTAssertEqual(harness.boardAtKeep, [result], "the user's clipboard came back before the verdict")
     }
 
     /// Once someone else owns the board — the user copied, or it was restored — a late paste
     /// would paste *that*, so the field cannot say the result never landed, and copying the
     /// result over the board would throw away what is there now.
     func testNoMissIsCalledOnceTheBoardIsNoLongerTheResult() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
-        rig.afterPaste = { [unowned self] rig in
-            page.focused = self.window
-            rig.targetMovedAfterPaste = true
-            rig.board.clearContents()
-            rig.board.setString("copied by the user meanwhile", forType: .string)
+        let harness = try makeHarness()
+        harness.hostPastes = false
+        harness.afterPaste = { harness in
+            harness.page.focused = harness.window
+            harness.targetMovedAfterPaste = true
+            harness.board.clearContents()
+            harness.board.setString("copied by the user meanwhile", forType: .string)
         }
-        let outcome = try replace(on: rig)
+        let outcome = harness.replaceSelection(in: self, result: result)
         XCTAssertEqual(outcome, .postedUnverified)
-        XCTAssertEqual(rig.kept, [])
-        XCTAssertEqual(rig.toasts, [])
-        XCTAssertEqual(rig.board.string(forType: .string), "copied by the user meanwhile")
+        XCTAssertEqual(harness.kept, [])
+        XCTAssertEqual(harness.toasts, [])
+        XCTAssertEqual(harness.board.string(forType: .string), "copied by the user meanwhile")
     }
 
     /// Measured from the hold's answer — where the witness's window starts — and never past the
@@ -371,98 +207,102 @@ final class ReplacementWitnessTests: XCTestCase {
     }
 
     func testAKeeperThatCannotCopyIsToldToTheUser() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
-        rig.keepAnswer = false
-        rig.afterPaste = { [unowned self] rig in
-            page.focused = self.window
-            rig.targetMovedAfterPaste = true
+        let harness = try makeHarness()
+        harness.keepAnswer = false
+        harness.hostPastes = false
+        harness.afterPaste = { harness in
+            harness.page.focused = harness.window
+            harness.targetMovedAfterPaste = true
         }
-        try replace(on: rig)
-        XCTAssertEqual(rig.toasts, [false])
+        harness.replaceSelection(in: self, result: result)
+        XCTAssertEqual(harness.toasts, [false])
     }
 
+    /// The host pastes where focus is, over the selection: the field ends holding the result.
     func testAPasteThatLandedIsSucceededAndKeepsNothing() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
-        rig.afterPaste = { [unowned self] rig in
-            page.values[page.key(self.field)] = "say: \(self.result) now"
-            page.selections[page.key(self.field)] =
-                NSRange(location: 5 + (self.result as NSString).length, length: 0)
-        }
-        let outcome = try replace(on: rig)
+        let harness = try makeHarness()
+        let outcome = harness.replaceSelection(in: self, result: result)
         XCTAssertEqual(outcome, .succeeded)
-        XCTAssertEqual(rig.kept, [])
-        XCTAssertEqual(rig.toasts, [])
+        XCTAssertEqual(harness.page.value(of: harness.field), "say: \(result) now")
+        XCTAssertEqual(harness.kept, [])
+        XCTAssertEqual(harness.toasts, [])
     }
 
     /// WebKit swaps the node when the paste lands, so the strict gate sees focus move — and the
     /// result is in the field. That is a landing, not a slip.
     func testAPasteThatReplacedTheNodeUnderItIsNotCalledAMiss() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
-        rig.afterPaste = { [unowned self] rig in
-            page.focused = self.replacementNode
-            page.values[page.key(self.replacementNode)] = "say: \(self.result) now"
-            page.selections[page.key(self.replacementNode)] =
-                NSRange(location: 5 + (self.result as NSString).length, length: 0)
-            rig.targetMovedAfterPaste = true
+        let harness = try makeHarness()
+        harness.hostPastes = false
+        harness.afterPaste = { harness in
+            harness.page.focused = harness.replacementNode
+            self.landOnField(harness, harness.replacementNode)
+            harness.targetMovedAfterPaste = true
         }
-        let outcome = try replace(on: rig)
+        let outcome = harness.replaceSelection(in: self, result: result)
         XCTAssertEqual(outcome, .succeeded)
-        XCTAssertEqual(rig.kept, [])
+        XCTAssertEqual(harness.kept, [])
     }
 
     /// A field AX cannot read gives no evidence either way: exactly the outcome it always had.
     func testAFieldThatCannotBeReadStaysPostedUnverified() throws {
-        let page = makePage()
-        page.unreadable.insert(page.key(field))
-        let rig = try makeRig(page)
-        let outcome = try replace(on: rig)
+        let harness = try makeHarness()
+        harness.hostPastes = false
+        harness.page.unreadable.insert(harness.page.key(harness.field))
+        let outcome = harness.replaceSelection(in: self, result: result)
         XCTAssertEqual(outcome, .postedUnverified)
-        XCTAssertEqual(rig.kept, [])
-        XCTAssertEqual(rig.toasts, [])
+        XCTAssertEqual(harness.kept, [])
+        XCTAssertEqual(harness.toasts, [])
     }
 
     /// Only a replace owes the field a read; an insert at the caret is untouched.
     func testAnInsertIsNotWatched() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
-        rig.afterPaste = { [unowned self] rig in
-            page.focused = self.window
-            rig.targetMovedAfterPaste = true
+        let harness = try makeHarness()
+        harness.hostPastes = false
+        harness.afterPaste = { harness in
+            harness.page.focused = harness.window
+            harness.targetMovedAfterPaste = true
         }
-        let outcome = try replace(on: rig, replacesSelection: false)
+        let outcome = harness.replaceSelection(in: self, result: result, replacesSelection: false)
         XCTAssertEqual(outcome, .postedUnverified)
-        XCTAssertEqual(rig.kept, [])
+        XCTAssertEqual(harness.kept, [])
     }
 
     /// A cancelled or superseded inject has no claim on the field, so it keeps nothing.
     func testACancelledReplaceIsNotJudged() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
+        let harness = try makeHarness()
         var cancelled = false
-        rig.afterPaste = { [unowned self] rig in
-            page.focused = self.window
-            rig.targetMovedAfterPaste = true
+        harness.hostPastes = false
+        harness.afterPaste = { harness in
+            harness.page.focused = harness.window
+            harness.targetMovedAfterPaste = true
             cancelled = true
         }
-        let outcome = try replace(on: rig, operationStillOurs: { !cancelled })
+        let outcome = harness.replaceSelection(in: self, result: result, operationStillOurs: { !cancelled })
         XCTAssertEqual(outcome, .postedUnverified)
-        XCTAssertEqual(rig.kept, [])
+        XCTAssertEqual(harness.kept, [])
     }
 
     /// ⌘V never went out (the target moved before it): the broker has restored the user's
     /// clipboard, so without the keep the result would simply be gone.
     func testAPasteThatWasNeverPostedKeepsTheResult() throws {
-        let page = makePage()
-        let rig = try makeRig(page)
-        rig.brokerRefusesTarget = true
-        let outcome = try replace(on: rig)
+        let harness = try makeHarness()
+        harness.brokerRefusesTarget = true
+        let outcome = harness.replaceSelection(in: self, result: result)
         XCTAssertEqual(outcome, .failedSilent)
-        XCTAssertEqual(rig.chords, 0)
-        XCTAssertEqual(rig.kept, [result])
-        XCTAssertEqual(rig.toasts, [true])
+        XCTAssertEqual(harness.chords, 0)
+        XCTAssertEqual(harness.kept, [result])
+        XCTAssertEqual(harness.toasts, [true])
+    }
+
+    /// Secure Input is the harness's to switch on, and the replace path under it never takes the
+    /// witnessed route: it leaves the payload for a manual ⌘V instead of judging the field.
+    func testASecureInputSessionNeverTakesTheWitnessedRoute() throws {
+        let harness = try makeHarness()
+        harness.secureInput = true
+        harness.hostPastes = false
+        let outcome = harness.replaceSelection(in: self, result: result)
+        XCTAssertEqual(outcome, .postedUnverified)
+        XCTAssertEqual(harness.kept, [], "under Secure Input the payload stays on the board, not via the keeper")
     }
 
     func testRefusalClassifiesAndKeepsItsSentence() {

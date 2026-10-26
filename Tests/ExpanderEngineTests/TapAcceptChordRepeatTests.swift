@@ -28,14 +28,14 @@ final class TapAcceptChordRepeatTests: TapEventTestCase {
 
     override func tearDown() {
         suspension.release()
-        TextInjectionPipeline.shared.cancelCurrentInjection()
+        pipeline.cancelCurrentInjection()
         claimed = nil
         super.tearDown()
     }
 
     private func claimDelivery(acceptedBy chord: DeliveryChord?) {
-        if let chord { TextInjectionPipeline.shared.noteAcceptChord(chord) }
-        claimed = TextInjectionPipeline.shared.claimOperationForTesting()
+        if let chord { pipeline.noteAcceptChord(chord) }
+        claimed = pipeline.claimOperationForTesting()
     }
 
     /// Whether the tap handed the key on. The returned `Unmanaged<CGEvent>` points at an event the
@@ -47,7 +47,7 @@ final class TapAcceptChordRepeatTests: TapEventTestCase {
     }
 
     private var stillCurrent: Bool {
-        TextInjectionPipeline.shared.operationIsCurrentForTesting(claimed.operation, revision: claimed.revision)
+        pipeline.operationIsCurrentForTesting(claimed.operation, revision: claimed.revision)
     }
 
     func testTheRepeatOfTheChordThatStartedTheDeliveryDoesNotAbortIt() {
