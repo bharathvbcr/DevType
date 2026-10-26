@@ -93,4 +93,9 @@ The bundle is written to `.build/DevType.app`. Use `./Scripts/signing-identity.s
 
 ## License and acknowledgements
 
-[MIT](LICENSE). See [NOTICE](NOTICE) for component attributions. Voice workflow inspiration includes [Google Gemini Jot](https://github.com/google-gemini/jot-gemini-transcribe-macOS); local Whisper integration uses [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
+Released under the [MIT License](LICENSE). See [NOTICE](NOTICE) for full third-party license texts and adapted file inventory.
+
+- **SnipKey Kit** (`Copyright (c) 2026 SnipKey contributors`, MIT) — Portions of `Sources/ExpanderEngine/` (abbreviation matching, macro parsing/rendering, keyboard layout buffer, Hangul composition, and sync helpers) are adapted from SnipKey Kit.
+- **[Google Gemini Jot (`google-gemini/jot-gemini-transcribe-macOS`)](https://github.com/google-gemini/jot-gemini-transcribe-macOS)** (`Google LLC`, Apache-2.0) — Inspired the macOS menu-bar voice-to-text dictation workflow.
+- **[whisper.cpp (`ggml-org/whisper.cpp`)](https://github.com/ggml-org/whisper.cpp)** (`Georgi Gerganov & contributors`, MIT) — Powers local on-device Whisper speech-to-text transcription.
+- **[Yams (`jpsim/Yams`)](https://github.com/jpsim/Yams)** (`JP Simard & contributors`, MIT) — YAML parsing for Espanso-compatible trigger pack import/export.
