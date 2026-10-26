@@ -232,6 +232,7 @@ final class InjectionHarness {
         brokerEnvironment.pasteboard = { board }
         brokerEnvironment.canPostEvents = { box.harness?.canPostEvents ?? false }
         brokerEnvironment.secureInputActive = { box.harness?.secureInput ?? false }
+        brokerEnvironment.frontmostPID = { box.harness?.frontmostPID }
         brokerEnvironment.targetCurrent = { target, _, checkElement in
             guard let harness = box.harness else { return false }
             if harness.brokerRefusesTarget || harness.targetMovedAfterPaste { return false }

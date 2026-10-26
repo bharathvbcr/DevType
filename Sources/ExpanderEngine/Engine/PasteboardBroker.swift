@@ -208,6 +208,8 @@ public final class PasteboardBroker {
         var pasteboard: () -> NSPasteboard = { .general }
         var canPostEvents: () -> Bool = { CGPreflightPostEventAccess() }
         var secureInputActive: () -> Bool = { AXContextChecker.isSecureEventInputEnabledLive() }
+        /// The process a paste's target is captured against.
+        var frontmostPID: () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
         var targetCurrent: (PasteTarget, _ checkRange: Bool, _ checkElement: Bool) -> Bool = {
             target, checkRange, checkElement in
             target.isCurrent(checkRange: checkRange, checkElement: checkElement)
@@ -1110,7 +1112,7 @@ public final class PasteboardBroker {
             completion(.notPosted)
             return
         }
-        let target = PasteTarget.capture(focus: focus, baseline: baseline)
+        let target = PasteTarget.capture(focus: focus, baseline: baseline, frontmostPID: environment.frontmostPID())
         let follower = followVouchedReplacement.map { PasteTargetFollower(vouch: $0) }
         // HID erase (or a no-AX secure paste) has already happened; AX selectedRange is settling.
         let verifySelection = Self.verifySelectionRange(
@@ -1362,7 +1364,7 @@ public final class PasteboardBroker {
         shouldContinue: @escaping () -> Bool = { true },
         completion: @escaping (PasteDeliveryResult) -> Void
     ) {
-        let target = PasteTarget.capture(focus: focus)
+        let target = PasteTarget.capture(focus: focus, frontmostPID: environment.frontmostPID())
         let imageRole = target.element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) }
         let verifySelection = Self.verifySelectionRange(
             bundleID: bundleID, role: imageRole, phase: .afterMutation
