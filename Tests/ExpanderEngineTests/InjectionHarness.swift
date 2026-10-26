@@ -133,7 +133,7 @@ final class InjectionHarness {
     }
 
     /// Lets a scripted collaborator (a confirmer's reads, say) put itself in the ordered log.
-    func note(_ event: Event) { log.append(event) }
+    func note(_ event: Event) { record(event) }
 
     // MARK: - Fixed cast
 
@@ -158,6 +158,29 @@ final class InjectionHarness {
     // MARK: - What the test observes
 
     private(set) var log: [Event] = []
+    /// When each `log` entry was made, on the monotonic clock the pipeline's own waits use.
+    private(set) var stamps: [TimeInterval] = []
+
+    private func record(_ event: Event) {
+        log.append(event)
+        stamps.append(InputClock.monotonicNow())
+    }
+
+    /// When the first (or `last`) matching event happened.
+    func time(of event: Event, last: Bool = false) -> TimeInterval? {
+        let indices = log.indices.filter { log[$0] == event }
+        return (last ? indices.last : indices.first).map { stamps[$0] }
+    }
+
+    /// The log with milliseconds since the first entry — what a failing timing assertion prints.
+    var timeline: String {
+        guard let origin = stamps.first else { return "(empty)" }
+        return zip(log, stamps).map { "\(Int(($1 - origin) * 1000))ms \($0)" }.joined(separator: ", ")
+    }
+
+    func timeOfLastPaste() -> TimeInterval? {
+        log.indices.last { if case .paste = log[$0] { true } else { false } }.map { stamps[$0] }
+    }
     /// `log` without the board probes: the order things were done in.
     var order: [Event] {
         log.filter { if case .boardBusy = $0 { return false } else { return true } }
@@ -311,12 +334,12 @@ final class InjectionHarness {
         )
         keeper = { [unowned self] text in
             self.boardAtKeep.append(self.board.string(forType: .string))
-            self.log.append(.keep(text))
+            self.record(.keep(text))
             return self.keepAnswer
         }
         focusQuery = { [unowned self] completion in
-            self.log.append(.focusQuery)
-            self.log.append(.boardBusy(self.broker.publicationGateRemaining() > 0))
+            self.record(.focusQuery)
+            self.record(.boardBusy(self.broker.publicationGateRemaining() > 0))
             let index = self.focusQueries
             if let scripted = self.focusAnswer(index) {
                 completion(scripted)
@@ -345,7 +368,7 @@ final class InjectionHarness {
         switch code {
         case kVK_Delete where down:
             let index = backspaces + 1
-            log.append(.backspace)
+            record(.backspace)
             if index > hostDropsBackspaces, let focused = page.focused {
                 page.deleteBackward(in: focused)
             }
@@ -356,14 +379,14 @@ final class InjectionHarness {
                 page.insert(text, into: focused)
                 landed = true
             }
-            log.append(.paste(landed: landed))
+            record(.paste(landed: landed))
         case kVK_Command where !down:
-            log.append(.chordDone)
+            record(.chordDone)
             if chords == 1 { afterPaste(self) }
         case kVK_Delete, kVK_ANSI_V, kVK_Command:
             break
         default:
-            if down { log.append(.key(code)) }
+            if down { record(.key(code)) }
         }
     }
 
@@ -377,7 +400,38 @@ final class InjectionHarness {
         page.focused = field
     }
 
-    func resetLog() { log.removeAll() }
+    func resetLog() {
+        log.removeAll()
+        stamps.removeAll()
+    }
+
+    /// An earlier expansion's payload is on the board with its ⌘V already out and nobody has read
+    /// it yet: the state that makes the next expansion wait. Returns once that ⌘V is out; the
+    /// payload's residency runs from then. The host does not paste it into the field.
+    func leaveAnUnreadPayload(in test: XCTestCase, text: String = "FIRST") {
+        seedUserClipboard()
+        let pastes = hostPastes
+        hostPastes = false
+        defer { hostPastes = pastes }
+        var posted = false
+        broker.pasteViaClipboard(
+            text: text, expectedText: nil, baseline: nil, focus: .resolved(field), completeBeforeRestore: true
+        ) { _ in posted = true }
+        pump(in: test, timeout: 5, "the first payload's ⌘V") { posted }
+    }
+
+    /// Runs the main run loop in small steps until `condition` holds. XCTest's own waiter coalesces
+    /// timers (a 50 ms poll fired every 125 ms under it), and every wait the pipeline owns is a
+    /// main-queue timer, so a timing assertion measures the pipeline only when this spins the loop.
+    func pump(
+        in test: XCTestCase, timeout: TimeInterval = 10, _ what: String, until condition: () -> Bool
+    ) {
+        let deadline = InputClock.monotonicNow() + timeout
+        while !condition(), InputClock.monotonicNow() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.002))
+        }
+        if !condition() { XCTFail("timed out after \(timeout) s waiting for \(what)") }
+    }
 
     /// Publishes the user's own clipboard on the private board.
     func seedUserClipboard(_ text: String = "the user's own clipboard") {
@@ -400,23 +454,25 @@ final class InjectionHarness {
         trigger: String = "`slm",
         lead: String = "say: ",
         result: String = "Sincerely, Slim",
+        erasing: Bool = true,
         operationStillOurs: @escaping () -> Bool = { true },
         timeout: TimeInterval = 10
     ) -> Run {
-        seed(lead + trigger)
+        // An insert at the caret (`erasing: false`) has no trigger in the field to remove.
+        seed(erasing ? lead + trigger : lead)
         var outcome: PermissionCoordinator.InjectOutcome?
-        let done = test.expectation(description: "typed expansion finished")
+        var finished = false
         pipeline.inject(
             snippet: SnippetModel(title: "Slim", triggerKeyword: trigger, replacementText: result),
-            triggerLength: (trigger as NSString).length,
+            triggerLength: erasing ? (trigger as NSString).length : 0,
             swallowed: .notSwallowed,
-            erasePlan: ErasePlan(text: trigger),
+            erasePlan: erasing ? ErasePlan(text: trigger) : .empty,
             preResolvedText: result,
             shouldContinue: { [unowned self] in !self.targetMovedAfterPaste && operationStillOurs() },
             targetFocus: .resolved(field),
-            completion: { outcome = $0; done.fulfill() }
+            completion: { outcome = $0; finished = true }
         )
-        test.wait(for: [done], timeout: timeout)
+        pump(in: test, timeout: timeout, "the typed expansion to finish") { finished }
         return Run(outcome: outcome, text: page.value(of: field))
     }
 
@@ -427,7 +483,7 @@ final class InjectionHarness {
         in test: XCTestCase, original: String, result: String, timeout: TimeInterval = 10
     ) -> PermissionCoordinator.InjectOutcome? {
         var outcome: PermissionCoordinator.InjectOutcome?
-        let done = test.expectation(description: "inject completed")
+        var finished = false
         pipeline.inject(
             snippet: SnippetModel(title: "AI", triggerKeyword: "", replacementText: result),
             triggerLength: 0,
@@ -439,9 +495,9 @@ final class InjectionHarness {
             replacingSelection: SelectionReplacement(original: original)
         ) {
             outcome = $0
-            done.fulfill()
+            finished = true
         }
-        test.wait(for: [done], timeout: timeout)
+        pump(in: test, timeout: timeout, "the replace to finish") { finished }
         return outcome
     }
 
@@ -457,7 +513,7 @@ final class InjectionHarness {
     ) -> PermissionCoordinator.InjectOutcome? {
         seedUserClipboard()
         var outcome: PermissionCoordinator.InjectOutcome?
-        let done = test.expectation(description: "replace finished")
+        var finished = false
         pipeline.injectSecureClipboardPasteOnMain(
             snippet: SnippetModel(title: "AI", triggerKeyword: "", replacementText: result),
             clipboardOverride: nil,
@@ -469,9 +525,9 @@ final class InjectionHarness {
             replacesSelection: replacesSelection,
             shouldContinue: { [unowned self] in !self.targetMovedAfterPaste && operationStillOurs() },
             operationIsCurrent: operationStillOurs,
-            completion: { outcome = $0; done.fulfill() }
+            completion: { outcome = $0; finished = true }
         )
-        test.wait(for: [done], timeout: timeout)
+        pump(in: test, timeout: timeout, "the replace to finish") { finished }
         return outcome
     }
 }

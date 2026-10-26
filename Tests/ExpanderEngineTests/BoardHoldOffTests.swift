@@ -1,6 +1,5 @@
 import AppKit
 import CoreGraphics
-import SourceTreeTestSupport
 import XCTest
 @testable import ExpanderEngine
 
@@ -130,28 +129,97 @@ final class BoardHoldOffTests: XCTestCase {
         XCTAssertTrue(steps.queue.isEmpty)
     }
 
-    // MARK: - Wiring
+    // MARK: - The inject, end to end
+    //
+    // The policy above is pure. What it is *for* is an order: the wait happens before the focus
+    // query, the entry gate, the precondition and the erase, so that every one of them runs after
+    // the wait. These run a whole typed expansion through the pipeline while a previous
+    // expansion's payload is still on the (private) board and read that order off the harness's
+    // log, against the real clock the wait is polled on.
 
-    /// Before the focus query, the entry gate, the precondition and the erase: every one of them
-    /// runs after the wait, which is what lets the wait be a plain hold.
+    /// Starts the second expansion once the first payload has at most `remaining` of its lease
+    /// left, so the wait it needs fits inside the budget.
+    private func waitUntilLeaseHas(
+        atMost remaining: TimeInterval, _ harness: InjectionHarness
+    ) {
+        let deadline = InputClock.monotonicNow() + 2
+        while harness.broker.publicationGateRemaining() > remaining, InputClock.monotonicNow() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+        }
+    }
+
+    /// A board that frees inside the budget: nothing — not the focus query that feeds the gates,
+    /// not the erase — happens until it has, and the expansion then completes normally.
     func testTheInjectWaitsForTheBoardBeforeAnyGateOrErase() throws {
-        let pipeline = SourceContractTests.strippingComments(
-            try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
+        let harness = try InjectionHarness()
+        harness.leaveAnUnreadPayload(in: self)
+        waitUntilLeaseHas(atMost: 0.09, harness)
+        XCTAssertGreaterThan(harness.broker.publicationGateRemaining(), 0, "the board is still busy when the inject starts")
+
+        let run = harness.typeExpansion(in: self)
+
+        XCTAssertEqual(run.text, "say: Sincerely, Slim")
+        XCTAssertEqual(harness.focusQueries, 1)
+        XCTAssertEqual(harness.focusQueriesWhileBoardBusy, 0, "the focus query ran while the board still held an unread payload")
+        let firstQuery = try XCTUnwrap(harness.time(of: .focusQuery))
+        let firstBackspace = try XCTUnwrap(harness.time(of: .backspace))
+        let firstPayloadOut = try XCTUnwrap(harness.time(of: .chordDone))
+        XCTAssertLessThanOrEqual(firstPayloadOut, firstQuery)
+        XCTAssertLessThan(firstQuery, firstBackspace)
+        XCTAssertEqual(harness.chords, 2)
+    }
+
+    /// A board that stays busy past the budget is published over — and the paste is told so, so it
+    /// does not sit out the previous payload's lease *after* the erase: the trigger is gone by
+    /// then, and the type-ahead hold has given up.
+    func testASpentBudgetPublishesOverTheBoardAndThePasteDoesNotWaitAgain() throws {
+        let harness = try InjectionHarness()
+        harness.leaveAnUnreadPayload(in: self)
+        let leaseStart = try XCTUnwrap(harness.time(of: .chordDone))
+        let startedAt = InputClock.monotonicNow()
+        XCTAssertGreaterThan(harness.broker.publicationGateRemaining(), BoardHoldOff.budget + 0.1)
+
+        let run = harness.typeExpansion(in: self)
+
+        XCTAssertEqual(run.text, "say: Sincerely, Slim")
+        let firstQuery = try XCTUnwrap(harness.time(of: .focusQuery))
+        XCTAssertGreaterThanOrEqual(firstQuery - startedAt, BoardHoldOff.budget * 0.9, "the wait spends its budget first")
+        XCTAssertEqual(harness.focusQueriesWhileBoardBusy, 1, "the board was still busy when the budget ran out")
+        let secondPaste = try XCTUnwrap(harness.timeOfLastPaste())
+        XCTAssertLessThan(
+            secondPaste - leaseStart, InjectTiming.unverifiedPayloadResidencyFloor - 0.03,
+            "the paste waited out the first payload's lease after the erase instead of publishing over it: started at \(Int((startedAt - (harness.stamps.first ?? 0)) * 1000))ms; \(harness.timeline)"
         )
-        let body = try SourceTree.functionBody("private func injectOnMain(", in: pipeline)
-        let wait = try XCTUnwrap(body.range(of: "BoardHoldOff.untilFree("))
-        // The only inject that skips the wait is one that erases nothing (and the secure-clipboard
-        // paste, which publishes a payload rather than erasing a trigger).
-        XCTAssertTrue(body.contains("guard !request.erasePlan.isEmpty, !request.secureClipboardPaste else"))
-        let proceed = try XCTUnwrap(body.range(of: "focusQuery {", options: .backwards))
-        XCTAssertLessThan(wait.lowerBound, proceed.lowerBound, "the gated path queries focus only once the board is free")
-        XCTAssertTrue(body.contains("publicationGateRemaining()"))
-        XCTAssertTrue(body.contains("refuseEntryGate("), "an abandoned wait is recorded like any entry-gate refusal")
-        XCTAssertTrue(body.contains("request.publicationGate = .waivedBeforeErase"),
-                      "a spent budget is carried to the paste so it does not wait again after the erase")
-        XCTAssertEqual(
-            pipeline.components(separatedBy: "publicationGate: context.request.publicationGate").count - 1, 2,
-            "both the text and the image paste of a typed expansion honour the waiver"
-        )
+    }
+
+    /// Input that arrives during the wait ends it with nothing erased: the field is exactly what
+    /// the user left, and the key that was swallowed is still the caller's to put back.
+    func testInputDuringTheWaitInThePipelineErasesNothing() throws {
+        let harness = try InjectionHarness()
+        harness.leaveAnUnreadPayload(in: self)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { harness.pipeline.noteDeliveryInput() }
+
+        let run = harness.typeExpansion(in: self)
+
+        guard case .refused = run.outcome else { return XCTFail("expected a refusal, got \(String(describing: run.outcome))") }
+        XCTAssertEqual(harness.backspaces, 0, "an abandoned wait erases nothing")
+        XCTAssertEqual(harness.focusQueries, 0, "and never reaches the gates that follow it")
+        XCTAssertEqual(run.text, "say: `slm", "the trigger is still in the field")
+        XCTAssertEqual(harness.chords, 1, "only the earlier payload's ⌘V went out")
+    }
+
+    /// The only inject that skips the wait is one that erases nothing: an insert at the caret has
+    /// no trigger to protect and no hole to leave, so it queries focus at once.
+    func testAnInsertThatErasesNothingDoesNotWait() throws {
+        let harness = try InjectionHarness()
+        harness.leaveAnUnreadPayload(in: self)
+        let startedAt = InputClock.monotonicNow()
+
+        harness.typeExpansion(in: self, erasing: false)
+
+        let firstQuery = try XCTUnwrap(harness.time(of: .focusQuery))
+        XCTAssertLessThan(firstQuery - startedAt, BoardHoldOff.pollInterval, "it queried focus without waiting")
+        XCTAssertEqual(harness.focusQueriesWhileBoardBusy, 1)
+        XCTAssertEqual(harness.backspaces, 0)
     }
 }
