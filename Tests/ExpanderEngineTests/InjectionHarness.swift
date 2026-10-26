@@ -472,6 +472,7 @@ final class InjectionHarness {
         lead: String = "say: ",
         result: String = "Sincerely, Slim",
         erasing: Bool = true,
+        swallowed: SwallowedKey = .notSwallowed,
         operationStillOurs: @escaping () -> Bool = { true },
         timeout: TimeInterval = 10
     ) -> Run {
@@ -482,7 +483,7 @@ final class InjectionHarness {
         pipeline.inject(
             snippet: SnippetModel(title: "Slim", triggerKeyword: trigger, replacementText: result),
             triggerLength: erasing ? (trigger as NSString).length : 0,
-            swallowed: .notSwallowed,
+            swallowed: swallowed,
             erasePlan: erasing ? ErasePlan(text: trigger) : .empty,
             preResolvedText: result,
             shouldContinue: { [unowned self] in !self.targetMovedAfterPaste && operationStillOurs() },

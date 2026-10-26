@@ -1,4 +1,3 @@
-import SourceTreeTestSupport
 import XCTest
 @testable import ExpanderEngine
 
@@ -146,38 +145,87 @@ final class ErasePartialRestoreTests: XCTestCase {
         ))
     }
 
-    // MARK: - Wiring
+    // MARK: - The pipeline
+    //
+    // A burst that stops part-way, run through the pipeline: Post Events drops for one pair after
+    // the second backspace and is back before the burst reports. The swallowed key is a space the
+    // tap ate; the refusal that follows owes it back, and owes it *after* the trigger is whole.
+
+    private let space = SwallowedKey(didSwallow: true, unicode: " ", keyCode: 49)
+
+    private func stopAfterTwoBackspaces(_ harness: InjectionHarness) {
+        harness.onBackspace = { harness, index in
+            guard index == 2 else { return }
+            harness.canPostEvents = false
+            DispatchQueue.main.async { harness.canPostEvents = true }
+        }
+    }
+
+    private func isPaste(_ event: InjectionHarness.Event) -> Bool {
+        if case .paste = event { return true }
+        return false
+    }
 
     func testAnIncompleteEraseRestoresTheTailBeforeTheKeyIsReplayed() throws {
-        let pipeline = SourceContractTests.strippingComments(
-            try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
-        )
-        let afterErase = try SourceTree.functionBody("func afterErase(", in: pipeline)
-        let incomplete = try XCTUnwrap(afterErase.range(of: "guard erased else {"))
-        let refuse = try XCTUnwrap(afterErase.range(of: "path: \"eraseIncomplete\""))
-        let restore = try XCTUnwrap(afterErase.range(of: "erasePlan.erasedTail(graphemes: postedBackspaces)"))
-        XCTAssertLessThan(incomplete.lowerBound, restore.lowerBound)
-        XCTAssertLessThan(restore.lowerBound, refuse.lowerBound, "restore first, then the refusal replays the key")
-        XCTAssertTrue(
-            afterErase.contains("swallowed: .notSwallowed"),
-            "The restore must not replay the swallowed key itself; the refusal that follows does, after the tail"
-        )
-        XCTAssertTrue(
-            afterErase.contains("canProceedAfterMutation()"),
-            "No restore into a field the continue-check no longer vouches for"
-        )
-        let headCheck = try XCTUnwrap(
-            afterErase.range(of: "erasePlan.keptHead(graphemes: postedBackspaces)"),
-            "The restore must be gated on the field holding the head the count implies"
-        )
-        XCTAssertLessThan(restore.lowerBound, headCheck.lowerBound)
-        XCTAssertLessThan(headCheck.lowerBound, refuse.lowerBound)
-        XCTAssertTrue(afterErase.contains("== .ok"), "Only a confirmed head admits the restore; unavailable does not")
-        let exact = try XCTUnwrap(
-            afterErase.range(of: "self.partialEraseLanded("),
-            "The restore must also match the pre-erase field exactly, not just a suffix"
-        )
-        XCTAssertLessThan(headCheck.lowerBound, exact.lowerBound)
-        XCTAssertLessThan(exact.lowerBound, refuse.lowerBound)
+        let harness = try InjectionHarness()
+        stopAfterTwoBackspaces(harness)
+        let run = harness.typeExpansion(in: self, swallowed: space)
+
+        guard case .refused = run.outcome else { return XCTFail("expected a refusal: \(harness.timeline)") }
+        XCTAssertEqual(run.text, "say: `slm", "the two erased graphemes are back: the trigger the user typed")
+        let order = harness.order
+        let restore = try XCTUnwrap(order.firstIndex(where: isPaste), "the tail was pasted back: \(order)")
+        let replay = try XCTUnwrap(order.firstIndex(of: .key(49)), "the swallowed key was replayed: \(order)")
+        XCTAssertEqual(order.filter { $0 == .backspace }.count, 2)
+        XCTAssertLessThan(restore, replay, "restore first, then the refusal replays the key: \(order)")
+        XCTAssertEqual(order.filter(isPaste).count, 1, "one restore, not a second")
+    }
+
+    /// The restore goes into a field the continue-check still vouches for and nowhere else: if the
+    /// user has moved on, nothing is pasted and the key is not replayed into the new place.
+    func testNoRestoreIsPastedIntoAFieldTheContinueCheckNoLongerVouchesFor() throws {
+        let harness = try InjectionHarness()
+        harness.page.values[harness.page.key(harness.elsewhere)] = "an unrelated field"
+        harness.page.selections[harness.page.key(harness.elsewhere)] = NSRange(location: 18, length: 0)
+        harness.onBackspace = { harness, index in
+            guard index == 2 else { return }
+            harness.canPostEvents = false
+            harness.page.focused = harness.elsewhere
+            DispatchQueue.main.async { harness.canPostEvents = true }
+        }
+        let run = harness.typeExpansion(in: self, swallowed: space)
+
+        guard case .refused = run.outcome else { return XCTFail("expected a refusal: \(harness.timeline)") }
+        XCTAssertEqual(harness.order.filter(isPaste).count, 0, "nothing was pasted into a field the user left")
+        XCTAssertFalse(harness.order.contains(.key(49)), "and the key was not typed into it either")
+        XCTAssertEqual(run.text, "say: `s", "what the posted backspaces left is what is left")
+        XCTAssertEqual(harness.page.value(of: harness.elsewhere), "an unrelated field")
+    }
+
+    /// Two pairs were authorized but the host only acted on one: the field holds more of the
+    /// trigger than the count implies, so restoring the tail would write text the user never typed.
+    func testAnOverstatedCountIsNeverRestoredOver() throws {
+        let harness = try InjectionHarness()
+        harness.hostDropsBackspaces = 1
+        stopAfterTwoBackspaces(harness)
+        let run = harness.typeExpansion(in: self, swallowed: space)
+
+        guard case .refused = run.outcome else { return XCTFail("expected a refusal: \(harness.timeline)") }
+        XCTAssertEqual(run.text, "say: `sl", "one grapheme went, and nothing was added to a count that overstated it")
+        XCTAssertEqual(harness.order.filter(isPaste).count, 0)
+    }
+
+    /// The head check is a suffix check and cannot see how many graphemes of a repeating head are
+    /// gone: with `aaa` and two pairs authorized but one acted on, the field `xaa` still ends in
+    /// the head the count implies. Only comparing the whole field with the pre-erase one refuses it.
+    func testARepeatedHeadWithAnOverstatedCountIsNeverRestoredOver() throws {
+        let harness = try InjectionHarness()
+        harness.hostDropsBackspaces = 1
+        stopAfterTwoBackspaces(harness)
+        let run = harness.typeExpansion(in: self, trigger: "aaa", lead: "x", swallowed: space)
+
+        guard case .refused = run.outcome else { return XCTFail("expected a refusal: \(harness.timeline)") }
+        XCTAssertEqual(run.text, "xaa", "no character the user never typed was added")
+        XCTAssertEqual(harness.order.filter(isPaste).count, 0)
     }
 }
