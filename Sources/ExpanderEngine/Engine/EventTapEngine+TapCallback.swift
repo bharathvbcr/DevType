@@ -89,10 +89,13 @@ extension EventTapEngine {
             let wasHolding = _typeAhead.isHolding
             let stranded = _typeAhead.flushForCaretChange()
             lock.unlock()
-            // The terminator was typed before every held key, at the caret the click is about to
-            // move: it goes back first, and only while the inject has not begun writing.
+            // The click abandons an inject that has not begun writing. Its terminator is settled,
+            // not typed: whether a post from here lands before or after the click is unverified,
+            // and after it the caret is wherever the user clicked (see the surrender's doc).
             if wasHolding {
-                surrenderHoldPuttingTerminatorBack(heldFor: holdPID, reason: "caret moved (click)")
+                surrenderHoldPuttingTerminatorBack(
+                    heldFor: holdPID, reason: "caret moved (click)", postTerminator: false
+                )
             }
             replayTypeAhead(stranded, heldFor: holdPID, reason: "caret moved (click)")
             resetBuffer()

@@ -209,17 +209,28 @@ extension EventTapEngine {
     ///
     /// Must be called on the tap thread, before `replayTypeAhead` posts the released keys and
     /// before the surrendering event is handed back. `reason` is a bounded label for the log.
-    func surrenderHoldPuttingTerminatorBack(heldFor sourcePID: pid_t?, reason: String) {
+    ///
+    /// `postTerminator` false is the click: the surrender still abandons the inject, but the
+    /// terminator is settled without being typed. A post from inside the callback may reach the
+    /// app *after* the event being handed back — unverified either way until a live run settles
+    /// it — and after a click that event has moved the caret, so a Return terminator could submit
+    /// whatever field the user just clicked into. Losing it is what a click did before.
+    func surrenderHoldPuttingTerminatorBack(heldFor sourcePID: pid_t?, reason: String, postTerminator: Bool = true) {
         // The surrender exists to keep the terminator ahead of the held keys *in the field they
         // were typed in*. A hold that ends because focus left that app — DevType's own fill-in
         // panel, which the expansion opened and will paste after, or another app — is not that:
         // the inject's own focus gates judge it, and its owed terminator stays with the refusal
         // that checks the target. Surrendering there cancelled every fill-in snippet the moment
-        // its panel took a key.
-        guard TypeAheadBuffer.mayReplay(heldFor: sourcePID, intoFrontmost: frontmostContext.processID) else {
+        // its panel took a key. Only an app *known* to be the same counts: an unknown hold or
+        // frontmost process is not evidence the field is the one the keys were held for.
+        guard let sourcePID, let frontPID = frontmostContext.processID, sourcePID == frontPID else {
             return
         }
         guard case .abandoned(let terminator?) = pipeline.surrenderHold() else {
+            return
+        }
+        guard postTerminator else {
+            DevTypeLog.inject.notice("[TypeAhead] hold surrendered by a click — terminator not typed after the caret moved")
             return
         }
         let safeReason = DevTypeLog.boundedPublicIdentifier(reason, label: "replayReason")

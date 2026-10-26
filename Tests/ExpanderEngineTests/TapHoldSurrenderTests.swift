@@ -112,11 +112,30 @@ final class TapHoldSurrenderTests: TapEventTestCase {
         XCTAssertFalse(stillCurrent, "capacity overflow")
     }
 
-    func testAClickSurrendersLikeAKey() {
+    /// A click abandons the inject like a key, but its terminator is settled, not typed: a post
+    /// from inside the callback may reach the app after the click has moved the caret, where a
+    /// Return terminator would submit the field the user clicked into. Until a live run proves the
+    /// order, losing the terminator — what a click always did — is the safe side.
+    func testAClickAbandonsTheInjectWithoutTypingTheTerminatorWhereTheCaretWent() {
         XCTAssertNil(key("x"))
         click()
-        XCTAssertEqual(order, ["terminator: ", "x"], "the click lands after both, at the caret they were typed at")
+        XCTAssertEqual(order, ["x"], "the held key goes back as before; the terminator does not")
         XCTAssertFalse(stillCurrent)
+        XCTAssertFalse(pipeline.reinjectSwallowedKey(terminator),
+                       "settled by the surrender: no later refusal types it either")
+    }
+
+    /// An unknown process on either side is not evidence the keys were held for the field in
+    /// front: no surrender, so nothing is latched against the next inject.
+    func testAnUnknownFrontmostProcessDoesNotSurrender() {
+        XCTAssertNil(key("x"))
+        setFrontmost(pid: nil, bundleID: nil)
+        clock += 1
+        key("y")
+        let next = pipeline.claimOperationForTesting()
+        XCTAssertTrue(pipeline.operationIsCurrentForTesting(next.operation, revision: next.revision),
+                      "no surrender is latched for a process nobody could name")
+        XCTAssertFalse(order.contains("terminator: "))
     }
 
     /// A click with no expansion in flight is not a surrender and owes nothing.
