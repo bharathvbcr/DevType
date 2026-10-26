@@ -311,6 +311,8 @@ public final class Runner {
             try page.reset()
         case .focus(let field):
             guard field.acceptsTyping else { throw CaseError(message: "\(field.domID) is not a typing target") }
+            // Focusing can fall back to a real click: it obeys the same latched abort as every key.
+            try abort.check()
             try page.focus(field)
         case .pause(let ms):
             try wait(Double(ms) / 1000)

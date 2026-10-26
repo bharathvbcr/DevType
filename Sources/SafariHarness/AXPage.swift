@@ -188,7 +188,10 @@ final class AXPage: PagePort {
         return false
     }
 
-    /// Last-resort focus. Checks the point resolves to this very control before clicking.
+    /// Last-resort focus. Checks the point resolves to this very control, in Safari, before
+    /// clicking. The hit test is system-wide, not scoped to Safari: a window of another app floating
+    /// over that point (a notification, DevType's own palette) is what the click would land in,
+    /// and a Safari-scoped hit test would still answer with the control underneath it.
     private func click(_ field: PageField, element target: AXUIElement) throws {
         guard let positionValue = copy(target, kAXPositionAttribute), let sizeValue = copy(target, kAXSizeAttribute) else {
             throw PageError.focusFailed(field, "no frame to click")
@@ -200,9 +203,14 @@ final class AXPage: PagePort {
         }
         let point = CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2)
         var hit: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success,
-              let hit, domID(hit) == field.domID else {
-            throw PageError.focusFailed(field, "the point (\(Int(point.x)), \(Int(point.y))) does not hit \(field.domID)")
+        var safariPID: pid_t = 0
+        var hitPID: pid_t = 0
+        guard AXUIElementGetPid(app, &safariPID) == .success,
+              AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+              let hit, AXUIElementGetPid(hit, &hitPID) == .success, hitPID == safariPID,
+              domID(hit) == field.domID,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == safariPID else {
+            throw PageError.focusFailed(field, "the point (\(Int(point.x)), \(Int(point.y))) does not hit \(field.domID) in frontmost Safari")
         }
         let source = CGEventSource(stateID: .hidSystemState)
         for type in [CGEventType.leftMouseDown, .leftMouseUp] {

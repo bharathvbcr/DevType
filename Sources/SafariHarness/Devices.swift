@@ -84,15 +84,19 @@ final class SystemClipboard: ClipboardPort {
 
     func restore(_ snapshot: ClipboardSnapshot) throws {
         let board = NSPasteboard.general
-        board.clearContents()
-        guard !snapshot.items.isEmpty else { return }
+        // Built before the board is cleared, so nothing that can fail sits between clearing the
+        // user's clipboard and writing it back; a refused write is retried once before giving up.
         let items = snapshot.items.map { entry -> NSPasteboardItem in
             let item = NSPasteboardItem()
             for (type, data) in entry { item.setData(data, forType: NSPasteboard.PasteboardType(type)) }
             return item
         }
+        board.clearContents()
+        guard !items.isEmpty else { return }
+        if board.writeObjects(items) { return }
+        board.clearContents()
         guard board.writeObjects(items) else {
-            throw NSError(domain: "SafariHarness", code: 2, userInfo: [NSLocalizedDescriptionKey: "pasteboard refused the restored items"])
+            throw NSError(domain: "SafariHarness", code: 2, userInfo: [NSLocalizedDescriptionKey: "pasteboard refused the restored items twice"])
         }
     }
 }
