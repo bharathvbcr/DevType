@@ -130,6 +130,9 @@ final class InjectionHarness {
         /// The board still had this long to run on a previous payload's lease when the pipeline
         /// asked the focus query — nonzero means it did not wait for the board.
         case boardBusy(Bool)
+        /// A continue-check or re-check read the live focused element (a re-check the pipeline
+        /// makes on purpose, as opposed to the one resolution it threads).
+        case focusRead
     }
 
     /// Lets a scripted collaborator (a confirmer's reads, say) put itself in the ordered log.
@@ -181,9 +184,20 @@ final class InjectionHarness {
     func timeOfLastPaste() -> TimeInterval? {
         log.indices.last { if case .paste = log[$0] { true } else { false } }.map { stamps[$0] }
     }
-    /// `log` without the board probes: the order things were done in.
+    /// `log` without the probes (board state, live focus reads): the order things were done in.
     var order: [Event] {
-        log.filter { if case .boardBusy = $0 { return false } else { return true } }
+        log.filter {
+            switch $0 {
+            case .boardBusy, .focusRead: return false
+            default: return true
+            }
+        }
+    }
+    /// Live focus reads made after the last backspace — the looks the pipeline takes at the field
+    /// once its trigger is gone.
+    var focusReadsAfterTheErase: Int {
+        guard let last = log.lastIndex(of: .backspace) else { return 0 }
+        return log[(last + 1)...].filter { $0 == .focusRead }.count
     }
     /// How many focus queries were asked while a previous payload was still waiting to be read.
     var focusQueriesWhileBoardBusy: Int { log.filter { $0 == .boardBusy(true) }.count }
@@ -300,7 +314,10 @@ final class InjectionHarness {
         environment.frontmostApp = {
             .init(processIdentifier: box.harness?.frontmostPID, bundleIdentifier: box.harness?.frontmostBundleID)
         }
-        environment.focusedElement = { box.harness?.page.focused }
+        environment.focusedElement = {
+            box.harness?.note(.focusRead)
+            return box.harness?.page.focused
+        }
         environment.focusedRole = { element in box.harness?.page.roles[box.harness?.page.key(element) ?? ""] }
         environment.imeMarkedText = { _ in false }
         environment.shellLikeContext = { _ in false }

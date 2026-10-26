@@ -176,19 +176,75 @@ final class EraseSettleRereadTests: XCTestCase {
         ), "one grapheme (the emoji, two UTF-16 units) is gone, the `a` is not")
     }
 
-    // MARK: - Wiring
+    // MARK: - The pipeline
 
-    func testThePipelineReReadsBeforeItRefusesAfterTheErase() throws {
+    /// Focus is momentarily nothing right after the last backspace — what WebKit does while it
+    /// replaces the node — and is back before the second look runs out. The expansion is not
+    /// refused for it: the trigger is gone and the result is pasted.
+    func testAFocusThatComesBackInsideTheSecondLookIsNotRefused() throws {
+        let harness = try InjectionHarness()
+        harness.onBackspace = { harness, index in
+            guard index == 4 else { return }
+            harness.page.focused = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { harness.page.focused = harness.field }
+        }
+        let run = harness.typeExpansion(in: self)
+
+        XCTAssertEqual(run.outcome, .succeeded, harness.timeline)
+        XCTAssertEqual(run.text, "say: Sincerely, Slim")
+        XCTAssertGreaterThanOrEqual(harness.focusReadsAfterTheErase, 3, "it looked more than once before it decided")
+    }
+
+    /// The second look is bounded: a focus that never comes back is refused after the third look,
+    /// with nothing pasted — never a wait for it.
+    func testAFocusThatNeverComesBackIsRefusedAfterTheBoundedLooks() throws {
+        let harness = try InjectionHarness()
+        harness.onBackspace = { harness, index in
+            if index == 4 { harness.page.focused = nil }
+        }
+        let started = InputClock.monotonicNow()
+        let run = harness.typeExpansion(in: self)
+        let took = InputClock.monotonicNow() - started
+
+        guard case .refused = run.outcome else { return XCTFail("expected a refusal: \(harness.timeline)") }
+        XCTAssertEqual(harness.chords, 0)
+        XCTAssertEqual(run.text, "say: ", "the trigger was erased and nothing took its place")
+        XCTAssertGreaterThan(harness.focusReadsAfterTheErase, 2 * EraseContinuation.maxSettleRereads - 1,
+                             "it looked again for every second look the budget allows")
+        XCTAssertGreaterThanOrEqual(
+            took, Double(EraseContinuation.maxSettleRereads) * AXSettleRetry.settleDelay * 0.9,
+            "each look waited the shared settle"
+        )
+        XCTAssertLessThan(took, 1.0, "and then it stopped looking")
+    }
+
+    /// A different text field is a verdict, not a reading: the second look is never spent on it.
+    func testADifferentTextFieldIsRefusedWithoutASecondLook() throws {
+        let harness = try InjectionHarness()
+        harness.page.values[harness.page.key(harness.elsewhere)] = "an unrelated field"
+        harness.onBackspace = { harness, index in
+            guard index == 4 else { return }
+            harness.page.values[harness.page.key(harness.elsewhere)] = "an unrelated field"
+            harness.page.selections[harness.page.key(harness.elsewhere)] = NSRange(location: 18, length: 0)
+            harness.page.focused = harness.elsewhere
+        }
+        let run = harness.typeExpansion(in: self)
+
+        guard case .refused = run.outcome else { return XCTFail("expected a refusal: \(harness.timeline)") }
+        XCTAssertEqual(harness.chords, 0)
+        XCTAssertLessThan(harness.focusReadsAfterTheErase, 1 + EraseContinuation.maxSettleRereads,
+                          "a refusal that cannot clear is not looked at again")
+    }
+
+    /// The wait between looks is the shared settle on the main queue, never a sleep: blocking main
+    /// there starves the event tap. A sleep and a scheduled retry are indistinguishable to a
+    /// headless run (both wait ~30 ms), so this one is read from the source on purpose.
+    func testTheWaitBetweenLooksIsTheSharedSettleAndNeverASleep() throws {
         let pipeline = SourceContractTests.strippingComments(
             try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
         )
         let afterErase = try SourceTree.functionBody("func afterErase(", in: pipeline)
-        XCTAssertTrue(
-            afterErase.contains("context.adopted.lastRefusalMayClear")
-                && afterErase.contains("EraseContinuation.rereadBudgetRemains(attempt: settleAttempt)"),
-            "A refusal after the erase must consult the bounded second look before it stands"
-        )
-        XCTAssertTrue(afterErase.contains("AXSettleRetry.settleDelay"), "The wait is the shared settle, never a sleep")
+        XCTAssertTrue(afterErase.contains("AXSettleRetry.settleDelay"), "The wait is the shared settle")
         XCTAssertFalse(afterErase.contains("Thread.sleep"), "Blocking main starves the event tap")
     }
 }
