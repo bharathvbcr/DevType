@@ -14,7 +14,7 @@ import CoreGraphics
 /// that makes the swallow contract safe: the tap only returns `nil` for the trigger key after the
 /// planner has synchronously said the expand may proceed, so a later refuse owes the user
 /// that keystroke back while the target is unchanged. A changed erase context suppresses replay.
-public struct SwallowedKey {
+public struct SwallowedKey: Equatable {
     /// True when the event tap swallowed the final trigger key (`return nil` from the callback).
     public let didSwallow: Bool
     public let unicode: String

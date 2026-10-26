@@ -119,6 +119,9 @@ extension EventTapEngine {
         _isExpanding = false
         let holdPID = _typeAhead.holdPID
         let replay = _typeAhead.endExpansion()
+        // Same nesting as `tryBeginExpansion` (engine → pipeline). A surrender recorded for this
+        // delivery must not outlive it and withhold an unrelated key replay later.
+        TextInjectionPipeline.shared.endDeliveryWindow()
         ringBuffer.removeAll()
         layoutBuffer.clear()
         lastEventUTF16Count = 1
@@ -194,6 +197,33 @@ extension EventTapEngine {
             unicodeCount: length
         )
         return (decision, decision != .swallow && contaminates, holdPID)
+    }
+
+    /// The type-ahead hold has surrendered (`.flushThenPassThrough`, or a click flushing it). If
+    /// the in-flight inject has not begun mutating the field, it is abandoned here and the
+    /// terminator it swallowed is put back first, so the user's keystrokes reach the field in
+    /// the order they typed them: terminator, then the keys the hold released, then the key that
+    /// forced the surrender. Once the pipeline has begun mutating, nothing changes: that
+    /// expansion is already past the point where the terminator's place is defined.
+    ///
+    /// Must be called on the tap thread, before `replayTypeAhead` posts the released keys and
+    /// before the surrendering event is handed back. `reason` is a bounded label for the log.
+    func surrenderHoldPuttingTerminatorBack(heldFor sourcePID: pid_t?, reason: String) {
+        guard case .abandoned(let terminator?) = TextInjectionPipeline.shared.surrenderHold() else {
+            return
+        }
+        // Same rule as every replay: an HID post lands wherever focus is *now*.
+        guard TypeAheadBuffer.mayReplay(heldFor: sourcePID, intoFrontmost: frontmostContext.processID) else {
+            DevTypeLog.inject.error(
+                "[TypeAhead] dropped the swallowed terminator — focus left the app it was typed in"
+            )
+            return
+        }
+        let safeReason = DevTypeLog.boundedPublicIdentifier(reason, label: "replayReason")
+        DevTypeLog.inject.notice(
+            "[TypeAhead] hold surrendered before the erase — terminator put back ahead of the held keys, reason=\(safeReason, privacy: .public)"
+        )
+        swallowedKeyPoster(terminator)
     }
 
     /// Re-posts keystrokes held during an expansion, in the order they were typed.

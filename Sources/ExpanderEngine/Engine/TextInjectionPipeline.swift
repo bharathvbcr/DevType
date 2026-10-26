@@ -367,6 +367,18 @@ public final class TextInjectionPipeline {
     @discardableResult
     public func reinjectSwallowedKey(_ swallowed: SwallowedKey) -> Bool {
         guard swallowed.hasPayload else { return false }
+        // A hold surrender may already have put this key back, ahead of the keys it released.
+        // Posting it again here would type the terminator twice, after them.
+        guard ledger.consumeTerminator(matching: swallowed) else { return false }
+        return repostSettledKey(swallowed)
+    }
+
+    /// Posts `swallowed` unconditionally: the caller holds the debt for it already (the tap's
+    /// hold surrender, which `ExpansionLedger.surrenderHold` handed the key to). Every other
+    /// path goes through `reinjectSwallowedKey`, which refuses a key already put back.
+    @discardableResult
+    func repostSettledKey(_ swallowed: SwallowedKey) -> Bool {
+        guard swallowed.hasPayload else { return false }
 
         if CGPreflightPostEventAccess() {
             if hid.postUnicodeKeyEvent(
@@ -457,6 +469,42 @@ public final class TextInjectionPipeline {
     /// premise.
     public func noteDeliveryInput(units: Int = 1) {
         ledger.noteDeliveryInput(units: units)
+    }
+
+    /// Closes the window `beginDeliveryWindow` opened. Called on every path that ends the
+    /// expansion (`EventTapEngine.endExpansion`).
+    public func endDeliveryWindow() {
+        ledger.endDeliveryWindow()
+    }
+
+    /// The tap swallowed `key` for the delivery whose window is open: it is owed back to the field
+    /// exactly once — by a hold surrender (`surrenderHold`) or by whichever refusal gets there
+    /// first (`reinjectSwallowedKey`), never both.
+    public func oweSwallowedKey(_ key: SwallowedKey) {
+        ledger.oweTerminator(key)
+    }
+
+    /// The type-ahead hold gave up on this delivery. See `ExpansionLedger.surrenderHold`.
+    func surrenderHold() -> ExpansionLedger.HoldSurrender {
+        ledger.surrenderHold()
+    }
+
+    /// A key reached the field mid-delivery that no unit count can describe. See
+    /// `ExpansionLedger.noteUncountedDeliveryKey`.
+    public func noteUncountedDeliveryKey() {
+        ledger.noteUncountedDeliveryKey()
+    }
+
+    /// The gate in front of a field write that owns no claimed operation (the typed AI
+    /// transform's trigger erase). `false` once the hold has surrendered.
+    public func beginUnclaimedMutation() -> Bool {
+        ledger.beginUnclaimedMutation()
+    }
+
+    /// Test seam: the pipeline's own `beginMutation`, for an operation claimed by
+    /// `claimOperationForTesting`.
+    func beginMutationForTesting(_ operation: InjectCompletionGuard, revision: UInt64) -> Bool {
+        ledger.beginMutation(operation, revision: revision)
     }
 
     /// Invalidates queued work as well as callbacks already scheduled on main.
@@ -1442,7 +1490,12 @@ public final class TextInjectionPipeline {
 
         if context.snippet.isImageSnippet {
             performImageInject(
-                context: context, focus: initialFocus, beforeMutation: canProceed,
+                context: context, focus: initialFocus,
+                // The erase's first backspace is this path's first write: claim it as such.
+                beforeMutation: {
+                    canProceed()
+                        && self.ledger.beginMutation(context.operation, revision: context.inputRevision)
+                },
                 afterMutation: canProceedAfterMutation, duringPost: postingContinue,
                 completion: completion
             )
@@ -1500,7 +1553,11 @@ public final class TextInjectionPipeline {
         )
         // #endregion
 
-        guard canProceed() else {
+        // The last gate before the first write (the AX range replace below, or the erase's first
+        // backspace). Winning `beginMutation` is the fact the tap's hold surrender reads: it
+        // cannot abandon this inject once the field is being mutated, and this cannot start once
+        // it has. `canProceed` stays a pure read; the claim is made here, once.
+        guard canProceed(), ledger.beginMutation(context.operation, revision: context.inputRevision) else {
             let refusal = context.adopted.lastRefusal ?? EraseContinuationRefusal(
                 path: "eraseContextChanged",
                 reason: "Expansion cancelled — input or target application changed before erase",

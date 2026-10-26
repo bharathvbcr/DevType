@@ -343,7 +343,20 @@ extension EventTapEngine {
                     return expected
                 }()
 
-                EraseExecutor.shared.performGuardedErase(plan: erasePlan, focus: .resolved(focus.element)) { [weak self] erased in
+                // This path owns no claimed inject operation, so its first write claims the
+                // mutation itself: a hold that surrendered before it is refused here (the keys
+                // are already back in the field, terminator first), and one that surrenders
+                // after cannot abandon an erase that has begun. The executor asks more than once;
+                // only the first ask is a claim.
+                var mutationClaimed = false
+                let claimMutation: () -> Bool = {
+                    if mutationClaimed { return true }
+                    mutationClaimed = TextInjectionPipeline.shared.beginUnclaimedMutation()
+                    return mutationClaimed
+                }
+                EraseExecutor.shared.performGuardedErase(
+                    plan: erasePlan, focus: .resolved(focus.element), canProceed: claimMutation
+                ) { [weak self] erased in
                     guard let self else { return }
                     if !erased {
                         self.refuseAfterSwallow(
