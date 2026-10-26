@@ -267,17 +267,19 @@ public final class EventTapEngine {
 
     /// Puts the swallowed terminator back when the type-ahead hold surrenders before the
     /// expansion wrote anything. Injectable for the same reason as `typeAheadReplayPoster`.
-    /// Production posts it as the key it was (code and flags, with the AX-insert fallback that
-    /// `reinjectSwallowedKey` carries) through this engine's own `pipeline`; its ledger has
-    /// already settled the debt by the time this runs, so it posts through `repostSettledKey`, not
-    /// the debt-checked entry. Nil uses that default.
+    /// Production posts it as the key it was (code and flags) through this engine's own
+    /// `pipeline`, by HID only: this runs on the tap thread, where the AX-insert fallback's
+    /// synchronous focus query must not. Its ledger has already settled the debt by the time this
+    /// runs, so it posts through `repostSettledKey`, not the debt-checked entry. Nil uses that
+    /// default.
     var swallowedKeyPoster: ((SwallowedKey) -> Void)?
 
     func postSurrenderedTerminator(_ key: SwallowedKey) {
         if let swallowedKeyPoster {
             swallowedKeyPoster(key)
         } else {
-            _ = pipeline.repostSettledKey(key)
+            // Runs inside the tap callback: HID only, never the AX fallback's synchronous IPC.
+            _ = pipeline.repostSettledKey(key, allowAXFallback: false)
         }
     }
 

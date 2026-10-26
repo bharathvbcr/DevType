@@ -383,8 +383,12 @@ public final class TextInjectionPipeline {
     /// Posts `swallowed` unconditionally: the caller holds the debt for it already (the tap's
     /// hold surrender, which `ExpansionLedger.surrenderHold` handed the key to). Every other
     /// path goes through `reinjectSwallowedKey`, which refuses a key already put back.
+    ///
+    /// `allowAXFallback` false is for a caller on the event-tap thread: the AX insert resolves
+    /// focus with a synchronous AX round trip, and the tap must never block on IPC (§1.1) — least
+    /// of all when Post Events is revoked, which is exactly when the fallback would run.
     @discardableResult
-    func repostSettledKey(_ swallowed: SwallowedKey) -> Bool {
+    func repostSettledKey(_ swallowed: SwallowedKey, allowAXFallback: Bool = true) -> Bool {
         guard swallowed.hasPayload else { return false }
 
         if environment.canPostEvents() {
@@ -399,6 +403,10 @@ public final class TextInjectionPipeline {
 
         // AX-only hosts: insert the swallowed character at the caret (no Post Events). Live on
         // purpose: a refused key goes back wherever the user now is, which is what typing it would do.
+        guard allowAXFallback else {
+            DevTypeLog.inject.error("[TypeAhead] terminator not put back — Post Events unavailable on the tap thread")
+            return false
+        }
         if !swallowed.unicode.isEmpty {
             return ax.attemptAXDirectInjection(text: swallowed.unicode, focus: .live)
         }
