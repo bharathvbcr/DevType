@@ -1461,7 +1461,20 @@ public final class TextInjectionPipeline {
         // the box already accepted. A failed focus read is the replacement, and snapshotting
         // that read would let the replacement match itself.
         var postedBackspaces = 0
+        // The claim "the field is about to be written", made at the instant a write is first
+        // issued — never earlier. The tap's hold surrender reads it: before the claim a surrender
+        // abandons this inject and puts the swallowed terminator back first; after it, the
+        // expansion is already mutating and nothing changes. Claiming at an earlier gate left a
+        // window (the erase precondition's reads and its settle) in which the field was untouched
+        // yet no surrender could cancel, and the terminator was lost. Idempotent for this
+        // operation and revision; `false` once input landed, the operation was superseded or the
+        // hold has surrendered.
+        let beginWrite: () -> Bool = {
+            self.ledger.beginMutation(context.operation, revision: context.inputRevision)
+        }
         let postingContinue: () -> Bool = {
+            // The first backspace pair is the first write of an HID erase.
+            if postedBackspaces == 0, !beginWrite() { return false }
             if self.canContinue(context, phase: .afterMutation) {
                 if context.adopted.eraseAnchor == nil, let element = context.focusedElement {
                     context.adopted.eraseAnchor = self.eraseFieldPicture(element)
@@ -1490,12 +1503,7 @@ public final class TextInjectionPipeline {
 
         if context.snippet.isImageSnippet {
             performImageInject(
-                context: context, focus: initialFocus,
-                // The erase's first backspace is this path's first write: claim it as such.
-                beforeMutation: {
-                    canProceed()
-                        && self.ledger.beginMutation(context.operation, revision: context.inputRevision)
-                },
+                context: context, focus: initialFocus, beforeMutation: canProceed,
                 afterMutation: canProceedAfterMutation, duringPost: postingContinue,
                 completion: completion
             )
@@ -1553,11 +1561,7 @@ public final class TextInjectionPipeline {
         )
         // #endregion
 
-        // The last gate before the first write (the AX range replace below, or the erase's first
-        // backspace). Winning `beginMutation` is the fact the tap's hold surrender reads: it
-        // cannot abandon this inject once the field is being mutated, and this cannot start once
-        // it has. `canProceed` stays a pure read; the claim is made here, once.
-        guard canProceed(), ledger.beginMutation(context.operation, revision: context.inputRevision) else {
+        func refuseBeforeFirstWrite() {
             let refusal = context.adopted.lastRefusal ?? EraseContinuationRefusal(
                 path: "eraseContextChanged",
                 reason: "Expansion cancelled — input or target application changed before erase",
@@ -1574,6 +1578,9 @@ public final class TextInjectionPipeline {
                 ),
                 completion: completion
             )
+        }
+        guard canProceed() else {
+            refuseBeforeFirstWrite()
             return
         }
 
@@ -1614,6 +1621,10 @@ public final class TextInjectionPipeline {
             // AX only — no HID. Range replace + optional AX caret; never erase-less direct inject.
             // A known-lying app has no fallback here, so this correctly refuses rather than
             // pretending the expand happened.
+            if !(shellLike || preferHID), !beginWrite() {
+                refuseBeforeFirstWrite()
+                return
+            }
             let axOnlyOutcome = (shellLike || preferHID)
                 ? AXTextWriter.AXReplaceOutcome.notAttempted(shellLike ? "shell-like context" : "weak AX app")
                 : ax.performAXRangeReplace(
@@ -1715,6 +1726,11 @@ public final class TextInjectionPipeline {
         // already landed.
         var unconfirmedAXWrite: AXTextWriter.PendingRangeReplace?
         if InjectionPlanner.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID) {
+            // The AX range replace is a write (a widened selection at the least).
+            guard beginWrite() else {
+                refuseBeforeFirstWrite()
+                return
+            }
             let axOutcome = ax.performAXRangeReplace(
                 text: textToInject,
                 eraseCount: erasePlan.utf16Count,

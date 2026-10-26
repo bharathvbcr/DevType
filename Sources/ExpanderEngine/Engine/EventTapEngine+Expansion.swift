@@ -344,10 +344,12 @@ extension EventTapEngine {
                 }()
 
                 // This path owns no claimed inject operation, so its first write claims the
-                // mutation itself: a hold that surrendered before it is refused here (the keys
-                // are already back in the field, terminator first), and one that surrenders
-                // after cannot abandon an erase that has begun. The executor asks more than once;
-                // only the first ask is a claim.
+                // mutation itself, at the moment the first backspace is about to be posted (the
+                // executor asks before each pair; only the first ask is a claim, and nothing
+                // before it — the precondition's reads and settle — touches the field): a hold
+                // that surrendered before it is refused here (the keys are already back in the
+                // field, terminator first), and one that surrenders after cannot abandon an
+                // erase that has begun.
                 var mutationClaimed = false
                 let claimMutation: () -> Bool = {
                     if mutationClaimed { return true }
@@ -355,7 +357,7 @@ extension EventTapEngine {
                     return mutationClaimed
                 }
                 EraseExecutor.shared.performGuardedErase(
-                    plan: erasePlan, focus: .resolved(focus.element), canProceed: claimMutation
+                    plan: erasePlan, focus: .resolved(focus.element), postingContinue: claimMutation
                 ) { [weak self] erased in
                     guard let self else { return }
                     if !erased {

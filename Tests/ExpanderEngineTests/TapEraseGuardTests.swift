@@ -145,6 +145,34 @@ final class TapEraseGuardTests: TapEventTestCase {
         XCTAssertEqual(poster.requested, [])
     }
 
+    /// The window between the pipeline's last gate and its first backspace — the precondition's
+    /// reads (and, on a mismatch, a settle) — touches nothing. A hold that surrenders inside it
+    /// must still cancel the erase AND put the terminator back; the write is claimed at the first
+    /// backspace pair, not at the gate before the reads. The gates here have the shape
+    /// `performInject` gives the executor: `canProceed` is a pure read, `postingContinue` claims.
+    func testASurrenderDuringThePreconditionReadStillReplaysTheTerminator() {
+        var terminators: [String] = []
+        engine.swallowedKeyPoster = { terminators.append($0.unicode) }
+        let poster = RecordingBackspaces()
+        let executor = executor(poster: poster, onFirstRead: { self.key("\r", keyCode: Int64(kVK_Return)) })
+        let done = expectation(description: "guarded erase")
+        var result = true
+        executor.performGuardedErase(
+            plan: ErasePlan(text: "trig"), focus: .resolved(element),
+            canProceed: { self.injectIsCurrent },
+            postingContinue: {
+                TextInjectionPipeline.shared.beginMutationForTesting(self.claimed.operation, revision: self.claimed.revision)
+            }
+        ) { erased in
+            result = erased
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 2)
+        XCTAssertFalse(result)
+        XCTAssertEqual(poster.requested, [], "nothing was erased")
+        XCTAssertEqual(terminators, [" "], "and the swallowed terminator went back, once")
+    }
+
     /// Keys the hold swallows never reach the field, so they must not refuse an erase that is
     /// otherwise safe — and our own synthetic keys must not abort the erase they belong to.
     func testHeldAndSyntheticKeysDoNotRefuseTheErase() {
