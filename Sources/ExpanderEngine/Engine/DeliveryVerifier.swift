@@ -233,14 +233,9 @@ public final class DeliveryVerifier {
     /// moving, so it must never be handed a threaded element.
     public func verifyFocusedTextDelivery(
         expectedText: String,
-        baseline: FocusedTextObservation?,
-        staleProbe: String? = nil,
-        staleProbeCaseInsensitive: Bool = false
+        baseline: FocusedTextObservation?
     ) -> TextDeliveryVerification {
-        readFocusedTextDelivery(
-            expectedText: expectedText, baseline: baseline,
-            staleProbe: staleProbe, staleProbeCaseInsensitive: staleProbeCaseInsensitive
-        ).verification
+        readFocusedTextDelivery(expectedText: expectedText, baseline: baseline).verification
     }
 
     /// `verifyFocusedTextDelivery` with the reason an answer was unavailable kept.
@@ -255,8 +250,6 @@ public final class DeliveryVerifier {
     public func readFocusedTextDelivery(
         expectedText: String,
         baseline: FocusedTextObservation?,
-        staleProbe: String? = nil,
-        staleProbeCaseInsensitive: Bool = false,
         vouchingReplacement: Bool = false
     ) -> FocusedDeliveryReading {
         func unavailable(_ reason: UnavailableReason) -> FocusedDeliveryReading {
@@ -282,8 +275,7 @@ public final class DeliveryVerifier {
                 selectedRange: observed.selectedRange, target: target
             )
             let verdict = Self.verifyTextDelivery(
-                expectedText: expectedText, baseline: baseline, after: rebound,
-                staleProbe: staleProbe, staleProbeCaseInsensitive: staleProbeCaseInsensitive
+                expectedText: expectedText, baseline: baseline, after: rebound
             )
             return FocusedDeliveryReading(
                 verification: verdict,
@@ -298,8 +290,7 @@ public final class DeliveryVerifier {
         } else {
             verdict = Self.verifyTextDelivery(
                 expectedText: expectedText, baseline: baseline,
-                after: focusedTextObservation(for: target), staleProbe: staleProbe,
-                staleProbeCaseInsensitive: staleProbeCaseInsensitive
+                after: focusedTextObservation(for: target)
             )
         }
         return FocusedDeliveryReading(
@@ -404,9 +395,7 @@ public final class DeliveryVerifier {
     public static func verifyTextDelivery(
         expectedText: String,
         baseline: FocusedTextObservation?,
-        after: FocusedTextObservation?,
-        staleProbe: String? = nil,
-        staleProbeCaseInsensitive: Bool = false
+        after: FocusedTextObservation?
     ) -> TextDeliveryVerification {
         guard !expectedText.isEmpty else { return .delivered }
         guard let baseline, let after,

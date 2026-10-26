@@ -1856,8 +1856,6 @@ public final class TextInjectionPipeline {
                 focus: focus,
                 bundleID: context.frontBundleID,
                 focusedRole: focusedRole,
-                staleProbe: erasePlan.expectedText,
-                staleProbeCaseInsensitive: erasePlan.caseInsensitive,
                 followVouchedReplacement: { self.vouchedPasteTarget(context) },
                 publicationGate: context.request.publicationGate,
                 shouldContinue: canProceedAfterMutation
@@ -2532,8 +2530,6 @@ public final class TextInjectionPipeline {
             let reading = self.verifier.readFocusedTextDelivery(
                 expectedText: expectedText,
                 baseline: baseline,
-                staleProbe: context.erasePlan.expectedText,
-                staleProbeCaseInsensitive: context.erasePlan.caseInsensitive,
                 vouchingReplacement: true
             )
             switch reading.verification {
