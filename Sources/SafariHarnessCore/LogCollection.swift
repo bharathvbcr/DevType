@@ -26,8 +26,9 @@ extension CollectedLogs {
             .filter { $0.text.contains("[Debounce] event timestamp units") }
             .max { $0.timestamp < $1.timestamp }
         let ratio = unitsLine.flatMap { LogParser.timestampUnitsRatio(in: $0.text) }
+        let converted = unitsLine.flatMap { LogParser.timestampUnitsConvertedRatio(in: $0.text) }
         return CollectedLogs(perCase: perCase, unitsLine: unitsLine?.text,
-                             unitsVerdict: TimestampUnitsVerdict.assess(ratio: ratio),
+                             unitsVerdict: TimestampUnitsVerdict.assess(ratio: ratio, converted: converted),
                              outcomes: outcomes, queryNote: queryNote)
     }
 }

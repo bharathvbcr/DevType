@@ -82,10 +82,20 @@ public enum LogParser {
         return nil
     }
 
-    /// The ratio in `[Debounce] event timestamp units ratio=1.0000 (...)`.
+    /// The raw ratio in `[Debounce] event timestamp units ratio=0.0240 unit=machTicks converted=1.0000`.
     public static func timestampUnitsRatio(in text: String) -> Double? {
+        number(after: "ratio=", in: text)
+    }
+
+    /// The converted ratio — the event clock against uptime after DevType's unit conversion. Nil on
+    /// builds that logged only the raw ratio.
+    public static func timestampUnitsConvertedRatio(in text: String) -> Double? {
+        number(after: "converted=", in: text)
+    }
+
+    private static func number(after key: String, in text: String) -> Double? {
         guard text.contains("[Debounce] event timestamp units"),
-              let range = text.range(of: "ratio=") else { return nil }
+              let range = text.range(of: key) else { return nil }
         let digits = text[range.upperBound...].prefix { $0.isNumber || $0 == "." || $0 == "-" }
         return Double(digits)
     }
@@ -98,26 +108,37 @@ public enum LogParser {
     }
 }
 
-/// What the `[Debounce] event timestamp units` line proved about CGEvent timestamps.
+/// What the `[Debounce] event timestamp units` line proved: whether DevType's input marks land on
+/// the same clock as its quiescence arm. Real taps on Apple silicon deliver mach ticks (raw ratio
+/// ≈ 0.024); DevType converts them, so the converted ratio is what has to be ≈ 1.
 public enum TimestampUnitsVerdict: Equatable, Sendable {
-    case nanoseconds(ratio: Double)
-    case other(ratio: Double)
+    case sameClock(raw: Double, converted: Double)
+    case mismatched(raw: Double, converted: Double?)
     /// DevType logs the line once per process launch, at its first key event. Not finding it is not
     /// a pass: the log store may have rotated it away, or DevType saw no key event since launch.
     case notFound(String)
 
-    public static func assess(ratio: Double?) -> TimestampUnitsVerdict {
+    /// `converted` nil is a build that logged only the raw ratio and converted nothing: it passes
+    /// only when the raw ratio is itself ≈ 1.
+    public static func assess(ratio: Double?, converted: Double? = nil) -> TimestampUnitsVerdict {
         guard let ratio else { return .notFound("no [Debounce] event timestamp units line in the queried window") }
-        return (0.9...1.1).contains(ratio) ? .nanoseconds(ratio: ratio) : .other(ratio: ratio)
+        let effective = converted ?? ratio
+        return (0.9...1.1).contains(effective)
+            ? .sameClock(raw: ratio, converted: effective)
+            : .mismatched(raw: ratio, converted: converted)
     }
 
-    public var isPass: Bool { if case .nanoseconds = self { return true } else { return false } }
+    public var isPass: Bool { if case .sameClock = self { return true } else { return false } }
 
     public var summary: String {
         switch self {
-        case .nanoseconds(let r): return "PASS ratio=\(String(format: "%.4f", r)) (about 1: event timestamps are nanoseconds)"
-        case .other(let r): return "FAIL ratio=\(String(format: "%.4f", r)) (not about 1: timestamps are not nanoseconds; 0.024 would be mach ticks)"
-        case .notFound(let why): return "NOT FOUND: \(why)"
+        case .sameClock(let raw, let converted):
+            return "PASS raw=\(String(format: "%.4f", raw)) converted=\(String(format: "%.4f", converted)) (marks and arm share a clock)"
+        case .mismatched(let raw, let converted):
+            let shown = converted.map { String(format: "%.4f", $0) } ?? "not logged"
+            return "FAIL raw=\(String(format: "%.4f", raw)) converted=\(shown) (marks and arm are on different clocks; the quiescence guard cannot fire)"
+        case .notFound(let why):
+            return "NOT FOUND: \(why)"
         }
     }
 }

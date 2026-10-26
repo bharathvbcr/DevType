@@ -424,8 +424,8 @@ final class ReportAndOptionsTests: XCTestCase {
                                   seed: 5, trigger: ";t", pageReadMode: "AX only", libraryOutcome: "unchanged", libraryBackup: "b",
                                   clipboardFinal: "unchanged", abort: nil, notes: ["n"])
         let logs = CollectedLogs(perCase: ["plain-input": (["[SourceFocus] read after 3 ms"], 2)],
-                                 unitsLine: "[Debounce] event timestamp units ratio=1.0000",
-                                 unitsVerdict: .nanoseconds(ratio: 1), outcomes: ["plain-input": [.succeeded]], queryNote: "q")
+                                 unitsLine: "[Debounce] event timestamp units ratio=0.0240 unit=machTicks converted=1.0000",
+                                 unitsVerdict: .sameClock(raw: 0.024, converted: 1), outcomes: ["plain-input": [.succeeded]], queryNote: "q")
         let text = ReportRenderer.render(header: header, results: [r], logs: logs)
         for needle in ["PREFLIGHT", "-> grant Terminal", "plain-input", "PASS", "TIMESTAMP UNITS  PASS", "[SourceFocus]",
                        "2 more dropped by the per-case cap", "inject outcomes in the log: succeeded", "library:", "LOG QUERY"] {

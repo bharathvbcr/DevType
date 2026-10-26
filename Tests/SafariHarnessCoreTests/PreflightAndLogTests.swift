@@ -181,6 +181,21 @@ final class LogParserTests: XCTestCase {
         XCTAssertNil(LogParser.timestampUnitsRatio(in: line("[Debounce] hold armed ratio=1.0")))
     }
 
+    /// A build that converts ticks logs both ratios; the converted one decides. A tick-reporting
+    /// tap with no conversion (build 438's `ratio=0.0240`) is the failure this check exists for.
+    func testTheConvertedRatioDecidesWhenTheBuildConverts() {
+        let text = line("[Debounce] event timestamp units ratio=0.0240 unit=machTicks converted=1.0000")
+        XCTAssertEqual(LogParser.timestampUnitsRatio(in: text) ?? 0, 0.024, accuracy: 1e-9)
+        XCTAssertEqual(LogParser.timestampUnitsConvertedRatio(in: text) ?? 0, 1.0, accuracy: 1e-9)
+        XCTAssertTrue(TimestampUnitsVerdict.assess(ratio: 0.024, converted: 1.0).isPass)
+        XCTAssertFalse(TimestampUnitsVerdict.assess(ratio: 0.024, converted: 0.024).isPass)
+        XCTAssertFalse(TimestampUnitsVerdict.assess(ratio: 1.0, converted: 41.7).isPass,
+                       "nanoseconds converted as ticks would put every key in the future")
+        let unconverted = line("[Debounce] event timestamp units ratio=0.0240 (≈1 nanoseconds; ≈0.024 mach ticks)")
+        XCTAssertNil(LogParser.timestampUnitsConvertedRatio(in: unconverted))
+        XCTAssertFalse(TimestampUnitsVerdict.assess(ratio: 0.024, converted: nil).isPass)
+    }
+
     func testExcerptCapsAndReportsWhatItDropped() {
         let base = LogParser.parse((0..<10).map { _ in line("[Inject] outcome=succeeded") }.joined(separator: "\n"))
         let all = LogParser.excerpt(base, from: .distantPast, to: .distantFuture, cap: 4)
