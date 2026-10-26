@@ -405,6 +405,31 @@ final class InjectionHarness {
         return Run(outcome: outcome, text: page.value(of: field))
     }
 
+    /// A whole replace through `inject`: the selection is confirmed on the live field first (by the
+    /// harness's `selectionConfirmer`), then the result is pasted over it.
+    @discardableResult
+    func injectReplace(
+        in test: XCTestCase, original: String, result: String, timeout: TimeInterval = 10
+    ) -> PermissionCoordinator.InjectOutcome? {
+        var outcome: PermissionCoordinator.InjectOutcome?
+        let done = test.expectation(description: "inject completed")
+        pipeline.inject(
+            snippet: SnippetModel(title: "AI", triggerKeyword: "", replacementText: result),
+            triggerLength: 0,
+            swallowed: .notSwallowed,
+            erasePlan: .empty,
+            preResolvedText: result,
+            secureClipboardPaste: true,
+            targetFocus: .resolved(field),
+            replacingSelection: SelectionReplacement(original: original)
+        ) {
+            outcome = $0
+            done.fulfill()
+        }
+        test.wait(for: [done], timeout: timeout)
+        return outcome
+    }
+
     /// One replace through the secure-paste path: the selection is already confirmed, only the
     /// ⌘V and what is read back remain.
     @discardableResult
