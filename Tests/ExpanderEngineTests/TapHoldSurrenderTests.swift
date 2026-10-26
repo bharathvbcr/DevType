@@ -19,8 +19,12 @@ final class TapHoldSurrenderTests: TapEventTestCase {
     /// still current at the moment it was posted.
     private var posted: [(what: String, injectStillCurrent: Bool)] = []
 
+    /// The hold's clock, stepped by hand: a deadline is passed by advancing it, never by sleeping.
+    private var clock = Date(timeIntervalSinceReferenceDate: 800_000_000)
+
     override func setUp() {
         super.setUp()
+        engine.now = { [unowned self] in clock }
         engine.swallowedKeyPoster = { [unowned self] key in
             posted.append(("terminator:" + key.unicode, stillCurrent))
         }
@@ -43,7 +47,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
         XCTAssertTrue(engine.tryBeginExpansion())
         engine.lock.lock()
         engine._typeAhead = TypeAheadBuffer(capacity: capacity, holdWindow: holdWindow)
-        engine._typeAhead.beginExpansion(focusPID: 735)
+        engine._typeAhead.beginExpansion(focusPID: 735, now: clock)
         engine.lock.unlock()
         pipeline.oweSwallowedKey(terminator)
         claimed = pipeline.claimOperationForTesting()
@@ -59,7 +63,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
     private func surrenderByDeadline(held: String) {
         beginDelivery(holdWindow: 0.04)
         for character in held { XCTAssertNil(key(String(character)), "inside the window the key is held") }
-        Thread.sleep(forTimeInterval: 0.08)
+        clock += 0.08
     }
 
     // Note: `surrenderByDeadline` re-arms the delivery, so a test that needs the first write to
@@ -129,7 +133,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
         beginDelivery(holdWindow: 0.04)
         for character in "ab" { XCTAssertNil(key(String(character))) }
         XCTAssertTrue(pipeline.beginMutationForTesting(claimed.operation, revision: claimed.revision))
-        Thread.sleep(forTimeInterval: 0.08)
+        clock += 0.08
         key("c")
         XCTAssertEqual(order, ["a", "b"], "mid-erase the terminator's place is undefined: only the held keys go back")
         XCTAssertFalse(stillCurrent, "and the keys that reached the field still abort the rest of the erase")
@@ -145,14 +149,39 @@ final class TapHoldSurrenderTests: TapEventTestCase {
                        "already put back ahead of the held keys — posting it again would type it twice")
     }
 
-    func testAFocusChangeDropsTheTerminatorWithTheHeldKeys() {
+    /// Focus left the app the keys were held for: nothing is replayed into the app that took focus,
+    /// and the hold is not surrendered — the inject's own focus gates judge a target that moved,
+    /// and the terminator stays with the refusal that checks the target before replaying it.
+    func testAFocusChangeDropsTheHeldKeysWithoutSurrenderingTheHold() {
         XCTAssertNil(key("x"))
         setFrontmost(pid: 999, bundleID: "com.example.Other")
         key("y")
         XCTAssertEqual(order, [], "replaying either into the app that took focus would leak the user's typing")
-        XCTAssertFalse(stillCurrent)
-        XCTAssertFalse(pipeline.reinjectSwallowedKey(terminator),
-                       "the debt is settled, not left for a refusal to post into the wrong app")
+        XCTAssertFalse(stillCurrent, "the keys that reached another app still move the revision")
+        let next = pipeline.claimOperationForTesting()
+        XCTAssertTrue(pipeline.operationIsCurrentForTesting(next.operation, revision: next.revision),
+                      "no surrender is latched: the next inject is not cancelled at birth")
+    }
+
+    /// The field report this guards: a fill-in snippet opens DevType's own panel while the
+    /// expansion is in flight. The first key or click in the panel (past the deadline, or simply
+    /// in another process) used to surrender the hold; the inject the panel completes was then
+    /// cancelled at birth and its terminator lost — every fill-in snippet refused.
+    func testTypingInDevTypesOwnPanelNeitherSurrendersNorCancelsTheInjectItCompletes() {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        setFrontmost(pid: ownPID, bundleID: "com.devtype.app")
+        clock += 1
+        key("v")
+        key("\r", keyCode: Int64(kVK_Return))
+        click()
+        XCTAssertEqual(order, [], "nothing typed in the panel is posted back into the source app")
+        // The panel completes: focus returns and the pipeline claims the inject that pastes.
+        setFrontmost(pid: 735, bundleID: "com.apple.Safari")
+        let inject = pipeline.claimOperationForTesting()
+        XCTAssertTrue(pipeline.operationIsCurrentForTesting(inject.operation, revision: inject.revision),
+                      "the inject the panel completes must not be cancelled at birth")
+        XCTAssertTrue(pipeline.beginMutationForTesting(inject.operation, revision: inject.revision),
+                      "and it may write")
     }
 
     // MARK: - What does not surrender
@@ -207,7 +236,7 @@ final class TapHoldSurrenderTests: TapEventTestCase {
     /// first replayed character is posted, so the erase's own continue-checks refuse.
     func testNoTextKeyReachesTheFieldBeforeTheInjectIsAbandoned() {
         let causes: [(String, () -> Void)] = [
-            ("deadline", { Thread.sleep(forTimeInterval: 0.08); self.key("y") }),
+            ("deadline", { self.clock += 0.08; self.key("y") }),
             ("return", { self.key("\r", keyCode: Int64(kVK_Return)) }),
             ("backspace", { self.key("\u{7F}", keyCode: Int64(kVK_Delete)) }),
             ("chord", { self.key("k", keyCode: Int64(kVK_ANSI_K), flags: .maskCommand) })

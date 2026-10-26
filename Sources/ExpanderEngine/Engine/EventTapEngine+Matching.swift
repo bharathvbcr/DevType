@@ -210,14 +210,16 @@ extension EventTapEngine {
     /// Must be called on the tap thread, before `replayTypeAhead` posts the released keys and
     /// before the surrendering event is handed back. `reason` is a bounded label for the log.
     func surrenderHoldPuttingTerminatorBack(heldFor sourcePID: pid_t?, reason: String) {
-        guard case .abandoned(let terminator?) = pipeline.surrenderHold() else {
+        // The surrender exists to keep the terminator ahead of the held keys *in the field they
+        // were typed in*. A hold that ends because focus left that app — DevType's own fill-in
+        // panel, which the expansion opened and will paste after, or another app — is not that:
+        // the inject's own focus gates judge it, and its owed terminator stays with the refusal
+        // that checks the target. Surrendering there cancelled every fill-in snippet the moment
+        // its panel took a key.
+        guard TypeAheadBuffer.mayReplay(heldFor: sourcePID, intoFrontmost: frontmostContext.processID) else {
             return
         }
-        // Same rule as every replay: an HID post lands wherever focus is *now*.
-        guard TypeAheadBuffer.mayReplay(heldFor: sourcePID, intoFrontmost: frontmostContext.processID) else {
-            DevTypeLog.inject.error(
-                "[TypeAhead] dropped the swallowed terminator — focus left the app it was typed in"
-            )
+        guard case .abandoned(let terminator?) = pipeline.surrenderHold() else {
             return
         }
         let safeReason = DevTypeLog.boundedPublicIdentifier(reason, label: "replayReason")
