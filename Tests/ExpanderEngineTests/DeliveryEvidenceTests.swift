@@ -569,12 +569,37 @@ final class DeliveryEvidenceTests: XCTestCase {
         XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: app, role: "AXTextArea"))
     }
 
-    func testUnprovenStaleOrUnnamedMirrorsAreNeverTrusted() {
+    func testUnprovenOrUnnamedMirrorsAreNeverTrusted() {
         let store = AXWriteCapabilityStore()
         XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: "org.fresh.NeverSeen", role: "AXTextArea"))
-        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: antigravity, role: "AXTextArea"),
-                       "a mirror that never confirms a paste in-window never earns trust")
         XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: nil, role: nil))
         XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: "", role: "AXTextField"))
+    }
+
+    /// A Chromium/Electron mirror confirms some pastes in-window and lags on others; this user's
+    /// own store holds a confirmed read for the Antigravity incident's app. Proof must not unlock
+    /// a seeded host whose read mirror is not known to be sound.
+    func testProofDoesNotUnlockASeededStaleMirrorClass() {
+        let store = AXWriteCapabilityStore()
+        for bundle in [antigravity, "com.google.Chrome", "com.todesktop.230313mzl4w4u92", "net.whatsapp.WhatsApp"] {
+            store.recordDeliveryConfirmed(bundleID: bundle, role: "AXTextArea")
+            XCTAssertTrue(store.hasProvenDeliveryReads(bundleID: bundle, role: "AXTextArea"))
+            XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: bundle, role: "AXTextArea"), bundle)
+        }
+    }
+
+    func testAnUnstableRoleVetoesEvenAnAllowedHost() {
+        let store = AXWriteCapabilityStore()
+        store.recordDeliveryConfirmed(bundleID: "com.apple.Safari", role: "AXComboBox")
+        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: "com.apple.Safari", role: "AXComboBox"))
+    }
+
+    /// An unseeded native app earns trust from proof alone.
+    func testAnUnseededAppIsTrustedOnProof() {
+        let store = AXWriteCapabilityStore()
+        let app = "org.example.NativeEditor"
+        XCTAssertEqual(AXWriteCapabilityStore.seedVerdict(bundleID: app, role: "AXTextArea"), .unknown)
+        store.recordDeliveryConfirmed(bundleID: app, role: "AXTextArea")
+        XCTAssertTrue(store.mayTrustDeliveryMirror(bundleID: app, role: "AXTextArea"))
     }
 }
