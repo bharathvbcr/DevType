@@ -69,6 +69,17 @@ let package = Package(
             name: "DevTypeApp",
             dependencies: ["DevTypeAppCore"]
         ),
+        // Developer tooling, not shipped: the pure half of the live Safari harness (case table,
+        // preflight, key plans, abort and focus-safety rules, verdicts, report). A library so
+        // `SafariHarnessCoreTests` can import it; the executable below owns every side effect.
+        .target(
+            name: "SafariHarnessCore",
+            dependencies: ["ExpanderEngine"],
+            linkerSettings: [
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("ApplicationServices")
+            ]
+        ),
         // Test support, not product code: the single reader source-contract tests use so a contract
         // covers a whole `Type.swift` + `Type+*.swift` family. Test targets cannot share a file.
         .target(
@@ -93,6 +104,10 @@ let package = Package(
         .testTarget(
             name: "DevTypeAppTests",
             dependencies: ["DevTypeAppCore", "SourceTreeTestSupport"]
+        ),
+        .testTarget(
+            name: "SafariHarnessCoreTests",
+            dependencies: ["SafariHarnessCore", "SourceTreeTestSupport"]
         )
     ]
 )
