@@ -273,6 +273,32 @@ enum EraseContinuation {
         return removed == posted
     }
 
+    /// Whether the live field is `anchor` with fewer than `posted` graphemes of the trigger gone,
+    /// including none: what a mirror still one key behind the backspaces shows, and also what an
+    /// overstated count shows (an authorized pair whose key event never existed). One reading
+    /// cannot tell the two apart, so this only licenses a second reading after the mirror has had
+    /// `AXSettleRetry.settleDelay` — `partialEraseLanded` is what then admits a restore, and it
+    /// admits only a field that has caught up to exactly `posted`.
+    static func partialEraseMayLag(
+        anchor: EraseFieldPicture?,
+        live: EraseFieldPicture?,
+        expectedText: String?,
+        caseInsensitive: Bool,
+        posted: Int
+    ) -> Bool {
+        guard posted > 0,
+              case .progress(let removed)? = deletionMatch(
+                anchor: anchor,
+                live: live,
+                expectedText: expectedText,
+                caseInsensitive: caseInsensitive,
+                maxRemovedGraphemes: posted
+              ) else {
+            return false
+        }
+        return removed < posted
+    }
+
     /// One AX reading of a field, with the text left out of `EraseContinuationFacts`. The
     /// pipeline stores the pre-delete reading and compares a later one; `decide` only sees
     /// whether that comparison succeeded.

@@ -543,6 +543,19 @@ public final class TextInjectionPipeline {
         )
     }
 
+    /// Whether the field shows part, but not yet all, of the deletion `posted` authorizes — see
+    /// `EraseContinuation.partialEraseMayLag`.
+    private func partialEraseMayLag(_ context: InjectContext, posted: Int) -> Bool {
+        guard let element = context.focusedElement else { return false }
+        return EraseContinuation.partialEraseMayLag(
+            anchor: context.adopted.eraseAnchor,
+            live: eraseFieldPicture(element),
+            expectedText: context.erasePlan.expectedText,
+            caseInsensitive: context.erasePlan.caseInsensitive,
+            posted: posted
+        )
+    }
+
     /// `canContinue` failed, or is about to be asked again from a closure that must not refuse
     /// on its own. Returns `.retarget` only after the adopted box names the element this call
     /// just read. `.proceed` means a fresh reading matches again. `.refuse` stashes the label
@@ -1699,6 +1712,7 @@ public final class TextInjectionPipeline {
         // The continuation after the erase is a local function, not the call's trailing closure,
         // so a refusal that a second look may clear can re-enter it after a settle.
         var restoredPartialErase = false
+        var settledPartialErase = false
         func afterErase(_ erased: Bool, settleAttempt: Int) {
             guard erased else {
                 // The burst stopped part-way: the keys already posted removed the end of the
@@ -1709,6 +1723,22 @@ public final class TextInjectionPipeline {
                 // posted when a CGEvent could not be created, so the field must show exactly the
                 // head that count implies; a restore on a wrong count writes text the user never
                 // typed. An unreadable field gets no restore — the refusal is what it got before.
+                //
+                // A mirror one key behind the backspaces reads the same as an overstated count,
+                // and neither is a verdict on one read. A field that verifiably shows *less*
+                // deleted than the count says gets one look after the mirror settles: only a
+                // lagging one has caught up to exactly the count by then, so the checks below run
+                // unchanged on that second reading, and an overstated one is refused as before.
+                // A keystroke in the wait fails `canProceedAfterMutation` on re-entry.
+                if !restoredPartialErase, !settledPartialErase, postedBackspaces > 0,
+                   self.partialEraseMayLag(context, posted: postedBackspaces),
+                   canProceedAfterMutation() {
+                    settledPartialErase = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + AXSettleRetry.settleDelay) {
+                        afterErase(false, settleAttempt: settleAttempt)
+                    }
+                    return
+                }
                 if !restoredPartialErase, postedBackspaces > 0, canProceedAfterMutation(),
                    let tail = erasePlan.erasedTail(graphemes: postedBackspaces),
                    let head = erasePlan.keptHead(graphemes: postedBackspaces),
