@@ -109,6 +109,7 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
         var frames: [String: CGRect] = [:]
         var roles: [String: String] = [:]
         var pids: [String: pid_t] = [:]
+        var attributes: [String: ControlIdentity.Attributes] = [:]
         func key(_ element: AXUIElement) -> String { String(describing: element) }
         func access() -> DeliveryVerifier.TextAccess {
             .init(
@@ -119,7 +120,8 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
                 observation: { .init(value: nil, selectedText: nil, target: $0) },
                 frame: { [unowned self] in self.frames[self.key($0)] },
                 role: { [unowned self] in self.roles[self.key($0)] },
-                pid: { [unowned self] in self.pids[self.key($0)] }
+                pid: { [unowned self] in self.pids[self.key($0)] },
+                attributes: { [unowned self] in self.attributes[self.key($0)] ?? .none }
             )
         }
     }
@@ -133,8 +135,14 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
 
     /// Replace in `field`; the confirm has to wait one settle, and by the time it is done the
     /// host's focus is `liveAfterWait`. `frameOfLive` decides whether that node is the same control.
-    private func replaceThenSwap(to live: AXUIElement, frameOfLive: CGRect) throws -> Outcome {
+    private func replaceThenSwap(
+        to live: AXUIElement, frameOfLive: CGRect,
+        attributesOfField: ControlIdentity.Attributes = .none,
+        attributesOfLive: ControlIdentity.Attributes = .none
+    ) throws -> Outcome {
         let page = Page()
+        page.attributes[page.key(field)] = attributesOfField
+        page.attributes[page.key(live)] = attributesOfLive
         let controlFrame = CGRect(x: 10, y: 20, width: 500, height: 200)
         for element in [field, replacementNode, elsewhere] {
             page.roles[page.key(element)] = "AXTextArea"
@@ -214,6 +222,30 @@ final class ReplaceFocusIntegrityTests: XCTestCase {
             run.confirmedOn.contains(String(describing: replacementNode)),
             "vouching proves the control, not the selection in it: the replace is confirmed on the new node"
         )
+    }
+
+    /// A single-page app re-renders another control at the very same frame while the confirm waits.
+    /// Frame, role and process all agree; the DOM identifier is the only thing that does not.
+    func testAnotherControlAtTheSameFrameIsAMoveAndKeepsTheResult() throws {
+        let run = try replaceThenSwap(
+            to: replacementNode, frameOfLive: CGRect(x: 10, y: 20, width: 500, height: 200),
+            attributesOfField: .init(domIdentifier: "search"),
+            attributesOfLive: .init(domIdentifier: "inline-editor")
+        )
+        XCTAssertEqual(run.outcome, .refused(SelectionReplacementGuard.Refusal.focusMoved.reason))
+        XCTAssertEqual(run.kept, [result], "the generated result is kept for a manual paste")
+        XCTAssertFalse(run.confirmedOn.contains(String(describing: replacementNode)))
+    }
+
+    func testTheSameDOMIdentifierOnTheSwappedNodeIsConfirmedAgainNotRefused() throws {
+        let run = try replaceThenSwap(
+            to: replacementNode, frameOfLive: CGRect(x: 10, y: 20, width: 500, height: 200),
+            attributesOfField: .init(domIdentifier: "search"),
+            attributesOfLive: .init(domIdentifier: "search")
+        )
+        XCTAssertNotEqual(run.outcome, .refused(SelectionReplacementGuard.Refusal.focusMoved.reason))
+        XCTAssertEqual(run.kept, [])
+        XCTAssertTrue(run.confirmedOn.contains(String(describing: replacementNode)))
     }
 
     func testAnotherFieldIsStillAMoveAndKeepsTheResult() throws {

@@ -504,9 +504,9 @@ public final class TextInjectionPipeline {
 
     /// Typed expansion with a vouched caret, and not a selection replace. Undo and voice pass
     /// the other values on purpose and must not follow an element swap.
-    private func allowsEraseRetarget(_ context: InjectContext) -> Bool {
-        guard context.eraseCaretVouched, !context.replacesSelection else { return false }
-        if case .expansion = context.purpose { return true }
+    private func allowsEraseRetarget(_ request: InjectRequest) -> Bool {
+        guard request.eraseCaretVouched, !request.replacesSelection else { return false }
+        if case .expansion = request.purpose { return true }
         return false
     }
 
@@ -565,7 +565,7 @@ public final class TextInjectionPipeline {
         let mismatch = context.target.mismatch(
             observing: element, pid: pid, checkRange: checkRange, checkElement: checkElement
         )
-        let allows = allowsEraseRetarget(context)
+        let allows = allowsEraseRetarget(context.request)
         let operationBlocked = !revisionCurrent || block != nil || secureInputBlocked || axUntrusted
         let elementOrRange = mismatch == .elementChanged || mismatch == .rangeChanged
         var livePrecondition: ErasePreconditionResult?
@@ -573,14 +573,24 @@ public final class TextInjectionPipeline {
         var reading: EraseFieldReading?
         var deletionMatched = false
         var deletionLagging = false
+        var identityContradicted = false
         if !operationBlocked, allows, elementOrRange {
+            // Read once, for every phase: the live control's published identity against the one
+            // this inject started in. A different control at the same place passes the text and
+            // frame evidence below, so this is checked ahead of all of it.
+            var liveAttributes = ControlIdentity.Attributes.none
+            if mismatch == .elementChanged, let element {
+                AXContextChecker.applyMessagingTimeout(to: element)
+                liveAttributes = verifier.controlAttributes(of: element)
+                identityContradicted = ControlIdentity.conflict(context.adopted.baseline, liveAttributes) != nil
+            }
             switch continuation {
             case .beforeErase:
                 if let element {
                     liveRole = AXContextChecker.shared.focusedElementRole(element: element)
                     // A secure field or a non-text role is not read. The voucher would be a
                     // comparison against that control's value, and a match must not retarget there.
-                    if EraseContinuation.roleAllowsInsertionRetarget(liveRole) {
+                    if ControlIdentity.roleAllowsInsertionRetarget(liveRole) {
                         livePrecondition = EraseContinuation.substantivePrecondition(
                             eraser.evaluateErasePrecondition(
                                 plan: context.erasePlan,
@@ -597,9 +607,9 @@ public final class TextInjectionPipeline {
                 }
             case .beforeInsertion, .duringErase:
                 liveRole = element.flatMap { AXContextChecker.shared.focusedElementRole(element: $0) }
-                if mismatch == .elementChanged, EraseContinuation.roleAllowsInsertionRetarget(liveRole),
+                if mismatch == .elementChanged, ControlIdentity.roleAllowsInsertionRetarget(liveRole),
                    let element {
-                    let live = eraseFieldPicture(element)
+                    let live = eraseFieldPicture(element, attributes: liveAttributes)
                     let maxRemoved = continuation == .duringErase
                         ? removedGraphemes
                         : (context.erasePlan.expectedText?.count ?? 0)
@@ -641,7 +651,8 @@ public final class TextInjectionPipeline {
             livePrecondition: livePrecondition,
             liveRole: liveRole,
             fieldReading: reading,
-            deletionLagging: deletionLagging
+            deletionLagging: deletionLagging,
+            identityContradicted: identityContradicted
         )
         let decision = EraseContinuation.decide(facts)
         context.adopted.lastRefusalMayClear = false
@@ -657,7 +668,7 @@ public final class TextInjectionPipeline {
             let role = liveRole ?? AXContextChecker.shared.focusedElementRole(element: element)
             // `decide` already requires this. The second check is the adopt itself: a retarget
             // that arrived without a text-field role does not get written into the box.
-            guard EraseContinuation.roleAllowsInsertionRetarget(role) else {
+            guard ControlIdentity.roleAllowsInsertionRetarget(role) else {
                 let refusal = EraseContinuation.unadoptedRefusal(continuation, mismatch)
                 context.adopted.lastRefusal = refusal
                 return .refuse(refusal)
@@ -678,14 +689,21 @@ public final class TextInjectionPipeline {
     /// the undo read uses: a hung field must not stall the backspace loop for the default AX
     /// timeout. Called on the can-continue path once, to remember the field before any key, and
     /// again only when that continue-check has already failed.
-    private func eraseFieldPicture(_ element: AXUIElement) -> EraseContinuation.EraseFieldPicture {
+    ///
+    /// `attributes` is what the caller already knows the control publishes: the anchor passes the
+    /// baseline read before the first key, a live read passes the attributes it just took. Without
+    /// one, the element is asked.
+    private func eraseFieldPicture(
+        _ element: AXUIElement, attributes: ControlIdentity.Attributes? = nil
+    ) -> EraseContinuation.EraseFieldPicture {
         AXContextChecker.applyMessagingTimeout(to: element)
         let observation = verifier.focusedTextObservation(for: element)
         return EraseContinuation.EraseFieldPicture(
             value: observation.value,
             caretLocation: observation.caretLocation,
             selectionLength: observation.selectedRange?.length,
-            frame: AXContextChecker.elementFrame(element)
+            frame: verifier.controlFrame(of: element),
+            attributes: attributes ?? verifier.controlAttributes(of: element)
         )
     }
 
@@ -876,10 +894,18 @@ public final class TextInjectionPipeline {
         /// this picture; adopting a mid-erase node must not replace it with the field the
         /// deletes have already changed, or a different control would match itself.
         var eraseAnchor: EraseContinuation.EraseFieldPicture?
-        init(target: PasteboardBroker.PasteTarget, element: AXUIElement?, role: String?) {
+        /// What the control this inject started in published about itself, read before anything
+        /// could swap its node. Never replaced by an adopt: the control a swap must be judged
+        /// against is the one the user typed in, not the last replacement.
+        let baseline: ControlIdentity.Attributes
+        init(
+            target: PasteboardBroker.PasteTarget, element: AXUIElement?, role: String?,
+            baseline: ControlIdentity.Attributes = .none
+        ) {
             self.target = target
             self.element = element
             self.role = role
+            self.baseline = baseline
         }
     }
 
@@ -1144,7 +1170,13 @@ public final class TextInjectionPipeline {
             frontBundleID: frontBundleID,
             frontPID: frontApp?.processIdentifier,
             deliveryInputUnits: deliveryInputUnits,
-            adopted: AdoptedInjectTarget(target: request.target, element: element, role: focusedRole),
+            adopted: AdoptedInjectTarget(
+                target: request.target, element: element, role: focusedRole,
+                // Only an inject that may follow a node swap ever compares it, so only that one
+                // pays for the read. It is taken here, ahead of the erase, while the node is alive.
+                baseline: allowsEraseRetarget(request)
+                    ? element.map { verifier.controlAttributes(of: $0) } ?? .none : .none
+            ),
             gateDecision: decision
         )
 
@@ -1326,7 +1358,7 @@ public final class TextInjectionPipeline {
                 // Taken now, while the node the confirm just read is certainly alive: a node swap
                 // during the wait below leaves nothing to measure the replacement against.
                 let confirmedElement = confirmed.target.element
-                let confirmedFrame = confirmedElement.flatMap { self.verifier.controlFrame(of: $0) }
+                let confirmedIdentity = confirmedElement.map { self.verifier.controlIdentity(of: $0) }
                 self.focusQuery { live in
                     // Judged here rather than left to the entry gate, which would drop the
                     // generated payload; a replace that cannot land keeps it on the clipboard.
@@ -1338,15 +1370,14 @@ public final class TextInjectionPipeline {
                     guard moved == nil else {
                         // WebKit swaps the focused text node under a selection change: same
                         // control, new element. That is the one move that is not the user's, and
-                        // it is judged by the verifier's own same-control rule (same process, a
-                        // text-entry role, the same on-screen frame) rather than a second one.
+                        // it is judged by `ControlIdentity`'s one same-control rule (same process,
+                        // a text-entry role, the same on-screen frame, and no published identity
+                        // attribute that disagrees) rather than a second one.
                         // Vouching proves the control, not the selection in it, so the replace is
                         // confirmed again on the new node — once: a second swap refuses.
                         if !vouchedRetarget, moved == .elementChanged,
-                           let confirmedElement, let liveElement = live.element,
-                           self.verifier.vouchesAsSameControl(
-                               baseline: confirmedElement, baselineFrame: confirmedFrame, live: liveElement
-                           ) {
+                           let confirmedIdentity, let liveElement = live.element,
+                           self.verifier.vouchesAsSameControl(baseline: confirmedIdentity, live: liveElement) {
                             DevTypeLog.inject.notice(
                                 "[Inject] replace: the field's node was replaced while the confirm waited — confirming again on the replacement"
                             )
@@ -1416,13 +1447,13 @@ public final class TextInjectionPipeline {
         let postingContinue: () -> Bool = {
             if self.canContinue(context, phase: .afterMutation) {
                 if context.adopted.eraseAnchor == nil, let element = context.focusedElement {
-                    context.adopted.eraseAnchor = self.eraseFieldPicture(element)
+                    context.adopted.eraseAnchor = self.eraseFieldPicture(element, attributes: context.adopted.baseline)
                 }
                 postedBackspaces += 1
                 return true
             }
             if context.adopted.eraseAnchor == nil, let element = context.focusedElement {
-                context.adopted.eraseAnchor = self.eraseFieldPicture(element)
+                context.adopted.eraseAnchor = self.eraseFieldPicture(element, attributes: context.adopted.baseline)
             }
             guard context.adopted.eraseAnchor != nil else { return false }
             switch self.adoptVouchedContinuation(

@@ -22,11 +22,15 @@ public final class DeliveryVerifier {
         /// (see `readFocusedTextDelivery`). Not part of `==`: it identifies the control, it is not
         /// field content.
         public let frame: CGRect?
+        /// What the host published about which control `target` is, read with the baseline for the
+        /// same reason as `frame`: once the node is swapped there is nothing left to read it from.
+        /// Not part of `==`.
+        public let attributes: ControlIdentity.Attributes
 
         public init(
             value: String?, selectedText: String?, caretLocation: Int? = nil,
             selectedRange: NSRange? = nil, target: AXUIElement? = nil, numberOfCharacters: Int? = nil,
-            frame: CGRect? = nil
+            frame: CGRect? = nil, attributes: ControlIdentity.Attributes = .none
         ) {
             self.value = value
             self.selectedText = selectedText
@@ -35,6 +39,7 @@ public final class DeliveryVerifier {
             self.target = target
             self.numberOfCharacters = numberOfCharacters
             self.frame = frame
+            self.attributes = attributes
         }
 
         public static func == (lhs: Self, rhs: Self) -> Bool {
@@ -76,10 +81,12 @@ public final class DeliveryVerifier {
         /// The full read the windowed path falls back to.
         var observation: (AXUIElement) -> FocusedTextObservation
         /// Screen frame, role and owning process of an element — the three facts a replaced node
-        /// must share with the baseline before its text may count as this field's.
+        /// must share with the baseline before its text may count as this field's — and the
+        /// identity attributes the host publishes, which may say it is not (`ControlIdentity`).
         var frame: (AXUIElement) -> CGRect? = { _ in nil }
         var role: (AXUIElement) -> String? = { _ in nil }
         var pid: (AXUIElement) -> pid_t? = { _ in nil }
+        var attributes: (AXUIElement) -> ControlIdentity.Attributes = { _ in .none }
 
         static let live = TextAccess(
             focusedElement: { AXContextChecker.shared.focusedElement() },
@@ -103,6 +110,10 @@ public final class DeliveryVerifier {
                 var pid: pid_t = 0
                 guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
                 return pid
+            },
+            attributes: { element in
+                AXContextChecker.applyMessagingTimeout(to: element)
+                return ControlIdentity.readAttributes(of: element)
             }
         )
     }
@@ -122,7 +133,7 @@ public final class DeliveryVerifier {
             value: observed.value, selectedText: observed.selectedText,
             caretLocation: observed.caretLocation, selectedRange: observed.selectedRange,
             target: observed.target, numberOfCharacters: access.numberOfCharacters(axElement),
-            frame: access.frame(axElement)
+            frame: access.frame(axElement), attributes: access.attributes(axElement)
         )
     }
 
@@ -198,34 +209,27 @@ public final class DeliveryVerifier {
         public let replacementElement: AXUIElement?
     }
 
-    /// Whether `live` may stand in for the baseline field after a node swap. Every condition must
-    /// hold: same owning process, a text-entry role (never a secure field, combo box or web
-    /// area), and the same on-screen control by `EraseContinuation`'s own frame rule. A missing
-    /// answer for any of them fails closed — "could not tell" is not "same field".
-    static func replacementIsSameControl(
-        baselineFrame: CGRect?, liveFrame: CGRect?,
-        baselinePID: pid_t?, livePID: pid_t?, liveRole: String?
-    ) -> Bool {
-        guard let baselinePID, let livePID, baselinePID == livePID else { return false }
-        guard EraseContinuation.roleAllowsInsertionRetarget(liveRole) else { return false }
-        guard let baselineFrame, let liveFrame else { return false }
-        return EraseContinuation.framesIdentifySameControl(baselineFrame, liveFrame)
+    /// The screen frame of a control, read through this verifier's access.
+    func controlFrame(of element: AXUIElement) -> CGRect? { access.frame(element) }
+
+    /// The identity attributes a control publishes, read through this verifier's access.
+    func controlAttributes(of element: AXUIElement) -> ControlIdentity.Attributes { access.attributes(element) }
+
+    /// What `element` is, as `ControlIdentity` compares it. Read *before* the node can be swapped
+    /// by a caller that will need to vouch for its replacement after a wait (see
+    /// `vouchesAsSameControl`).
+    func controlIdentity(of element: AXUIElement) -> ControlIdentity {
+        ControlIdentity(
+            pid: access.pid(element), role: access.role(element),
+            frame: controlFrame(of: element), attributes: controlAttributes(of: element)
+        )
     }
 
-    /// The screen frame of a control, for a caller that will need to vouch for its replacement
-    /// after a wait (see `vouchesAsSameControl`).
-    public func controlFrame(of element: AXUIElement) -> CGRect? { access.frame(element) }
-
-    /// `replacementIsSameControl` over live elements: whether `live` may stand in for `baseline`,
-    /// whose frame `baselineFrame` was read before the node could be swapped. The one owner of
-    /// that rule — callers that need it ask here instead of restating it.
-    public func vouchesAsSameControl(
-        baseline: AXUIElement, baselineFrame: CGRect?, live: AXUIElement
-    ) -> Bool {
-        Self.replacementIsSameControl(
-            baselineFrame: baselineFrame, liveFrame: access.frame(live),
-            baselinePID: access.pid(baseline), livePID: access.pid(live), liveRole: access.role(live)
-        )
+    /// Whether `live` may stand in for the control `baseline` was read from — `ControlIdentity`'s
+    /// rule over a live element, which is the only owner of it. Callers ask here instead of
+    /// restating it.
+    func vouchesAsSameControl(baseline: ControlIdentity, live: AXUIElement) -> Bool {
+        ControlIdentity.compare(baseline: baseline, live: controlIdentity(of: live)).isSameControl
     }
 
     /// §2.2: a documented re-check. The live focus is compared (`CFEqual`) against the baseline's
@@ -265,47 +269,39 @@ public final class DeliveryVerifier {
         guard let baseline, let target = baseline.target else { return unavailable(.noBaselineTarget) }
         guard let current = access.focusedElement() else { return unavailable(.noFocusedElement) }
 
-        guard CFEqual(target, current) else {
+        let isReplacement = !CFEqual(target, current)
+        if isReplacement {
+            let baselineIdentity = ControlIdentity(
+                pid: access.pid(target), frame: baseline.frame, attributes: baseline.attributes
+            )
             guard vouchingReplacement,
-                  Self.replacementIsSameControl(
-                    baselineFrame: baseline.frame, liveFrame: access.frame(current),
-                    baselinePID: access.pid(target), livePID: access.pid(current),
-                    liveRole: access.role(current)
-                  ) else {
+                  vouchesAsSameControl(baseline: baselineIdentity, live: current) else {
                 return unavailable(.focusReplaced)
             }
-            // Re-pin the read to the baseline target: `verifyTextDelivery` demands the same
-            // element, and the vouch above is what licenses reading the replacement as it.
-            let observed = focusedTextObservation(for: current)
-            let rebound = FocusedTextObservation(
-                value: observed.value, selectedText: observed.selectedText,
-                selectedRange: observed.selectedRange, target: target
-            )
-            let verdict = Self.verifyTextDelivery(
-                expectedText: expectedText, baseline: baseline, after: rebound,
-                staleProbe: staleProbe, staleProbeCaseInsensitive: staleProbeCaseInsensitive
-            )
-            return FocusedDeliveryReading(
-                verification: verdict,
-                unavailableReason: verdict == .unavailable ? .fieldUnreadable : nil,
-                replacementElement: verdict == .delivered ? current : nil
-            )
         }
 
+        // One comparison for the baseline's own element and for a vouched replacement of it: the
+        // windowed read first, the whole-field read where that cannot answer. The replacement's
+        // read is re-pinned to the baseline target, because `verifyTextDelivery` demands the same
+        // element and the vouch above is what licenses reading the replacement as it.
         let verdict: TextDeliveryVerification
-        if let windowed = verifyDeliveryByWindow(expectedText: expectedText, baseline: baseline, target: target) {
+        if let windowed = verifyDeliveryByWindow(expectedText: expectedText, baseline: baseline, target: current) {
             verdict = windowed
         } else {
+            let observed = focusedTextObservation(for: current)
             verdict = Self.verifyTextDelivery(
                 expectedText: expectedText, baseline: baseline,
-                after: focusedTextObservation(for: target), staleProbe: staleProbe,
-                staleProbeCaseInsensitive: staleProbeCaseInsensitive
+                after: FocusedTextObservation(
+                    value: observed.value, selectedText: observed.selectedText,
+                    selectedRange: observed.selectedRange, target: target
+                ),
+                staleProbe: staleProbe, staleProbeCaseInsensitive: staleProbeCaseInsensitive
             )
         }
         return FocusedDeliveryReading(
             verification: verdict,
             unavailableReason: verdict == .unavailable ? .fieldUnreadable : nil,
-            replacementElement: nil
+            replacementElement: isReplacement && verdict == .delivered ? current : nil
         )
     }
 
