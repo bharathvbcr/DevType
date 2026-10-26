@@ -768,10 +768,11 @@ public final class PasteboardBroker {
         /// that already resolved its element hand it over instead of paying another query.
         static func capture(
             focus: FocusedElementSource,
-            baseline: DeliveryVerifier.FocusedTextObservation? = nil
+            baseline: DeliveryVerifier.FocusedTextObservation? = nil,
+            frontmostPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier
         ) -> Self {
             let element = baseline?.target ?? focus.element
-            return Self(pid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            return Self(pid: frontmostPID,
                         element: element,
                         range: baseline?.selectedRange ?? element.flatMap { DeliveryVerifier.selectedRange(for: $0) })
         }
