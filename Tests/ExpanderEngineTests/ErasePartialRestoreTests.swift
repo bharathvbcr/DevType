@@ -146,6 +146,56 @@ final class ErasePartialRestoreTests: XCTestCase {
         ))
     }
 
+    // MARK: - A mirror one key behind the backspaces
+
+    /// The exact comparison is stricter than the old suffix check, so a readable host whose value
+    /// lags the keys by one now reads as "not landed" on the first look. That is not a verdict: the
+    /// same field read after the mirror settles is. These pin the pair of readings.
+    func testAFieldOneKeyBehindIsReadAgainAndThenRestored() {
+        let before = picture("xaaa")
+        let lagging = picture("xaa")
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: before, live: lagging, expectedText: "aaa", caseInsensitive: false, posted: 2
+        ), "the first look: two keys posted, the mirror shows one")
+        XCTAssertTrue(EraseContinuation.partialEraseMayLag(
+            anchor: before, live: lagging, expectedText: "aaa", caseInsensitive: false, posted: 2
+        ))
+        XCTAssertTrue(EraseContinuation.partialEraseLanded(
+            anchor: before, live: picture("xa"), expectedText: "aaa", caseInsensitive: false, posted: 2
+        ), "the second look, after the mirror caught up")
+    }
+
+    /// An overstated count (an authorized pair whose key never existed) looks exactly like a lagging
+    /// mirror on the first reading and never changes on the second, so it is never restored.
+    func testAnOverstatedCountStaysRefusedAfterTheSecondLook() {
+        let before = picture("xaaa")
+        let stuck = picture("xaa")
+        XCTAssertTrue(EraseContinuation.partialEraseMayLag(
+            anchor: before, live: stuck, expectedText: "aaa", caseInsensitive: false, posted: 2
+        ))
+        XCTAssertFalse(EraseContinuation.partialEraseLanded(
+            anchor: before, live: stuck, expectedText: "aaa", caseInsensitive: false, posted: 2
+        ))
+    }
+
+    func testOnlyAFieldThatVerifiablyShowsPartOfTheDeletionEarnsTheSecondLook() {
+        let before = picture("xaaa")
+        func mayLag(_ anchor: EraseContinuation.EraseFieldPicture?, _ live: EraseContinuation.EraseFieldPicture?,
+                    posted: Int = 2) -> Bool {
+            EraseContinuation.partialEraseMayLag(
+                anchor: anchor, live: live, expectedText: "aaa", caseInsensitive: false, posted: posted
+            )
+        }
+        XCTAssertTrue(mayLag(before, picture("xaaa")), "no key visible yet is the extreme of a lagging mirror")
+        XCTAssertFalse(mayLag(before, picture("xa")), "already exactly the posted count: nothing to wait for")
+        XCTAssertFalse(mayLag(before, picture("another field")), "not the field the erase started in")
+        XCTAssertFalse(mayLag(before, picture(nil)), "an unreadable field is not evidence of progress")
+        XCTAssertFalse(mayLag(nil, picture("xaa")), "no pre-erase picture to compare against")
+        XCTAssertFalse(mayLag(before, nil))
+        XCTAssertFalse(mayLag(before, picture("xaa"), posted: 0))
+        XCTAssertFalse(mayLag(before, picture("x")), "more gone than was posted is not a lagging mirror")
+    }
+
     // MARK: - Wiring
 
     func testAnIncompleteEraseRestoresTheTailBeforeTheKeyIsReplayed() throws {
@@ -179,5 +229,29 @@ final class ErasePartialRestoreTests: XCTestCase {
         )
         XCTAssertLessThan(headCheck.lowerBound, exact.lowerBound)
         XCTAssertLessThan(exact.lowerBound, refuse.lowerBound)
+    }
+
+    /// The second look is one wait, one `settleDelay`, taken before the restore chain and re-entering
+    /// it — so every check that admits a restore runs again on the new reading — and a keystroke in
+    /// the wait is a hard stop because the chain begins with `canProceedAfterMutation()`.
+    func testTheSecondLookIsOneBoundedSettleBeforeTheRestoreChain() throws {
+        let pipeline = SourceContractTests.strippingComments(
+            try SourceTree.text("Sources/ExpanderEngine/Engine/TextInjectionPipeline.swift")
+        )
+        let afterErase = try SourceTree.functionBody("func afterErase(", in: pipeline)
+        let lag = try XCTUnwrap(afterErase.range(of: "self.partialEraseMayLag(context, posted: postedBackspaces)"))
+        let restore = try XCTUnwrap(afterErase.range(of: "erasePlan.erasedTail(graphemes: postedBackspaces)"))
+        XCTAssertLessThan(lag.lowerBound, restore.lowerBound)
+        let before = String(afterErase[..<restore.lowerBound])
+        XCTAssertTrue(before.contains("!settledPartialErase"), "one second look, never a loop")
+        XCTAssertTrue(before.contains("settledPartialErase = true"))
+        XCTAssertTrue(before.contains("AXSettleRetry.settleDelay"), "the existing settle, not a new constant")
+        XCTAssertTrue(before.contains("afterErase(false, settleAttempt: settleAttempt)"), "re-enters the whole chain")
+        let continueCheck = try XCTUnwrap(before.range(of: "canProceedAfterMutation()"))
+        let lagRead = try XCTUnwrap(before.range(of: "self.partialEraseMayLag("))
+        XCTAssertLessThan(
+            continueCheck.lowerBound, lagRead.lowerBound,
+            "the continue-check adopts a vouched replacement; the lag must be read from the adopted element"
+        )
     }
 }

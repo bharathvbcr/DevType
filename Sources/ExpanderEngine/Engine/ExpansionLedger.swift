@@ -39,6 +39,13 @@ extension TextInjectionPipeline {
         private var deliveryInputUnits = 0
         private var inputRevision: UInt64 = 0
         private var activeOperation: InjectCompletionGuard?
+        /// The chord that accepted a result, noted just before the delivery it starts is claimed;
+        /// the next `claim` takes it if it is still fresh, so a chord that led to no delivery
+        /// cannot attach to an unrelated one.
+        private var pendingAcceptChord: (chord: DeliveryChord, at: Date)?
+        /// The chord that started `activeOperation`, while that operation is in flight.
+        private var deliveryChord: DeliveryChord?
+        static let acceptChordWindow: TimeInterval = 3
 
         init(defaults: UserDefaults) {
             self.defaults = defaults
@@ -70,12 +77,34 @@ extension TextInjectionPipeline {
         /// still match. The previous operation is cancelled in the same critical section, and an
         /// expansion (not an undo) consumes any outstanding record — so no window exists in which
         /// two operations are current, or a stale record survives into the new inject.
-        func claim(_ operation: InjectCompletionGuard, consumingUndo: Bool) -> UInt64 {
+        func claim(_ operation: InjectCompletionGuard, consumingUndo: Bool, now: Date = Date()) -> UInt64 {
             lock.withLock {
                 if consumingUndo { invalidateUndoLocked() }
                 activeOperation?.cancel()
                 activeOperation = operation
+                if let pending = pendingAcceptChord, now.timeIntervalSince(pending.at) <= Self.acceptChordWindow {
+                    deliveryChord = pending.chord
+                } else {
+                    deliveryChord = nil
+                }
+                pendingAcceptChord = nil
                 return inputRevision
+            }
+        }
+
+        /// Records the chord that accepted a result, for the delivery claimed next.
+        func noteAcceptChord(_ chord: DeliveryChord, now: Date = Date()) {
+            lock.withLock { pendingAcceptChord = (chord, now) }
+        }
+
+        /// Whether `chord` is the one that started the operation in flight. False once that
+        /// operation has completed, timed out, or been superseded, so a later press of the same key
+        /// is real input again. Takes only the local state of the operation, never its caller's
+        /// closure — this is asked from the event tap thread.
+        func isDeliveryChord(_ chord: DeliveryChord) -> Bool {
+            lock.withLock {
+                guard let deliveryChord, deliveryChord == chord, let operation = activeOperation else { return false }
+                return operation.terminalOutcome == nil && !operation.didTimeOut
             }
         }
 

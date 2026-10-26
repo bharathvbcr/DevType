@@ -55,6 +55,11 @@ struct EraseContinuationFacts: Equatable {
     /// trigger gone. Every backspace has been posted by then, so this is a mirror still catching
     /// up, not a verdict — `mayClearOnReread` is what turns it into a second look.
     var deletionLagging: Bool = false
+    /// An identity attribute both the control this erase started in and the live one publish
+    /// differs (`ControlIdentity.conflict`). A different control at the same place — a
+    /// single-page app re-rendering another field — passes every text and frame check below, so
+    /// this is the one fact that refuses it, in every phase.
+    var identityContradicted: Bool = false
 }
 
 struct EraseContinuationRefusal: Equatable {
@@ -80,21 +85,6 @@ enum EraseContinuationDecision: Equatable {
 /// pastes into whatever is focused now. This type is the whole policy; the pipeline only supplies
 /// the readings and, on `.retarget`, adopts the element it just read.
 enum EraseContinuation {
-    /// Roles an element swap may land on, before the erase and after it. `AXSecureTextField` is a
-    /// text-entry role and is deliberately absent: a secure field is not a retarget destination.
-    /// Unstable roles (combo box, menu, list) are absent too — they already skip element identity
-    /// after the erase, and a swap onto one is not a text field we may paste into.
-    static let insertionRetargetRoles: Set<String> = [
-        "AXTextField",
-        "AXTextArea",
-        "AXSearchField",
-    ]
-
-    static func roleAllowsInsertionRetarget(_ role: String?) -> Bool {
-        guard let role else { return false }
-        return insertionRetargetRoles.contains(role)
-    }
-
     /// `.ok` is a voucher only when it means "the trigger is at the caret". An empty plan, a
     /// count-only plan, and a whitespace-only plan are also `.ok` — there was nothing to
     /// compare — and that answer must not license following a different element.
@@ -122,7 +112,7 @@ enum EraseContinuation {
         case .elementChanged, .rangeChanged:
             break
         }
-        guard facts.allowsRetarget else {
+        guard facts.allowsRetarget, !facts.identityContradicted else {
             return .refuse(refusal)
         }
         switch facts.phase {
@@ -130,7 +120,7 @@ enum EraseContinuation {
             // The destination is a text field or it is not. A secure field, a combo box, a menu,
             // and a role we could not read are not places an expansion may follow a node swap,
             // even when their caret window happens to equal the trigger.
-            guard roleAllowsInsertionRetarget(facts.liveRole) else {
+            guard ControlIdentity.roleAllowsInsertionRetarget(facts.liveRole) else {
                 return .refuse(refusal)
             }
             // `.mismatch` and `.unavailable` both refuse. Unavailable includes the caret-geometry
@@ -150,7 +140,7 @@ enum EraseContinuation {
             guard mismatch == .elementChanged else {
                 return .refuse(refusal)
             }
-            guard roleAllowsInsertionRetarget(facts.liveRole) else {
+            guard ControlIdentity.roleAllowsInsertionRetarget(facts.liveRole) else {
                 return .refuse(refusal)
             }
             guard facts.deletionMatched else {
@@ -163,7 +153,7 @@ enum EraseContinuation {
             guard mismatch == .elementChanged else {
                 return .refuse(refusal)
             }
-            guard roleAllowsInsertionRetarget(facts.liveRole) else {
+            guard ControlIdentity.roleAllowsInsertionRetarget(facts.liveRole) else {
                 return .refuse(refusal)
             }
             // The trigger being gone, or the value being unreadable, is not a destination.
@@ -210,6 +200,7 @@ enum EraseContinuation {
     static func mayClearOnReread(_ facts: EraseContinuationFacts) -> Bool {
         guard facts.phase == .beforeInsertion,
               facts.allowsRetarget,
+              !facts.identityContradicted,
               operationRefusal(facts) == nil,
               let mismatch = facts.mismatch else {
             return false
@@ -218,7 +209,7 @@ enum EraseContinuation {
         case .focusLost:
             return true
         case .elementChanged:
-            if roleAllowsInsertionRetarget(facts.liveRole) {
+            if ControlIdentity.roleAllowsInsertionRetarget(facts.liveRole) {
                 return !facts.deletionMatched && facts.deletionLagging
             }
             // A secure field is a destination we never follow, however briefly it is focused.
@@ -282,6 +273,32 @@ enum EraseContinuation {
         return removed == posted
     }
 
+    /// Whether the live field is `anchor` with fewer than `posted` graphemes of the trigger gone,
+    /// including none: what a mirror still one key behind the backspaces shows, and also what an
+    /// overstated count shows (an authorized pair whose key event never existed). One reading
+    /// cannot tell the two apart, so this only licenses a second reading after the mirror has had
+    /// `AXSettleRetry.settleDelay` — `partialEraseLanded` is what then admits a restore, and it
+    /// admits only a field that has caught up to exactly `posted`.
+    static func partialEraseMayLag(
+        anchor: EraseFieldPicture?,
+        live: EraseFieldPicture?,
+        expectedText: String?,
+        caseInsensitive: Bool,
+        posted: Int
+    ) -> Bool {
+        guard posted > 0,
+              case .progress(let removed)? = deletionMatch(
+                anchor: anchor,
+                live: live,
+                expectedText: expectedText,
+                caseInsensitive: caseInsensitive,
+                maxRemovedGraphemes: posted
+              ) else {
+            return false
+        }
+        return removed < posted
+    }
+
     /// One AX reading of a field, with the text left out of `EraseContinuationFacts`. The
     /// pipeline stores the pre-delete reading and compares a later one; `decide` only sees
     /// whether that comparison succeeded.
@@ -292,6 +309,9 @@ enum EraseContinuation {
         /// Screen frame (`kAXPosition` + `kAXSize`). Nil when either attribute is missing or
         /// the rect is not a positive finite size — a zero frame is not a control.
         var frame: CGRect?
+        /// What the host publishes about which control this is (DOM id, placeholder, …). Absent
+        /// attributes are nil, and only an attribute both pictures have can contradict.
+        var attributes: ControlIdentity.Attributes = .none
     }
 
     /// How a live field relates to the field the erase started in.
@@ -302,30 +322,6 @@ enum EraseContinuation {
         /// The value could not be read, and both screen frames are the same positive rect.
         /// A readable value that merely disagrees is not this case.
         case sameFrame
-    }
-
-    /// Screen points of slack for "this is the same control". WebKit's replacement node lands
-    /// on the same text field; a different control does not sit one point away.
-    static let frameIdentityTolerance: CGFloat = 1
-
-    /// Nil when `frame` is missing, non-finite, or has no positive area.
-    static func usableFrame(_ frame: CGRect?) -> CGRect? {
-        guard let frame else { return nil }
-        guard frame.origin.x.isFinite, frame.origin.y.isFinite,
-              frame.size.width.isFinite, frame.size.height.isFinite,
-              frame.size.width > 0, frame.size.height > 0 else {
-            return nil
-        }
-        return frame
-    }
-
-    static func framesIdentifySameControl(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
-        guard let left = usableFrame(lhs), let right = usableFrame(rhs) else { return false }
-        let slack = frameIdentityTolerance
-        return abs(left.origin.x - right.origin.x) <= slack
-            && abs(left.origin.y - right.origin.y) <= slack
-            && abs(left.size.width - right.size.width) <= slack
-            && abs(left.size.height - right.size.height) <= slack
     }
 
     /// Whether `live` is `anchor` after removing at most `maxRemovedGraphemes` graphemes of
@@ -351,6 +347,9 @@ enum EraseContinuation {
     ) -> EraseDeletionMatch? {
         guard let anchor, let live, maxRemovedGraphemes >= 0 else { return nil }
         guard let expectedText, expectedText.contains(where: { !$0.isWhitespace }) else { return nil }
+        // Before any text or frame evidence: the text of a different control can match the text
+        // of this one exactly, and a remainder that names the field skips the frame altogether.
+        if ControlIdentity.conflict(anchor.attributes, live.attributes) != nil { return nil }
         if (anchor.selectionLength ?? 0) > 0 || (live.selectionLength ?? 0) > 0 { return nil }
         if let removed = textProgress(
             anchor: anchor,
@@ -366,8 +365,7 @@ enum EraseContinuation {
         // still has to have had the trigger at the caret. A missing anchor value has no
         // window, so the frame is the only evidence this is the field the erase started in.
         guard live.value == nil else { return nil }
-        guard let anchorFrame = anchor.frame, let liveFrame = live.frame,
-              framesIdentifySameControl(anchorFrame, liveFrame) else {
+        guard ControlIdentity.framesMatch(anchor.frame, live.frame) else {
             return nil
         }
         if let anchorValue = anchor.value {
@@ -511,8 +509,7 @@ enum EraseContinuation {
     }
 
     private static func framesAgree(_ anchor: EraseFieldPicture, _ live: EraseFieldPicture) -> Bool {
-        guard let anchorFrame = anchor.frame, let liveFrame = live.frame else { return false }
-        return framesIdentifySameControl(anchorFrame, liveFrame)
+        ControlIdentity.framesMatch(anchor.frame, live.frame)
     }
 
     private static func sameFieldText(_ lhs: String, _ rhs: String, caseInsensitive: Bool) -> Bool {

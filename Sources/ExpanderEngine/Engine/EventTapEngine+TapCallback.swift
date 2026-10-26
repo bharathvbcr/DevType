@@ -176,6 +176,19 @@ extension EventTapEngine {
             return Unmanaged.passUnretained(event)
         }
 
+        // Holding the chord that accepted an AI result repeats it into the app while the result is
+        // being delivered. That is the same press the panel already consumed, so the repeat is
+        // swallowed here — before every bypass branch below would count it as input the delivery
+        // could not account for and abort the replace as `.focusMoved`. Only the chord that began
+        // the delivery in flight, and only its autorepeat: a fresh press, or any other key,
+        // is real input and takes the normal path.
+        if event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
+           TextInjectionPipeline.shared.isRepeatOfDeliveryChord(DeliveryChord(
+               keyCode: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags
+           )) {
+            return nil
+        }
+
         guard enabled && !secureFlag && !suspended else {
             noteBypassedRealKey()
             TextInjectionPipeline.shared.clearLastExpansion()
