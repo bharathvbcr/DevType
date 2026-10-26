@@ -56,12 +56,28 @@ struct AppleSpeechAnalyzerRuntime: Sendable {
     }
 
     let isPlatformSupported: @Sendable () -> Bool
+    /// Claims this app's reservation slot for the locale's installed asset. Never downloads.
+    ///
+    /// `AssetInventory.status(forModules:)` is a per-app reservation fact, not an on-disk one: an
+    /// asset that is already installed reads `.supported` until the app reserves its locale, and
+    /// the system may unsubscribe an app from assets it has not used recently. Callers therefore
+    /// reserve immediately before every `assetState` read, through `currentAssetState`.
+    /// Failure is not reported: a locale that could not be reserved simply reads back as it is.
+    let reserveAssets: @Sendable (Locale) async -> Void
     let assetState: @Sendable (Locale) async -> AssetState
     let transcribe: @Sendable (
         SpeechRequest,
         @escaping @Sendable (Result) -> Void
     ) async throws -> Void
     let installAssets: @Sendable (Locale) async throws -> Void
+
+    /// The one way to read asset readiness: reserve the locale's slot, then read the status. Every
+    /// adapter read goes through here so a lapsed reservation cannot be mistaken for a missing
+    /// download.
+    func currentAssetState(_ locale: Locale) async -> AssetState {
+        await reserveAssets(locale)
+        return await assetState(locale)
+    }
 
     /// Apple documents a maximum of 100 contextual strings for transcription. Keep this pure so
     /// the bound is testable without allocating a system SpeechTranscriber or touching assets.
@@ -79,6 +95,10 @@ struct AppleSpeechAnalyzerRuntime: Sendable {
                 if #available(macOS 26.0, *) { return true }
                 return false
             },
+            reserveAssets: { locale in
+                guard #available(macOS 26.0, *) else { return }
+                await SystemAppleSpeechAnalyzerRuntime.reserveAssets(for: locale)
+            },
             assetState: { locale in
                 guard #available(macOS 26.0, *) else { return .unsupported }
                 return await SystemAppleSpeechAnalyzerRuntime.assetState(for: locale)
@@ -95,6 +115,7 @@ struct AppleSpeechAnalyzerRuntime: Sendable {
         #else
         return AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { false },
+            reserveAssets: { _ in },
             assetState: { _ in .unsupported },
             transcribe: { _, _ in throw RuntimeError.unsupported },
             installAssets: { _ in throw RuntimeError.unsupported }
@@ -103,9 +124,99 @@ struct AppleSpeechAnalyzerRuntime: Sendable {
     }
 }
 
+/// Reservation policy over `AssetInventory`'s per-app locale slots, free of the system types so the
+/// limit handling is testable without a Speech runtime.
+///
+/// Verified on macOS 27 with the `swift` interpreter (see the lane report): at
+/// `maximumReservedLocales` a further `reserve(locale:)` returns `false` rather than throwing, and
+/// re-reserving an already reserved locale also returns `false`. Apple's documentation also says
+/// `reserve` throws when the limit is exceeded. The policy therefore decides "the limit is the
+/// reason" from state (`reservedLocales.count >= maximumReservedLocales`), not from the shape of
+/// the failure, so both a `false` and a throw take the same path.
+enum AppleSpeechAssetReservation {
+    struct Operations: Sendable {
+        let reservedLocales: @Sendable () async -> [Locale]
+        let maximumReservedLocales: @Sendable () -> Int
+        let reserve: @Sendable (Locale) async throws -> Bool
+        let release: @Sendable (Locale) async -> Bool
+    }
+
+    enum Outcome: Sendable, Equatable {
+        case alreadyReserved
+        case reserved
+        /// Reserved after releasing `evicted` to make room.
+        case reservedAfterEviction(evicted: Locale)
+        /// Not reserved. Callers read the asset status as it is; this is never fatal by itself.
+        case notReserved
+    }
+
+    /// Reserves `locale`, evicting at most one other locale and retrying at most once.
+    ///
+    /// Which locale is evicted: the first entry of `reservedLocales` that is not the requested one.
+    /// That list is the only ordering the API offers and it is NOT chronological (verified: after
+    /// reserving de, fr, it, es, ja in that order it read `[it, ja, es, fr, de]`), so "oldest" is
+    /// not knowable. The choice is nevertheless safe: the slots are per app and this app reserves a
+    /// locale only for the recognition it is about to run, so an evicted locale is simply
+    /// re-reserved the next time it is needed.
+    @discardableResult
+    static func reserve(_ locale: Locale, using operations: Operations) async -> Outcome {
+        let reserved = await operations.reservedLocales()
+        // Re-reserving a held locale reports `false`, which would be indistinguishable from a
+        // refusal. Ask first.
+        if reserved.contains(where: { sameLocale($0, locale) }) { return .alreadyReserved }
+        if Task.isCancelled { return .notReserved }
+
+        if (try? await operations.reserve(locale)) == true { return .reserved }
+
+        let current = await operations.reservedLocales()
+        guard current.count >= operations.maximumReservedLocales(),
+              let victim = current.first(where: { !sameLocale($0, locale) }),
+              !Task.isCancelled else {
+            // Not a limit problem (no installed asset, unsupported locale, or any other refusal).
+            return .notReserved
+        }
+        guard await operations.release(victim) else { return .notReserved }
+        if (try? await operations.reserve(locale)) == true {
+            return .reservedAfterEviction(evicted: victim)
+        }
+        return .notReserved
+    }
+
+    private static func sameLocale(_ lhs: Locale, _ rhs: Locale) -> Bool {
+        lhs == rhs || lhs.identifier(.bcp47) == rhs.identifier(.bcp47)
+    }
+}
+
 #if compiler(>=6.0)
 @available(macOS 26.0, *)
 private enum SystemAppleSpeechAnalyzerRuntime {
+    private static let reservationOperations = AppleSpeechAssetReservation.Operations(
+        reservedLocales: { await AssetInventory.reservedLocales },
+        maximumReservedLocales: { AssetInventory.maximumReservedLocales },
+        reserve: { try await AssetInventory.reserve(locale: $0) },
+        release: { await AssetInventory.release(reservedLocale: $0) }
+    )
+
+    /// Reservation is not a download: it claims a slot for an asset that is already on disk and
+    /// never starts an installation. Anything that cannot be reserved is left for the status read.
+    static func reserveAssets(for locale: Locale) async {
+        guard SpeechTranscriber.isAvailable,
+              let supportedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale)
+        else { return }
+        await reserve(supportedLocale)
+    }
+
+    private static func reserve(_ supportedLocale: Locale) async {
+        let outcome = await AppleSpeechAssetReservation.reserve(
+            supportedLocale, using: reservationOperations
+        )
+        if case .reservedAfterEviction(let evicted) = outcome {
+            DevTypeLog.voice.info(
+                "[Voice] SpeechAnalyzer reservation limit reached; released \(evicted.identifier, privacy: .public) to reserve \(supportedLocale.identifier, privacy: .public)"
+            )
+        }
+    }
+
     static func assetState(for locale: Locale) async -> AppleSpeechAnalyzerRuntime.AssetState {
         guard SpeechTranscriber.isAvailable else { return .unavailable }
         guard let supportedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
@@ -135,6 +246,7 @@ private enum SystemAppleSpeechAnalyzerRuntime {
             throw AppleSpeechAnalyzerRuntime.RuntimeError.unsupported
         }
 
+        await reserve(supportedLocale)
         let transcriber = makeTranscriber(locale: supportedLocale)
         guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
             throw AppleSpeechAnalyzerRuntime.RuntimeError.assetsNotInstalled
@@ -192,6 +304,7 @@ private enum SystemAppleSpeechAnalyzerRuntime {
             throw AppleSpeechAnalyzerRuntime.RuntimeError.unsupported
         }
 
+        await reserve(supportedLocale)
         let transcriber = makeTranscriber(locale: supportedLocale)
         let modules: [any SpeechModule] = [transcriber]
         let before = await AssetInventory.status(forModules: modules)
@@ -252,8 +365,13 @@ private enum SystemAppleSpeechAnalyzerRuntime {
 
 /// On-device, locale-aware batch transcription through macOS 26 SpeechAnalyzer.
 ///
-/// Readiness is observational. A `.downloadable` result never starts a download; callers must
-/// explicitly invoke `installAssets(for:deadline:)` from a user-initiated setup action.
+/// Readiness is observational with one bounded side effect. `probe()` (and the readiness reads in
+/// `transcribe` and `installAssets`) may reserve the locale's slot in `AssetInventory`, because
+/// asset status is a per-app reservation fact and an installed asset reads `.supported` until the
+/// app reserves it. A reservation never downloads anything: it may release one other locale this
+/// app had reserved when the system's slot limit is reached, and it never starts an installation.
+/// A `.downloadable` result never starts a download either; callers must explicitly invoke
+/// `installAssets(for:deadline:)` from a user-initiated setup action.
 public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable {
     public let descriptor: SpeechProviderDescriptor
 
@@ -314,7 +432,8 @@ public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Send
         return builtWithSpeechAnalyzer ? .modelNotFound : .buildLacksSpeechAnalyzer
     }
 
-    /// Observes platform, TCC, locale, and asset readiness without prompting or downloading.
+    /// Observes platform, TCC, locale, and asset readiness without prompting or downloading. The
+    /// only side effect is reserving the locale's asset slot (see the type's documentation).
     public func probe() async -> ProviderReadiness {
         guard runtime.isPlatformSupported() else {
             return .unsupported(reason: Self.platformUnsupportedReason(
@@ -325,13 +444,14 @@ public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Send
         guard authorizationStatus() == .authorized else {
             return .requiresPermission(.speechRecognition)
         }
-        return readiness(for: await runtime.assetState(locale))
+        return readiness(for: await runtime.currentAssetState(locale))
     }
 
     /// Explicit, cancellable model installation for a user-initiated setup action.
     ///
-    /// This method is intentionally outside `SpeechRecognizer`: provider resolution remains a
-    /// side-effect-free observation and cannot silently start a model download.
+    /// This method is intentionally outside `SpeechRecognizer`: provider resolution remains an
+    /// observation (its only side effect is reserving the locale's asset slot) and cannot
+    /// silently start a model download.
     @discardableResult
     public func installAssets(
         for locale: Locale = Locale.current,
@@ -351,7 +471,7 @@ public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Send
                 deadline: deadline,
                 timeoutError: timeout
             ) { [runtime] in
-                let before = await runtime.assetState(locale)
+                let before = await runtime.currentAssetState(locale)
                 switch before {
                 case .installed:
                     return before
@@ -362,7 +482,7 @@ public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Send
                 case .downloadable, .downloading:
                     try await runtime.installAssets(locale)
                     try Task.checkCancellation()
-                    return await runtime.assetState(locale)
+                    return await runtime.currentAssetState(locale)
                 }
             }
         } catch is CancellationError {
@@ -376,17 +496,13 @@ public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Send
 
     public func transcribe(_ request: SpeechRequest) -> AsyncThrowingStream<SpeechEvent, Error> {
         AsyncThrowingStream(bufferingPolicy: .bufferingNewest(256)) { continuation in
-            guard request.audio.frameCount > 0,
-                  request.audio.byteCount > 0,
-                  request.audio.durationSeconds.isFinite,
-                  request.audio.durationSeconds > 0 else {
-                continuation.finish(throwing: failure(
-                    code: .speechNoSpeech,
-                    artifactState: .durable
-                ))
-                return
-            }
-
+            // No empty-artifact guard here by design. An empty `AudioArtifact` is a capture-protocol
+            // violation, owned upstream: the capture actor throws before producing one and the
+            // session reducer rejects one before `.transcribeAudio` is issued. This adapter is
+            // reached only through that command (`VoiceSessionCoordinator`, the sole production
+            // caller of `SpeechRecognizer.transcribe`), so a second check here would only be a
+            // divergent copy that reports the wrong code. The Gemini, Whisper and legacy Apple
+            // adapters carry no such guard either.
             let token = UUID()
             let accumulator = AppleSpeechAnalyzerAccumulator(
                 idPrefix: "\(request.sessionID.description)-\(request.generation.rawValue)",
@@ -428,7 +544,7 @@ public final class AppleSpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Send
                         )
                     }
 
-                    let currentAssets = await runtime.assetState(request.locale)
+                    let currentAssets = await runtime.currentAssetState(request.locale)
                     try Task.checkCancellation()
                     guard currentAssets == .installed else {
                         throw self.failure(for: currentAssets)

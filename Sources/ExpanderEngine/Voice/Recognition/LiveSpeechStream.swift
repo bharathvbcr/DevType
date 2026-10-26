@@ -24,8 +24,26 @@ public final class LiveSpeechStream: @unchecked Sendable {
     public static let maxPendingBuffers = 256
     public static let maxConsecutiveEmptyRestarts = 8
 
+    /// A recognition task that ends with no text counts toward `maxConsecutiveEmptyRestarts` only if
+    /// it lived shorter than this. A task that survived this long and then ended empty is a silence
+    /// endpoint (a pause in the dictation), not an immediate-error loop, so it does not count and
+    /// it resets the run. Without the distinction a minute's pause ends several silence-timeout
+    /// tasks in a row and the live preview stays dead for the rest of the session.
+    ///
+    /// UNMEASURED. 2 s is a design choice, not an observation: the trace had no task-end records
+    /// when it was chosen. Every task end now writes `stream.taskEnded` with `lifetimeMs=` and
+    /// `produced=` (see `taskEndedNote`). To measure it, read `~/Library/Application
+    /// Support/DevType/voice-trace.jsonl` (tracing must be on), keep the `stream.taskEnded` rows
+    /// with `produced=false`, and look at the `lifetimeMs` distribution: an immediate-error loop is
+    /// a tight cluster near zero, a silence endpoint clusters at the recognizer's idle timeout.
+    /// The threshold belongs in the gap between the two clusters.
+    static let minimumProductiveTaskLifetimeSeconds: TimeInterval = 2
+
     private let lock = UnfairLock()
     private let runtime: AppleOnDeviceSpeechRuntime?
+    /// Monotonic seconds; injected so lifetimes are testable without sleeping.
+    private let clock: @Sendable () -> TimeInterval
+    private var taskStartedAt: TimeInterval = 0
 
     private let onSegment: @Sendable (SpeechSegment) -> Void
     private let onFailure: @Sendable (VoiceFailure) -> Void
@@ -63,12 +81,14 @@ public final class LiveSpeechStream: @unchecked Sendable {
     init(
         runtime: AppleOnDeviceSpeechRuntime?,
         contextualStrings: [String] = [],
+        clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         onSegment: @escaping @Sendable (SpeechSegment) -> Void,
         onFailure: @escaping @Sendable (VoiceFailure) -> Void = { _ in }
     ) {
         self.onSegment = onSegment
         self.onFailure = onFailure
         self.runtime = runtime
+        self.clock = clock
         self.contextualStrings = contextualStrings
 
         lock.withLock { startTaskLocked() }
@@ -126,6 +146,11 @@ public final class LiveSpeechStream: @unchecked Sendable {
         let request: SFSpeechAudioBufferRecognitionRequest? = lock.withLock {
             guard !isFinished else { return nil }
             isFinished = true
+            // With no request in flight the live preview is already over (it gave up, was
+            // disabled, or never started), so buffered audio has no recipient and is released
+            // rather than held until deinit. This is harmless to the transcript: the preview is
+            // optional and the final batch pass reads the durable recording, never these buffers.
+            if activeRequest == nil { pendingBuffers.removeAll() }
             return activeRequest
         }
         request?.endAudio()
@@ -149,15 +174,17 @@ public final class LiveSpeechStream: @unchecked Sendable {
         guard consecutiveEmptyRestarts < Self.maxConsecutiveEmptyRestarts else {
             // Recognition has stopped for the rest of the session; without this line that
             // is completely silent to the user and to a bug report.
-            DevTypeLog.voice.info("[Voice] live recognition stopped: \(Self.maxConsecutiveEmptyRestarts) empty restarts")
+            DevTypeLog.voice.info("[Voice] live recognition stopped: \(Self.maxConsecutiveEmptyRestarts) immediate empty restarts")
             VoiceDiagnosticsRecorder.shared.record(
                 "stream.gaveUp", note: "emptyRestarts=\(consecutiveEmptyRestarts)"
             )
+            stopRestartingLocked()
             return
         }
         guard segmentIndex < Self.maxSegments else {
             DevTypeLog.voice.info("[Voice] live recognition stopped: segment cap reached")
             VoiceDiagnosticsRecorder.shared.record("stream.gaveUp", note: "segmentCap")
+            stopRestartingLocked()
             return
         }
 
@@ -198,6 +225,7 @@ public final class LiveSpeechStream: @unchecked Sendable {
 
         taskGeneration += 1
         let generation = taskGeneration
+        taskStartedAt = clock()
         VoiceDiagnosticsRecorder.shared.record(
             "stream.taskStarted",
             note: "segment=live-\(segmentIndex) taskGen=\(generation) "
@@ -226,15 +254,49 @@ public final class LiveSpeechStream: @unchecked Sendable {
                 self?.handle(generation: generation, result: result, error: error)
             }
         ) else {
-            isFinished = true
+            // Only reachable if on-device support was withdrawn between the check above and this
+            // call. The preview is over for the session, which is harmless to the transcript: it
+            // is optional, and the final batch pass reads the durable recording.
             activeRequest = nil
-            pendingBuffers.removeAll()
+            stopRestartingLocked()
+            DevTypeLog.voice.error("[Voice] live recognition disabled: on-device policy rejected the start")
             VoiceDiagnosticsRecorder.shared.record(
                 "stream.unavailable", note: "onDevicePolicyRejectedStart"
             )
             return
         }
         activeTask = task
+    }
+
+    /// Ends the live preview for the rest of the session and releases buffered audio. Caller must
+    /// hold the lock. Nothing is reported through `onFailure`: the preview is optional and the final
+    /// batch pass runs from the durable recording whatever happens here.
+    private func stopRestartingLocked() {
+        isFinished = true
+        pendingBuffers.removeAll()
+    }
+
+    /// The `stream.taskEnded` trace note. Pure so the evidence the lifetime threshold depends on
+    /// is testable: lifetime, whether any text was produced, how the task ended, and the error's
+    /// domain and code when it ended with one. Never carries transcript text.
+    static func taskEndedNote(
+        segment: Int,
+        taskGeneration: Int,
+        lifetime: TimeInterval,
+        textLength: Int,
+        endedBy: String,
+        error: Error?,
+        countedAsEmptyRestart: Bool
+    ) -> String {
+        var note = "segment=live-\(segment) taskGen=\(taskGeneration) "
+            + "lifetimeMs=\(Int((max(0, lifetime) * 1_000).rounded())) "
+            + "produced=\(textLength > 0) textLength=\(textLength) endedBy=\(endedBy) "
+            + "countedAsEmptyRestart=\(countedAsEmptyRestart)"
+        if let error {
+            let bridged = error as NSError
+            note += " errorDomain=\(bridged.domain) errorCode=\(bridged.code)"
+        }
+        return note
     }
 
     private func handle(generation: Int, result: SFSpeechRecognitionResult?, error: Error?) {
@@ -290,7 +352,11 @@ public final class LiveSpeechStream: @unchecked Sendable {
                 )
 
                 if isEndpoint {
-                    advanceSegmentLocked(hadSpeech: !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    advanceSegmentLocked(
+                        textLength: text.trimmingCharacters(in: .whitespacesAndNewlines).count,
+                        endedBy: "final",
+                        error: nil
+                    )
                 }
                 return
             }
@@ -306,12 +372,6 @@ public final class LiveSpeechStream: @unchecked Sendable {
                 // wait forever.
                 guard !isFinished else { return }
 
-                VoiceDiagnosticsRecorder.shared.record(
-                    "stream.taskEnded",
-                    note: "segment=live-\(segmentIndex) taskGen=\(taskGeneration) "
-                        + "textLength=\(currentText.count) error=\(error.map { String(describing: type(of: $0)) } ?? "nil")"
-                )
-
                 let settled = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !settled.isEmpty {
                     currentRevision += 1
@@ -322,7 +382,7 @@ public final class LiveSpeechStream: @unchecked Sendable {
                         finality: .final
                     ))
                 }
-                advanceSegmentLocked(hadSpeech: !settled.isEmpty)
+                advanceSegmentLocked(textLength: settled.count, endedBy: "error", error: error)
             }
         }
 
@@ -332,9 +392,27 @@ public final class LiveSpeechStream: @unchecked Sendable {
         }
     }
 
-    /// Seals the current utterance and opens the next one. Caller must hold the lock.
-    private func advanceSegmentLocked(hadSpeech: Bool) {
-        consecutiveEmptyRestarts = hadSpeech ? 0 : consecutiveEmptyRestarts + 1
+    /// Records how the task ended, seals the current utterance and opens the next one. Caller must
+    /// hold the lock.
+    ///
+    /// Only an empty task that lived under `minimumProductiveTaskLifetimeSeconds` counts toward the
+    /// give-up cap; any other ending shows the recognizer is alive and resets the run.
+    private func advanceSegmentLocked(textLength: Int, endedBy: String, error: Error?) {
+        let lifetime = clock() - taskStartedAt
+        let isImmediateEmptyEnding = textLength == 0 && lifetime < Self.minimumProductiveTaskLifetimeSeconds
+        VoiceDiagnosticsRecorder.shared.record(
+            "stream.taskEnded",
+            note: Self.taskEndedNote(
+                segment: segmentIndex,
+                taskGeneration: taskGeneration,
+                lifetime: lifetime,
+                textLength: textLength,
+                endedBy: endedBy,
+                error: error,
+                countedAsEmptyRestart: isImmediateEmptyEnding
+            )
+        )
+        consecutiveEmptyRestarts = isImmediateEmptyEnding ? consecutiveEmptyRestarts + 1 : 0
         segmentIndex += 1
         currentRevision = 0
         currentText = ""

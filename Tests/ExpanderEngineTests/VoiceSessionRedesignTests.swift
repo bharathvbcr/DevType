@@ -39,6 +39,50 @@ final class VoiceSessionRedesignTests: XCTestCase {
 
     // MARK: - Reducer Tests
 
+    /// The reducer is the one owner of "an artifact worth recognizing". An empty or non-finite
+    /// artifact is a capture protocol violation, never a recognition run that ends in "no speech".
+    func testReducerRejectsEmptyArtifactsAsCaptureProtocolViolation() {
+        func finalizing() -> VoiceSessionState {
+            let snapshot = VoiceSessionSnapshot(
+                speechProvider: SpeechProviderDescriptor(id: "test.speech", displayName: "Test", modelVersion: "1.0", privacyRoute: .onDeviceOnly),
+                correctionProvider: CorrectionProviderDescriptor(id: "deterministic.local", displayName: "Deterministic", modelVersion: "1.0", privacyRoute: .onDeviceOnly),
+                privacyRoute: .onDeviceOnly,
+                targetLease: TargetLease(bundleIdentifier: "com.apple.TextEdit", processIdentifier: 1234)
+            )
+            return VoiceSessionState(snapshot: snapshot, phase: .finalizingAudio)
+        }
+        let url = URL(fileURLWithPath: "/tmp/empty.caf")
+        let cases: [(String, AudioArtifact)] = [
+            ("zero frames", AudioArtifact(fileURL: url, frameCount: 0, durationSeconds: 1, byteCount: 4096)),
+            ("zero bytes", AudioArtifact(fileURL: url, frameCount: 16_000, durationSeconds: 1, byteCount: 0)),
+            ("zero duration", AudioArtifact(fileURL: url, frameCount: 16_000, durationSeconds: 0, byteCount: 4096)),
+            ("negative duration", AudioArtifact(fileURL: url, frameCount: 16_000, durationSeconds: -1, byteCount: 4096)),
+            ("NaN duration", AudioArtifact(fileURL: url, frameCount: 16_000, durationSeconds: .nan, byteCount: 4096)),
+            ("infinite duration", AudioArtifact(fileURL: url, frameCount: 16_000, durationSeconds: .infinity, byteCount: 4096)),
+            ("negative frames", AudioArtifact(fileURL: url, frameCount: -1, durationSeconds: 1, byteCount: 4096)),
+            ("negative bytes", AudioArtifact(fileURL: url, frameCount: 16_000, durationSeconds: 1, byteCount: -1)),
+        ]
+        for (label, artifact) in cases {
+            var state = finalizing()
+            let result = VoiceSessionReducer.reduce(
+                state: &state,
+                event: .audioFinalized(artifact),
+                eventGeneration: state.snapshot.generation
+            )
+            guard case .failed(let failure) = state.phase else {
+                XCTFail("\(label): expected .failed, got \(state.phase)")
+                continue
+            }
+            XCTAssertEqual(failure.code, .captureProtocolViolation, label)
+            XCTAssertEqual(failure.stage, .audioFinalization, label)
+            XCTAssertEqual(failure.artifactState, .absent, label)
+            XCTAssertNil(state.audioArtifact, "\(label): a rejected artifact must not be retained")
+            let commands = (try? result.get()) ?? []
+            XCTAssertFalse(commands.contains { if case .persistAudio = $0 { return true } else { return false } }, label)
+            XCTAssertFalse(commands.contains { if case .transcribeAudio = $0 { return true } else { return false } }, label)
+        }
+    }
+
     func testReducerHappyPath() {
         let snapshot = VoiceSessionSnapshot(
             speechProvider: SpeechProviderDescriptor(id: "test.speech", displayName: "Test", modelVersion: "1.0", privacyRoute: .onDeviceOnly),
@@ -61,7 +105,7 @@ final class VoiceSessionRedesignTests: XCTestCase {
         XCTAssertEqual(state.phase, .finalizingAudio)
 
         // 3. Audio Finalized
-        let artifact = AudioArtifact(fileURL: URL(fileURLWithPath: "/tmp/test.caf"), frameCount: 16000, durationSeconds: 1.0)
+        let artifact = AudioArtifact(fileURL: URL(fileURLWithPath: "/tmp/test.caf"), frameCount: 16000, durationSeconds: 1.0, byteCount: 64_000)
         let r3 = VoiceSessionReducer.reduce(state: &state, event: .audioFinalized(artifact), eventGeneration: gen)
         XCTAssertTrue(try! r3.get().contains(.transcribeAudio(audio: artifact)))
         XCTAssertEqual(state.phase, .recognizing)

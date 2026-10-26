@@ -71,9 +71,14 @@ public final class ActivityHistoryStore {
 
     public struct PersistenceHealth: Equatable, Sendable {
         public let lastFailureKind: String?
+        /// Rows skipped on load because this build could not decode them. Not a failure: the
+        /// readable rows are intact, so `isHealthy` is unaffected and the history is not shown as
+        /// unavailable. It exists so the loss is reported instead of silent.
+        public let skippedEvents: Int
 
-        public init(lastFailureKind: String?) {
+        public init(lastFailureKind: String?, skippedEvents: Int = 0) {
             self.lastFailureKind = lastFailureKind
+            self.skippedEvents = max(0, skippedEvents)
         }
 
         public var isHealthy: Bool { lastFailureKind == nil }
@@ -330,6 +335,9 @@ public final class ActivityHistoryStore {
     private let lock = NSLock()
     private var events: [ActivityEvent] = []
     private var lastPersistenceFailureKind: String?
+    /// Rows the last load could not decode. Sticky for the process (a later write drops them from
+    /// the file, which makes the count the only remaining evidence); `clear()` resets it.
+    private var skippedEventCount = 0
     /// Set inside `persistLocked`, which runs while `lock` is held. A test that waits until
     /// `record` returns can read this without a second lock.
     public private(set) var lastPersistWasOnMain = false
@@ -356,6 +364,18 @@ public final class ActivityHistoryStore {
             let loaded = try Self.load(from: self.fileURL)
             let scrubbed = loaded.events.filter { !Self.isLegacyPlaintextRecoveryEvent($0) }
             self.events = scrubbed
+            self.skippedEventCount = loaded.skippedEvents
+            if loaded.events.isEmpty && loaded.skippedEvents > 0 {
+                // Nothing in the file was readable. That is not "no recent activity", so it keeps
+                // the unavailable health an unreadable file has always had; a partially readable
+                // file stays healthy and reports its skips through `skippedEvents` instead.
+                self.lastPersistenceFailureKind = PersistenceFailureKind.invalidContent.rawValue
+            }
+            if loaded.skippedEvents > 0 {
+                DevTypeLog.store.error(
+                    "[Activity] load skipped undecodable rows count=\(loaded.skippedEvents, privacy: .public)"
+                )
+            }
             if loaded.hadDiscardedTail || scrubbed.count != loaded.events.count {
                 try Self.save(scrubbed, to: self.fileURL)
             }
@@ -478,6 +498,7 @@ public final class ActivityHistoryStore {
     public func clear() -> MutationResult {
         lock.lock()
         let result = persistLocked([])
+        if result == .persisted { skippedEventCount = 0 }
         lock.unlock()
         publishMutation(result, operation: .clear)
         return result
@@ -500,7 +521,10 @@ public final class ActivityHistoryStore {
     public var persistenceHealth: PersistenceHealth {
         lock.lock()
         defer { lock.unlock() }
-        return PersistenceHealth(lastFailureKind: lastPersistenceFailureKind)
+        return PersistenceHealth(
+            lastFailureKind: lastPersistenceFailureKind,
+            skippedEvents: skippedEventCount
+        )
     }
 
     // MARK: - Persistence
@@ -541,21 +565,34 @@ public final class ActivityHistoryStore {
     private struct LoadedHistory {
         let events: [ActivityEvent]
         let hadDiscardedTail: Bool
+        /// Rows inside the file that could not be decoded (a newer build's vocabulary, or damage).
+        let skippedEvents: Int
     }
 
+    /// Reads rows one at a time. A row this build cannot decode is skipped and counted; it never
+    /// fails the array, because a failed load leaves `events` empty and the next `record` would
+    /// then persist that emptiness over every row that was perfectly readable. A file that is not
+    /// an array at all still throws.
     private struct BoundedEventArray: Decodable {
         let events: [ActivityEvent]
         let hadDiscardedTail: Bool
+        let skippedEvents: Int
 
         init(from decoder: Decoder) throws {
             var container = try decoder.unkeyedContainer()
             var bounded: [ActivityEvent] = []
+            var skipped = 0
             bounded.reserveCapacity(ActivityHistoryStore.maxEvents)
             while !container.isAtEnd, bounded.count < ActivityHistoryStore.maxEvents {
-                bounded.append(try container.decode(ActivityEvent.self))
+                if let event = try container.decode(LenientlyDecoded<ActivityEvent>.self).value {
+                    bounded.append(event)
+                } else {
+                    skipped += 1
+                }
             }
             events = bounded
             hadDiscardedTail = !container.isAtEnd
+            skippedEvents = skipped
         }
     }
 
@@ -565,7 +602,7 @@ public final class ActivityHistoryStore {
 
     private static func load(from url: URL) throws -> LoadedHistory {
         guard FileManager.default.fileExists(atPath: url.path) else {
-            return LoadedHistory(events: [], hadDiscardedTail: false)
+            return LoadedHistory(events: [], hadDiscardedTail: false, skippedEvents: 0)
         }
         let handle: FileHandle
         do {
@@ -588,7 +625,8 @@ public final class ActivityHistoryStore {
             let decoded = try JSONDecoder().decode(BoundedEventArray.self, from: data)
             return LoadedHistory(
                 events: decoded.events,
-                hadDiscardedTail: decoded.hadDiscardedTail
+                hadDiscardedTail: decoded.hadDiscardedTail,
+                skippedEvents: decoded.skippedEvents
             )
         } catch {
             throw PersistenceError(kind: .invalidContent)

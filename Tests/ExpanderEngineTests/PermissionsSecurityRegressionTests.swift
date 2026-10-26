@@ -9,6 +9,7 @@ final class PermissionsSecurityRegressionTests: XCTestCase {
 
         func setOnPCMBuffer(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {}
         func setOnAudioLevelUpdate(_ handler: (@Sendable (Float) -> Void)?) {}
+        func setOnInterruption(_ handler: (@Sendable (CaptureInterruption) -> Void)?) {}
         func startCapture(sessionDirectory: URL) throws { startCount += 1 }
         func stopCapture() async throws -> AudioArtifact { VoiceFixtures.audioArtifact() }
         func cancelCapture() {}

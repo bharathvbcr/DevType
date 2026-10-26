@@ -18,12 +18,17 @@ public struct VoiceTerminalDiagnostic: Codable, Equatable, Sendable, Identifiabl
         case failure(FailureCode)
         case cancelled
         case superseded
+        /// A code written by a build whose vocabulary this one does not share. It carries no
+        /// payload on purpose: the unknown raw value is dropped, never retained or re-encoded, so
+        /// forward-compatible decoding cannot reopen a free-form string channel.
+        case unrecognized
 
         public var rawValue: String {
             switch self {
             case .failure(let code): return code.rawValue
             case .cancelled: return "cancelled"
             case .superseded: return "sessionSuperseded"
+            case .unrecognized: return "unrecognized"
             }
         }
     }
@@ -292,19 +297,36 @@ extension VoiceTerminalDiagnostic.Code: Codable {
         switch rawValue {
         case "cancelled": self = .cancelled
         case "sessionSuperseded": self = .superseded
+        case "unrecognized": self = .unrecognized
         default:
-            guard let failure = FailureCode(rawValue: rawValue) else {
-                throw DecodingError.dataCorruptedError(
-                    in: container,
-                    debugDescription: "Unknown voice terminal diagnostic code"
-                )
+            // A newer build may persist a `FailureCode` this one lacks. Mirror `Provider.unknown`:
+            // collapse it to a finite value rather than failing the whole manifest / history file.
+            if let failure = FailureCode(rawValue: rawValue) {
+                self = .failure(failure)
+            } else {
+                self = .unrecognized
             }
-            self = .failure(failure)
         }
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
+    }
+}
+
+/// Decodes one array element without letting its failure fail the array.
+///
+/// The initializer never throws, so an unkeyed container always advances past the element, and
+/// `value` is `nil` exactly when that element could not be decoded. Callers must count the `nil`s:
+/// a skipped element is data loss and has to be reported, never silently dropped.
+///
+/// Used at the two seams where a file written by another build is read element by element: the
+/// voice terminal manifest and Recent Activity history.
+struct LenientlyDecoded<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: Decoder) {
+        value = try? Value(from: decoder)
     }
 }

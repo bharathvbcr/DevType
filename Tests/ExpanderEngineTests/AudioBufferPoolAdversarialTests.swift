@@ -649,25 +649,122 @@ final class LiveSpeechStreamAdversarialTests: XCTestCase {
 
 final class DurableVoiceCaptureAdversarialTests: XCTestCase {
     func testTapClosureHasNoTaskAndDrainStartsOnlyAfterEngineStart() throws {
-        let source = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
-        let marker = "installTap(onBus:"
-        let start = try XCTUnwrap(source.range(of: marker))
-        let tail = source[start.lowerBound...]
-        let end = try XCTUnwrap(tail.range(of: "\n        }"))
-        let closure = String(tail[..<end.upperBound])
-        XCTAssertFalse(closure.contains("Task"))
-        XCTAssertFalse(closure.contains("async"))
-        XCTAssertTrue(closure.contains(".enqueue("))
+        // Both tap closures (macOS 27 throwing tap and legacy tap) live in CaptureInput.
+        let inputSource = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/CaptureInput.swift")
+        for marker in ["installAudioTap(onBus:", "installTap(onBus:"] {
+            let start = try XCTUnwrap(inputSource.range(of: marker), marker)
+            let lineStart = inputSource[..<start.lowerBound].lastIndex(of: "\n")
+                .map { inputSource.index(after: $0) } ?? inputSource.startIndex
+            let indent = String(inputSource[lineStart..<start.lowerBound].prefix { $0 == " " })
+            let tail = inputSource[start.lowerBound...]
+            let end = try XCTUnwrap(tail.range(of: "\n\(indent)}"), marker)
+            let closure = String(tail[..<end.upperBound])
+            XCTAssertFalse(closure.contains("Task"), marker)
+            XCTAssertFalse(closure.contains("async"), marker)
+            XCTAssertTrue(closure.contains(".enqueue("), marker)
+        }
 
-        let engineStart = try XCTUnwrap(source.range(of: "try engine.start()"))
-        let drainStart = try XCTUnwrap(source.range(of: "captureDrain.start()"))
-        XCTAssertLessThan(engineStart.lowerBound, drainStart.lowerBound)
-        let between = source[engineStart.upperBound..<drainStart.lowerBound]
-        XCTAssertTrue(between.contains("writer.finalize()"))
-        XCTAssertEqual(between.components(separatedBy: ".finalize()").count - 1, 1)
-        XCTAssertFalse(between.contains("captureDrain.start()"))
+        // A segment starts its drain only after its input (engine) started; a start that throws
+        // leaves no drain running.
+        let source = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
+        let inputStart = try XCTUnwrap(source.range(of: "try input.start(into: pool)"))
+        let drainStart = try XCTUnwrap(source.range(of: "drain.start()", range: inputStart.upperBound..<source.endIndex))
+        XCTAssertLessThan(inputStart.lowerBound, drainStart.lowerBound)
         XCTAssertTrue(source.contains("private static let drainJoinTimeout: TimeInterval = 2"))
         XCTAssertTrue(source.contains("stopAndJoin(timeout: Self.drainJoinTimeout)"))
+    }
+
+    /// A start whose input cannot start finalizes the recording once, keeps no session, and
+    /// leaves the actor free for the next capture.
+    func testAFailedInputStartFinalizesOnceAndLeavesTheActorFree() async throws {
+        let directory = try makeDirectory(named: "failed-input-start")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Every attempt the settle retry makes fails.
+        let failing = try (0...DurableVoiceCapture.inputOpenRetryDelaysNanoseconds.count).map { _ in
+            let input = try FakeCaptureInput()
+            input.failStart = true
+            return input
+        }
+        let working = try FakeCaptureInput()
+        let inputs = InputQueue(failing + [working])
+        let capture = DurableVoiceCapture(makeInput: { try inputs.next() }, hasInputDevice: { true })
+
+        do {
+            try await capture.startCapture(sessionDirectory: directory)
+            XCTFail("an input that cannot start opened a capture")
+        } catch {}
+        XCTAssertTrue(failing.allSatisfy { !$0.wasStarted && $0.stopCount == 1 })
+        let written = try AVAudioFile(forReading: directory.appendingPathComponent("capture.caf"))
+        XCTAssertEqual(written.length, 0, "the start-failure recording must be a finalized, empty file")
+
+        let next = try makeDirectory(named: "after-failed-start")
+        defer { try? FileManager.default.removeItem(at: next) }
+        try await capture.startCapture(sessionDirectory: next)
+        XCTAssertTrue(working.wasStarted)
+        await capture.cancelCapture()
+        XCTAssertEqual(working.stopCount, 1)
+    }
+
+    /// macOS 27.0.1 refuses to start an engine for a moment after the default input changes
+    /// (-10868 "Input HW format is invalid"). One refusal followed by a settled device must
+    /// open the capture, not report a missing microphone.
+    func testAnInputThatRefusesOnceWhileSettlingStillOpens() async throws {
+        let directory = try makeDirectory(named: "settling-input-start")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settling = try FakeCaptureInput()
+        settling.failStart = true
+        let settled = try FakeCaptureInput()
+        let inputs = InputQueue([settling, settled])
+        let capture = DurableVoiceCapture(makeInput: { try inputs.next() }, hasInputDevice: { true })
+
+        try await capture.startCapture(sessionDirectory: directory)
+        XCTAssertEqual(settling.stopCount, 1)
+        XCTAssertTrue(settled.wasStarted)
+        try settled.deliver(chunks: 2)
+        let artifact = try await capture.stopCapture()
+        XCTAssertEqual(artifact.frameCount, 2 * 1600)
+    }
+
+    /// A cancel that lands while the start waits for the device leaves nothing open.
+    func testCancelWhileAStartWaitsForTheDeviceLeavesNothingOpen() async throws {
+        let directory = try makeDirectory(named: "cancel-during-settle")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settling = try FakeCaptureInput()
+        settling.failStart = true
+        let settled = try FakeCaptureInput()
+        let inputs = InputQueue([settling, settled])
+        let capture = DurableVoiceCapture(makeInput: { try inputs.next() }, hasInputDevice: { true })
+
+        let start = Task { try await capture.startCapture(sessionDirectory: directory) }
+        // Inside the first settle wait (150 ms).
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await capture.cancelCapture()
+        do {
+            try await start.value
+            XCTFail("a cancelled start reported success")
+        } catch is CancellationError {
+        }
+        XCTAssertEqual(settled.stopCount, settled.wasStarted ? 1 : 0, "an input opened after the cancel was left running")
+        let next = try makeDirectory(named: "after-cancel-during-settle")
+        defer { try? FileManager.default.removeItem(at: next) }
+        do {
+            try await capture.startCapture(sessionDirectory: next)
+            XCTFail("the queue is exhausted; the start must fail rather than hang")
+        } catch is CancellationError {
+            // The fake queue throws CancellationError when empty: the actor accepted a new start.
+        }
+    }
+
+    private final class InputQueue: @unchecked Sendable {
+        private let lock = NSLock()
+        private var remaining: [FakeCaptureInput]
+        init(_ inputs: [FakeCaptureInput]) { remaining = inputs }
+        func next() throws -> any CaptureInput {
+            try lock.withLock {
+                guard !remaining.isEmpty else { throw CancellationError() }
+                return remaining.removeFirst()
+            }
+        }
     }
 
     func testCancelJoinIsBoundedAndFinalizesTheWriterOnce() throws {

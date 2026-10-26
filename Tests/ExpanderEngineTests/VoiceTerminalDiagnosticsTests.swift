@@ -373,6 +373,159 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
         XCTAssertEqual(reloaded.ioHealth.terminalRead, .failed(.manifestExceedsLimit))
     }
 
+    /// A manifest written by a newer build can carry a failure code this build does not know.
+    /// Decoding must keep every other entry, map the unknown one to the payload-free
+    /// `unrecognized` code, and leave the next record able to persist.
+    func testManifestEntryWithFutureCodeLoadsAsUnrecognizedAndLaterRecordsPersist() throws {
+        let directory = try makeDirectory()
+        let manifestURL = directory.appendingPathComponent("voice-terminal-manifest.json")
+        let seed = VoiceDiagnosticsFixture.makeRecorder(in: directory)
+        let kept = VoiceTerminalDiagnostic(
+            recordedAt: Date(timeIntervalSince1970: 1),
+            outcome: .cancelled,
+            code: .cancelled,
+            stage: .audioCapture,
+            provider: .audioCapture,
+            locality: .onDevice,
+            recoverability: .notApplicable
+        )
+        let future = VoiceTerminalDiagnostic(
+            recordedAt: Date(timeIntervalSince1970: 2),
+            outcome: .failed,
+            code: .failure(.endpointUnreachable),
+            stage: .recognition,
+            provider: .whisperCpp,
+            locality: .localNetwork,
+            recoverability: .retryAfterDelay
+        )
+        XCTAssertEqual(seed.recordTerminal(kept), .persisted)
+        XCTAssertEqual(seed.recordTerminal(future), .persisted)
+
+        let original = try String(contentsOf: manifestURL, encoding: .utf8)
+        let rewritten = original.replacingOccurrences(
+            of: "\"code\":\"endpointUnreachable\"",
+            with: "\"code\":\"someFutureCode\""
+        )
+        XCTAssertNotEqual(original, rewritten, "The fixture must actually carry the unknown code.")
+        try rewritten.write(to: manifestURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifestURL.path)
+
+        let reloaded = VoiceDiagnosticsFixture.makeRecorder(in: directory)
+        let loaded = reloaded.recentTerminalDiagnostics(limit: Int.max)
+
+        XCTAssertEqual(reloaded.ioHealth.terminalRead, .succeeded)
+        XCTAssertEqual(loaded.count, 2)
+        XCTAssertEqual(loaded.first, kept)
+        XCTAssertEqual(loaded.last?.id, future.id)
+        XCTAssertEqual(loaded.last?.code.rawValue, "unrecognized")
+
+        let newest = VoiceTerminalDiagnostic(
+            recordedAt: Date(timeIntervalSince1970: 3),
+            outcome: .superseded,
+            code: .superseded,
+            stage: .recognition,
+            provider: .whisperCpp,
+            locality: .localNetwork,
+            recoverability: .retryImmediately
+        )
+        XCTAssertEqual(
+            reloaded.recordTerminal(newest),
+            .persisted,
+            "A tolerated unknown code must not park the recorder on the load-failure path."
+        )
+        XCTAssertEqual(reloaded.ioHealth.terminalWrite, .succeeded)
+
+        let afterWrite = VoiceDiagnosticsFixture.makeRecorder(in: directory)
+            .recentTerminalDiagnostics(limit: Int.max)
+        XCTAssertEqual(afterWrite.map(\.id), [kept.id, future.id, newest.id])
+        XCTAssertEqual(afterWrite.map(\.code.rawValue), ["cancelled", "unrecognized", "sessionSuperseded"])
+    }
+
+    /// An entry that cannot be decoded at all (not merely an unknown code) is skipped, counted
+    /// and surfaced; it never discards its neighbours.
+    func testManifestEntryThatCannotDecodeIsSkippedCountedAndReported() throws {
+        let directory = try makeDirectory()
+        let manifestURL = directory.appendingPathComponent("voice-terminal-manifest.json")
+        let seed = VoiceDiagnosticsFixture.makeRecorder(in: directory)
+        let kept = VoiceTerminalDiagnostic(
+            recordedAt: Date(timeIntervalSince1970: 1),
+            outcome: .cancelled,
+            code: .cancelled,
+            stage: .audioCapture,
+            provider: .audioCapture,
+            locality: .onDevice,
+            recoverability: .notApplicable
+        )
+        let damaged = VoiceTerminalDiagnostic(
+            recordedAt: Date(timeIntervalSince1970: 2),
+            outcome: .failed,
+            code: .failure(.endpointUnreachable),
+            stage: .recognition,
+            provider: .whisperCpp,
+            locality: .localNetwork,
+            recoverability: .retryAfterDelay
+        )
+        XCTAssertEqual(seed.recordTerminal(kept), .persisted)
+        XCTAssertEqual(seed.recordTerminal(damaged), .persisted)
+        XCTAssertEqual(seed.ioHealth.terminalSkippedEntries, 0)
+
+        let original = try String(contentsOf: manifestURL, encoding: .utf8)
+        let rewritten = original.replacingOccurrences(
+            of: "\"stage\":\"recognition\"",
+            with: "\"stage\":\"someFutureStage\""
+        )
+        XCTAssertNotEqual(original, rewritten)
+        try rewritten.write(to: manifestURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifestURL.path)
+
+        let reloaded = VoiceDiagnosticsFixture.makeRecorder(in: directory)
+
+        XCTAssertEqual(reloaded.recentTerminalDiagnostics(limit: Int.max), [kept])
+        XCTAssertEqual(reloaded.ioHealth.terminalRead, .succeeded)
+        XCTAssertEqual(reloaded.ioHealth.terminalSkippedEntries, 1)
+        XCTAssertTrue(
+            reloaded.terminalReportLines().first?.contains("skipped=1") == true,
+            "A skipped entry must be visible in the report, never silent."
+        )
+    }
+
+    /// The wire value `unrecognized` is itself a valid code, so a manifest this build wrote after
+    /// tolerating an unknown value reads back unchanged.
+    func testUnrecognizedCodeRoundTripsAndStaysPayloadFree() throws {
+        let diagnostic = VoiceTerminalDiagnostic(
+            outcome: .failed,
+            code: .unrecognized,
+            stage: .protocolViolation,
+            provider: .sessionCoordinator,
+            locality: .onDevice,
+            recoverability: .notRecoverable
+        )
+        let data = try JSONEncoder().encode(diagnostic)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("\"code\":\"unrecognized\""))
+        XCTAssertEqual(try JSONDecoder().decode(VoiceTerminalDiagnostic.self, from: data), diagnostic)
+
+        let hostile = String(decoding: data, as: UTF8.self).replacingOccurrences(
+            of: "\"code\":\"unrecognized\"",
+            with: "\"code\":\"/Users/person/secret transcript\""
+        )
+        let decoded = try JSONDecoder().decode(VoiceTerminalDiagnostic.self, from: Data(hostile.utf8))
+        XCTAssertEqual(decoded.code, .unrecognized)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(decoded), as: UTF8.self).contains("secret"))
+    }
+
+    /// `LenientlyDecoded` is only correct if a failed element still advances the unkeyed
+    /// container; otherwise a bad element would be retried forever or abort the array.
+    func testLenientlyDecodedAdvancesTheContainerPastAFailedElement() throws {
+        struct Strict: Decodable, Equatable {
+            let n: Int
+        }
+        let json = Data(#"[{"n":1},{"n":"bad"},{"x":0},{"n":4},7,{"n":5}]"#.utf8)
+        let decoded = try JSONDecoder().decode([LenientlyDecoded<Strict>].self, from: json)
+
+        XCTAssertEqual(decoded.count, 6)
+        XCTAssertEqual(decoded.map(\.value), [Strict(n: 1), nil, nil, Strict(n: 4), nil, Strict(n: 5)])
+    }
+
     func testRawTraceFailureCannotHideOrContaminateTerminalManifest() throws {
         let directory = try makeDirectory()
         let blocker = directory.appendingPathComponent("not-a-directory")
@@ -588,6 +741,37 @@ final class VoiceTerminalDiagnosticsTests: XCTestCase {
         XCTAssertFalse(persisted.contains("private endpoint response body"))
     }
 
+    /// A non-`VoiceFailure` error out of `stopCapture` used to be fabricated into
+    /// `.zeroFramesCaptured`, which the UI renders as "no speech detected".
+    func testUntypedStopFailureIsACaptureProtocolViolationNotNoSpeech() async throws {
+        let directory = try makeDirectory()
+        let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
+        let capture = UntypedStopFailureCapture()
+        let coordinator = VoiceSessionCoordinator(
+            capture: capture,
+            store: VoiceSessionStore(baseDirectory: directory.appendingPathComponent("sessions")),
+            diagnosticsRecorder: recorder
+        )
+        let observed = expectation(description: "terminal observer")
+        observed.assertForOverFulfill = false
+        let observations = ObservedCodes()
+        await coordinator.setOnTerminalDiagnostic { diagnostic in
+            observations.append(diagnostic.code.rawValue)
+            if diagnostic.outcome == .failed { observed.fulfill() }
+        }
+
+        try await coordinator.startSession(snapshot: makeSnapshot(), enableLiveRecognition: false)
+        await capture.waitUntilStarted()
+        await coordinator.stopSession()
+        await fulfillment(of: [observed], timeout: 2)
+
+        let diagnostic = try XCTUnwrap(recorder.recentTerminalDiagnostics().last)
+        XCTAssertEqual(diagnostic.code, .failure(.captureProtocolViolation))
+        XCTAssertEqual(diagnostic.stage, .protocolViolation)
+        XCTAssertNotEqual(diagnostic.code, .failure(.zeroFramesCaptured))
+        XCTAssertEqual(observations.all, ["captureProtocolViolation"])
+    }
+
     func testCancellationAndSupersessionHaveDistinctStableCodes() async throws {
         let directory = try makeDirectory()
         let recorder = VoiceDiagnosticsFixture.makeRecorder(in: directory)
@@ -618,6 +802,7 @@ private actor CaptureStub: VoiceCaptureEngine {
 
     func setOnPCMBuffer(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {}
     func setOnAudioLevelUpdate(_ handler: (@Sendable (Float) -> Void)?) {}
+    func setOnInterruption(_ handler: (@Sendable (CaptureInterruption) -> Void)?) {}
 
     func startCapture(sessionDirectory: URL) throws {
         started = true
@@ -635,9 +820,56 @@ private actor CaptureStub: VoiceCaptureEngine {
         AudioArtifact(
             fileURL: URL(fileURLWithPath: "/dev/null"),
             frameCount: 16_000,
-            durationSeconds: 1
+            durationSeconds: 1,
+            // A real artifact always has bytes; the reducer now rejects one that does not.
+            byteCount: 64_000
         )
     }
+
+    func cancelCapture() {}
+}
+
+private final class ObservedCodes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var codes: [String] = []
+
+    func append(_ code: String) {
+        lock.lock()
+        codes.append(code)
+        lock.unlock()
+    }
+
+    var all: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return codes
+    }
+}
+
+/// A capture engine whose `stopCapture` throws something that is not a `VoiceFailure`, the shape
+/// of a broken capture/coordinator contract rather than a typed device failure.
+private actor UntypedStopFailureCapture: VoiceCaptureEngine {
+    struct ContractBroken: Error {}
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func setOnPCMBuffer(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {}
+    func setOnAudioLevelUpdate(_ handler: (@Sendable (Float) -> Void)?) {}
+    func setOnInterruption(_ handler: (@Sendable (CaptureInterruption) -> Void)?) {}
+
+    func startCapture(sessionDirectory: URL) throws {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func stopCapture() async throws -> AudioArtifact { throw ContractBroken() }
 
     func cancelCapture() {}
 }

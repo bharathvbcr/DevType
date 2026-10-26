@@ -23,9 +23,9 @@ final class VoiceCaptureRaceTests: XCTestCase {
         private(set) var isCapturing = false
 
         /// Runs inside `startCapture`, standing in for the window during which a real session
-        /// can be superseded while the audio engine is spinning up. Synchronous because the
-        /// protocol's `startCapture` is `throws`, not `async` — and retiring a generation is a
-        /// lock-guarded synchronous call anyway, so this is the real shape of the interference.
+        /// can be superseded while the audio engine is spinning up. Synchronous even though the
+        /// protocol's `startCapture` is `async`: retiring a generation is a lock-guarded
+        /// synchronous call, so this is the real shape of the interference.
         var duringStart: (@Sendable () -> Void)?
         /// Thrown from `startCapture` when set.
         var startError: (any Error)?
@@ -35,6 +35,12 @@ final class VoiceCaptureRaceTests: XCTestCase {
         var duringStop: (@Sendable () async -> Void)?
         var duringPCMSetup: (@Sendable () -> Void)?
         private var audioLevelHandler: (@Sendable (Float) -> Void)?
+        private var interruptionHandler: (@Sendable (CaptureInterruption) -> Void)?
+
+        func emitInterruption(_ reason: CaptureInterruption) { interruptionHandler?(reason) }
+        func setOnInterruption(_ handler: (@Sendable (CaptureInterruption) -> Void)?) {
+            interruptionHandler = handler
+        }
 
         func setDuringStart(_ handler: (@Sendable () -> Void)?) { duringStart = handler }
         func setStartError(_ error: (any Error)?) { startError = error }
@@ -63,7 +69,9 @@ final class VoiceCaptureRaceTests: XCTestCase {
             return AudioArtifact(
                 fileURL: URL(fileURLWithPath: "/dev/null"),
                 frameCount: 16_000,
-                durationSeconds: 1
+                durationSeconds: 1,
+                // The reducer rejects an artifact with no bytes before recognition can start.
+                byteCount: 64_000
             )
         }
 
@@ -498,6 +506,71 @@ final class VoiceCaptureRaceTests: XCTestCase {
             1,
             "The finite capture budget must close and finalize the audio artifact."
         )
+        _ = await coordinator.cancelSession()
+    }
+
+    /// A device switch or a dead input stops the session immediately, through the same
+    /// `.stopCapture` path the duration limit uses, instead of waiting for the user to stop
+    /// talking into a recording that is no longer growing.
+    func testCaptureInterruptionFinalizesTheSessionImmediately() async throws {
+        let spy = CaptureSpy()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceCaptureInterruption_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let coordinator = VoiceSessionCoordinator(
+            capture: spy,
+            store: VoiceSessionStore(baseDirectory: directory)
+        )
+
+        try await coordinator.startSession(
+            snapshot: makeSnapshot(),
+            mode: .handsFree,
+            enableLiveRecognition: false
+        )
+        var deadline = Date().addingTimeInterval(2)
+        while await spy.isCapturing == false, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let stopsBefore = await spy.stopCount
+        XCTAssertEqual(stopsBefore, 0)
+
+        await spy.emitInterruption(.deviceChanged)
+
+        deadline = Date().addingTimeInterval(2)
+        while await spy.stopCount == 0, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let stops = await spy.stopCount
+        XCTAssertEqual(stops, 1, "an interrupted input must finalize the capture")
+        _ = await coordinator.cancelSession()
+    }
+
+    func testARetiredGenerationsInterruptionCannotStopTheCurrentSession() async throws {
+        let spy = CaptureSpy()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceCaptureStaleInterruption_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let coordinator = VoiceSessionCoordinator(
+            capture: spy,
+            store: VoiceSessionStore(baseDirectory: directory)
+        )
+
+        try await coordinator.startSession(
+            snapshot: makeSnapshot(generation: SessionGeneration(rawValue: 7)),
+            mode: .handsFree,
+            enableLiveRecognition: false
+        )
+        let deadline = Date().addingTimeInterval(2)
+        while await spy.isCapturing == false, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        await coordinator.stopCaptureOnInterruption(.inputStalled, generation: SessionGeneration(rawValue: 6))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let stops = await spy.stopCount
+        XCTAssertEqual(stops, 0, "a stale generation's interruption must be ignored")
         _ = await coordinator.cancelSession()
     }
 

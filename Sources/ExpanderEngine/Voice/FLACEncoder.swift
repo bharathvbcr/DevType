@@ -60,47 +60,112 @@ public enum FLACEncoder {
         if inputFormat.sampleRate == 16000.0 && inputFormat.channelCount == 1 && inputFormat.commonFormat == .pcmFormatInt16 {
             bufferToWrite = inputBuffer
         } else {
-            guard let converter = AVAudioConverter(from: inputFormat, to: target) else {
-                throw FLACEncoderError.invalidFormat("Cannot convert from \(inputFormat) to 16kHz mono")
-            }
-            
-            let ratio = 16000.0 / inputFormat.sampleRate
-            let targetCapacity = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio) + 64
-            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: targetCapacity) else {
-                throw FLACEncoderError.conversionFailed("Failed to allocate converted buffer")
-            }
-            
-            var error: NSError?
-            var isDone = false
-            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
-                if isDone {
-                    outStatus.pointee = .noDataNow
-                    return nil
-                }
-                isDone = true
-                outStatus.pointee = .haveData
-                return inputBuffer
-            }
-            
-            if let error {
-                throw FLACEncoderError.conversionFailed(error.localizedDescription)
-            }
-            bufferToWrite = convertedBuffer
+            bufferToWrite = try resample(inputBuffer, from: inputFormat, to: target)
         }
-        
+
         return try finishOutputFile(
             outputURL: outputURL,
             inputURL: inputURL,
             startTime: startTime
         ) {
+            try writeFLAC(bufferToWrite, to: outputURL, settings: outputSettings)
+        }
+    }
+
+    /// Converts one whole in-memory buffer to `target`, including the converter's held tail.
+    ///
+    /// A sample-rate converter withholds its filter tail until it is given more input or told the
+    /// input has ended (`AVAudioConverter.h`). Answering the second input request with
+    /// `.noDataNow` leaves that tail inside the converter and silently shortens every resampled
+    /// upload, so the second request reports `.endOfStream`.
+    private static func resample(
+        _ input: AVAudioPCMBuffer,
+        from inputFormat: AVAudioFormat,
+        to target: AVAudioFormat
+    ) throws -> AVAudioPCMBuffer {
+        guard let converter = AVAudioConverter(from: inputFormat, to: target) else {
+            throw FLACEncoderError.invalidFormat("Cannot convert from \(inputFormat) to 16kHz mono")
+        }
+
+        let ratio = target.sampleRate / inputFormat.sampleRate
+        // Round up and leave headroom: the flush emits the converter's priming/filter tail on top
+        // of the proportional output.
+        let capacity = AVAudioFrameCount((Double(input.frameLength) * ratio).rounded(.up)) + 64
+        guard let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else {
+            throw FLACEncoderError.conversionFailed("Failed to allocate converted buffer")
+        }
+
+        var error: NSError?
+        var suppliedInput = false
+        let status = converter.convert(to: converted, error: &error) { _, outStatus in
+            if suppliedInput {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+            suppliedInput = true
+            outStatus.pointee = .haveData
+            return input
+        }
+
+        if let error {
+            throw FLACEncoderError.conversionFailed(error.localizedDescription)
+        }
+        guard status != .error else {
+            throw FLACEncoderError.conversionFailed("AVAudioConverter reported an error without detail")
+        }
+        return converted
+    }
+
+    /// The system FLAC encoder emits nothing for a stream shorter than one block: the file it
+    /// leaves behind is a 42-byte header with no audio (verified on macOS 27: 4,607 frames at
+    /// 16 kHz produce it, 4,608 produce a valid file), yet `AVAudioFile.write` reports success.
+    /// Pad a short buffer with trailing digital silence up to one block, then read the file back so
+    /// an unreadable or short result is an error instead of a "successful" empty upload.
+    private static let minimumFLACFrames: AVAudioFrameCount = 4_608
+
+    private static func writeFLAC(
+        _ buffer: AVAudioPCMBuffer,
+        to outputURL: URL,
+        settings: [String: Any]
+    ) throws {
+        let toWrite = try paddedToMinimumBlock(buffer)
+        let expectedFrames = AVAudioFramePosition(toWrite.frameLength)
+        do {
             let outputFile = try AVAudioFile(
                 forWriting: outputURL,
-                settings: outputSettings,
+                settings: settings,
                 commonFormat: .pcmFormatInt16,
                 interleaved: false
             )
-            try outputFile.write(from: bufferToWrite)
+            try outputFile.write(from: toWrite)
         }
+        // The writer is released at the end of the scope above, which finalizes the stream.
+        let written: AVAudioFramePosition
+        do {
+            written = try AVAudioFile(forReading: outputURL).length
+        } catch {
+            throw FLACEncoderError.fileWriteFailed("FLAC output is unreadable: \(error.localizedDescription)")
+        }
+        guard written >= expectedFrames else {
+            throw FLACEncoderError.fileWriteFailed(
+                "FLAC output holds \(written) of \(expectedFrames) frames"
+            )
+        }
+    }
+
+    private static func paddedToMinimumBlock(_ buffer: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
+        guard buffer.frameLength < minimumFLACFrames else { return buffer }
+        guard let padded = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: minimumFLACFrames),
+              let source = buffer.int16ChannelData,
+              let destination = padded.int16ChannelData else {
+            throw FLACEncoderError.conversionFailed("Failed to allocate padded buffer")
+        }
+        padded.frameLength = minimumFLACFrames
+        for channel in 0..<Int(buffer.format.channelCount) {
+            destination[channel].update(repeating: 0, count: Int(minimumFLACFrames))
+            destination[channel].update(from: source[channel], count: Int(buffer.frameLength))
+        }
+        return padded
     }
     
     /// Encodes raw PCM data to FLAC
@@ -138,13 +203,7 @@ public enum FLACEncoder {
             inputURL: nil,
             startTime: startTime
         ) {
-            let outputFile = try AVAudioFile(
-                forWriting: outputURL,
-                settings: outputSettings,
-                commonFormat: .pcmFormatInt16,
-                interleaved: false
-            )
-            try outputFile.write(from: buffer)
+            try writeFLAC(buffer, to: outputURL, settings: outputSettings)
         }
     }
 

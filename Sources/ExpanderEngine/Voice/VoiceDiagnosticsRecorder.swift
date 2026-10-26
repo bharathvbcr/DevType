@@ -50,6 +50,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
     /// IDs keep this exact when a later write fails after older entries were persisted.
     private var volatileTerminalEntryIDs: Set<UUID> = []
     private var terminalObservedCount: UInt64 = 0
+    private var terminalSkippedEntries = 0
     private var terminalEncodedByteCount = 0
     private var didLoadTerminalManifest = false
 
@@ -144,6 +145,11 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         public let terminalWrite: IOStatus
         public let terminalRead: IOStatus
         public let terminalDelete: IOStatus
+        /// Manifest entries this process could not decode when loading (written by a build with a
+        /// different vocabulary, or damaged). They are skipped, not failed: the rest of the
+        /// manifest loads and `terminalRead` stays `succeeded`, so this is the only place the
+        /// loss is visible. It counts what the last load saw and is not persisted.
+        public let terminalSkippedEntries: Int
         /// Byte coverage from the most recent opt-in trace read. `observed = retained + dropped`;
         /// rollover metadata carries cumulative dropped bytes across process launches. An
         /// oversized current file is refused, so retained is zero and dropped is its observed size.
@@ -189,6 +195,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
                 terminalWrite: terminalWriteStatus,
                 terminalRead: terminalReadStatus,
                 terminalDelete: terminalDeleteStatus,
+                terminalSkippedEntries: terminalSkippedEntries,
                 traceReadCoverage: traceReadCoverage
             )
         }
@@ -200,12 +207,44 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
         case retainedInMemory(IOFailure)
     }
 
+    /// `schemaVersion` is deliberately not bumped for new diagnostic vocabulary: a bump makes an
+    /// older reader refuse the whole file. Entries decode one at a time instead, so a value this
+    /// build cannot read costs that entry (counted in `skippedEntries`), never the manifest.
     private struct TerminalManifest: Codable {
         static let schemaVersion = 1
+
+        private enum CodingKeys: String, CodingKey {
+            case schemaVersion, observedCount, entries
+        }
 
         let schemaVersion: Int
         let observedCount: UInt64
         let entries: [VoiceTerminalDiagnostic]
+        /// Entries present in the decoded file that could not be read. Never encoded.
+        let skippedEntries: Int
+
+        init(schemaVersion: Int, observedCount: UInt64, entries: [VoiceTerminalDiagnostic]) {
+            self.schemaVersion = schemaVersion
+            self.observedCount = observedCount
+            self.entries = entries
+            self.skippedEntries = 0
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+            observedCount = try container.decode(UInt64.self, forKey: .observedCount)
+            let raw = try container.decode([LenientlyDecoded<VoiceTerminalDiagnostic>].self, forKey: .entries)
+            entries = raw.compactMap(\.value)
+            skippedEntries = raw.count - entries.count
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(schemaVersion, forKey: .schemaVersion)
+            try container.encode(observedCount, forKey: .observedCount)
+            try container.encode(entries, forKey: .entries)
+        }
     }
 
     // MARK: - Events
@@ -754,6 +793,12 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
                 novelVolatileObserved
             )
             terminalEncodedByteCount = data.count
+            terminalSkippedEntries = manifest.skippedEntries
+            if manifest.skippedEntries > 0 {
+                DevTypeLog.voice.error(
+                    "[VoiceTerminal] manifest entries skipped count=\(manifest.skippedEntries, privacy: .public)"
+                )
+            }
             terminalReadStatus = .succeeded
             didLoadTerminalManifest = true
             return nil
@@ -785,7 +830,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
                 "(voice terminal retention — observed=\(terminalObservedCount); "
                     + "retained=\(retained)/\(Self.maxTerminalEntries); "
                     + "bytes=\(terminalEncodedByteCount)/\(Self.maxTerminalBytes); "
-                    + "visible=\(visible.count); volatile=\(volatile); "
+                    + "visible=\(visible.count); volatile=\(volatile); skipped=\(terminalSkippedEntries); "
                     + "terminal-write=\(statusLabel(terminalWriteStatus)); "
                     + "terminal-read=\(statusLabel(terminalReadStatus)))"
             ]
@@ -820,6 +865,7 @@ public final class VoiceDiagnosticsRecorder: @unchecked Sendable {
                 terminalEntries.removeAll(keepingCapacity: false)
                 volatileTerminalEntryIDs.removeAll(keepingCapacity: false)
                 terminalObservedCount = 0
+                terminalSkippedEntries = 0
                 terminalEncodedByteCount = 0
                 didLoadTerminalManifest = true
                 guard FileManager.default.fileExists(atPath: terminalManifestURL.path) else {

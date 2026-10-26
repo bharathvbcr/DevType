@@ -907,13 +907,18 @@ public enum DiagnosticReport {
         retainedEventCount: Int
     ) -> String {
         let retained = min(ActivityHistoryStore.maxEvents, max(0, retainedEventCount))
+        // Shown only when non-zero so a clean history keeps its short form; a non-zero count is
+        // the one place a row this build could not read is visible.
+        let skipped = health.skippedEvents > 0 ? " skipped=\(health.skippedEvents)" : ""
         guard let rawFailure = health.lastFailureKind else {
             return "Activity history: healthy retained=\(retained)/\(ActivityHistoryStore.maxEvents)"
+                + skipped
         }
         let failure = ActivityHistoryStore.PersistenceFailureKind(rawValue: rawFailure)?.rawValue
             ?? "unknown"
         return "Activity history: unavailable failure=\(failure) "
             + "retained=\(retained)/\(ActivityHistoryStore.maxEvents)"
+            + skipped
     }
 
     public static func formatToolchain(xcode: String?, sdk: String?) -> String {

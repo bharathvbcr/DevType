@@ -117,6 +117,55 @@ final class ActivitySignalTests: XCTestCase {
         XCTAssertTrue(details.contains("recoverability=userActionRequired"))
     }
 
+    /// A history written by a newer build can hold a terminal code this build lacks. The row must
+    /// survive as `unrecognized` (finite, payload-free) instead of costing the whole file.
+    func testHistoryRowWithFutureVoiceCodeLoadsAsUnrecognizedAndKeepsItsNeighbours() throws {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let url = temp.appendingPathComponent("activity.json")
+        let store = ActivityHistoryStore(fileURL: url)
+        XCTAssertEqual(store.record(.aiFailed, localization: loc), .persisted)
+        XCTAssertEqual(
+            store.record(
+                .voiceTerminal(VoiceTerminalDiagnostic(
+                    outcome: .failed,
+                    code: .failure(.secureInputActive),
+                    stage: .delivery,
+                    provider: .textDelivery,
+                    locality: .onDevice,
+                    recoverability: .userActionRequired
+                )),
+                localization: loc
+            ),
+            .persisted
+        )
+        let original = try String(contentsOf: url, encoding: .utf8)
+        let rewritten = original.replacingOccurrences(
+            of: "\"code\":\"secureInputActive\"",
+            with: "\"code\":\"someFutureCode\""
+        )
+        XCTAssertNotEqual(original, rewritten, "The fixture must actually carry the unknown code.")
+        try rewritten.write(to: url, atomically: true, encoding: .utf8)
+
+        let reloaded = ActivityHistoryStore(fileURL: url)
+
+        XCTAssertEqual(reloaded.recentEvents().count, 2)
+        XCTAssertEqual(reloaded.persistenceHealth.skippedEvents, 0)
+        let voiceEvent = try XCTUnwrap(reloaded.recentEvents().first { $0.category == .voice })
+        guard case .voiceTerminal(let diagnostic) = voiceEvent.typedSignal else {
+            return XCTFail("Expected the voice row to keep its typed payload")
+        }
+        XCTAssertEqual(diagnostic.code, .unrecognized)
+        XCTAssertTrue(voiceEvent.presentation(localization: loc).details.contains("code=unrecognized"))
+        XCTAssertEqual(reloaded.record(.importFailed, localization: loc), .persisted)
+        XCTAssertEqual(ActivityHistoryStore(fileURL: url).recentEvents().count, 3)
+        XCTAssertFalse(
+            String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("someFutureCode"),
+            "Re-persisted history must not carry the unknown raw value forward."
+        )
+    }
+
     func testCancellationAndSupersessionAreNotPresentedAsFailures() {
         let cancelled = ActivitySignal.voiceTerminal(VoiceTerminalDiagnostic(
             outcome: .cancelled,

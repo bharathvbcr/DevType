@@ -252,6 +252,10 @@ public enum FailureCode: String, Codable, Sendable, CaseIterable {
     case manifestWriteFailed
     case staleGeneration
     case buildLacksSpeechAnalyzer
+    /// The input device is present but stopped sending audio (or never started).
+    case microphoneStalled
+    /// The capture path broke its own contract (inactive capture finalized, empty artifact).
+    case captureProtocolViolation
 }
 
 public enum RetryClass: String, Codable, Sendable {
@@ -380,9 +384,11 @@ public struct AudioArtifact: Codable, Sendable, Equatable {
         format: String = "caf",
         sampleRate: Double = 16000,
         channelCount: Int = 1,
-        frameCount: Int64 = 0,
-        durationSeconds: Double = 0,
-        byteCount: Int64 = 0,
+        // No defaults for the three measurements: a defaulted zero silently builds an artifact the
+        // reducer rejects as unrecognizable, so every caller must state what it captured.
+        frameCount: Int64,
+        durationSeconds: Double,
+        byteCount: Int64,
         sha256Hex: String = "",
         gapCount: Int = 0
     ) {

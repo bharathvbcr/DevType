@@ -11,6 +11,9 @@
 "voice.error.accessibilityDenied" = "テキストを挿入するにはアクセシビリティ権限が必要です";
 "voice.error.noSpeech" = "音声を検出できませんでした";
 "voice.error.audioInterrupted" = "音声入力が中断されました";
+"voice.error.microphoneStalled" = "マイクから音声が届かなくなりました — システム設定 → サウンドで入力デバイスを確認してください。";
+"voice.error.noAudioCaptured" = "音声が録音されませんでした";
+"voice.error.sessionInternal" = "音声入力セッションが予期せず終了しました";
 "voice.error.diskFull" = "録音に必要なディスク空き容量がありません";
 "voice.error.audioEncoding" = "録音をエンコードできませんでした";
 "voice.error.invalidAPIKey" = "APIキーが無効です。環境設定 → 音声を確認してください。";

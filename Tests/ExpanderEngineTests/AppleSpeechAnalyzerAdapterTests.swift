@@ -11,6 +11,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         let installations = LockedCounter()
         let runtime = AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { true },
+            reserveAssets: { _ in },
             assetState: { _ in
                 probes.increment()
                 return assets.value
@@ -57,6 +58,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         let probes = LockedCounter()
         let runtime = AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { false },
+            reserveAssets: { _ in },
             assetState: { _ in probes.increment(); return .installed },
             transcribe: { _, _ in },
             installAssets: { _ in }
@@ -115,6 +117,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         let installations = LockedCounter()
         let runtime = AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { true },
+            reserveAssets: { _ in },
             assetState: { _ in assets.value },
             transcribe: { _, _ in },
             installAssets: { _ in
@@ -144,6 +147,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         let cancellations = LockedCounter()
         let runtime = AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { true },
+            reserveAssets: { _ in },
             assetState: { _ in .downloadable },
             transcribe: { _, _ in },
             installAssets: { _ in
@@ -180,6 +184,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         let cancellations = LockedCounter()
         let runtime = AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { true },
+            reserveAssets: { _ in },
             assetState: { _ in .downloadable },
             transcribe: { _, _ in },
             installAssets: { _ in
@@ -219,6 +224,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         let postInspectionCancellations = LockedCounter()
         let runtime = AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { true },
+            reserveAssets: { _ in },
             assetState: { _ in
                 inspections.increment()
                 guard inspections.value > 1 else { return .downloadable }
@@ -501,19 +507,92 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         XCTAssertEqual(completion?.finalSegmentCount, 1)
     }
 
-    func testEmptyArtifactFailsBeforeRuntimeAndNoResultsFailsAsNoSpeech() async {
+    // MARK: Reservation (status is per-app: an installed asset reads `.supported` until reserved)
+
+    /// Runtime double that behaves like the system: the asset is on disk, but status is
+    /// `.downloadable` until the app reserves the locale.
+    private func unreservedRuntime(
+        reservations: LockedCounter,
+        installations: LockedCounter,
+        transcriptions: LockedCounter
+    ) -> AppleSpeechAnalyzerRuntime {
+        let reserved = LockedValue(false)
+        return AppleSpeechAnalyzerRuntime(
+            isPlatformSupported: { true },
+            reserveAssets: { _ in reservations.increment(); reserved.value = true },
+            assetState: { _ in reserved.value ? .installed : .downloadable },
+            transcribe: { _, emit in
+                transcriptions.increment()
+                emit(.init(startSeconds: 0, durationSeconds: 1, text: "hello", isFinal: true))
+            },
+            installAssets: { _ in installations.increment() }
+        )
+    }
+
+    func testProbeReservesTheLocaleSoInstalledAssetsAreNotReportedDownloadable() async {
+        let reservations = LockedCounter()
+        let installations = LockedCounter()
+        let adapter = readyAdapter(runtime: unreservedRuntime(
+            reservations: reservations, installations: installations, transcriptions: LockedCounter()
+        ))
+
+        guard case .ready = await adapter.probe() else {
+            return XCTFail("An asset that is on disk must not be reported as needing a download")
+        }
+        XCTAssertEqual(reservations.value, 1)
+        XCTAssertEqual(installations.value, 0, "Reservation is not a download: probe never installs")
+    }
+
+    func testTranscribeReservesBeforeItsAssetGate() async throws {
+        let transcriptions = LockedCounter()
+        let installations = LockedCounter()
+        let adapter = readyAdapter(runtime: unreservedRuntime(
+            reservations: LockedCounter(), installations: installations, transcriptions: transcriptions
+        ))
+
+        let completion = try await completion(from: adapter.transcribe(makeRequest()))
+
+        XCTAssertEqual(completion?.rawTranscript.text, "hello")
+        XCTAssertEqual(transcriptions.value, 1)
+        XCTAssertEqual(installations.value, 0)
+    }
+
+    func testInstallAssetsOnReservableAssetsReportsReadyWithoutDownloading() async throws {
+        let installations = LockedCounter()
+        let adapter = readyAdapter(runtime: unreservedRuntime(
+            reservations: LockedCounter(), installations: installations, transcriptions: LockedCounter()
+        ))
+
+        let readiness = try await adapter.installAssets(
+            for: Locale(identifier: "en-US"),
+            deadline: Date().addingTimeInterval(5)
+        )
+
+        guard case .ready = readiness else { return XCTFail("expected ready, got \(readiness)") }
+        XCTAssertEqual(installations.value, 0, "an installed asset must not trigger a download")
+    }
+
+    func testNoResultsFailsAsNoSpeech() async {
         let starts = LockedCounter()
         let runtime = installedRuntime { _, _ in starts.increment() }
         let adapter = readyAdapter(runtime: runtime)
 
-        let empty = makeRequest(frameCount: 0, duration: 0, byteCount: 0)
-        let emptyFailure = await failure(from: adapter.transcribe(empty))
-        XCTAssertEqual(emptyFailure?.code, .speechNoSpeech)
-        XCTAssertEqual(starts.value, 0)
-
         let noResultFailure = await failure(from: adapter.transcribe(makeRequest()))
         XCTAssertEqual(noResultFailure?.code, .speechNoSpeech)
         XCTAssertEqual(starts.value, 1)
+    }
+
+    /// An empty artifact is a capture-protocol violation owned by the capture actor and the
+    /// session reducer; this adapter no longer second-guesses it with a differently-coded
+    /// `.speechNoSpeech`. It is the runtime's to reject, so the request reaches it.
+    func testAdapterNoLongerOwnsTheEmptyArtifactCheck() async {
+        let starts = LockedCounter()
+        let runtime = installedRuntime { _, _ in starts.increment() }
+        let adapter = readyAdapter(runtime: runtime)
+
+        _ = await failure(from: adapter.transcribe(makeRequest(frameCount: 0, duration: 0, byteCount: 0)))
+
+        XCTAssertEqual(starts.value, 1, "the empty-artifact decision belongs upstream, not to this adapter")
     }
 
     func testAudioReadFailureIsRedactedAndTyped() async {
@@ -537,6 +616,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         let starts = LockedCounter()
         let runtime = AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { true },
+            reserveAssets: { _ in },
             assetState: { _ in
                 inspectionStarted.increment()
                 await inspectionLatch.wait()
@@ -564,6 +644,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
         let freshInspectionLatch = AsyncLatch(released: true)
         let assetsRuntime = AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { true },
+            reserveAssets: { _ in },
             assetState: { _ in await freshInspectionLatch.wait(); return assets.value },
             transcribe: { _, _ in starts.increment() },
             installAssets: { _ in }
@@ -851,6 +932,7 @@ final class AppleSpeechAnalyzerAdapterTests: XCTestCase {
     ) -> AppleSpeechAnalyzerRuntime {
         AppleSpeechAnalyzerRuntime(
             isPlatformSupported: { true },
+            reserveAssets: { _ in },
             assetState: { _ in .installed },
             transcribe: transcribe,
             installAssets: { _ in }
