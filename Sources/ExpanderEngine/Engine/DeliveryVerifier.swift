@@ -335,7 +335,7 @@ public final class DeliveryVerifier {
     ///
     /// Fails closed to `.unverified` where an unchanged field would prove nothing:
     /// - `mirrorTrusted` is false (a host whose AX value lags its own edits reads unchanged for a
-    ///   paste that landed — `AXWriteCapabilityStore.canConfirmDelivery`);
+    ///   paste that landed — `AXWriteCapabilityStore.mayTrustDeliveryMirror`);
     /// - the baseline never read the field's value or selection;
     /// - the result reads the same as the text it replaces, so a paste that landed leaves the
     ///   field as it was;

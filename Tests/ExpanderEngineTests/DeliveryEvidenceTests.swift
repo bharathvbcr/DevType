@@ -532,4 +532,49 @@ final class DeliveryEvidenceTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Mirror trust for a correction that adds nothing (the AI replace witness)
+
+    /// Safari is seeded `.falseSuccess` for AX *writes*. That seed made the replace witness's trust
+    /// (`canConfirmDelivery`) false for every Safari field, so a proofread whose ⌘V landed nowhere
+    /// in Safari — the field report's app — could never be called a miss, and the result was lost.
+    /// Proven in-window reads are direct evidence about the mirror and outrank a write prior.
+    func testASeededWriteVerdictDoesNotVetoAProvenReadMirror() {
+        let store = AXWriteCapabilityStore()
+        let safari = "com.apple.Safari"
+        XCTAssertEqual(store.verdict(for: safari, role: "AXTextField"), .falseSuccess, "precondition: seeded")
+        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: safari, role: "AXTextField"), "no proof yet")
+
+        store.recordDeliveryConfirmed(bundleID: safari, role: "AXTextField")
+        XCTAssertTrue(store.mayTrustDeliveryMirror(bundleID: safari, role: "AXTextField"))
+        XCTAssertFalse(
+            store.mayActOnDeliveryFailure(bundleID: safari, role: "AXTextField"),
+            "re-pastes and trigger restores add text: they keep the seed's veto"
+        )
+        XCTAssertFalse(
+            store.mayTrustDeliveryMirror(bundleID: safari, role: "AXTextArea"),
+            "proof is per role: a text field's mirror says nothing about a text area's"
+        )
+    }
+
+    func testAnObservedCondemnationRevokesMirrorTrust() {
+        let store = AXWriteCapabilityStore()
+        let app = "org.example.Editor"
+        store.recordDeliveryConfirmed(bundleID: app, role: "AXTextArea")
+        XCTAssertTrue(store.mayTrustDeliveryMirror(bundleID: app, role: "AXTextArea"))
+        store.recordFalseSuccess(bundleID: app, role: "AXTextArea")
+        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: app, role: "AXTextArea"))
+        // Proof kept under the bundle key does not outlive a role-scoped condemnation.
+        store.recordDeliveryConfirmed(bundleID: app, role: nil)
+        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: app, role: "AXTextArea"))
+    }
+
+    func testUnprovenStaleOrUnnamedMirrorsAreNeverTrusted() {
+        let store = AXWriteCapabilityStore()
+        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: "org.fresh.NeverSeen", role: "AXTextArea"))
+        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: antigravity, role: "AXTextArea"),
+                       "a mirror that never confirms a paste in-window never earns trust")
+        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: nil, role: nil))
+        XCTAssertFalse(store.mayTrustDeliveryMirror(bundleID: "", role: "AXTextField"))
+    }
 }

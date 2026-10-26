@@ -76,8 +76,9 @@ public final class TextInjectionPipeline {
     private let ax: AXTextWriter
     private let verifier: DeliveryVerifier
     private let clipboard: PasteboardBroker
-    /// Whether this app's AX mirror may be believed about a paste (`canConfirmDelivery`). A seam
-    /// so a test's verdict is its own, not whatever this Mac learned about the test host's bundle.
+    /// Whether this app's AX mirror may be believed when it says a replace did not land
+    /// (`AXWriteCapabilityStore.mayTrustDeliveryMirror`). A seam so a test's verdict is its own,
+    /// not whatever this Mac learned about the test host's bundle.
     private let deliveryTrust: (_ bundleID: String?, _ role: String?) -> Bool
     private let eraser: EraseExecutor
     private let timing: InjectTimingStore
@@ -153,7 +154,7 @@ public final class TextInjectionPipeline {
         clipboard: PasteboardBroker = .shared,
         verifier: DeliveryVerifier = .shared,
         deliveryTrust: @escaping (_ bundleID: String?, _ role: String?) -> Bool = {
-            AXWriteCapabilityStore.shared.canConfirmDelivery(bundleID: $0, role: $1)
+            AXWriteCapabilityStore.shared.mayTrustDeliveryMirror(bundleID: $0, role: $1)
         }
     ) {
         self.focusQuery = focusQuery

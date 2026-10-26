@@ -524,6 +524,24 @@ public final class AXWriteCapabilityStore {
         return hasProvenDeliveryReads(bundleID: bundleID, role: role)
     }
 
+    /// May this app's AX mirror be believed when it says a paste did *not* land, for a correction
+    /// that adds nothing to the field — keeping an AI result on the clipboard and saying so?
+    ///
+    /// Only observation counts: a paste here was AX-confirmed inside the hold window
+    /// (`hasProvenDeliveryReads`), and no condemnation has been *observed* since (one revokes the
+    /// proof; the explicit check covers a condemnation recorded under another key shape). Unlike
+    /// `mayActOnDeliveryFailure`, a **seeded** verdict does not veto it. Seeds are priors about AX
+    /// *writes* — Safari is seeded because `kAXSelectedText` writes report success without
+    /// mutating — not observations of the read mirror, and the proof is exactly such an
+    /// observation. A host whose mirror really is stale (the Antigravity seed's incident) never
+    /// confirms a paste in-window, so it never earns this. `mayActOnDeliveryFailure` stays the
+    /// gate for re-pastes and trigger restores, which add text and keep the seed's veto.
+    public func mayTrustDeliveryMirror(bundleID: String?, role: String?) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else { return false }
+        if observedVerdict(bundleID: bundleID, role: role) == .falseSuccess { return false }
+        return hasProvenDeliveryReads(bundleID: bundleID, role: role)
+    }
+
     // MARK: - Learning
 
     /// Record that AX claimed success but the field did not change. Sticky across launches.
