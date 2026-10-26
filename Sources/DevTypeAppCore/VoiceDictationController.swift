@@ -1109,7 +1109,8 @@ public final class VoiceDictationController: @unchecked Sendable {
         .modelNotFound,
         .modelLoadFailed,
         .cloudAudioConsentRequired,
-        .buildLacksSpeechAnalyzer
+        .buildLacksSpeechAnalyzer,
+        .microphoneStalled
     ]
 
     /// Maps a structured failure to something the user can act on. The failure already
@@ -1133,7 +1134,10 @@ public final class VoiceDictationController: @unchecked Sendable {
         case .noMicrophone: return localization.s("voice.error.noMicrophone")
         case .microphonePermissionDenied: return localization.s("voice.error.microphoneDenied")
         case .accessibilityPermissionDenied: return localization.s("voice.error.accessibilityDenied")
-        case .zeroFramesCaptured, .speechNoSpeech: return localization.s("voice.error.noSpeech")
+        case .speechNoSpeech: return localization.s("voice.error.noSpeech")
+        case .zeroFramesCaptured: return localization.s("voice.error.noAudioCaptured")
+        case .microphoneStalled: return localization.s("voice.error.microphoneStalled")
+        case .captureProtocolViolation: return localization.s("voice.error.sessionInternal")
         case .captureBackpressure, .deviceChangeInterrupted:
             return localization.s("voice.error.audioInterrupted")
         case .diskFull: return localization.s("voice.error.diskFull")

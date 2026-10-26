@@ -577,6 +577,22 @@ public actor VoiceSessionCoordinator {
         _ = processEvent(.stopCapture, generation: generation)
     }
 
+    /// The input went quiet under the user — a switched device, a tap that never called back, or
+    /// buffers the capture cannot copy. Stop now, exactly as the duration limit does, instead of
+    /// letting them keep speaking into a recording that is no longer growing. `stopCapture`
+    /// decides whether what was heard is delivered or the session fails.
+    func stopCaptureOnInterruption(_ reason: CaptureInterruption, generation: SessionGeneration) {
+        guard taskBag?.isCurrentGeneration(generation) == true,
+              let state = activeState,
+              state.snapshot.generation == generation,
+              case .capturing = state.phase else {
+            return
+        }
+        diagnosticsRecorder.record("capture.interrupted", note: "reason=\(reason.rawValue)")
+        DevTypeLog.voice.error("[Voice] capture interrupted; stopping session reason=\(reason.rawValue, privacy: .public)")
+        _ = processEvent(.stopCapture, generation: generation)
+    }
+
     private func failOnTimeout(generation: SessionGeneration, after seconds: Double) {
         guard taskBag?.isCurrentGeneration(generation) == true,
               let state = activeState,
@@ -776,6 +792,13 @@ public actor VoiceSessionCoordinator {
             )
             try Task.checkCancellation()
             guard taskBag?.isCurrentGeneration(generation) == true else { return }
+            // Installed before the engine starts: an input that dies during start-up must still
+            // stop this generation, and a stale generation's handler is refused by its guards.
+            await capture.setOnInterruption { [weak self] reason in
+                Task { await self?.stopCaptureOnInterruption(reason, generation: generation) }
+            }
+            try Task.checkCancellation()
+            guard taskBag?.isCurrentGeneration(generation) == true else { return }
             try await capture.startCapture(sessionDirectory: sessionDir)
             // Setup finished, but this task may have lost the race while it ran.
             guard taskBag?.isCurrentGeneration(generation) == true else {
@@ -814,9 +837,15 @@ public actor VoiceSessionCoordinator {
             // banner for a session the user had already moved on from.
             cancelCurrentSessionIfNeeded(generation: generation)
         } catch {
+            // Any error that is not a typed capture failure means the capture/coordinator contract
+            // broke (for example stop on an engine that was not capturing). That is a protocol
+            // violation, never evidence the user said nothing, so it must not render as "no speech".
+            // Any error that is not a typed capture failure means the capture/coordinator contract
+            // broke (for example stop on an engine that was not capturing). That is a protocol
+            // violation, never evidence the user said nothing, so it must not render as "no speech".
             let fail = (error as? VoiceFailure) ?? VoiceFailure(
-                stage: .audioFinalization,
-                code: .zeroFramesCaptured
+                stage: .protocolViolation,
+                code: .captureProtocolViolation
             )
             _ = processEvent(.failureOccurred(fail), generation: generation)
         }

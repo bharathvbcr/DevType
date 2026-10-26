@@ -592,6 +592,7 @@ private actor ProviderProvenanceCapture: VoiceCaptureEngine {
 
     func setOnPCMBuffer(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {}
     func setOnAudioLevelUpdate(_ handler: (@Sendable (Float) -> Void)?) {}
+    func setOnInterruption(_ handler: (@Sendable (CaptureInterruption) -> Void)?) {}
 
     func startCapture(sessionDirectory: URL) throws {
         started = true
@@ -609,7 +610,9 @@ private actor ProviderProvenanceCapture: VoiceCaptureEngine {
         AudioArtifact(
             fileURL: URL(fileURLWithPath: "/dev/null"),
             frameCount: 16_000,
-            durationSeconds: 1
+            durationSeconds: 1,
+            // The reducer rejects an artifact with no bytes before recognition can start.
+            byteCount: 64_000
         )
     }
 

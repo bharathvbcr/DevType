@@ -1,3 +1,4 @@
+import AVFoundation
 import Darwin
 import XCTest
 @testable import ExpanderEngine
@@ -27,6 +28,75 @@ final class FLACEncoderTests: XCTestCase {
         XCTAssertGreaterThan(result.byteCount, 0)
         XCTAssertGreaterThanOrEqual(result.encodeSeconds, 0.0)
         XCTAssertEqual(result.url, flacURL)
+    }
+
+    /// `AVAudioConverter` withholds the resampler's filter tail until it is told the input has
+    /// ended (AVAudioConverter.h: held data is emitted only on more input or end-of-stream). An
+    /// encoder that never signals `.endOfStream` silently truncates every resampled upload.
+    func testResampledEncodeKeepsTheConverterTail() throws {
+        for inputFrames in [14_400, 48_000, 96_000] {
+            let inputURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("flac-tail-in-\(UUID().uuidString).wav")
+            let outputURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("flac-tail-out-\(UUID().uuidString).flac")
+            defer {
+                try? FileManager.default.removeItem(at: inputURL)
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+            var pcm = Data(capacity: inputFrames * 2)
+            for index in 0..<inputFrames {
+                let sample = Int16(sin(Double(index) / 20.0) * 8_000.0)
+                pcm.append(contentsOf: withUnsafeBytes(of: sample.littleEndian) { Data($0) })
+            }
+            try WavTestData.createWavData(
+                fromPCM: pcm, sampleRate: 48_000, channels: 1, bitsPerSample: 16
+            ).write(to: inputURL)
+
+            _ = try FLACEncoder.encode(inputURL: inputURL, outputURL: outputURL)
+
+            let decoded = try AVAudioFile(forReading: outputURL)
+            XCTAssertEqual(decoded.fileFormat.sampleRate, 16_000)
+            // 48 kHz -> 16 kHz is an exact 3:1 ratio, so the expected count is exact.
+            let expectedFrames = Int64((Double(inputFrames) / 3.0).rounded(.up))
+            XCTAssertEqual(
+                decoded.length, expectedFrames,
+                "\(inputFrames) input frames at 48 kHz must yield \(expectedFrames) frames at 16 kHz"
+            )
+        }
+    }
+
+    /// The system FLAC encoder leaves a 42-byte, audio-less header for a stream shorter than one
+    /// block (4,608 frames) while `AVAudioFile.write` reports success, so a short dictation used
+    /// to upload as an unreadable "successful" file.
+    func testClipsShorterThanOneFLACBlockStillProduceAReadableFile() throws {
+        let inputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flac-short-in-\(UUID().uuidString).wav")
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flac-short-out-\(UUID().uuidString).flac")
+        let pcmOutputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flac-short-pcm-\(UUID().uuidString).flac")
+        defer {
+            for url in [inputURL, outputURL, pcmOutputURL] { try? FileManager.default.removeItem(at: url) }
+        }
+        let inputFrames = 4_800   // 100 ms at 48 kHz -> 1,600 frames at 16 kHz
+        var pcm = Data(capacity: inputFrames * 2)
+        for index in 0..<inputFrames {
+            let sample = Int16(sin(Double(index) / 20.0) * 8_000.0)
+            pcm.append(contentsOf: withUnsafeBytes(of: sample.littleEndian) { Data($0) })
+        }
+        try WavTestData.createWavData(
+            fromPCM: pcm, sampleRate: 48_000, channels: 1, bitsPerSample: 16
+        ).write(to: inputURL)
+
+        let resampled = try FLACEncoder.encode(inputURL: inputURL, outputURL: outputURL)
+        let direct = try FLACEncoder.encode(
+            pcmData: Data(pcm.prefix(4_800)), sampleRate: 16_000, outputURL: pcmOutputURL
+        )
+
+        XCTAssertGreaterThan(resampled.byteCount, 64, "a header-only file is 42 bytes")
+        XCTAssertGreaterThan(direct.byteCount, 64)
+        XCTAssertGreaterThanOrEqual(try AVAudioFile(forReading: outputURL).length, 1_600)
+        XCTAssertGreaterThanOrEqual(try AVAudioFile(forReading: pcmOutputURL).length, 2_400)
     }
 
     func testEncodeLeavesPreexistingOutputUntouchedWhenInputIsMissing() throws {

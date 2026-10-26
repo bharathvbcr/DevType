@@ -1246,6 +1246,8 @@ final class CorrectionCapStopTests: XCTestCase {
                 "manifestWriteFailed",
                 "staleGeneration",
                 "buildLacksSpeechAnalyzer",
+                "microphoneStalled",
+                "captureProtocolViolation",
             ]
         )
     }

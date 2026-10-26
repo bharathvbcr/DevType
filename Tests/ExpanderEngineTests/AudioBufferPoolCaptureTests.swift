@@ -142,6 +142,73 @@ final class AudioBufferPoolCopyTests: XCTestCase {
         XCTAssertTrue(pool.dequeueAll().isEmpty)
     }
 
+    /// macOS 27 ignores `installTap(bufferSize: 2048)` and delivers 4800 frames (100 ms) at
+    /// 48 kHz. The default pool's 4096-frame bound refused every such callback, so dictation
+    /// recorded nothing and reported "No speech detected".
+    func testDefaultPoolRefusesTheTapBufferMacOS27Delivers() throws {
+        let pool = AudioBufferPool()
+        let buffer = try Self.hardwareBuffer(sampleRate: 48_000, channels: 1, frames: 4800)
+        XCTAssertFalse(pool.enqueue(buffer: buffer, sampleTime: 0))
+        XCTAssertEqual(pool.rejectedFrames, 4800)
+    }
+
+    func testFormatSizedPoolAcceptsEveryTapBufferSizeTheEngineMayChoose() throws {
+        let cases: [(rate: Double, channels: AVAudioChannelCount, frames: AVAudioFrameCount)] = [
+            (48_000, 1, 4800),   // 100 ms, observed on macOS 27.0.1
+            (48_000, 1, 19_200), // 400 ms, the documented ceiling
+            (44_100, 1, 4410),
+            (48_000, 2, 4800),
+            (96_000, 1, 38_400),
+            (16_000, 1, 2048),
+        ]
+        for item in cases {
+            let buffer = try Self.hardwareBuffer(
+                sampleRate: item.rate,
+                channels: item.channels,
+                frames: item.frames
+            )
+            let pool = AudioBufferPool(capturing: buffer.format)
+            XCTAssertTrue(
+                pool.enqueue(buffer: buffer, sampleTime: 0),
+                "\(item.rate) Hz × \(item.channels) ch × \(item.frames) frames was refused"
+            )
+            XCTAssertEqual(pool.droppedFrames, 0)
+            let chunk = try XCTUnwrap(pool.dequeueAll().first)
+            XCTAssertEqual(chunk.frameCount, item.frames)
+            XCTAssertNotNil(chunk.makePCMBuffer())
+        }
+    }
+
+    func testFormatSizedPoolAcceptsFloat64() throws {
+        let format = try XCTUnwrap(AVAudioFormat(
+            commonFormat: .pcmFormatFloat64,
+            sampleRate: 48_000,
+            channels: 2,
+            interleaved: false
+        ))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800))
+        buffer.frameLength = 4800
+        let pool = AudioBufferPool(capturing: format)
+        XCTAssertTrue(pool.enqueue(buffer: buffer, sampleTime: 0))
+        XCTAssertEqual(pool.rejectedFrames, 0)
+    }
+
+    func testRingOverflowIsNotCountedAsARejectedCopy() throws {
+        let pool = AudioBufferPool(capacity: 2, maxChunkFrames: 8, bytesPerFrame: 4)
+        XCTAssertTrue(pool.enqueue(buffer: try Self.monoBuffer(frames: 4), sampleTime: 0))
+        XCTAssertFalse(pool.enqueue(buffer: try Self.monoBuffer(frames: 4), sampleTime: 1))
+        XCTAssertEqual(pool.droppedFrames, 4)
+        XCTAssertEqual(pool.rejectedFrames, 0)
+
+        _ = pool.dequeueAll()
+        XCTAssertFalse(pool.enqueue(buffer: try Self.monoBuffer(frames: 16), sampleTime: 2))
+        XCTAssertEqual(pool.droppedFrames, 20)
+        XCTAssertEqual(pool.rejectedFrames, 16)
+
+        pool.reset()
+        XCTAssertEqual(pool.rejectedFrames, 0)
+    }
+
     func testEnqueueBenchmarkOf2048FrameMonoBuffer() throws {
         let frames: AVAudioFrameCount = 2048
         let pool = AudioBufferPool(capacity: 4096, maxChunkFrames: frames, bytesPerFrame: 4)
@@ -179,6 +246,28 @@ final class AudioBufferPoolCopyTests: XCTestCase {
         return buffer
     }
 
+    /// The shape `AVAudioInputNode` taps deliver: Float32, non-interleaved.
+    static func hardwareBuffer(
+        sampleRate: Double,
+        channels: AVAudioChannelCount,
+        frames: AVAudioFrameCount
+    ) throws -> AVAudioPCMBuffer {
+        let format = try XCTUnwrap(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: channels,
+            interleaved: false
+        ))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames))
+        buffer.frameLength = frames
+        for channel in 0..<Int(channels) {
+            for frame in 0..<Int(frames) {
+                buffer.floatChannelData?[channel][frame] = sinf(Float(frame) * 0.05) * 0.5
+            }
+        }
+        return buffer
+    }
+
     private static func floats(in data: Data) -> [Float] {
         data.withUnsafeBytes { buffer in
             Array(buffer.bindMemory(to: Float.self))
@@ -187,35 +276,42 @@ final class AudioBufferPoolCopyTests: XCTestCase {
 }
 
 final class DurableVoiceCaptureTapCopyTests: XCTestCase {
+    /// Both tap APIs — the macOS 27 throwing tap and the legacy one — must copy synchronously
+    /// into the pool and capture nothing else.
     func testInstallTapDoesNotPassTheEngineBufferIntoATask() throws {
-        let source = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
-        let marker = "installTap(onBus:"
-        guard let start = source.range(of: marker) else {
-            return XCTFail("DurableVoiceCapture must install the microphone tap")
+        let source = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/CaptureInput.swift")
+        for marker in ["installAudioTap(onBus:", "installTap(onBus:"] {
+            guard let start = source.range(of: marker) else {
+                return XCTFail("CaptureInput must install the microphone tap through \(marker)")
+            }
+            let lineStart = source[..<start.lowerBound].lastIndex(of: "\n").map { source.index(after: $0) }
+                ?? source.startIndex
+            let indent = String(source[lineStart..<start.lowerBound].prefix { $0 == " " })
+            let tail = source[start.lowerBound...]
+            guard let end = tail.range(of: "\n\(indent)}") else {
+                return XCTFail("Could not isolate the \(marker) closure")
+            }
+            let closure = String(tail[..<end.upperBound])
+            XCTAssertFalse(
+                closure.contains("Task"),
+                "\(marker): the tap must copy synchronously and must not hop the engine buffer onto a Task"
+            )
+            XCTAssertFalse(
+                closure.contains("handleAudioCallback"),
+                "\(marker): the tap must not retain the engine buffer for later processing"
+            )
+            XCTAssertTrue(
+                closure.contains(".enqueue("),
+                "\(marker): the tap must hand the engine buffer to AudioBufferPool.enqueue before returning"
+            )
+            XCTAssertFalse(
+                closure.contains("self"),
+                "\(marker): the tap must capture the pool, not the actor, so the realtime thread does not hop actors"
+            )
         }
-        let tail = source[start.lowerBound...]
-        guard let end = tail.range(of: "\n        }") else {
-            return XCTFail("Could not isolate the installTap closure")
-        }
-        let closure = String(tail[..<end.upperBound])
-        XCTAssertFalse(
-            closure.contains("Task"),
-            "The tap must copy synchronously and must not hop the engine buffer onto a Task"
-        )
-        XCTAssertFalse(
-            closure.contains("handleAudioCallback"),
-            "The tap must not retain the engine AVAudioPCMBuffer for later processing"
-        )
+        let capture = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
         XCTAssertTrue(
-            closure.contains(".enqueue("),
-            "The tap must hand the engine buffer to AudioBufferPool.enqueue before returning"
-        )
-        XCTAssertFalse(
-            closure.contains("self"),
-            "The tap must capture the pool, not the actor, so the realtime thread does not hop actors"
-        )
-        XCTAssertTrue(
-            source.contains("bufferPool.droppedFrames"),
+            capture.contains("segment.pool.droppedFrames"),
             "Artifact gapCount must include frames the pool rejected"
         )
     }
@@ -268,6 +364,81 @@ final class DurableVoiceCaptureTapCopyTests: XCTestCase {
         let stats = try writer.finalize()
         XCTAssertGreaterThan(stats.totalFrames, 0)
         XCTAssertThrowsError(try writer.finalize())
+    }
+
+    /// End to end through the path `startCapture` builds: a 48 kHz tap buffer of the size
+    /// macOS 27 delivers must reach the 16 kHz recording and the live recognizer.
+    func testHardwareSizedTapBuffersReachTheRecording() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pcm-drain-hw-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writer = try CAFSessionWriter(
+            outputURL: directory.appendingPathComponent("capture.caf"),
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        let first = try AudioBufferPoolCopyTests.hardwareBuffer(sampleRate: 48_000, channels: 1, frames: 4800)
+        let pool = AudioBufferPool(capturing: first.format)
+        for index in 0..<10 {
+            let buffer = try AudioBufferPoolCopyTests.hardwareBuffer(sampleRate: 48_000, channels: 1, frames: 4800)
+            XCTAssertTrue(pool.enqueue(buffer: buffer, sampleTime: Double(index * 4800)))
+        }
+
+        let published = PublishedBuffer()
+        let drain = PCMCaptureDrain(
+            pool: pool,
+            writer: writer,
+            converter: AVAudioConverter(from: first.format, to: writer.targetFormat),
+            targetFormat: writer.targetFormat,
+            onPCMBuffer: { buffer in published.store(buffer) },
+            onLevel: { _ in }
+        )
+        drain.start()
+        let outcome = drain.stopAndJoin(timeout: 2)
+        XCTAssertNil(outcome.joinFailure)
+        XCTAssertNil(outcome.captureError, outcome.captureError?.redactedDetail ?? "")
+        XCTAssertEqual(pool.droppedFrames, 0)
+        XCTAssertNotNil(published.buffer, "the live recognizer never received audio")
+        let stats = try writer.finalize()
+        // One second at 48 kHz is exactly 16 000 frames at 16 kHz once the converter's withheld
+        // tail is flushed at stop. Without the flush this came out 20 frames short.
+        XCTAssertEqual(stats.totalFrames, 16_000)
+        XCTAssertEqual(outcome.acceptedFrames, 16_000)
+    }
+
+    func testRefusedCopiesFailAsAudioEncodingNotAsNoSpeech() throws {
+        XCTAssertNil(DurableVoiceCapture.rejectedAudioFailure(rejectedFrames: 0, acceptedFrames: 0))
+
+        let nothingKept = try XCTUnwrap(
+            DurableVoiceCapture.rejectedAudioFailure(rejectedFrames: 72_000, acceptedFrames: 0)
+        )
+        XCTAssertEqual(nothingKept.code, .audioEncodingFailed)
+        XCTAssertEqual(nothingKept.artifactState, .absent)
+
+        let someKept = try XCTUnwrap(
+            DurableVoiceCapture.rejectedAudioFailure(rejectedFrames: 4800, acceptedFrames: 16_000)
+        )
+        XCTAssertEqual(someKept.code, .audioEncodingFailed)
+        XCTAssertEqual(someKept.artifactState, .partial)
+    }
+
+    func testEmptyRecordingIsNoSpeechOnlyWhenNothingWasDropped() {
+        XCTAssertEqual(DurableVoiceCapture.emptyCaptureFailure(droppedFrames: 0).code, .zeroFramesCaptured)
+        XCTAssertEqual(DurableVoiceCapture.emptyCaptureFailure(droppedFrames: 9600).code, .captureBackpressure)
+    }
+
+    func testStartCaptureSizesThePoolFromTheHardwareFormat() throws {
+        let source = try SourceTree.text("Sources/ExpanderEngine/Voice/Audio/DurableVoiceCapture.swift")
+        XCTAssertTrue(
+            source.contains("AudioBufferPool(capturing: input.format)"),
+            "the pool must be sized from the format the tap delivers"
+        )
+        XCTAssertFalse(
+            source.contains("bufferPool.reset()"),
+            "reusing the default-sized pool refuses 100 ms hardware buffers"
+        )
     }
 }
 

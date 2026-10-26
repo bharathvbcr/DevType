@@ -160,6 +160,17 @@ public enum VoiceSessionReducer {
 
         // Finalizing Audio -> Recognizing
         case (.finalizingAudio, .audioFinalized(let artifact)):
+            // The one owner of "an artifact worth recognizing". An artifact with no frames, no
+            // bytes, or no finite positive duration cannot contain speech, so letting it reach
+            // recognition only turns a broken capture into a misleading "no speech" result.
+            // Reject it before it is retained, persisted, or handed to a provider.
+            guard Self.isRecognizable(artifact) else {
+                return reduce(state: &state, event: .failureOccurred(VoiceFailure(
+                    stage: .audioFinalization, code: .captureProtocolViolation,
+                    artifactState: .absent,
+                    redactedDetail: "Capture finalized without a usable audio artifact"
+                )), eventGeneration: eventGeneration)
+            }
             state.audioArtifact = artifact
             state.phase = .recognizing
             // The batch pass restates the whole session rather than extending the live
@@ -315,6 +326,15 @@ public enum VoiceSessionReducer {
 }
 
 extension VoiceSessionReducer {
+
+    /// A finalized artifact is recognizable only if it holds audio: positive frames and bytes and a
+    /// finite, positive duration. Negative values are treated like zero (a corrupt count is not audio).
+    static func isRecognizable(_ artifact: AudioArtifact) -> Bool {
+        artifact.frameCount > 0
+            && artifact.byteCount > 0
+            && artifact.durationSeconds.isFinite
+            && artifact.durationSeconds > 0
+    }
 
     private static func acceptSegment(
         _ segment: SpeechSegment, state: inout VoiceSessionState, live: Bool

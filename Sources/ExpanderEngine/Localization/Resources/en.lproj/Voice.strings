@@ -11,6 +11,9 @@
 "voice.error.accessibilityDenied" = "Accessibility access is needed to insert text";
 "voice.error.noSpeech" = "No speech detected";
 "voice.error.audioInterrupted" = "Audio input was interrupted";
+"voice.error.microphoneStalled" = "The microphone stopped sending audio — check the input device in System Settings → Sound.";
+"voice.error.noAudioCaptured" = "No audio was captured";
+"voice.error.sessionInternal" = "The dictation session ended unexpectedly";
 "voice.error.diskFull" = "Not enough disk space to record";
 "voice.error.audioEncoding" = "Could not encode the recording";
 "voice.error.invalidAPIKey" = "Invalid API key. Check Preferences → Voice.";

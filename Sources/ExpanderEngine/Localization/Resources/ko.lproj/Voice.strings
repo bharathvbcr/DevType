@@ -11,6 +11,9 @@
 "voice.error.accessibilityDenied" = "텍스트를 삽입하려면 손쉬운 사용 권한이 필요합니다";
 "voice.error.noSpeech" = "음성이 감지되지 않았습니다";
 "voice.error.audioInterrupted" = "오디오 입력이 중단되었습니다";
+"voice.error.microphoneStalled" = "마이크에서 오디오가 들어오지 않습니다 — 시스템 설정 → 사운드에서 입력 장치를 확인하세요.";
+"voice.error.noAudioCaptured" = "녹음된 오디오가 없습니다";
+"voice.error.sessionInternal" = "받아쓰기 세션이 예기치 않게 종료되었습니다";
 "voice.error.diskFull" = "녹음할 디스크 공간이 부족합니다";
 "voice.error.audioEncoding" = "녹음을 인코딩할 수 없습니다";
 "voice.error.invalidAPIKey" = "API 키가 유효하지 않습니다. 환경설정 → 음성을 확인하세요.";

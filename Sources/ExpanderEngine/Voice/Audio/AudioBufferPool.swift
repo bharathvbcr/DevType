@@ -5,6 +5,9 @@ public final class AudioBufferPool: @unchecked Sendable {
     public struct Chunk: Sendable {
         public let sequence: UInt64
         public let sampleTime: Double
+        /// When the first frame was captured, in host-clock ticks (`mach_absolute_time`); 0 when
+        /// the tap did not supply a valid host time.
+        public let hostTime: UInt64
         public let frameCount: AVAudioFrameCount
         public let pcmData: Data
         public let sampleRate: Double
@@ -107,6 +110,7 @@ public final class AudioBufferPool: @unchecked Sendable {
     private var bufferSlots: [Data]
     private var sequences: [UInt64]
     private var sampleTimes: [Double]
+    private var hostTimes: [UInt64]
     private var frameCounts: [AVAudioFrameCount]
     private var sampleRates: [Double]
     private var channelCounts: [AVAudioChannelCount]
@@ -119,6 +123,9 @@ public final class AudioBufferPool: @unchecked Sendable {
     private var readHead: Int = 0
     private var currentSequence: UInt64 = 0
     private var droppedFrameCount: UInt64 = 0
+    /// The share of `droppedFrameCount` refused by the copy itself (oversized, non-float, or
+    /// unreadable), as opposed to a full ring. A refusal repeats on every callback of that format.
+    private var rejectedFrameCount: UInt64 = 0
     /// Enqueues not yet observed by `waitForEnqueue`. Cleared when `dequeueAll` empties the ring,
     /// so a batched drain cannot leave a counting semaphore credited once per chunk.
     private var pendingNotices: Int = 0
@@ -134,6 +141,25 @@ public final class AudioBufferPool: @unchecked Sendable {
     private static let maximumCapacity = 4096
     private static let maximumChunkByteSize = 4 * 1024 * 1024
     private static let maximumStoredBytes = 64 * 1024 * 1024
+    /// `installTap`'s `bufferSize` is advisory: AVAudioEngine documents a 100–400 ms range and
+    /// macOS 27 delivers 4800-frame (100 ms) buffers at 48 kHz for a 2048-frame request. Size the
+    /// chunk for a full second so no callback the engine may choose is refused by the copy.
+    static let maximumCallbackSeconds: Double = 1
+    private static let minimumCallbackFrames: AVAudioFrameCount = 4096
+
+    /// A pool whose chunk bound fits every callback the microphone tap can deliver in `format`.
+    /// The compile-time defaults are sized for 2048-frame mono buffers and refuse real hardware.
+    public convenience init(capturing format: AVAudioFormat, capacity: Int = 128) {
+        let bytesPerSample = format.commonFormat == .pcmFormatFloat64 ? 8 : 4
+        let channels = max(1, Int(format.channelCount))
+        let callbackFrames = format.sampleRate.isFinite && format.sampleRate > 0
+            ? (format.sampleRate * Self.maximumCallbackSeconds).rounded(.up)
+            : 0
+        let frames = callbackFrames < Double(AVAudioFrameCount.max)
+            ? max(Self.minimumCallbackFrames, AVAudioFrameCount(callbackFrames))
+            : AVAudioFrameCount.max
+        self.init(capacity: capacity, maxChunkFrames: frames, bytesPerFrame: bytesPerSample * channels)
+    }
 
     public init(capacity: Int = 128, maxChunkFrames: AVAudioFrameCount = 4096, bytesPerFrame: Int = 4) {
         let requestedCapacity = min(max(Self.minimumCapacity, capacity), Self.maximumCapacity)
@@ -154,6 +180,7 @@ public final class AudioBufferPool: @unchecked Sendable {
         self.bufferSlots = Array(repeating: Data(), count: self.capacity)
         self.sequences = Array(repeating: 0, count: self.capacity)
         self.sampleTimes = Array(repeating: 0.0, count: self.capacity)
+        self.hostTimes = Array(repeating: 0, count: self.capacity)
         self.frameCounts = Array(repeating: 0, count: self.capacity)
         self.sampleRates = Array(repeating: 0, count: self.capacity)
         self.channelCounts = Array(repeating: 0, count: self.capacity)
@@ -167,14 +194,32 @@ public final class AudioBufferPool: @unchecked Sendable {
     /// Copies every float channel before returning. The caller may reuse `buffer` immediately.
     /// A zero-length buffer is ignored. Overflow and buffers that cannot be copied are drops:
     /// the ring slot a reader has not consumed is left unchanged.
-    public func enqueue(buffer: AVAudioPCMBuffer, sampleTime: Double) -> Bool {
-        let frames = buffer.frameLength
+    public func enqueue(buffer: AVAudioPCMBuffer, sampleTime: Double, hostTime: UInt64 = 0) -> Bool {
+        enqueue(
+            bufferList: UnsafePointer(buffer.mutableAudioBufferList),
+            frameLength: buffer.frameLength,
+            format: buffer.format,
+            sampleTime: sampleTime,
+            hostTime: hostTime
+        )
+    }
+
+    /// The one copy every tap API goes through: the legacy tap hands an `AVAudioPCMBuffer`, the
+    /// macOS 27 tap a read-only buffer that only exposes its `AudioBufferList`. The list is read,
+    /// never retained, so the caller's storage may be reused as soon as this returns.
+    public func enqueue(
+        bufferList: UnsafePointer<AudioBufferList>,
+        frameLength frames: AVAudioFrameCount,
+        format: AVAudioFormat,
+        sampleTime: Double,
+        hostTime: UInt64 = 0
+    ) -> Bool {
         if frames == 0 {
             return true
         }
         // Copy before the lock. NSLock/NSCondition are not recursive, and the memcpy must not
         // run while a reader is blocked on this pool's lock.
-        let copied = copyFloatPCM(buffer)
+        let copied = copyFloatPCM(bufferList, format: format)
 
         condition.lock()
         defer { condition.unlock() }
@@ -182,6 +227,9 @@ public final class AudioBufferPool: @unchecked Sendable {
         let nextWrite = (writeHead + 1) % capacity
         if nextWrite == readHead || copied == nil {
             droppedFrameCount = Saturating.adding(droppedFrameCount, UInt64(frames))
+            if copied == nil {
+                rejectedFrameCount = Saturating.adding(rejectedFrameCount, UInt64(frames))
+            }
             return false
         }
         guard let copied else { return false }
@@ -191,9 +239,10 @@ public final class AudioBufferPool: @unchecked Sendable {
         bufferSlots[writeHead] = copied.pcmData
         sequences[writeHead] = currentSequence
         sampleTimes[writeHead] = sampleTime
+        hostTimes[writeHead] = hostTime
         frameCounts[writeHead] = frames
-        sampleRates[writeHead] = buffer.format.sampleRate
-        channelCounts[writeHead] = buffer.format.channelCount
+        sampleRates[writeHead] = format.sampleRate
+        channelCounts[writeHead] = format.channelCount
         commonFormatRawValues[writeHead] = copied.commonFormatRawValue
         interleavedFlags[writeHead] = copied.isInterleaved
         audioBufferByteCounts[writeHead] = copied.audioBufferByteCounts
@@ -240,6 +289,14 @@ public final class AudioBufferPool: @unchecked Sendable {
         return droppedFrameCount
     }
 
+    /// Frames the copy refused (oversized, non-float, or unreadable). Included in
+    /// `droppedFrames`; a full ring is not counted here. Saturates.
+    public var rejectedFrames: UInt64 {
+        condition.lock()
+        defer { condition.unlock() }
+        return rejectedFrameCount
+    }
+
     /// Dequeues available chunks for background serial writer.
     public func dequeueAll() -> [Chunk] {
         condition.lock()
@@ -250,6 +307,7 @@ public final class AudioBufferPool: @unchecked Sendable {
             let chunk = Chunk(
                 sequence: sequences[readHead],
                 sampleTime: sampleTimes[readHead],
+                hostTime: hostTimes[readHead],
                 frameCount: frameCounts[readHead],
                 pcmData: bufferSlots[readHead],
                 sampleRate: sampleRates[readHead],
@@ -274,6 +332,7 @@ public final class AudioBufferPool: @unchecked Sendable {
         readHead = 0
         currentSequence = 0
         droppedFrameCount = 0
+        rejectedFrameCount = 0
         pendingNotices = 0
     }
 
@@ -284,21 +343,19 @@ public final class AudioBufferPool: @unchecked Sendable {
         return Double(target - now) / 1_000_000_000
     }
 
-    /// Float PCM only. `AVAudioBuffer.h` documents `floatChannelData` as non-nil only for 32-bit
-    /// float, so float64 is copied from the audio buffer list. Anything else is a drop, not an alias.
-    private func copyFloatPCM(_ buffer: AVAudioPCMBuffer) -> OwnedPCM? {
-        let format = buffer.format
+    /// Float PCM only, copied from the audio buffer list for both widths. Anything else is a
+    /// drop, not an alias.
+    private func copyFloatPCM(_ list: UnsafePointer<AudioBufferList>, format: AVAudioFormat) -> OwnedPCM? {
         let commonFormat = format.commonFormat
         switch commonFormat {
-        case .pcmFormatFloat32:
-            guard buffer.floatChannelData != nil else { return nil }
-        case .pcmFormatFloat64:
+        case .pcmFormatFloat32, .pcmFormatFloat64:
             break
         default:
             return nil
         }
 
-        let source = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        // Read-only: the mutable wrapper is only how Core Audio exposes iteration.
+        let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
         guard !source.isEmpty else { return nil }
 
         var counts: [Int] = []

@@ -276,6 +276,102 @@ final class ActivityHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.recentEvents().map(\.title), ["Keep me"])
     }
 
+    /// Writes `titles` (oldest first) through a store, then makes the element titled
+    /// `damagedTitle` undecodable the way a newer build's unknown enum value or a hand-damaged
+    /// row would. Returns the number of rows in the file.
+    private func seedHistory(titles: [String], damaging damagedTitle: String) throws {
+        let seed = ActivityHistoryStore(fileURL: storeURL)
+        for title in titles {
+            XCTAssertEqual(seed.record(category: .general, title: title, details: "state"), .persisted)
+        }
+        let raw = try Data(contentsOf: storeURL)
+        var rows = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [[String: Any]])
+        let index = try XCTUnwrap(rows.firstIndex { ($0["title"] as? String) == damagedTitle })
+        rows[index]["category"] = "someFutureCategory"
+        try JSONSerialization.data(withJSONObject: rows).write(to: storeURL, options: .atomic)
+    }
+
+    func testOneUndecodableRowKeepsTheOtherRowsAndTheNextRecordDoesNotTruncateTheFile() throws {
+        try seedHistory(titles: ["oldest", "damaged", "newest"], damaging: "damaged")
+
+        let store = ActivityHistoryStore(fileURL: storeURL)
+
+        XCTAssertEqual(
+            store.recentEvents().map(\.title),
+            ["newest", "oldest"],
+            "One undecodable row must not discard every other row."
+        )
+        XCTAssertEqual(store.record(category: .general, title: "after", details: "state"), .persisted)
+        XCTAssertEqual(
+            ActivityHistoryStore(fileURL: storeURL).recentEvents().map(\.title),
+            ["after", "newest", "oldest"],
+            "The next record must extend the surviving history, not replace the file with it empty."
+        )
+    }
+
+    func testSkippedRowsAreCountedInHealthAndReportedWithoutMarkingHistoryUnavailable() throws {
+        try seedHistory(titles: ["oldest", "damaged", "newest"], damaging: "damaged")
+
+        let store = ActivityHistoryStore(fileURL: storeURL)
+
+        XCTAssertEqual(store.persistenceHealth.skippedEvents, 1)
+        XCTAssertTrue(
+            store.persistenceHealth.isHealthy,
+            "Readable rows are intact; one skipped row must not present the history as unavailable."
+        )
+        let line = DiagnosticReport.activityHistoryDiagnosticLine(
+            health: store.persistenceHealth,
+            retainedEventCount: store.recentEvents().count
+        )
+        XCTAssertEqual(line, "Activity history: healthy retained=2/25 skipped=1")
+
+        XCTAssertEqual(store.clear(), .persisted)
+        XCTAssertEqual(store.persistenceHealth.skippedEvents, 0)
+        XCTAssertEqual(ActivityHistoryStore(fileURL: storeURL).persistenceHealth.skippedEvents, 0)
+    }
+
+    func testCleanHistoryReportsNoSkippedRows() throws {
+        let store = ActivityHistoryStore(fileURL: storeURL)
+        XCTAssertEqual(store.record(category: .general, title: "only", details: "state"), .persisted)
+
+        let reloaded = ActivityHistoryStore(fileURL: storeURL)
+
+        XCTAssertEqual(reloaded.persistenceHealth.skippedEvents, 0)
+        XCTAssertEqual(
+            DiagnosticReport.activityHistoryDiagnosticLine(health: reloaded.persistenceHealth, retainedEventCount: 1),
+            "Activity history: healthy retained=1/25"
+        )
+    }
+
+    func testSkippedRowsDoNotCountAgainstTheRetentionBound() throws {
+        let seed = ActivityHistoryStore(fileURL: storeURL)
+        let titles = (0..<ActivityHistoryStore.maxEvents).map { "event-\($0)" }
+        for title in titles {
+            XCTAssertEqual(seed.record(category: .general, title: title, details: "state"), .persisted)
+        }
+        // Newest row first on disk; damage it so a full complement of readable rows still follows.
+        let raw = try Data(contentsOf: storeURL)
+        var rows = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [[String: Any]])
+        rows.insert(["junk": true], at: 0)
+        try JSONSerialization.data(withJSONObject: rows).write(to: storeURL, options: .atomic)
+
+        let store = ActivityHistoryStore(fileURL: storeURL)
+
+        XCTAssertEqual(store.recentEvents(limit: 100).count, ActivityHistoryStore.maxEvents)
+        XCTAssertEqual(store.persistenceHealth.skippedEvents, 1)
+    }
+
+    func testAFileThatIsNotAnArrayStillFailsAsInvalidContent() throws {
+        try Data(#"{"events":[]}"#.utf8).write(to: storeURL)
+
+        let store = ActivityHistoryStore(fileURL: storeURL)
+
+        XCTAssertEqual(
+            store.persistenceHealth.lastFailureKind,
+            ActivityHistoryStore.PersistenceFailureKind.invalidContent.rawValue
+        )
+    }
+
     func testLegacyRecoveredTranscriptIsScrubbedFromDiskOnLoad() throws {
         let secret = "dictated password sentinel 4d4930"
         let legacy = """

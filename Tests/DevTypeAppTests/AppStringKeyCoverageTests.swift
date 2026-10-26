@@ -135,6 +135,17 @@ final class AppStringKeyCoverageTests: XCTestCase {
         )
     }
 
+    /// Capture failures that used to collapse into "No speech detected" each name their own fault.
+    func testVoiceCaptureFailureKeysResolve() {
+        for key in [
+            "voice.error.microphoneStalled",
+            "voice.error.noAudioCaptured",
+            "voice.error.sessionInternal",
+        ] {
+            assertResolves(key, origin: "VoiceDictationController.baseMessage")
+        }
+    }
+
     func testVoiceBuildLacksSpeechKeyResolves() {
         assertResolves(
             "prefs.voice.speechModels.status.buildLacksSpeech",
