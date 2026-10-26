@@ -1071,6 +1071,9 @@ private final class AIPreviewController: NSViewController {
             // ⌥↩ -> Replace & Copy
             if flags.contains(.option) && (event.keyCode == UInt16(kVK_Return) || event.keyCode == UInt16(kVK_ANSI_KeypadEnter)) {
                 if self.replaceAndCopyButton.isEnabled {
+                    TextInjectionPipeline.shared.noteAcceptChord(
+                        DeliveryChord(keyCode: event.keyCode, modifierFlags: flags)
+                    )
                     self.replaceAndCopyTapped()
                     return nil
                 }
@@ -1082,6 +1085,9 @@ private final class AIPreviewController: NSViewController {
                 return nil
             case kVK_Return, kVK_ANSI_KeypadEnter:
                 if self.replaceButton.isEnabled, flags.isEmpty {
+                    TextInjectionPipeline.shared.noteAcceptChord(
+                        DeliveryChord(keyCode: event.keyCode, modifierFlags: flags)
+                    )
                     self.replaceTapped()
                     return nil
                 }

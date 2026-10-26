@@ -459,6 +459,20 @@ public final class TextInjectionPipeline {
         ledger.noteDeliveryInput(units: units)
     }
 
+    /// The chord that just accepted an AI result, noted before the delivery it starts is claimed.
+    /// See `DeliveryChord`: only its autorepeat, only while that delivery is in flight.
+    public func noteAcceptChord(_ chord: DeliveryChord) {
+        ledger.noteAcceptChord(chord)
+    }
+
+    /// Whether a key-repeat of `chord` is the continuation of the press that started the delivery
+    /// in flight. The tap swallows such a repeat instead of passing it to the field and moving the
+    /// input revision: the press that began the delivery was consumed by the panel, and a repeat
+    /// that reached the field would be real input the delivery could not account for.
+    func isRepeatOfDeliveryChord(_ chord: DeliveryChord) -> Bool {
+        ledger.isDeliveryChord(chord)
+    }
+
     /// Invalidates queued work as well as callbacks already scheduled on main.
     public func cancelCurrentInjection() {
         ledger.cancelCurrent()
