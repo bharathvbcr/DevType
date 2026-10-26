@@ -2,22 +2,43 @@ import Foundation
 import XCTest
 import SourceTreeTestSupport
 
-final class InjectionLifetimeWiringTests: XCTestCase {
+@testable import ExpanderEngine
+
+/// The owner of "which injection is the live one" is the pipeline's ledger. A new claim and the
+/// engine stopping both cancel the one operation it holds, so neither can leave a second running.
+/// Driven on a real engine with its own pipeline, not by reading the source for the call.
+final class InjectionLifetimeWiringTests: TapEventTestCase {
     private func source(_ name: String) throws -> String {
         return try SourceTree.text("Sources/ExpanderEngine/Engine/\(name).swift")
     }
 
-    func testQueuedOperationsAndEngineStopUseTheSameCancellationOwner() throws {
-        let pipeline = try source("TextInjectionPipeline")
-        // The owner is the ledger: claiming a new operation and stopping the engine both cancel
-        // the one `activeOperation` it holds, so neither path can leave a second one running.
-        let ledger = try source("ExpansionLedger")
-        XCTAssertEqual(ledger.components(separatedBy: "activeOperation?.cancel()").count - 1, 2,
-                       "claim and cancelCurrent must both cancel the ledger's current operation")
-        XCTAssertTrue(pipeline.contains("let revision = ledger.claim(operation, consumingUndo: purpose.consumesUndo)"))
-        XCTAssertTrue(pipeline.contains("ledger.cancelCurrent()"))
-        XCTAssertTrue(pipeline.contains("let completionGuard = operation"))
-        XCTAssertTrue(try source("EventTapEngine").contains("TextInjectionPipeline.shared.cancelCurrentInjection()"))
+    private func isCurrent(_ claim: (operation: InjectCompletionGuard, revision: UInt64)) -> Bool {
+        pipeline.operationIsCurrentForTesting(claim.operation, revision: claim.revision)
+    }
+
+    func testAClaimCancelsTheOperationItSupersedes() {
+        let first = pipeline.claimOperationForTesting()
+        XCTAssertTrue(isCurrent(first))
+        let second = pipeline.claimOperationForTesting()
+        XCTAssertFalse(isCurrent(first), "two operations must never both be live")
+        XCTAssertEqual(first.operation.continuationBlock(), .cancelled,
+                       "a superseded operation already queued or scheduled must stop itself")
+        XCTAssertTrue(isCurrent(second))
+    }
+
+    func testStoppingTheEngineCancelsTheOperationInFlight() {
+        let claim = pipeline.claimOperationForTesting()
+        XCTAssertTrue(isCurrent(claim))
+        engine.stop()
+        XCTAssertFalse(isCurrent(claim), "stop() must reach the same ledger a claim does")
+        XCTAssertEqual(claim.operation.continuationBlock(), .cancelled)
+    }
+
+    func testCancellingTheCurrentInjectionCancelsTheOperationInFlight() {
+        let claim = pipeline.claimOperationForTesting()
+        pipeline.cancelCurrentInjection()
+        XCTAssertFalse(isCurrent(claim))
+        XCTAssertEqual(claim.operation.continuationBlock(), .cancelled)
     }
 
     func testEmptyEraseCannotBypassContinuationAndDelayedCursorMustCheckIt() throws {

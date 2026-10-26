@@ -408,7 +408,7 @@ extension EventTapEngine {
                 sourceApp.activate()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                guard self != nil else {
+                guard let self else {
                     completion?()
                     return
                 }
@@ -438,7 +438,7 @@ extension EventTapEngine {
                     replacementText: text
                 )
                 let suspension = EventTapEngine.shared.suspendMatching(reason: "aiTransformInject")
-                TextInjectionPipeline.shared.inject(
+                self.pipeline.inject(
                     snippet: carrier,
                     triggerLength: 0,
                     swallowed: .notSwallowed,
@@ -536,7 +536,7 @@ extension EventTapEngine {
 
         let lookup = matchSnapshot.nestedResolver.lookup
 
-        TextInjectionPipeline.shared.inject(
+        pipeline.inject(
             snippet: snippet,
             triggerLength: triggerUTF16Length,
             swallowed: swallowed,
@@ -583,7 +583,7 @@ extension EventTapEngine {
         // the prefix-debounce fire — which swallows nothing — avoided a replay only because its
         // empty payload happened to fail `hasPayload` inside `reinjectSwallowedKey`.
         if swallowed.mustReinjectOnRefuse {
-            _ = TextInjectionPipeline.shared.reinjectSwallowedKey(swallowed)
+            _ = pipeline.reinjectSwallowedKey(swallowed)
         }
         DispatchQueue.main.async {
             PermissionCoordinator.shared.recordInjectOutcome(

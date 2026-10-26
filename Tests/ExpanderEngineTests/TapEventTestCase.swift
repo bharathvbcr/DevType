@@ -15,13 +15,25 @@ import XCTest
 /// test may type a key sequence that fires an expansion: the callback would try to inject.
 class TapEventTestCase: XCTestCase {
     var engine: EventTapEngine!
+    /// The pipeline the engine under test writes its input revision, delivery window and undo
+    /// record into: this test's own, on a private defaults suite, never `TextInjectionPipeline.shared`.
+    var pipeline: TextInjectionPipeline!
+    private var pipelineSuite: String?
 
     override func setUp() {
         super.setUp()
         // The undo path reads `EventTapEngine.shared`; its first use runs a layout refresh whose
         // listeners include every live engine. Pay that now rather than in the middle of a test.
         _ = EventTapEngine.shared
+        let suite = "TapEventTestCase.\(UUID().uuidString)"
+        pipelineSuite = suite
+        pipeline = TextInjectionPipeline(
+            defaults: UserDefaults(suiteName: suite) ?? .standard,
+            selectionConfirmer: SelectionReplacementGuard.Confirmer(),
+            keepRefusedReplacement: { _ in false }
+        )
         engine = EventTapEngine()
+        engine.pipeline = pipeline
         engine.snippets = [prefixTriggerSnippet("`slm"), prefixTriggerSnippet("`slmabout")]
         // No test may post a keystroke to the machine it runs on.
         engine.typeAheadReplayPoster = { _ in }
@@ -36,6 +48,9 @@ class TapEventTestCase: XCTestCase {
         // another test cannot claim it and attempt a real injection.
         engine.heldCoordinator.cancelAll(reason: .bufferReset)
         engine = nil
+        pipeline.cancelCurrentInjection()
+        pipeline = nil
+        if let pipelineSuite { UserDefaults.standard.removePersistentDomain(forName: pipelineSuite) }
         super.tearDown()
     }
 

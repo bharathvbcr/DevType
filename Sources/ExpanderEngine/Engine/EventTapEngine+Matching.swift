@@ -96,13 +96,13 @@ extension EventTapEngine {
         _isExpanding = true
         // §8.3: from here until `endExpansion`, keys the user types are held rather than passed
         // through, so they cannot overtake the paste still in flight.
-        _typeAhead.beginExpansion(focusPID: focusPID)
+        _typeAhead.beginExpansion(focusPID: focusPID, now: now())
         // §3.1d: open the delivery-input window *before* the expanding flag is visible to the
         // tap thread. Resetting it after the flag was observable raced: a pass-through key could
         // increment the counter and then be wiped by the reset, losing exactly the contamination
         // evidence the window exists to keep. Nesting order is one-directional (engine →
         // pipeline); no path holds `lastExpansionLock` while taking this engine lock.
-        TextInjectionPipeline.shared.beginDeliveryWindow()
+        pipeline.beginDeliveryWindow()
         lock.unlock()
         return true
     }
@@ -180,7 +180,8 @@ extension EventTapEngine {
             unicode: unicode,
             isSynthetic: false,
             resetsBuffer: resets,
-            focusPID: focusPID
+            focusPID: focusPID,
+            now: now()
         )
         lock.unlock()
 
@@ -244,7 +245,7 @@ extension EventTapEngine {
         // synthetically so the tap's counter hook never sees them. Count them here or a blind
         // undo would under-count what sits between the injected text and the caret. Replays that
         // fire before a record exists are a harmless no-op.
-        TextInjectionPipeline.shared.noteInputAfterExpansion(units: text.count)
+        pipeline.noteInputAfterExpansion(units: text.count)
         // HID only — deliberately *not* `attemptAXDirectInjection`. That call reports success
         // without writing in the whole Chromium/Electron false-success class, which is exactly
         // where this bug occurs, so an AX replay would silently eat the user's keystrokes: the

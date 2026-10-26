@@ -107,7 +107,7 @@ extension EventTapEngine {
     /// holds a keep-alive port) so a later `start()` does not have to churn threads; use
     /// `shutdownTapThread()` for a full teardown.
     public func stop() {
-        TextInjectionPipeline.shared.cancelCurrentInjection()
+        pipeline.cancelCurrentInjection()
         let wasRunning = isTapRunning
         stopHealthMonitor()
 

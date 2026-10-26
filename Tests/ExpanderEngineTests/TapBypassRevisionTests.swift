@@ -14,17 +14,17 @@ final class TapBypassRevisionTests: TapEventTestCase {
 
     override func setUp() {
         super.setUp()
-        claimed = TextInjectionPipeline.shared.claimOperationForTesting()
+        claimed = pipeline.claimOperationForTesting()
     }
 
     override func tearDown() {
-        TextInjectionPipeline.shared.cancelCurrentInjection()
+        pipeline.cancelCurrentInjection()
         claimed = nil
         super.tearDown()
     }
 
     private var stillCurrent: Bool {
-        TextInjectionPipeline.shared.operationIsCurrentForTesting(
+        pipeline.operationIsCurrentForTesting(
             claimed.operation, revision: claimed.revision
         )
     }
@@ -66,9 +66,9 @@ final class TapBypassRevisionTests: TapEventTestCase {
     func testABufferResettingKeyMovesTheRevision() {
         key("", keyCode: Int64(kVK_Escape))
         XCTAssertFalse(stillCurrent)
-        let chord = TextInjectionPipeline.shared.claimOperationForTesting()
+        let chord = pipeline.claimOperationForTesting()
         key("t", keyCode: Int64(kVK_ANSI_T), flags: .maskCommand)
-        XCTAssertFalse(TextInjectionPipeline.shared.operationIsCurrentForTesting(
+        XCTAssertFalse(pipeline.operationIsCurrentForTesting(
             chord.operation, revision: chord.revision
         ))
     }

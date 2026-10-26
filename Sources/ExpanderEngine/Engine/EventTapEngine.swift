@@ -256,6 +256,15 @@ public final class EventTapEngine {
         _ = HIDKeyPoster.shared.postUnicodeKeyEvent(unicode: character, keyCode: 0, flags: [])
     }
 
+    /// The injection pipeline this engine drives: the one whose ledger its input revision, delivery
+    /// window and undo record live in. A seam so a test owns that ledger instead of sharing the
+    /// process-wide one.
+    var pipeline: TextInjectionPipeline = .shared
+
+    /// The wall clock the type-ahead hold is measured against. A seam so a test steps a window past
+    /// its deadline instead of sleeping through it.
+    var now: () -> Date = { Date() }
+
     /// The non-IPC Secure Input read the tap trusts over its polled flag. Injectable so a test can
     /// stage "the flag says secure, the system says otherwise" without owning the real state.
     var liveSecureInputProbe: () -> Bool = { AXContextChecker.isSecureEventInputEnabledLive() }
