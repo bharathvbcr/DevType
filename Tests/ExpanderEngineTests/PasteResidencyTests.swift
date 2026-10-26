@@ -267,9 +267,13 @@ final class PasteResidencyTests: XCTestCase {
         let harness = Harness()
         harness.seedUserClipboard("USER-OLD")
         harness.paste("FIRST", in: self)
+        XCTAssertGreaterThan(harness.broker.publicationGateRemaining(), 0, "precondition: FIRST is inside its lease")
 
+        // A paste that is not gated publishes synchronously, inside the call; a gated one leaves
+        // FIRST on the board until a timer fires. Judged on the board, not the clock: a loaded
+        // machine stretches main-queue timers by hundreds of milliseconds, and a wall-clock
+        // threshold then fails a paste that never waited.
         let posted = expectation(description: "restore paste posted")
-        let askedAt = InputClock.monotonicNow()
         var postedAt = 0.0
         harness.broker.pasteViaClipboard(
             text: "TRIGGER", expectedText: nil, baseline: nil, focus: .resolved(nil),
@@ -278,9 +282,10 @@ final class PasteResidencyTests: XCTestCase {
             postedAt = InputClock.monotonicNow()
             posted.fulfill()
         }
+        XCTAssertEqual(harness.board.string(forType: .string), "TRIGGER",
+                       "published at once: it did not wait on its own expansion's lease")
         wait(for: [posted], timeout: 5)
-        XCTAssertLessThan(postedAt - askedAt, 0.25, "waited \(postedAt - askedAt) s on its own expansion's lease")
-        XCTAssertEqual(harness.hostRead(in: self), "TRIGGER")
+        XCTAssertEqual(harness.posted.events, 8, "both chords went out")
 
         pump(until: postedAt + 1.0)
         XCTAssertEqual(harness.board.string(forType: .string), "USER-OLD",

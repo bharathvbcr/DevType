@@ -213,13 +213,14 @@ final class BoardHoldOffTests: XCTestCase {
     func testAnInsertThatErasesNothingDoesNotWait() throws {
         let harness = try InjectionHarness()
         harness.leaveAnUnreadPayload(in: self)
-        let startedAt = InputClock.monotonicNow()
 
         harness.typeExpansion(in: self, erasing: false)
 
-        let firstQuery = try XCTUnwrap(harness.time(of: .focusQuery))
-        XCTAssertLessThan(firstQuery - startedAt, BoardHoldOff.pollInterval, "it queried focus without waiting")
-        XCTAssertEqual(harness.focusQueriesWhileBoardBusy, 1)
+        // Judged on the board, not the clock: focus was queried while the earlier payload still
+        // held it, which a wait could not have allowed. A loaded machine stretches main-queue
+        // timers, so an elapsed-time threshold would fail an insert that never waited.
+        XCTAssertNotNil(harness.time(of: .focusQuery))
+        XCTAssertEqual(harness.focusQueriesWhileBoardBusy, 1, "it queried focus without waiting for the board")
         XCTAssertEqual(harness.backspaces, 0)
     }
 }
