@@ -182,7 +182,8 @@ public extension SelectionReader {
         /// Set only when a non-blank body was over the character cap and was not retained.
         public let oversizedCharacterCount: Int?
         /// The element that answered, kept for `Result.element`.
-        public let element: AXUIElement?
+        public var element: AXUIElement? { elementHandle?.element }
+        private let elementHandle: AXElementHandle?
 
         public init(
             text: String?,
@@ -197,7 +198,7 @@ public extension SelectionReader {
             self.bundleID = bundleID
             self.via = via
             self.oversizedCharacterCount = oversizedCharacterCount
-            self.element = element
+            self.elementHandle = element.map(AXElementHandle.init)
         }
 
         public static func == (lhs: Self, rhs: Self) -> Bool {

@@ -26,22 +26,14 @@ public struct SelectionReplacement: Equatable, Sendable {
     /// window; this is the one element known to have held the selection. It is evidence to *read*
     /// and, when focus still resolves to nothing that can hold a selection, a place to put focus
     /// back — never a paste target on its own (see `Confirmer.restoreFocus`).
-    public let capturedElement: AXUIElement?
+    public var capturedElement: AXUIElement? { captured?.element }
+    private let captured: AXElementHandle?
 
     public init?(original: String, requiresEvidence: Bool = true, capturedElement: AXUIElement? = nil) {
         guard !original.isEmpty else { return nil }
         self.original = original
         self.requiresEvidence = requiresEvidence
-        self.capturedElement = capturedElement
-    }
-
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        guard lhs.original == rhs.original, lhs.requiresEvidence == rhs.requiresEvidence else { return false }
-        switch (lhs.capturedElement, rhs.capturedElement) {
-        case (nil, nil): return true
-        case let (left?, right?): return CFEqual(left, right)
-        default: return false
-        }
+        self.captured = capturedElement.map(AXElementHandle.init)
     }
 }
 
