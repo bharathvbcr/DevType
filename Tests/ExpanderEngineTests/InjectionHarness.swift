@@ -205,6 +205,10 @@ final class InjectionHarness {
     var chords: Int { log.filter { $0 == .chordDone }.count }
     var kept: [String] { log.compactMap { if case .keep(let text) = $0 { text } else { nil } } }
     var toasts: [Bool] = []
+    /// What the broker asked its target check, each time: whether it wanted the selection range and
+    /// the focused element held to the captured ones. This is the policy a paste applies after a
+    /// mutation of the field, as the broker states it.
+    var targetChecks: [(checkRange: Bool, checkElement: Bool)] = []
     var focusQueries: Int { log.filter { $0 == .focusQuery }.count }
     /// What the board held at the instant the result was kept — the instant a miss is called.
     var boardAtKeep: [String?] = []
@@ -284,8 +288,9 @@ final class InjectionHarness {
         brokerEnvironment.canPostEvents = { box.harness?.canPostEvents ?? false }
         brokerEnvironment.secureInputActive = { box.harness?.secureInput ?? false }
         brokerEnvironment.frontmostPID = { box.harness?.frontmostPID }
-        brokerEnvironment.targetCurrent = { target, _, checkElement in
+        brokerEnvironment.targetCurrent = { target, checkRange, checkElement in
             guard let harness = box.harness else { return false }
+            harness.targetChecks.append((checkRange: checkRange, checkElement: checkElement))
             if harness.brokerRefusesTarget || harness.targetMovedAfterPaste { return false }
             return target.mismatch(
                 pid: harness.frontmostPID, element: harness.page.focused, range: target.range,
