@@ -12,6 +12,10 @@ is allowed to show a dialog, and the measured keychain behaviour the design is b
 - An independent `SecretModel`, created in **menu bar → Copy Secret → Manage Secrets…**.
   The editor asks for a name and secure value, with optional tags and an enabled setting.
   There is no trigger, keyboard shortcut, snippet group, replacement body, image, or AI action.
+  The checkout command `devtype-cli` can list this metadata (`secret list`, and `snippet get`
+  by id). It refuses `snippet set`, `snippet remove`, and `expand` for a secret id. It never
+  accepts a value on the command line and never prints one, and it does not open the keychain.
+  See the [user guide](docs/USER_GUIDE.md#12-command-line-devtype-cli).
   Existing values are never prefilled. Leaving the value blank while editing keeps it unchanged.
   The value field is concealed by default; a **Show** button reveals what is being typed so a
   typo is caught before it is stored, and says so on screen while the value is visible. See

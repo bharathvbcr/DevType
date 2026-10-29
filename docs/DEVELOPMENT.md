@@ -47,7 +47,7 @@ flowchart TD
 |---|---|---|
 | **Signing Identity** | `./Scripts/signing-identity.sh` | Prints the identity builds will use: Developer ID → Apple Development → self-signed → ad-hoc. Read-only. |
 | **Local Signing Certificate** | `./Scripts/make-signing-cert.sh` | Generates the `DevType Local Signing` self-signed cert so TCC permissions survive rebuilds. Only needed when you have no Apple Development certificate. |
-| **Run Unit Tests** | `./Scripts/test.sh [-v]` | Runs the SwiftPM engine and AppKit-core tests (`ExpanderEngineTests`, `DevTypeAppTests`). Pins `DEVELOPER_DIR` to full Xcode — Command Line Tools-only toolchains break `swift test`. |
+| **Run Unit Tests** | `./Scripts/test.sh [-v]` | Runs the SwiftPM test suite. Targets include `ExpanderEngineTests`, `DevTypeAppTests`, and `DevTypeCLITests`. Pins `DEVELOPER_DIR` to full Xcode — Command Line Tools-only toolchains break `swift test`. |
 | **Coverage (GitPulse LCOV)** | `./Scripts/test.sh --coverage` | Same suite, with Swift and `DevTypeSafety.m` instrumented, then writes `coverage/lcov.info` (per-file, per-line hit counts). `--enable-code-coverage` does the same. |
 | **Package Application** | `./Scripts/package-app.sh [release\|debug]` | Compiles binaries, bundles resources, stamps version from Git, and signs `.build/DevType.app`. Skips wipe+resign when nothing changed to preserve the CDHash. |
 | **Build Application** | `./Scripts/build_app.sh [release\|debug]` | Thin wrapper delegating to `package-app.sh`. |
@@ -61,12 +61,17 @@ flowchart TD
 | **Release Preflight** | `./Scripts/release-preflight.sh` | Requires an existing exact tag at HEAD, a clean worktree, matching release notes, and disabled default voice tracing. Run local CI separately. |
 | **Signing Preflight** | `./Scripts/release-signing-preflight.sh` | Validates that the active signing identity meets distribution requirements. |
 | **Release Version Check** | `./Scripts/verify-release-version.sh` | Refuses to package a bundle whose stamped version differs from the exact release tag. |
+| **Verify Packaged Bundle** | `./Scripts/verify-packaged-bundle.sh` | Validates `.build/DevType.app` bundle structure, executable presence, Info.plist metadata, codesign validity, and required embedded resources. |
 | **Asset Verification** | `./Scripts/verify-release-asset-list.sh` | Verifies published GitHub release asset inventories to prevent missing or mismatched assets. |
+| **CI Cache Key** | `./Scripts/ci-cache-key.sh` | Generates isolated SwiftPM cache keys by runner OS, architecture, label, and Xcode version to prevent cross-image cache pollution. |
+| **CI Hygiene** | `./Scripts/ci-hygiene.sh` | Lints shell script syntax (`sh -n`), property lists (`plutil -lint`), and whitespace/formatting hygiene. Shared across local and hosted CI. |
+| **Purge Stale Module Cache** | `./Scripts/purge-stale-module-cache.sh` | Purges stale Swift module caches across toolchains to eliminate compiler lockups and cross-SDK corruption. |
 | **Publish Verified Draft** | `GH_REPO=owner/repo ./Scripts/publish-release.sh <tag> <dist-dir>` | Requires the remote tag to match HEAD, uploads to a draft, verifies exact notes and downloaded bytes, then publishes and rechecks. Refuses to overwrite a public release. |
 | **Seed Issues** | `./Scripts/seed-good-first-issues.sh` | Seeds curated, self-contained `good first issue` candidates for open-source contributors. |
 | **Safari Live Harness** | `./Scripts/safari-harness.sh --dry-run \| --live \| --add-snippet` | Drives the **installed** `/Applications/DevType.app` in a real Safari with real HID key events against `Tests/Fixtures/SafariHarness/safari-harness.html`, then writes a pass/fail table, field values and DevType log lines to `tmp/`. You launch it; it types for a few minutes. See [Safari live harness](#safari-live-harness). |
+| **Snippet command** | `./Scripts/devtype [--release] …` | Runs the `devtype-cli` product against the snippet library. Build with `swift build --product devtype-cli`. Not part of `DevType.app`. See [Command line](#command-line). |
 
-The resolver and verification scripts have dedicated self-tests (`test-signing-identity.sh`, `test-release-dmg-select.sh`, `test-release-signing-preflight.sh`, `test-release-preflight.sh`, `test-release-asset-list.sh`, `test-release-guard.sh`, `test-release-version.sh`, `test-export-lcov.sh`) that run inside local CI with stubbed environments.
+The resolver and verification scripts have dedicated self-tests (`test-signing-identity.sh`, `test-release-dmg-select.sh`, `test-release-signing-preflight.sh`, `test-release-preflight.sh`, `test-release-asset-list.sh`, `test-release-guard.sh`, `test-release-version.sh`, `test-export-lcov.sh`, `test-ci-cache-isolation.sh`, `test-purge-stale-module-cache.sh`, `test-verify-packaged-bundle.sh`) that run inside local CI with stubbed environments.
 
 ### Safari live harness
 
@@ -85,11 +90,35 @@ The resolver and verification scripts have dedicated self-tests (`test-signing-i
 
 **Output**: `tmp/safari-harness-<live|dry>-<time>.txt`, with the case table, each field's AX and page value, the page's own per-input event log, DevType's `[SourceFocus]`, settle-trail, `[Debounce]` and `[Inject] outcome=` lines per case (from `/usr/bin/log show`, filtered to the running DevType pid), and the once-per-launch `[Debounce] event timestamp units ratio=` line, asserted to be about 1 (DevType logs it once per launch, from its first key event, so relaunch DevType first if you want the live run to produce a fresh measurement; "not found" is reported as such, never as a pass). Exit code 0 = every case passed (skips allowed and listed), 1 = a failure or inconclusive case, 2 = preflight refused, 3 = aborted or cases not run.
 
+### Command line
+
+`devtype-cli` is the SwiftPM product. The executable target is `DevTypeCLIApp`; the library `DevTypeCLI` is what `DevTypeCLITests` calls in process. The binary is not named `devtype`: `Scripts/package-app.sh` finds a product path ending in `DevType`, and the default macOS volume is case-insensitive, so that name would collide with `DevType.app`. Packaging does not copy this binary into the app or the disk image. The [user guide](USER_GUIDE.md#12-command-line-devtype-cli) is the command reference.
+
+```bash
+swift build --product devtype-cli
+./Scripts/devtype --help
+./Scripts/test.sh --filter DevTypeCLITests
+```
+
+`./Scripts/devtype` prefers the `.build/debug/devtype-cli` (or `release`) symlink, then a built binary whose path contains `debug`/`Debug` or `release`/`Release`. `--release` selects the release configuration. A missing binary exits 1 and names the build command.
+
+The command calls `SnippetStore` and `MacroRenderer` in process. It does not shell out to the app. The secret store it opens is in memory, with secret purge off, so it does not talk to the keychain. Secret metadata already in the library JSON is still visible, and set, remove, and expand of a secret id are refused so a later app save is not handed a library that dropped those records.
+
+Opening a store still uses the engine's process-wide usage-stats store. The command does not record usage. Pass `--library` (a file) for a scratch library. `DEVTYPE_STORE_DIR` is a directory; the file inside it is `snippets.json`. For either of those, backups go in a `Backups` folder next to the library file. When neither is set, backups use `~/Library/Application Support/DevType`, including when the library path is the one saved in Preferences.
+
+`--json` is one pretty-printed, key-sorted object per command, with `ok`. Failures add `error` and `message` and write nothing to stderr. The token `--json` anywhere in that argument list applies to usage errors that fail during parsing. Exit 2 is `usage`. Exit 1 is everything else. Codes include `library_missing`, `library_not_file`, `not_found`, `ambiguous`, `group_not_found`, `invalid_query`, `duplicate_trigger`, `secret_refused`, `image_snippet`, `disabled`, `render_failed`, `save_refused`, and `failed`. `save_refused` covers a newer schema, a library that changed on disk, and a save that reported a failure string.
+
+A successful `snippet add` includes `seededExamples` (true when the file was missing, which is when the built-in examples are written) and `groupCreated`. Snippet objects include `id`, `trigger`, `title`, `label`, `group`, `groupId`, `enabled`, `groupEnabled`, `secret`, `caseSensitive`, `propagateCase`, `wordBoundary`, `plainText`, `createdAt`, and `updatedAt`. `replacement` is omitted for a secret. `image` and `tags` appear only when set and the row is not a secret. Search hits add `score`. Dates are ISO-8601, without a fractional second. Expand returns `text`, `cursorOffset` (`null` when the template has no cursor), `needsFillIn`, `fillFields` (`id`, `name`, `default`, `kind`, and `options` for a popup), and `trailingKeys`. `needsFillIn` is still success.
+
+`repl` prepends the invocation's `--json`, `--allow-disabled`, and `--library` onto each line unless that line already has the flag. Line flags win for `--library`. The line splitter handles whitespace, single and double quotes, and backslash escapes inside quotes. It is not a POSIX shell. `quit`, `exit`, and end of input return 0 from `repl` itself. A nested `repl` is a usage error and does not start another loop.
+
+Tests live in `Tests/DevTypeCLITests/` and use a temporary directory plus `InMemorySecretBackingStore`. They must not open `SnippetStore.shared` or the login keychain.
+
 ---
 
 ## 🧪 Testing Guidelines
 
-DevType maintains unit, fuzz, race, persistence, controller and stress tests across `Tests/ExpanderEngineTests/` and `Tests/DevTypeAppTests/`. Read the actual test summary for the selected SDK and filter; skipped tests are not passing checks. The five audit performance tests require `DEVTYPE_BENCH=1`. Isolated native pasteboard/file-version tests do not replace physical cross-application focus, Secure Input or live iCloud validation.
+DevType maintains unit, fuzz, race, persistence, controller and stress tests, including `Tests/ExpanderEngineTests/`, `Tests/DevTypeAppTests/`, and `Tests/DevTypeCLITests/`. Read the actual test summary for the selected SDK and filter; skipped tests are not passing checks. The five audit performance tests require `DEVTYPE_BENCH=1`. Isolated native pasteboard/file-version tests do not replace physical cross-application focus, Secure Input or live iCloud validation.
 
 ### Running Tests
 ```bash
@@ -107,6 +136,9 @@ DEVTYPE_BENCH=1 ./Scripts/test.sh --filter AuditBenchmark
 
 # Run a specific test class
 ./Scripts/test.sh --filter SecretSnippetStressTests
+
+# Command-line library and expansion tests
+./Scripts/test.sh --filter DevTypeCLITests
 
 # Run a single test case
 ./Scripts/test.sh --filter testBiometricGateGating

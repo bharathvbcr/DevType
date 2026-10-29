@@ -14,7 +14,7 @@ flowchart TD
 
     subgraph Core["Architecture & Internals"]
         Arch["Technical Architecture<br/>(ARCHITECTURE.md)"]
-        Targets["Subsystems & Targets:<br/>DevTypeApp · DevTypeAppCore · ExpanderEngine · DevTypeSafety"]
+        Targets["Subsystems & Targets:<br/>DevTypeApp · DevTypeAppCore · ExpanderEngine · DevTypeSafety · DevTypeCLI"]
         Arch --- Targets
     end
 
@@ -32,7 +32,7 @@ flowchart TD
 
 | Guide | What it covers |
 |---|---|
-| [User guide](USER_GUIDE.md) | Installation, your first snippet, search, AI, voice, secrets, Recent Activity, and everyday settings |
+| [User guide](USER_GUIDE.md) | Installation, your first snippet, search, AI, voice, secrets, Recent Activity, everyday settings, and the checkout-only command line |
 | [Permissions](PERMISSIONS_GUIDE.md) | Accessibility, Input Monitoring, microphone, Speech Recognition, and recovery |
 | [Macro reference](MACRO_REFERENCE.md) | Mustache and TextExpander syntax, fill-ins, dates, counters, and nesting |
 | [Voice dictation](VOICE_DICTATION.md) | Recognizer choices, readiness, correction, delivery modes, and saved recordings |
@@ -44,14 +44,15 @@ flowchart TD
 
 | Guide | What it covers |
 |---|---|
-| [Development](DEVELOPMENT.md) | Repository commands, tests, signing, installation, and release gates |
-| [Architecture](ARCHITECTURE.md) | SwiftPM targets, injection lifecycle, providers, persistence, and diagnostics |
+| [Development](DEVELOPMENT.md) | Repository commands, tests, `devtype-cli`, signing, installation, and release gates |
+| [Architecture](ARCHITECTURE.md) | SwiftPM targets, the command-line targets, injection lifecycle, providers, persistence, and diagnostics |
 | [Contributing](../CONTRIBUTING.md) | Contribution workflow and engineering expectations |
 | [Website](WEBSITE.md) | Static site ownership, local preview, verification, and hosting |
 
 ## Version history and engineering records
 
 - [Release notes](releases/) — version-specific changes; the [published releases](https://github.com/bharathvbcr/DevType/releases) determine availability. [CHANGELOG.md](../CHANGELOG.md) mirrors the curated notes.
+- [1.5.0 notes](releases/v1.5.0.md) — Safari delivery hardening, WebKit control identity, event-timestamp unit calibration, eager clipboard publication with marker precedence, voice dictation recovery on macOS 27, and the live Safari test harness.
 - [1.3.0 notes](releases/v1.3.0.md) — image-snippet bytes, Espanso image round-trip, library restore, `devtype://`, and table formatting in the preview. Also includes the unpublished 1.2.1 changes: case-matching expansions, off-main selection reads, local Lappi routing, and string tables.
 - [1.2.1 notes](releases/v1.2.1.md) — case-matching expansions, off-main selection reads, local Lappi routing, and string tables.
 - [1.2.0 notes](releases/v1.2.0.md) — structured refusals, honest recovery, voice remedies, a preview that answers, Recent Activity, Electron paste fallback, and on-device AI deferral handling.

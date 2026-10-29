@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Run the devtype-cli binary. Build it first with: swift build --product devtype-cli
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+config="debug"
+if [[ "${1:-}" == "--release" ]]; then
+  config="release"
+  shift
+fi
+
+# SwiftPM links `.build/debug` at the product directory. Xcode's driver spells
+# that directory `Debug` and keeps the real binary under `.build/out/Products`.
+found=""
+linked="${ROOT}/.build/${config}/devtype-cli"
+if [[ -x "${linked}" ]]; then
+  found="${linked}"
+elif [[ -d "${ROOT}/.build" ]]; then
+  found="$(
+    find "${ROOT}/.build" -name devtype-cli -type f -perm +111 2>/dev/null |
+      while IFS= read -r path; do
+        case "${path}" in
+          */debug/devtype-cli|*/Debug/devtype-cli)
+            [[ "${config}" == "debug" ]] && printf '%s\n' "${path}"
+            ;;
+          */release/devtype-cli|*/Release/devtype-cli)
+            [[ "${config}" == "release" ]] && printf '%s\n' "${path}"
+            ;;
+        esac
+      done | sort | tail -n 1 || true
+  )"
+fi
+if [[ -z "${found}" || ! -x "${found}" ]]; then
+  echo "devtype-cli is not built. From the repository root: swift build --product devtype-cli" >&2
+  exit 1
+fi
+exec "${found}" "$@"

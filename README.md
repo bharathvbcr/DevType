@@ -71,6 +71,8 @@ cd DevType
 
 The bundle is written to `.build/DevType.app`. Use `./Scripts/signing-identity.sh` to inspect the selected identity. Packaging, local installation, and release publication are distinct operations; the [developer guide](docs/DEVELOPMENT.md) covers each.
 
+The snippet command is a separate product, `devtype-cli`. From the repository root, `swift build --product devtype-cli` and then `./Scripts/devtype` run it. Packaging does not copy it into `.build/DevType.app` or the disk image. The [user guide](docs/USER_GUIDE.md#12-command-line-devtype-cli) covers the commands.
+
 [Contributing](CONTRIBUTING.md) · [Architecture](docs/ARCHITECTURE.md) · [Support](SUPPORT.md) · [Security reports](SECURITY.md#-reporting-a-vulnerability)
 
 ## Contributors

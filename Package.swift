@@ -13,6 +13,13 @@ let package = Package(
             name: "DevType",
             targets: ["DevTypeApp"]
         ),
+        // Agent and script command. The binary is `devtype-cli`, not `devtype`:
+        // packaging searches for a path ending in `DevType`, and the volume is
+        // case-insensitive.
+        .executable(
+            name: "devtype-cli",
+            targets: ["DevTypeCLIApp"]
+        ),
         .library(
             name: "ExpanderEngine",
             targets: ["ExpanderEngine"]
@@ -91,6 +98,23 @@ let package = Package(
                 .linkedFramework("Carbon")
             ]
         ),
+        // Agent-facing command over the real library and macro renderer. A library so
+        // `DevTypeCLITests` can call it without spawning the executable.
+        .target(
+            name: "DevTypeCLI",
+            dependencies: ["ExpanderEngine"]
+        ),
+        .executableTarget(
+            name: "DevTypeCLIApp",
+            dependencies: ["DevTypeCLI"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("ApplicationServices"),
+                .linkedFramework("Carbon"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("Security")
+            ]
+        ),
         // Test support, not product code: the single reader source-contract tests use so a contract
         // covers a whole `Type.swift` + `Type+*.swift` family. Test targets cannot share a file.
         .target(
@@ -119,6 +143,10 @@ let package = Package(
         .testTarget(
             name: "SafariHarnessCoreTests",
             dependencies: ["SafariHarnessCore", "SourceTreeTestSupport"]
+        ),
+        .testTarget(
+            name: "DevTypeCLITests",
+            dependencies: ["DevTypeCLI"]
         )
     ]
 )

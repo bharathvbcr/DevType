@@ -2,6 +2,25 @@
 
 Curated notes for each tag live in `docs/releases/<tag>.md`. The publisher reads that file. This changelog matches it. Older tags are linked, not copied.
 
+## [Unreleased]
+
+### Continuous integration & build tooling
+
+- **Swift build caches are strictly isolated by runner and Xcode.** A macOS 14 restore prefix could load a macOS 26 build cache. `Scripts/ci-cache-key.sh` keys caches by runner OS, architecture, runner label, and Xcode version in `.github/actions/swift-build-cache/action.yml`, `.github/workflows/ci.yml`, and `release.yml`.
+- **Shared hygiene and bundle verification across local CI and workflows.** Script syntax (`sh -n`), plist linting (`plutil -lint`), and file hygiene are unified into `Scripts/ci-hygiene.sh`. `Scripts/purge-stale-module-cache.sh` purges cross-SDK compiler module caches before test runs, and `Scripts/verify-packaged-bundle.sh` validates the packaged `.build/DevType.app` bundle structure, codesign validity, and embedded resources.
+- **Dedicated self-tests** added to the local CI suite: `Scripts/test-ci-cache-isolation.sh`, `Scripts/test-purge-stale-module-cache.sh`, and `Scripts/test-verify-packaged-bundle.sh`.
+
+### Documentation & acknowledgements
+
+- **Third-party component acknowledgements.** Added explicit attributions in `LICENSE` and `README.md` for SnipKey Kit (abbreviation matching, macro rendering, keyboard layout buffer, Hangul composition, sync helpers), Google Gemini Jot (macOS dictation workflow inspiration), whisper.cpp (local speech-to-text), and Yams (Espanso YAML parsing).
+- **Updated copyright holder** in `LICENSE`.
+
+### Command line
+
+- **Checkout command for the snippet library.** `devtype-cli` reads and writes the library the app uses, through `SnippetStore` and `MacroRenderer`. `./Scripts/devtype` runs the built binary. The product is not named `devtype`, and packaging does not put it in `DevType.app` or the disk image.
+- **Secrets stay in the keychain.** `secret list` prints metadata. Set, remove, and expand refuse a secret id. The command does not accept or print a value.
+- **A missing library is not created by a read.** The first `snippet add` on a new file also writes the built-in examples (`:eml`, `:tdate`, `:hello`, `:func`).
+
 ## [1.5.0]
 
 **DevType 1.5.0 — Safari delivery hardening, voice dictation recovery, and verified replace**

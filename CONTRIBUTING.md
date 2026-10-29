@@ -58,6 +58,10 @@ This creates a certificate named `DevType Local Signing` in your login keychain.
 
 # Run full local CI pipeline (checks syntax, plists, tests, and builds release bundle)
 ./Scripts/ci-local.sh
+
+# Snippet command (not part of DevType.app)
+swift build --product devtype-cli
+./Scripts/devtype --help
 ```
 
 ---
@@ -72,8 +76,11 @@ The project is organized into modular SwiftPM targets:
 | `Sources/DevTypeAppCore/` | AppDelegate, windows, menus, preferences, and panels |
 | `Sources/ExpanderEngine/` | Matching, macros, injection, AI, voice, storage, and platform adapters |
 | `Sources/DevTypeSafety/` | Objective-C window/KVC exception boundaries and legacy Keychain bridge |
+| `Sources/DevTypeCLI/` | Command-line library over the real snippet store and macro renderer |
+| `Sources/DevTypeCLIApp/` | `devtype-cli` executable. Not copied into the app bundle |
 | `Tests/ExpanderEngineTests/` | Engine behavior and isolated platform tests |
 | `Tests/DevTypeAppTests/` | AppKit controller and application integration tests |
+| `Tests/DevTypeCLITests/` | Command-line behavior against a temporary library |
 | `Scripts/` | Build, validation, packaging, and release commands |
 | `docs/` | Current guides, versioned records, and static website |
 
@@ -89,7 +96,7 @@ When writing code for DevType, please keep the following core principles in mind
 - **Zero telemetry, always**: never add analytics, network logging, crash reporting, or usage-tracking SDKs. There is no exception to this one, and no setting that turns it on.
 - **Offline by default; network only when the user asks**: core expansion and deterministic tools work without the internet; speech assets and local models must first be available. A handful of features *may* reach out, but only after the user explicitly enables them, and each is off until they do — cloud transcription (`GeminiTranscriptionClient`), local LLM servers on `localhost` (`OllamaCorrector`, `OpenAICompatibleCorrector`), Whisper model downloads (`WhisperServerController`), and the update check (`UpdateChecker`). If you add a network path, it must follow the same shape: opt-in, off by default, disclosed in the UI, and sending nothing about the user or their machine beyond what the feature strictly requires.
 - **Fail-Closed Security**: Never capture or process keystrokes during password entry (`NSSecureTextField`), Secure Event Input locks, or in muted applications.
-- **Secrets Protection**: Secrets are independent records with AES-GCM-protected values and a configurable authentication gate. Never expose values in logs or diagnostic exports. Clipboard markers request exclusion from compatible managers but cannot enforce another process’s retention policy.
+- **Secrets Protection**: Secrets are independent records with AES-GCM-protected values and a configurable authentication gate. Never expose values in logs, diagnostic exports, or command-line output. `devtype-cli` lists metadata and does not accept a value. Clipboard markers request exclusion from compatible managers but cannot enforce another process’s retention policy.
 
 ### 2. Thread Safety & Concurrency
 - **UI Safety**: All AppKit UI operations, windows, and panels MUST execute on `@MainActor`.
@@ -118,6 +125,9 @@ Every fix and feature must be accompanied by comprehensive unit tests.
 
 # Run specific test suite
 ./Scripts/test.sh --filter SecretSnippetTests
+
+# Command-line library and expansion tests
+./Scripts/test.sh --filter DevTypeCLITests
 
 # Run full local validation suite
 ./Scripts/ci-local.sh

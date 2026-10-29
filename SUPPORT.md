@@ -8,7 +8,7 @@ Welcome to the DevType support guide. Whether you are encountering an issue, hav
 
 Before submitting an issue, please check our documentation resources:
 
-- **[User Guide](docs/USER_GUIDE.md)**: Complete guide to using DevType, creating snippets, using AI features, Smart Dictation, and managing shortcuts.
+- **[User Guide](docs/USER_GUIDE.md)**: Complete guide to using DevType, creating snippets, using AI features, Smart Dictation, and managing shortcuts. The [command line](docs/USER_GUIDE.md#12-command-line-devtype-cli) is a source-checkout tool. The installed app does not include it.
 - **[Voice Dictation Guide](docs/VOICE_DICTATION.md)**: Details on Smart Voice Dictation, speech engines, and thought-revision processing.
 - **[Macro Reference](docs/MACRO_REFERENCE.md)**: Syntax reference for Mustache tags (`{{date}}`, `{{calc}}`, `{{clipboard}}`) and TextExpander tokens (`%filltext%`, `%|`, `%date%`).
 - **[Permissions Guide](docs/PERMISSIONS_GUIDE.md)**: Resolving macOS Input Monitoring and Accessibility permission issues.
@@ -28,6 +28,7 @@ Before submitting an issue, please check our documentation resources:
 6. If the report says **input or target application changed**, place the cursor in the intended field and retype the trigger. DevType cancels instead of erasing or replaying a key into a changed target.
 7. If the trigger is erased and then typed back (`failedSilent` / `restoring trigger`) in Cursor, VS Code, Antigravity, or another Chromium app, open **Diagnostics**. A permission failure is not the cause when Listen, Accessibility, and Post Events are granted. Chromium/Electron delivery does not require a stable accessibility caret range after the erase; if paste still fails, the log names the refusal (target field/app changed, clipboard ownership lost, Post Events, Secure Input, or Cmd+V not posted).
 8. If the diagnostic report identifies a permission failure, follow the [Permissions Guide](docs/PERMISSIONS_GUIDE.md). For an erase refusal, include the target app and the diagnostic report with the bug report. `expectedTextInScan` records whether the trigger was found; `scan=caretWindow` means only part of a large field was searched.
+9. In Safari or complex web apps where DOM nodes dynamically re-render, DevType verifies control identity (`ControlIdentity`) across node replacements. If you type during an expansion, typing surrenders the hold cleanly and restores your swallowed terminator; a click surrenders the hold without typing the terminator at the new caret location.
 
 ### 2. How do I trigger On-Device AI text transforms?
 Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A). You can also type assigned trigger abbreviations (e.g. `:fix`, `:rw`) when configured in **Preferences → AI**. Note that on-device Apple Foundation Models require macOS 26+, a compatible Mac, Apple Intelligence enabled, and an available system model, while **Remove Markdown** runs offline locally on all supported macOS versions (macOS 14+).
@@ -39,8 +40,13 @@ Select any text in any macOS app and press **`⌘⌥A`** (Command + Option + A).
 ### 3. How do I use Smart Voice Dictation?
 Press or hold **`⌘⌥V`** to activate push-to-talk or toggle dictation. You can configure your speech recognition engine (Apple Speech, Local AI, Local Whisper, or Gemini) and custom vocabulary under **Preferences → Voice**.
 
+If dictation stops or fails to capture audio, check the diagnostic message: DevType distinguishes between refused buffer sizes, full rings, stalled devices, disconnected mics, and silence auto-stop (which pauses recording after 2.5 s of silence for wired mics or 6.0 s for Bluetooth/AirPlay). "No audio was captured" indicates recording stopped before audio arrived, while "No speech detected" means audio was heard but held no intelligible words.
+
 ### 4. How do I migrate my snippets from TextExpander or Espanso?
 Open the DevType menu bar icon and choose **Import Snippets…** (or go to Preferences → Snippets), then select your TextExpander settings bundle (`.textexpandersettings` / `.textexpanderbackup`) or an Espanso config folder / match YAML file. Your library can be exported again as DevType JSON, Espanso YAML, an Espanso match folder, or CSV via **Export…**.
+
+### 5. Can I drive DevType from the terminal?
+The installed app and the disk image do not include a command. From a source checkout, `./Scripts/devtype` runs `devtype-cli`, which reads and writes the same snippet library. It lists secret names and will not show or change a secret value. See [Command line](docs/USER_GUIDE.md#12-command-line-devtype-cli).
 
 ---
 

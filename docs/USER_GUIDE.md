@@ -18,6 +18,7 @@ Welcome to the comprehensive user manual for **DevType** — the fast, native ma
 9. [Importing & Exporting Libraries](#9-importing--exporting-libraries)
 10. [Preferences & Customization](#10-preferences--customization)
 11. [Troubleshooting & FAQs](#11-troubleshooting--faqs)
+12. [Command line (`devtype-cli`)](#12-command-line-devtype-cli)
 
 ---
 
@@ -181,6 +182,8 @@ sequenceDiagram
 ### Live Diff Preview
 Proofread and Remove Markdown replace in place by default; every other action streams into a preview panel showing the result (with diff view). Press `Enter` to accept, `Esc` to discard, or use Retry to re-roll the result. Per-action delivery can be switched between direct replace and preview under **Preferences → AI**, and **Undo last AI** at the top of the Command Palette reverts the most recent transform.
 
+**Verified replace & Safari delivery.** When inserting an AI result, DevType waits for focus to return to the specific text control rather than pasting blindly into a window or container element. In browsers such as Safari, DevType uses a proven read mirror to verify that the replace landed. If the field still holds the original after the miss window, the result remains safely on your clipboard with a "didn't land" notice and is never pasted twice.
+
 **Changing your mind mid-generation.** While a preview is still generating you can change the tone, pick a different action, press Retry, or open a second preview. DevType stops the earlier request and runs the new one after it unwinds, so the preview never goes blank or reports that another transform is already running. A result that arrives for a request you have already replaced is ignored. If the generated text is blank, the preview shows it as a failure and leaves Replace unavailable, so a selection is never overwritten with nothing.
 
 ### When macOS pauses the on-device model
@@ -209,6 +212,7 @@ flowchart LR
 - **Thought-Revision & Smart Polish**: Automatically handles mid-sentence self-corrections ("tomorrow at 3... actually make that 4 PM"), removes verbal fillers (*"um"*, *"uh"*, *"like"*), and applies custom vocabulary.
 - **Multi-Register Tone**: Style transcripts for *Natural*, *Email*, *Chat*, *Code* (identifier formatting), or *Verbatim*.
 - **Liquid Glass HUD**: Non-activating floating HUD using Apple Liquid Glass (`NSGlassEffectView`) on macOS 26+ (with `NSVisualEffectView` fallback on earlier systems) that meters microphone levels and streams live partial transcripts without stealing keyboard focus.
+- **Silence Auto-Stop & Device Migration**: Sessions automatically terminate when silence is detected (2.5 s for wired mics, 6.0 s for Bluetooth/AirPlay). Switching or disconnecting your microphone mid-dictation automatically continues recording on the new default input.
 
 For complete voice architecture details, see [docs/VOICE_DICTATION.md](VOICE_DICTATION.md).
 
@@ -245,7 +249,7 @@ Open **menu bar → Copy Secret → Manage Secrets…** to add a secret with a n
 
 Copies clear after 90 seconds if DevType still owns the clipboard. Concealed/transient markers request exclusion from compatible clipboard managers, but cannot stop another app from retaining a copy. The submenu shows up to 20 entries and reports omitted entries; use Search Secrets for the rest.
 
-Values are AES-GCM encrypted with a master key in Keychain. Secret metadata occupies a separate collection in the library; values do not enter library JSON or snippet exports. If storage needs attention, use **Preferences → Advanced → Repair Secret Storage**. See [Secrets](../SECRETS.md) for recovery and device-only key limitations.
+Values are AES-GCM encrypted with a master key in Keychain. Secret metadata occupies a separate collection in the library; values do not enter library JSON or snippet exports. If storage needs attention, use **Preferences → Advanced → Repair Secret Storage**. See [Secrets](../SECRETS.md) for recovery and device-only key limitations. The [command line](#12-command-line-devtype-cli) can list that metadata. It will not print or change a value.
 
 ---
 
@@ -308,9 +312,102 @@ When enabled, DevType checks that the original process and field still match bef
 ## 11. Troubleshooting & FAQs
 
 - **Text is not expanding**: Press **`⌘⇧P`** to open Permission Recovery and inspect **Last inject**. A permission failure and an erase refusal need different remedies; see [expansion troubleshooting](../SUPPORT.md#1-snippets-are-not-expanding-when-i-type-what-should-i-do). A **⚠** on the menu bar item is shown on **Diagnostics** (`⇧⌘D`), not on Permission Recovery.
+- **Safari / WebKit expansions**: In web pages where fields dynamically re-render (such as SPAs or complex forms), DevType tracks element identity (`ControlIdentity`) across node replacements. If you type during an expansion, typing in the same app surrenders the hold cleanly and restores your terminator without mangling text.
+- **Voice dictation stopped or reports an error**: DevType provides distinct diagnostic notices: a full buffer ring, stalled audio device, disconnected microphone, or quiet silence each report their exact cause. "No audio was captured" indicates recording stopped before audio arrived, while "No speech detected" means audio was captured but held no intelligible words.
 - **Expansion cancelled after moving the cursor**: Refocus the intended field and retype the trigger. DevType rechecks the target field, input and live permissions before delayed paste and cursor actions. Switching to a different field or app can cancel the pending operation. A fluctuating accessibility caret range in Chromium/Electron editors after the trigger is erased is not treated as a moved caret.
 - **Paste reported as unverified**: DevType posted the paste but could not confirm a relevant text change. Check the target before repeating the expansion; the app does not automatically replay an ambiguous paste.
 - **Library conflict recovery**: Recovery validates the selected library and saves verified recovery copies before removing alternate versions. An adoption failure keeps recovery alternatives. If the library was adopted but cleanup is pending, the dialog shows that status and the recovery folder; retry cleanup after the underlying file-access problem is resolved.
 - **Accidental expansion in games or terminals**: Add the app to your **Muted Apps** list in Preferences → General or choose **Mute Frontmost App** from the menu bar.
 - **Shortcut conflicts**: Re-record your global hotkeys in **Preferences → Hotkeys**.
 - **Need help?**: Check our [Support Guide](../SUPPORT.md) or open an issue on GitHub.
+
+---
+
+## 12. Command line (`devtype-cli`)
+
+The installed app and the disk image do not include a terminal command. `devtype-cli` is built from a checkout of this repository. It reads and writes the same snippet library the app uses, and it expands templates with the same macro renderer.
+
+### Build and run
+
+From the repository root:
+
+```sh
+swift build --product devtype-cli
+./Scripts/devtype --help
+./Scripts/devtype --release status
+```
+
+`./Scripts/devtype` runs the debug build. Pass `--release` before the command to run the release build. With no arguments, the command prints help and exits. It starts an interactive session only when you run `repl`.
+
+### Which library
+
+`--library` is the path of one JSON file. Without it, the command uses the first of these that applies:
+
+1. `snippets.json` inside the directory named by `DEVTYPE_STORE_DIR`
+2. The library path saved by the app (**Preferences → Snippets**)
+3. `~/Library/Application Support/DevType/snippets.json`
+
+`status` with no `--library` reads the library the app is using. Point experiments at another file:
+
+```sh
+./Scripts/devtype --library /tmp/scratch.json snippet add --trigger :hi --text "hello"
+```
+
+`status`, list, get, search, set, remove, and `expand --trigger` leave a missing file uncreated and report that it is missing. A path that is a directory is refused. `snippet add` checks `--trigger` and `--text` before it creates anything. The first add on a new file also writes the built-in examples `:eml`, `:tdate`, `:hello`, and `:func`, the same examples the app writes on a first launch. A library selected with `--library` or `DEVTYPE_STORE_DIR` keeps its backups in a `Backups` folder next to that file.
+
+### Commands
+
+```text
+devtype-cli [--json] [--library <file>] <command>
+
+status
+group list
+secret list
+snippet list [--group <name>] [--limit <n>]
+snippet search <query> [--limit <n>]
+snippet get <id-or-trigger>
+snippet add --trigger <trigger> --text <body> [--title <title>] [--group <name>]
+            [--enabled true|false] [--case-sensitive true|false]
+            [--propagate-case true|false] [--word-boundary true|false]
+snippet set <id-or-trigger> [--text <body>] [--title <title>] [--trigger <trigger>]
+            [--group <name>] [--enabled true|false] [--case-sensitive true|false]
+            [--propagate-case true|false] [--word-boundary true|false]
+snippet remove <id-or-trigger>
+expand (--trigger <trigger> | --text <body>) [--typed <typed>] [--now <iso8601>]
+       [--clipboard <text>] [--allow-disabled]
+repl
+```
+
+`snippet list` and `group list` show user snippets and groups. Secrets are not rows in those lists. `secret list` is id, title, and whether the secret is enabled.
+
+`snippet get`, `set`, and `remove` take a snippet id or a trigger. An id match is exact. A trigger match prefers the exact spelling, then a unique case-insensitive match. Two matches is an error that names the ids. Two case-sensitive spellings, such as `Hi` and `hi`, are allowed to coexist, so `get HI` matches both.
+
+`snippet add` uses the trigger as the title when you omit `--title`, turns word boundary on, and puts the snippet in **General**. `--group` with a new name creates that user group. There is no command to rename or delete a group. Removing the last snippet leaves the empty group. `snippet set` needs at least one change. An exact trigger already in the library is refused. A case-insensitive match is also refused when neither snippet is case-sensitive.
+
+A search query that starts with `-` is read as a flag until you put `--` in front of it:
+
+```sh
+./Scripts/devtype snippet search -- -tag:work
+```
+
+Search includes disabled snippets. An empty query is a usage error.
+
+### Secrets
+
+`secret list`, and `snippet get` of a secret's id, print metadata only: no trigger, no replacement, and no value. `snippet set`, `snippet remove`, and `expand` refuse a secret id. Adding a snippet into the reserved secret group is refused. The command never asks you to type a secret, never prints one, and does not open the keychain.
+
+### Expansion
+
+`expand --trigger` renders a saved snippet. `expand --text` renders the text you pass and does not open a library. Expansion does not read the clipboard. Pass `--clipboard` when the template needs that text. `--now` is an ISO-8601 time for date tokens; omit it to use the current time. `--typed` changes case only when that snippet was saved with `--propagate-case true`.
+
+A disabled snippet, or a snippet in a disabled group, is refused unless you pass `--allow-disabled`. An image snippet is refused; the app pastes those. A template that needs fill-in fields returns the rendered text and the fields. The command does not prompt.
+
+### JSON, repl, and exit status
+
+`--json` prints one pretty-printed JSON object on stdout. Failures then go to stdout as well, including a usage error when the argument list contains the token `--json`. Without it, `expand` prints the rendered text followed by a newline, lists are tab-separated, and other errors are `error: …` on stderr.
+
+Exit status is 0 for success, 2 when the arguments are wrong, and 1 for any other failure.
+
+`repl` reads one command per line until `quit`, `exit`, or end of input. Blank lines are ignored. It keeps `--json`, `--library`, and `--allow-disabled` from the way you started it. A line can pass its own `--library`. A line cannot turn those session flags off. The greeting is on stderr, so a JSON session's stdout stays the command results. Leaving the repl exits 0 even when a line failed; read each line's own result.
+
+The command does not import or export a library, and it does not create, edit, or delete secrets. Flag values may be written as `--flag value` or `--flag=value`. On, off, and the other yes/no flags accept `true`, `false`, `yes`, `no`, `1`, and `0`. `--limit` is a positive integer up to 100000.

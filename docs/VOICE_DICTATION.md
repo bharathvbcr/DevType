@@ -34,9 +34,9 @@ flowchart TD
 | Local Whisper | A local `whisper.cpp` server plus deterministic cleanup | Needs an installed server and verified model; audio goes to the configured loopback endpoint |
 | Gemini | Cloud transcription with built-in formatting, followed by local cleanup | Requires your API key and separate cloud-audio consent; audio and steering instructions go to Google |
 
-On macOS 26+, Apple recognition prefers **SpeechAnalyzer** when its locale assets and service are ready. Older systems use the legacy `SFSpeechRecognizer` path with on-device recognition required. The registry can fall back to the legacy provider only after that provider independently reports ready. An unavailable cloud provider is refused rather than silently changing the selected route.
+On macOS 26+, Apple recognition prefers **SpeechAnalyzer** when its locale assets and service are ready. On macOS 27, `installAudioTap` is utilized where available, and the audio buffer pool is sized directly from the hardware format (supporting 100 ms / 4,800-frame buffers at 48 kHz without dropping frames). Older systems use the legacy `SFSpeechRecognizer` path with on-device recognition required. The registry can fall back to the legacy provider only after that provider independently reports ready. An unavailable cloud provider is refused rather than silently changing the selected route.
 
-Speech assets may need installation. **Preferences → Voice** offers readiness and setup actions; checking readiness itself does not authorize a download. Local Whisper setup can download the pinned `base.en` model from Hugging Face. Once assets are installed, local recognition does not require an internet connection. A local server remains a separate process responsible for the data it receives.
+Speech assets may need installation. **Preferences → Voice** offers readiness and setup actions; checking readiness itself does not authorize a download, and DevType reserves the locale asset before reading its status so macOS does not prompt to download models that are already installed. Local Whisper setup can download the pinned `base.en` model from Hugging Face. Once assets are installed, local recognition does not require an internet connection. A local server remains a separate process responsible for the data it receives.
 
 The default Whisper endpoint is `http://127.0.0.1:8080/inference`. The default correction endpoint is `http://localhost:11434/v1/chat/completions`. DevType accepts loopback hosts only, rejects URL credentials and redirects, and bounds responses. Correction routing supports Ollama-native and OpenAI-compatible endpoints; a configured URL is not proof that a model is loaded.
 
@@ -87,6 +87,8 @@ Insertion is automatic; these modes do not add an approval step. Apple final tra
 
 Keep the intended document focused. Delivery rechecks the target and session before changing text. It can refuse when focus, selection, permissions, or the session changes. A final correction that would remove too much visible dictated text is refused so the existing words remain. If delivery is **posted, unverified**, inspect the destination before retrying: posting a paste is not proof that the editor accepted it.
 
+A session that detects silence automatically terminates after 2.5 s for wired microphones and 6.0 s for Bluetooth/AirPlay devices, preventing endless recording into a dead input. Switching or disconnecting your microphone mid-dictation automatically migrates capture to the new default input into the same recording (retrying transient Core Audio -10868 errors and accommodating up to two device migrations per session).
+
 ## Correction and vocabulary
 
 The correction pipeline supports filler cleanup, self-correction handling, custom vocabulary, and Natural, Email, Chat, Code, or Verbatim styling. Use vocabulary entries for names or identifiers that recognition repeatedly misses. Model output can still change meaning; review dictated text, especially names, numbers, and code.
@@ -103,13 +105,14 @@ Audio is journaled to `capture.caf` inside a per-session folder at:
 
 These local records can contain your voice and transcript. They support recovery when recording, transcription, or delivery is interrupted; local processing does not mean nothing is saved. Use the application's voice history/recovery controls to inspect saved sessions.
 
-The session coordinator owns capture, recognition, correction, and delivery. Generation checks reject retired work; a watchdog bounds the overall session. Recovery writes use atomic replacement and size limits. A transcript existing on disk does not prove it reached the target app.
+The session coordinator owns capture, recognition, correction, and delivery. Generation checks reject retired work; a watchdog bounds the overall session. Recovery writes use atomic replacement and size limits. A transcript existing on disk does not prove it reached the target app. The resampler flushes its withholding tail upon stop, ensuring short clips upload complete data rather than empty FLAC files. Terminal records and activity history safely skip unreadable entries rather than discarding historical records.
 
 Detailed voice tracing is **off by default** and can include dictated text when enabled. Review local recordings and traces before sharing them. Ordinary diagnostic summaries use bounded, redacted outcomes; do not attach your entire application-support folder to a bug report.
 
 ## Troubleshooting
 
 - **Not ready:** read the selected engine's reason in Voice preferences. Resolve its permission, asset, model, or endpoint requirement before recording again.
+- **Specific capture failures:** DevType diagnoses capture issues distinctly: refused buffers, full rings, disconnected microphones, and audio device stalls each emit targeted diagnostics rather than a generic "No speech detected" message. "No audio was captured" is kept strictly for stops before the first buffer arrives.
 - **No microphone:** check the selected input device and Microphone grant; reconnecting headphones can change the active device.
 - **Local server unavailable:** start the configured server and confirm its model is loaded. Readiness of the server and installation of its model are separate checks.
 - **Cloud refuses before capture:** both the API key and the explicit cloud-audio consent must be present. Choosing Gemini alone grants neither.
