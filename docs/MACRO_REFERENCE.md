@@ -40,6 +40,7 @@ flowchart TD
 6. [Generated Values (UUID / Random / Counter)](#6-generated-values-uuid--random--counter)
 7. [Case Transforms](#7-case-transforms)
 8. [Real-World Snippet Recipes](#8-real-world-snippet-recipes)
+9. [Testing Templates from the Command Line](#9-testing-templates-from-the-command-line)
 
 ---
 
@@ -311,3 +312,22 @@ Clipboard text, fill-in values, and generated values remain literal data through
 Cursor markers remain anchors until all substitutions and case transforms finish. The first cursor position in the final text wins across both syntaxes. `{{upper:abc}}%|x` produces `ABCx` with the caret before `x`; length-changing Unicode transforms and emoji use final UTF-16 coordinates.
 
 Rendering is bounded to 1,048,576 UTF-16 units, 4,096 tokens/operations, and a cumulative transformation-work budget. The existing nested-reference depth/substitution/output limits also apply. A rendering-budget failure or overlapping transform structure refuses the expansion with an explicit error; it never sends partial text or trailing keys. Unknown tags and malformed math expressions retain their existing literal behavior.
+
+---
+
+## 9. Testing Templates from the Command Line
+
+You can test and render macro expressions headlessly without typing into another application by using `devtype-cli expand`:
+
+```bash
+# Render an arbitrary template directly
+./Scripts/devtype expand --text 'Today is {{date:iso}} and next week is {{date:iso:+1w}}'
+
+# Render with simulated clipboard and timestamp
+./Scripts/devtype expand --text 'Copied: {{clipboard}} on {{date:iso}}' --clipboard "Sample Text" --now "2026-10-30T12:00:00Z"
+
+# Expand a saved trigger from your library (or a scratch file)
+./Scripts/devtype expand --trigger :mytrigger
+```
+
+Pass `--json` for detailed structured output including `text`, `cursorOffset` (`null` when no marker is present), `needsFillIn`, `fillFields` (`id`, `name`, `default`, `kind`, and `options`), and `trailingKeys`. See [User Guide §12](USER_GUIDE.md#12-command-line-devtype-cli).

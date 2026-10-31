@@ -404,6 +404,10 @@ For cache clients, supply `libraryID` together with `revision` only when both id
 
 Selection hardening regressions include extreme UTF-16 ranges, non-finite cache ages, reentrant/concurrent consumption, incomplete multi-range reads, deadline exhaustion, permission revocation during a command chord, clipboard ownership loss and delayed source-app activation. Multi-range fallback accepts at most 64 complete pieces and 200,000 aggregate characters including separators. Source restoration polls at 20 ms intervals for at most 25 waits. These finite tests and limits do not qualify every editor, keyboard layout, OS or native IPC stall; see the [selection delivery audit](audits/2026-09-10-selection-delivery-hardening.md) for evidence and remaining gates.
 
+## Repository configuration & agent settings
+
+`.claude/settings.json` is tracked in the repository with `"attribution": { "commit": "", "pr": "", "sessionUrl": false }` to suppress automated commit co-authorship trailers and session URLs across Claude Code versions (including older versions < 2.1.281). `.gitignore` allows `.claude/settings.json` while ignoring other machine-local `.claude/*` files such as `.claude/settings.local.json`.
+
 ## Documentation and website changes
 
 The website is static HTML, CSS, and JavaScript under `docs/`, with no package manager or build step. Follow [Website maintenance](WEBSITE.md) for local serving, browser checks, and the hosting boundary. Check Markdown links and source-backed claims when changing guides. Historical audit results should retain their original date and scope. Documentation-only edits do not establish a new app test, signing, or release result.

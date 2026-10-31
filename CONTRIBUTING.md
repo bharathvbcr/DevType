@@ -162,6 +162,8 @@ We follow clear, descriptive commit messages. Use prefixes where applicable:
 - `refactor:` Code restructuring without functional changes
 - `test:` Adding or updating tests
 
+Keep commit messages concise and focused without automated co-authorship or agent trailers (`.claude/settings.json` is checked into the repository to suppress automated attribution in cloud and local sessions).
+
 ### Step 4: Open a Pull Request
 - Push your branch: `git push origin feature/my-new-feature`.
 - Open a PR against the `main` branch.

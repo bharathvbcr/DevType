@@ -9,6 +9,7 @@ Curated notes for each tag live in `docs/releases/<tag>.md`. The publisher reads
 - **Swift build caches are strictly isolated by runner and Xcode.** A macOS 14 restore prefix could load a macOS 26 build cache. `Scripts/ci-cache-key.sh` keys caches by runner OS, architecture, runner label, and Xcode version in `.github/actions/swift-build-cache/action.yml`, `.github/workflows/ci.yml`, and `release.yml`.
 - **Shared hygiene and bundle verification across local CI and workflows.** Script syntax (`sh -n`), plist linting (`plutil -lint`), and file hygiene are unified into `Scripts/ci-hygiene.sh`. `Scripts/purge-stale-module-cache.sh` purges cross-SDK compiler module caches before test runs, and `Scripts/verify-packaged-bundle.sh` validates the packaged `.build/DevType.app` bundle structure, codesign validity, and embedded resources.
 - **Dedicated self-tests** added to the local CI suite: `Scripts/test-ci-cache-isolation.sh`, `Scripts/test-purge-stale-module-cache.sh`, and `Scripts/test-verify-packaged-bundle.sh`.
+- **Automated commit and PR attribution disabled for Claude Code.** Added tracked `.claude/settings.json` configured with `"attribution": { "commit": "", "pr": "", "sessionUrl": false }` to suppress automated co-authorship trailers across Claude Code versions (including < 2.1.281), and updated `.gitignore` to keep machine-local `.claude/*` state uncommitted.
 
 ### Documentation & acknowledgements
 
