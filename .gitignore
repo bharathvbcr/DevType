@@ -253,7 +253,7 @@ tasks/
 .worktree/
 .bench-cache/
 
-# Working reports, wave reports, audits, and release ledgers
+# Working reports, wave reports, build reports, audits, and release ledgers
 *_REPORT.md
 *_report.md
 *_REPORT.txt
@@ -266,22 +266,51 @@ audit-report*
 *AUDIT_REPORT*
 *audit_report*
 *audit-report*
-BUILD_REPORT*
-build_report*
-build-report*
-*BUILD_REPORT*
-*build_report*
-*build-report*
+reports/
+Reports/
+build/reports/
 build-reports/
 build_reports/
+build-report/
+build_report/
+BUILD_REPORT*
+BUILD_REPORTS*
+build_report*
+build_reports*
+build-report*
+build-reports*
+*BUILD_REPORT*
+*BUILD_REPORTS*
+*build_report*
+*build_reports*
+*build-report*
+*build-reports*
+*build*report*
+*build*reports*
+*BUILD*REPORT*
+*BUILD*REPORTS*
+*build report*
+*build reports*
 WAVE_REPORT*
+WAVE_REPORTS*
 wave_report*
+wave_reports*
 wave-report*
+wave-reports*
 *WAVE_REPORT*
+*WAVE_REPORTS*
 *wave_report*
+*wave_reports*
 *wave-report*
+*wave-reports*
+*wave*report*
+*wave*reports*
+*wave report*
+*wave reports*
 wave-reports/
 wave_reports/
+wave-report/
+wave_report/
 BRANCH_REPORT*
 branch_report*
 branch-report*

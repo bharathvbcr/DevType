@@ -408,6 +408,8 @@ Selection hardening regressions include extreme UTF-16 ranges, non-finite cache 
 
 `.claude/settings.json` is tracked in the repository with `"attribution": { "commit": "", "pr": "", "sessionUrl": false }` to suppress automated commit co-authorship trailers and session URLs across Claude Code versions (including older versions < 2.1.281). `.gitignore` allows `.claude/settings.json` while ignoring other machine-local `.claude/*` files such as `.claude/settings.local.json`.
 
+`.gitignore` also ignores internal working reports (build reports, wave reports, audit reports, branch and release reports), GitPulse local state and task board definitions (`.gitpulse/`, `tasks/`, `*.tasks.json`), git worktrees (`.worktrees/`), benchmark caches (`.bench-cache/`), and agent plan scratchpads (`AI_PLAN.md`, `PLAN.md`), while keeping issue templates and tracked documentation safe.
+
 ## Documentation and website changes
 
 The website is static HTML, CSS, and JavaScript under `docs/`, with no package manager or build step. Follow [Website maintenance](WEBSITE.md) for local serving, browser checks, and the hosting boundary. Check Markdown links and source-backed claims when changing guides. Historical audit results should retain their original date and scope. Documentation-only edits do not establish a new app test, signing, or release result.
