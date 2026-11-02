@@ -503,6 +503,451 @@ final class DevTypeCLITests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: corruptURL), corrupt)
     }
 
+    /// Flag-shaped tokens stay flags. Inline `=` values and tokens after `--` do not retarget the session library.
+    func testAdversarialFlagValuesDoNotRetargetOrWrite() throws {
+        defer { try? FileManager.default.removeItem(atPath: "owned") }
+        let session = directory.appendingPathComponent("session lib.json")
+        let evil = directory.appendingPathComponent("evil.json")
+        let elsewhere = directory.appendingPathComponent("env-fallback", isDirectory: true)
+        let isolated = [SnippetStore.storeDirEnvKey: elsewhere.path]
+        let seeded = run([
+            "--json", "--library", session.path,
+            "snippet", "add", "--trigger", ":hi", "--text", "session-marker",
+        ], environment: isolated)
+        XCTAssertEqual(seeded.code, 0, seeded.err + seeded.out)
+        XCTAssertEqual((try jsonObject(seeded.out))["seededExamples"] as? Bool, true)
+        let evilSeed = run([
+            "--json", "--library", evil.path,
+            "snippet", "add", "--trigger", ":hi", "--text", "evil-marker",
+        ], environment: isolated)
+        XCTAssertEqual(evilSeed.code, 0, evilSeed.err + evilSeed.out)
+        let sessionBefore = try Data(contentsOf: session)
+        let evilBefore = try Data(contentsOf: evil)
+        let triggers = try listedTriggers(session, environment: isolated)
+        XCTAssertEqual(triggers, [":eml", ":func", ":hello", ":hi", ":tdate"])
+
+        let stolen = run([
+            "--json", "--library", session.path,
+            "snippet", "set", ":hi", "--text", "--library=\(evil.path)",
+        ], environment: isolated)
+        XCTAssertEqual(stolen.code, 2, stolen.out + stolen.err)
+        XCTAssertEqual((try jsonObject(stolen.out))["error"] as? String, "usage")
+        assertFileEquals(session, sessionBefore, "stolen --text")
+        assertFileEquals(evil, evilBefore, "stolen --text evil")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "owned"))
+
+        let inline = run([
+            "--json", "--library", session.path,
+            "snippet", "set", ":hi", "--text=--library=\(evil.path)",
+        ], environment: isolated)
+        XCTAssertEqual(inline.code, 0, inline.out + inline.err)
+        let inlineSnippet = try XCTUnwrap((try jsonObject(inline.out))["snippet"] as? [String: Any])
+        XCTAssertEqual(inlineSnippet["replacement"] as? String, "--library=\(evil.path)")
+        assertFileEquals(evil, evilBefore, "inline text must not touch evil")
+
+        let restore = run([
+            "--json", "--library", session.path,
+            "snippet", "set", ":hi", "--text", "session-marker",
+        ], environment: isolated)
+        XCTAssertEqual(restore.code, 0, restore.out + restore.err)
+        let restored = try Data(contentsOf: session)
+
+        let singleDash = run([
+            "--json", "--library", session.path,
+            "snippet", "set", ":hi", "--text", "-n",
+        ], environment: isolated)
+        XCTAssertEqual(singleDash.code, 0, singleDash.out + singleDash.err)
+        XCTAssertEqual(
+            ((try jsonObject(singleDash.out))["snippet"] as? [String: Any])?["replacement"] as? String,
+            "-n"
+        )
+        let putBack = run([
+            "--json", "--library", session.path,
+            "snippet", "set", ":hi", "--text", "session-marker",
+        ], environment: isolated)
+        XCTAssertEqual(putBack.code, 0, putBack.out)
+        assertFileEquals(evil, evilBefore, "single-dash value")
+
+        let fresh = directory.appendingPathComponent("fresh-add.json")
+        let refusedAdd = run([
+            "--json", "--library", fresh.path,
+            "snippet", "add", "--trigger", ":x", "--text", "--library=owned",
+        ], environment: isolated)
+        XCTAssertEqual(refusedAdd.code, 2, refusedAdd.out + refusedAdd.err)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fresh.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "owned"))
+        let inlineAdd = run([
+            "--json", "--library", fresh.path,
+            "snippet", "add", "--trigger", ":x", "--text=--library=owned", "--group=--library=\(evil.path)",
+        ], environment: isolated)
+        XCTAssertEqual(inlineAdd.code, 0, inlineAdd.out + inlineAdd.err)
+        let addedSnippet = try XCTUnwrap((try jsonObject(inlineAdd.out))["snippet"] as? [String: Any])
+        XCTAssertEqual(addedSnippet["replacement"] as? String, "--library=owned")
+        XCTAssertEqual(addedSnippet["group"] as? String, "--library=\(evil.path)")
+        XCTAssertEqual((try jsonObject(inlineAdd.out))["seededExamples"] as? Bool, true)
+        assertFileEquals(evil, evilBefore, "inline add")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: elsewhere.appendingPathComponent("snippets.json").path))
+
+        var lines = [
+            "snippet search session-marker -- --library=\(evil.path)",
+            "snippet get -- :hi",
+            "snippet get :hi --library '\(evil.path)'",
+            "snippet set :hi --group='--library=\(evil.path)'",
+            "snippet set :hi --text --library=\(evil.path)",
+            "snippet search session-marker -- --library=\(evil.path)",
+            "quit",
+        ]
+        let repl = run(
+            ["--json", "--library", session.path, "repl"],
+            environment: isolated,
+            input: { lines.isEmpty ? nil : lines.removeFirst() }
+        )
+        XCTAssertEqual(repl.code, 0, repl.err + repl.out)
+        XCTAssertTrue(repl.err.contains("devtype-cli repl"))
+        XCTAssertFalse(repl.out.contains("devtype-cli repl"))
+        let objects = try topLevelJSONObjects(repl.out)
+        XCTAssertEqual(objects.count, 6, repl.out)
+        XCTAssertEqual(objects[0]["ok"] as? Bool, true, repl.out)
+        let searchHits = try XCTUnwrap(objects[0]["snippets"] as? [[String: Any]])
+        XCTAssertTrue(searchHits.contains { ($0["replacement"] as? String) == "session-marker" }, repl.out)
+        XCTAssertFalse(searchHits.contains { ($0["replacement"] as? String) == "evil-marker" }, repl.out)
+        let got = try XCTUnwrap(objects[1]["snippet"] as? [String: Any])
+        XCTAssertEqual(got["replacement"] as? String, "session-marker")
+        let overridden = try XCTUnwrap(objects[2]["snippet"] as? [String: Any])
+        XCTAssertEqual(overridden["replacement"] as? String, "evil-marker")
+        XCTAssertEqual(objects[3]["ok"] as? Bool, true, repl.out)
+        let grouped = try XCTUnwrap(objects[3]["snippet"] as? [String: Any])
+        XCTAssertEqual(grouped["group"] as? String, "--library=\(evil.path)")
+        XCTAssertEqual(grouped["replacement"] as? String, "session-marker")
+        XCTAssertEqual(objects[4]["ok"] as? Bool, false)
+        XCTAssertEqual(objects[4]["error"] as? String, "usage")
+        XCTAssertEqual(objects[5]["ok"] as? Bool, true, repl.out)
+        assertFileEquals(evil, evilBefore, "repl must not rewrite evil")
+        let sessionAfter = try Data(contentsOf: session)
+        XCTAssertNotEqual(sessionAfter, restored)
+        XCTAssertFalse(String(decoding: sessionAfter, as: UTF8.self).contains("evil-marker"))
+        let reread = run(["--json", "--library", session.path, "snippet", "get", ":hi"], environment: isolated)
+        let rereadSnippet = try XCTUnwrap((try jsonObject(reread.out))["snippet"] as? [String: Any])
+        XCTAssertEqual(rereadSnippet["group"] as? String, "--library=\(evil.path)")
+        XCTAssertEqual(rereadSnippet["replacement"] as? String, "session-marker")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: elsewhere.appendingPathComponent("snippets.json").path))
+
+        let leadingSpace = run([
+            "--json", "--library", session.path,
+            "snippet", "set", ":hi", "--text", " --library=\(evil.path)",
+        ], environment: isolated)
+        XCTAssertEqual(leadingSpace.code, 0, leadingSpace.out + leadingSpace.err)
+        XCTAssertEqual(
+            ((try jsonObject(leadingSpace.out))["snippet"] as? [String: Any])?["replacement"] as? String,
+            " --library=\(evil.path)"
+        )
+        assertFileEquals(evil, evilBefore, "leading space")
+    }
+
+    /// Eviction, symlinks, odd paths, and a rejected create must not publish demo bytes.
+    func testAdversarialEvictionSymlinksAndCreate() throws {
+        let fm = FileManager.default
+        let isolated = [SnippetStore.storeDirEnvKey: directory.appendingPathComponent("env-fallback-2").path]
+
+        let parent = directory.appendingPathComponent("my cloud", isDirectory: true)
+        try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        let evicted = parent.appendingPathComponent("e victed.json")
+        let placeholder = evicted.deletingLastPathComponent()
+            .appendingPathComponent(".\(evicted.lastPathComponent).icloud")
+        let placeholderBytes = Data("keep-me-évicted".utf8)
+        fm.createFile(atPath: placeholder.path, contents: placeholderBytes)
+        let duplicate = run([
+            "--json", "--library", evicted.path,
+            "snippet", "add", "--trigger", ":eml", "--text", "other",
+        ], environment: isolated)
+        XCTAssertEqual(duplicate.code, 1, duplicate.out + duplicate.err)
+        XCTAssertEqual((try jsonObject(duplicate.out))["error"] as? String, "save_refused")
+        XCTAssertNotEqual((try jsonObject(duplicate.out))["error"] as? String, "duplicate_trigger")
+        XCTAssertFalse(fm.fileExists(atPath: evicted.path))
+        assertFileEquals(placeholder, placeholderBytes, "placeholder after :eml")
+        let freshTrigger = run([
+            "--json", "--library", evicted.path + "/",
+            "snippet", "add", "--trigger", ":not-a-demo", "--text", "nope",
+        ], environment: isolated)
+        XCTAssertEqual(freshTrigger.code, 1, freshTrigger.out + freshTrigger.err)
+        XCTAssertEqual((try jsonObject(freshTrigger.out))["error"] as? String, "save_refused")
+        XCTAssertFalse(fm.fileExists(atPath: evicted.path))
+        assertFileEquals(placeholder, placeholderBytes, "placeholder after fresh trigger")
+        let status = run(["--json", "--library", evicted.path, "status"], environment: isolated)
+        XCTAssertEqual(status.code, 1, status.out + status.err)
+        XCTAssertEqual((try jsonObject(status.out))["error"] as? String, "library_missing")
+        XCTAssertFalse(fm.fileExists(atPath: evicted.path))
+        assertFileEquals(placeholder, placeholderBytes, "placeholder after status")
+
+        let absent = directory.appendingPathComponent("really-absent.json")
+        let created = run([
+            "--json", "--library", absent.path,
+            "snippet", "add", "--trigger", ":mine", "--text", "body",
+        ], environment: isolated)
+        XCTAssertEqual(created.code, 0, created.out + created.err)
+        XCTAssertEqual((try jsonObject(created.out))["seededExamples"] as? Bool, true)
+        XCTAssertEqual(try listedTriggers(absent, environment: isolated), [":eml", ":func", ":hello", ":mine", ":tdate"])
+
+        let nested = directory.appendingPathComponent("brand-new-parent").appendingPathComponent("snippets.json")
+        let rejected = run([
+            "--json", "--library", nested.path,
+            "snippet", "add", "--trigger", ":eml", "--text", "other",
+        ], environment: isolated)
+        XCTAssertEqual(rejected.code, 1, rejected.out + rejected.err)
+        XCTAssertEqual((try jsonObject(rejected.out))["error"] as? String, "duplicate_trigger")
+        XCTAssertFalse(fm.fileExists(atPath: nested.path))
+        let nestedParent = nested.deletingLastPathComponent()
+        if fm.fileExists(atPath: nestedParent.path) {
+            let kids = try fm.subpathsOfDirectory(atPath: nestedParent.path)
+            XCTAssertEqual(kids, [], "rejected create left \(kids)")
+        }
+
+        let unicode = directory.appendingPathComponent("my lib").appendingPathComponent("ライブラリ.json")
+        let unicodeAdd = run([
+            "--json", "--library", unicode.path,
+            "snippet", "add", "--trigger", ":uni", "--text", "ユニコード",
+        ], environment: isolated)
+        XCTAssertEqual(unicodeAdd.code, 0, unicodeAdd.out + unicodeAdd.err)
+        XCTAssertEqual(try listedTriggers(unicode, environment: isolated), [":eml", ":func", ":hello", ":tdate", ":uni"])
+        let fetched = run(["--json", "--library", unicode.path, "snippet", "get", ":uni"], environment: isolated)
+        XCTAssertEqual(
+            ((try jsonObject(fetched.out))["snippet"] as? [String: Any])?["replacement"] as? String,
+            "ユニコード"
+        )
+
+        let slashTarget = directory.appendingPathComponent("slash.json")
+        let slashAdd = run([
+            "--json", "--library", slashTarget.path + "/",
+            "snippet", "add", "--trigger", ":slash", "--text", "slash-body",
+        ], environment: isolated)
+        XCTAssertEqual(slashAdd.code, 0, slashAdd.out + slashAdd.err)
+        var slashDir: ObjCBool = true
+        XCTAssertTrue(fm.fileExists(atPath: slashTarget.path, isDirectory: &slashDir))
+        XCTAssertFalse(slashDir.boolValue)
+        let slashBefore = try Data(contentsOf: slashTarget)
+        let slashStatus = run(["--json", "--library", slashTarget.path + "/", "status"], environment: isolated)
+        XCTAssertEqual(slashStatus.code, 0, slashStatus.out + slashStatus.err)
+        XCTAssertGreaterThan((try jsonObject(slashStatus.out))["snippets"] as? Int ?? 0, 0)
+        assertFileEquals(slashTarget, slashBefore, "trailing-slash status")
+
+        let missingSlash = directory.appendingPathComponent("nope.json")
+        let missingStatus = run(["--json", "--library", missingSlash.path + "/", "status"], environment: isolated)
+        XCTAssertEqual(missingStatus.code, 1)
+        XCTAssertEqual((try jsonObject(missingStatus.out))["error"] as? String, "library_missing")
+        XCTAssertFalse(fm.fileExists(atPath: missingSlash.path))
+
+        let realDir = directory.appendingPathComponent("real-dir", isDirectory: true)
+        try fm.createDirectory(at: realDir, withIntermediateDirectories: true)
+        let linkDir = directory.appendingPathComponent("link-dir")
+        try fm.createSymbolicLink(atPath: linkDir.path, withDestinationPath: realDir.path)
+        let dirStatus = run(["--json", "--library", linkDir.path, "status"], environment: isolated)
+        XCTAssertEqual((try jsonObject(dirStatus.out))["error"] as? String, "library_not_file")
+        let dirAdd = run([
+            "--json", "--library", linkDir.path,
+            "snippet", "add", "--trigger", ":x", "--text", "x",
+        ], environment: isolated)
+        XCTAssertEqual((try jsonObject(dirAdd.out))["error"] as? String, "library_not_file")
+        XCTAssertFalse(fm.fileExists(atPath: realDir.appendingPathComponent("snippets.json").path))
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: linkDir.path), realDir.path)
+
+        let danglingTarget = directory.appendingPathComponent("missing-target.json")
+        let dangling = directory.appendingPathComponent("dangling.json")
+        try fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: danglingTarget.path)
+        let danglingStatus = run(["--json", "--library", dangling.path, "status"], environment: isolated)
+        XCTAssertEqual((try jsonObject(danglingStatus.out))["error"] as? String, "library_missing")
+        XCTAssertFalse(fm.fileExists(atPath: danglingTarget.path))
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: dangling.path), danglingTarget.path)
+        let danglingReject = run([
+            "--json", "--library", dangling.path,
+            "snippet", "add", "--trigger", ":eml", "--text", "other",
+        ], environment: isolated)
+        XCTAssertEqual(danglingReject.code, 1, danglingReject.out + danglingReject.err)
+        XCTAssertEqual((try jsonObject(danglingReject.out))["error"] as? String, "duplicate_trigger")
+        XCTAssertFalse(fm.fileExists(atPath: danglingTarget.path))
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: dangling.path), danglingTarget.path)
+
+        let createTarget = directory.appendingPathComponent("create-target.json")
+        let createLink = directory.appendingPathComponent("dangling-create.json")
+        try fm.createSymbolicLink(atPath: createLink.path, withDestinationPath: createTarget.path)
+        let createdViaLink = run([
+            "--json", "--library", createLink.path,
+            "snippet", "add", "--trigger", ":via-link", "--text", "through-symlink",
+        ], environment: isolated)
+        XCTAssertEqual(createdViaLink.code, 0, createdViaLink.out + createdViaLink.err)
+        var createdDir: ObjCBool = true
+        XCTAssertTrue(fm.fileExists(atPath: createLink.path, isDirectory: &createdDir))
+        XCTAssertFalse(createdDir.boolValue)
+        let viaTriggers = try listedTriggers(createLink, environment: isolated)
+        XCTAssertTrue(viaTriggers.contains(":via-link"), viaTriggers.joined(separator: ","))
+        XCTAssertTrue(viaTriggers.contains(":eml"), viaTriggers.joined(separator: ","))
+
+        let loopA = directory.appendingPathComponent("loop-a")
+        let loopB = directory.appendingPathComponent("loop-b")
+        try fm.createSymbolicLink(atPath: loopA.path, withDestinationPath: loopB.path)
+        try fm.createSymbolicLink(atPath: loopB.path, withDestinationPath: loopA.path)
+        let loopAdd = run([
+            "--json", "--library", loopA.path,
+            "snippet", "add", "--trigger", ":eml", "--text", "other",
+        ], environment: isolated)
+        XCTAssertEqual(loopAdd.code, 1, loopAdd.out + loopAdd.err)
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: loopA.path), loopB.path)
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: loopB.path), loopA.path)
+
+        let reads = directory.appendingPathComponent("reads.json")
+        let commands: [[String]] = [
+            ["status"],
+            ["group", "list"],
+            ["secret", "list"],
+            ["snippet", "list"],
+            ["snippet", "search", "hi"],
+            ["snippet", "get", ":eml"],
+            ["snippet", "set", ":eml", "--text", "x"],
+            ["snippet", "remove", ":eml"],
+            ["expand", "--trigger", ":eml"],
+        ]
+        for command in commands {
+            let result = run(["--json", "--library", reads.path] + command, environment: isolated)
+            XCTAssertNotEqual(result.code, 0, "\(command) \(result.out) \(result.err)")
+            XCTAssertFalse(fm.fileExists(atPath: reads.path), command.joined(separator: " "))
+        }
+        let inlineExpand = run(["--json", "--library", reads.path, "expand", "--text", "plain"], environment: isolated)
+        XCTAssertEqual(inlineExpand.code, 0, inlineExpand.out)
+        XCTAssertFalse(fm.fileExists(atPath: reads.path))
+
+        let appSeed = directory.appendingPathComponent("app-seed.json")
+        let store = SnippetStore(fileURL: appSeed)
+        XCTAssertTrue(fm.fileExists(atPath: appSeed.path))
+        XCTAssertTrue(store.loadSnippets().contains { $0.triggerKeyword == ":eml" })
+
+        let roParent = directory.appendingPathComponent("ro-parent", isDirectory: true)
+        try fm.createDirectory(at: roParent, withIntermediateDirectories: true)
+        let roLib = roParent.appendingPathComponent("snippets.json")
+        defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: roParent.path) }
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: roParent.path)
+        let roAdd = run([
+            "--json", "--library", roLib.path,
+            "snippet", "add", "--trigger", ":x", "--text", "hi",
+        ], environment: isolated)
+        XCTAssertNotEqual(roAdd.code, 0, roAdd.out + roAdd.err)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: roParent.path)
+        XCTAssertFalse(fm.fileExists(atPath: roLib.path), roAdd.out + roAdd.err)
+        let roKids = try fm.subpathsOfDirectory(atPath: roParent.path)
+        XCTAssertEqual(roKids, [], "read-only create left \(roKids)")
+    }
+
+    /// Undecodable libraries fail status and keep their original bytes, including after a later write attempt.
+    func testAdversarialUnreadableLibrariesKeepOriginalBytes() throws {
+        let isolated = [SnippetStore.storeDirEnvKey: directory.appendingPathComponent("env-fallback-3").path]
+        let cases: [(String, Data, Bool)] = [
+            ("nul.json", Data(repeating: 0, count: 64), false),
+            ("truncated.json", Data("{\"snippets\":".utf8), false),
+            ("truncated-array.json", Data("[{".utf8), false),
+            ("leading-ws.json", Data(" \n{\"snippets\":".utf8), false),
+            ("ff.json", Data(repeating: 0xFF, count: 32), false),
+            ("true.json", Data("true".utf8), false),
+            ("garbage.json", Data(repeating: UInt8(ascii: "x"), count: 256 * 1024), false),
+            ("spaces.json", Data(repeating: UInt8(ascii: " "), count: 256 * 1024), true),
+            ("whitespace.json", Data(" \n\t\r\u{000B}\u{000C}\n".utf8), true),
+            ("empty.json", Data(), true),
+            ("legacy-empty.json", Data("[]".utf8), true),
+        ]
+        for (name, payload, readable) in cases {
+            let url = directory.appendingPathComponent(name)
+            try payload.write(to: url)
+            let status = run(["--json", "--library", url.path, "status"], environment: isolated)
+            assertFileEquals(url, payload, name)
+            let body = try jsonObject(status.out)
+            if readable {
+                XCTAssertEqual(status.code, 0, "\(name) \(status.out) \(status.err)")
+                XCTAssertEqual(body["ok"] as? Bool, true, name)
+                XCTAssertEqual(body["snippets"] as? Int, 0, name)
+                if name != "legacy-empty.json" {
+                    XCTAssertEqual(body["groups"] as? Int, 0, name)
+                }
+            } else {
+                XCTAssertEqual(status.code, 1, "\(name) \(status.out) \(status.err)")
+                XCTAssertEqual(body["ok"] as? Bool, false, name)
+                XCTAssertEqual(body["error"] as? String, "library_unreadable", name)
+                XCTAssertNil(body["snippets"], name)
+                let again = run(["--json", "--library", url.path, "status"], environment: isolated)
+                XCTAssertEqual(again.code, 1, name)
+                XCTAssertEqual((try jsonObject(again.out))["error"] as? String, "library_unreadable")
+                assertFileEquals(url, payload, "\(name) second status")
+                let human = run(["--library", url.path, "status"], environment: isolated)
+                XCTAssertEqual(human.code, 1, human.out + human.err)
+                XCTAssertFalse(human.out.contains("snippets: 0"), human.out)
+                XCTAssertTrue(human.err.contains("error:"), human.err)
+                assertFileEquals(url, payload, "\(name) human status")
+            }
+        }
+
+        let corrupt = directory.appendingPathComponent("mutate.json")
+        let original = Data("{\"snippets\":".utf8)
+        try original.write(to: corrupt)
+        let attempts: [[String]] = [
+            ["snippet", "add", "--trigger", ":x", "--text", "hijack"],
+            ["snippet", "set", ":eml", "--text", "hijack"],
+            ["snippet", "remove", ":eml"],
+            ["snippet", "list"],
+            ["group", "list"],
+            ["secret", "list"],
+            ["expand", "--trigger", ":eml"],
+        ]
+        for command in attempts {
+            let result = run(["--json", "--library", corrupt.path] + command, environment: isolated)
+            assertFileEquals(corrupt, original, command.joined(separator: " ") + " " + result.out)
+            if command.first == "snippet" && command.dropFirst().first == "add" {
+                XCTAssertNotEqual(result.code, 0, result.out + result.err)
+            }
+        }
+
+        let linkTarget = directory.appendingPathComponent("linked-corrupt.json")
+        try original.write(to: linkTarget)
+        let link = directory.appendingPathComponent("linked.json")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: linkTarget.path)
+        let viaLink = run(["--json", "--library", link.path, "status"], environment: isolated)
+        XCTAssertEqual(viaLink.code, 1, viaLink.out + viaLink.err)
+        XCTAssertEqual((try jsonObject(viaLink.out))["error"] as? String, "library_unreadable")
+        assertFileEquals(linkTarget, original, "symlink target")
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), linkTarget.path)
+
+        let clipPlain = run(["--json", "expand", "--text", "clip[%clipboard]{{clipboard}}end"], environment: isolated)
+        XCTAssertEqual(clipPlain.code, 0, clipPlain.out + clipPlain.err)
+        XCTAssertEqual((try jsonObject(clipPlain.out))["text"] as? String, "clip[]end")
+        let clipFlag = run([
+            "--json", "expand", "--text", "clip[%clipboard]{{clipboard}}end",
+            "--clipboard", "SENTINEL4d7038",
+        ], environment: isolated)
+        XCTAssertEqual((try jsonObject(clipFlag.out))["text"] as? String, "clip[SENTINEL4d7038]SENTINEL4d7038end")
+    }
+
+    private func listedTriggers(_ url: URL, environment: [String: String]) throws -> [String] {
+        let listed = run(["--json", "--library", url.path, "snippet", "list"], environment: environment)
+        XCTAssertEqual(listed.code, 0, listed.out + listed.err)
+        let rows = try XCTUnwrap((try jsonObject(listed.out))["snippets"] as? [[String: Any]])
+        return rows.compactMap { $0["trigger"] as? String }.sorted()
+    }
+
+    private func assertFileEquals(
+        _ url: URL,
+        _ before: Data,
+        _ note: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        do {
+            let after = try Data(contentsOf: url)
+            XCTAssertTrue(
+                after == before,
+                "\(note): \(after.count) bytes vs \(before.count); head \(Array(after.prefix(16)))",
+                file: file,
+                line: line
+            )
+        } catch {
+            XCTFail("\(note): \(error)", file: file, line: line)
+        }
+    }
+
     /// Pretty-printed objects one after another, including ones whose last value is itself an object.
     /// Splitting on a column-zero `}` drops that closer when the nested value already ends in `}`.
     private func topLevelJSONObjects(_ text: String) throws -> [[String: Any]] {
