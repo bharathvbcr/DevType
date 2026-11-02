@@ -711,8 +711,9 @@ public enum SelectionReader {
     ///   and text-marker forms when the primary attribute reports nothing. **Off for
     ///   high-frequency callers**, which pay for the extra IPC on every keystroke.
     /// - Parameter allowValueSlice: permit the `kAXValue`-sliced-by-range rung, which pulls the
-    ///   element's *whole* value (up to `maxSliceableDocumentCharacters`) across AX IPC. Off for
-    ///   `SelectionMonitor`; the explicit reads keep it.
+    ///   element's *whole* value across AX IPC when `kAXNumberOfCharacters` is an `Int` at or
+    ///   below `maxSliceableDocumentCharacters`. Off for `SelectionMonitor`; the explicit reads
+    ///   keep it.
     public static func copySelectedText(
         from element: AXUIElement,
         allowSlowRetry: Bool = false,
@@ -895,9 +896,11 @@ public enum SelectionReader {
     /// Documents past this length are not sliced client-side.
     ///
     /// `copyValueSubstring` has to pull the element's *whole* value across AX IPC to cut a
-    /// selection out of it. The range guard bounds the selection; nothing bounds the document.
-    /// Selecting one line in a 50 MB log would otherwise drag all 50 MB onto the main thread —
-    /// the pathological case for a rung that only exists as a third fallback anyway.
+    /// selection out of it. The range guard bounds the selection; the character count is what
+    /// bounds the document. Selecting one line in a 50 MB log would otherwise drag all 50 MB
+    /// onto the main thread — the pathological case for a rung that only exists as a third
+    /// fallback anyway. A missing count, or one that is not an `Int`, does not authorize that
+    /// copy: without a usable count the document is unbounded.
     static let maxSliceableDocumentCharacters = 2_000_000
 
     /// `kAXValue` sliced by the selected range, for elements implementing neither parameterized
@@ -905,23 +908,36 @@ public enum SelectionReader {
     private static func copyValueSubstring(_ element: AXUIElement, _ range: AXValue) -> String? {
         var cfRange = CFRange(location: 0, length: 0)
         guard AXValueGetValue(range, .cfRange, &cfRange) else { return nil }
+        return copyValueSubstring(utf16Range: cfRange) { attribute in
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                element,
+                attribute as CFString,
+                &ref
+            ) == .success else {
+                return nil
+            }
+            return ref
+        }
+    }
 
-        // One cheap integer read decides whether the expensive one is worth making.
-        var countRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
-            element,
-            kAXNumberOfCharactersAttribute as CFString,
-            &countRef
-        ) == .success, let count = countRef as? Int, count > maxSliceableDocumentCharacters {
+    /// Attribute-read seam for the value-slice rung. Production passes
+    /// `AXUIElementCopyAttributeValue`; tests pass a stand-in and must not call Accessibility.
+    ///
+    /// `kAXNumberOfCharacters` is read first. Only an `Int` at or below
+    /// `maxSliceableDocumentCharacters` may then read `kAXValue`.
+    static func copyValueSubstring(
+        utf16Range: CFRange,
+        copyAttribute: (String) -> CFTypeRef?
+    ) -> String? {
+        // The count is the only bound on the document. Missing or not an Int, refuse
+        // before kAXValue is read — falling through would copy an unbounded value.
+        guard let characterCount = copyAttribute(kAXNumberOfCharactersAttribute as String) as? Int,
+              characterCount <= maxSliceableDocumentCharacters else {
             return nil
         }
 
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            kAXValueAttribute as CFString,
-            &valueRef
-        ) == .success, let valueRef else {
+        guard let valueRef = copyAttribute(kAXValueAttribute as String) else {
             return nil
         }
         let string: String?
@@ -933,7 +949,7 @@ public enum SelectionReader {
             string = nil
         }
         guard let string else { return nil }
-        return substring(of: string, utf16Range: cfRange)
+        return substring(of: string, utf16Range: utf16Range)
     }
 
     /// UTF-16-safe slice, bounds-checked against the value the app just handed us.
