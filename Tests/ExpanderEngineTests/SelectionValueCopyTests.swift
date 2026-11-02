@@ -3,9 +3,10 @@ import XCTest
 @testable import ExpanderEngine
 
 /// The value-slice rung may copy `kAXValue` only when `kAXNumberOfCharacters` is a whole number
-/// from zero through `maxSliceableDocumentCharacters`, including a whole-valued double. A
-/// missing count, a boolean, a fraction, or a negative refuses the copy. Attribute reads are
-/// supplied here; nothing in this file calls Accessibility.
+/// from zero through `maxSliceableDocumentCharacters`, including a whole-valued double and a
+/// negative zero. A missing count, a boolean, a fraction, a non-finite, a non-numeric CF type,
+/// or a negative refuses the copy. Attribute reads are supplied here. `AXValueCreate` only
+/// builds a local value; nothing in this file reads an element.
 final class SelectionValueCopyTests: XCTestCase {
     private final class Reads {
         private(set) var attributes: [String] = []
@@ -330,6 +331,139 @@ final class SelectionValueCopyTests: XCTestCase {
         XCTAssertEqual(reads.attributes, [kAXNumberOfCharactersAttribute as String])
     }
 
+    func testNonFiniteDoubleCharacterCountsDoNotCopyTheValue() {
+        let samples: [(String, Double)] = [
+            ("Double.nan", Double.nan),
+            ("Double.infinity", Double.infinity),
+            ("-Double.infinity", -Double.infinity),
+        ]
+        for (label, value) in samples {
+            assertValueCopyRefused(
+                count: NSNumber(value: value),
+                "kAXValue must not be copied when kAXNumberOfCharacters is a Double NSNumber (\(label))"
+            )
+            assertValueCopyRefused(
+                count: cfNumber(value, type: .float64Type),
+                "kAXValue must not be copied when kAXNumberOfCharacters is a float64 CFNumber (\(label))"
+            )
+        }
+    }
+
+    /// Negative zero is an integral zero. It is inside the cap and must copy, not refuse.
+    func testNegativeZeroDoubleCopiesAndSlicesTheValue() {
+        let samples: [(String, CFNumber)] = [
+            ("Double NSNumber", NSNumber(value: -0.0)),
+            ("float64 CFNumber", cfNumber(-0.0, type: .float64Type)),
+        ]
+        for (label, count) in samples {
+            var doubleValue = 0.0
+            XCTAssertTrue(
+                CFNumberGetValue(count, .doubleType, &doubleValue),
+                "\(label) did not yield a double"
+            )
+            XCTAssertEqual(doubleValue.sign, .minus, "\(label) lost the negative-zero sign")
+            XCTAssertTrue(doubleValue.isFinite, "\(label) was not a finite zero")
+            XCTAssertEqual(doubleValue, 0.0, "\(label) was not zero")
+            assertValueCopyAccepted(
+                count: count,
+                "a negative-zero \(label) is an integral zero, so kAXValue is copied and sliced"
+            )
+        }
+    }
+
+    func testDoublesPastTheCapDoNotCopyTheValue() {
+        let samples: [(String, Double)] = [
+            ("2_000_000.5", 2_000_000.5),
+            ("2_000_001.0", 2_000_001.0),
+        ]
+        for (label, value) in samples {
+            assertValueCopyRefused(
+                count: NSNumber(value: value),
+                "kAXValue must not be copied when kAXNumberOfCharacters is a Double NSNumber (\(label))"
+            )
+            assertValueCopyRefused(
+                count: cfNumber(value, type: .float64Type),
+                "kAXValue must not be copied when kAXNumberOfCharacters is a float64 CFNumber (\(label))"
+            )
+        }
+    }
+
+    /// 2_000_000 is exact in float32. A storage type other than float32 or float is not itself
+    /// a failure; the length must still copy. The assertion message names `CFNumberGetType`.
+    func testExactFloat32CapCopiesAndSlicesTheValue() {
+        let samples: [(String, CFNumber)] = [
+            ("Float NSNumber", NSNumber(value: Float(2_000_000))),
+            ("float32 CFNumber", cfNumber(Float(2_000_000), type: .float32Type)),
+        ]
+        for (label, count) in samples {
+            let stored = CFNumberGetType(count)
+            assertValueCopyAccepted(
+                count: count,
+                "\(label) CFNumberGetType raw=\(stored.rawValue) is an exact 2000000 and must copy kAXValue"
+            )
+        }
+    }
+
+    func testSignedIntegerCFNumberAtZeroAndTheCapCopies() {
+        let cap = Int64(SelectionReader.maxSliceableDocumentCharacters)
+        let samples: [(String, Int64)] = [
+            ("0", 0),
+            ("2_000_000", cap),
+        ]
+        for (label, value) in samples {
+            let count = cfNumber(value, type: .sInt64Type)
+            XCTAssertEqual(
+                CFNumberGetType(count),
+                .sInt64Type,
+                "integer \(label) was not stored as sInt64; this case missed the integer path"
+            )
+            assertValueCopyAccepted(
+                count: count,
+                "signed integer CFNumber \(label) is inside the cap, so kAXValue is copied and sliced"
+            )
+        }
+    }
+
+    func testSignedIntegerCFNumberPastTheCapOrNegativeRefuses() {
+        let past = Int64(SelectionReader.maxSliceableDocumentCharacters) + 1
+        let samples: [(String, Int64)] = [
+            ("2_000_001", past),
+            ("-1", -1),
+        ]
+        for (label, value) in samples {
+            let count = cfNumber(value, type: .sInt64Type)
+            XCTAssertEqual(CFNumberGetType(count), .sInt64Type)
+            assertValueCopyRefused(
+                count: count,
+                "kAXValue must not be copied when kAXNumberOfCharacters is signed integer CFNumber \(label)"
+            )
+        }
+    }
+
+    /// A count that is a CFArray or an AXValue is not a length, so kAXValue is not copied.
+    func testNonNumericCFTypeDoesNotCopyTheValue() {
+        let array = [1, 2, 3] as CFArray
+        XCTAssertNotEqual(CFGetTypeID(array), CFNumberGetTypeID())
+        XCTAssertNotEqual(CFGetTypeID(array), CFStringGetTypeID())
+        assertValueCopyRefused(
+            count: array,
+            "kAXValue must not be copied when kAXNumberOfCharacters is a CFArray"
+        )
+
+        var cfRange = CFRange(location: 0, length: 4)
+        guard let axValue = AXValueCreate(.cfRange, &cfRange) else {
+            XCTFail("AXValueCreate returned nil; the non-numeric AXValue case did not run")
+            return
+        }
+        XCTAssertEqual(CFGetTypeID(axValue), AXValueGetTypeID())
+        XCTAssertNotEqual(CFGetTypeID(axValue), CFNumberGetTypeID())
+        XCTAssertNotEqual(CFGetTypeID(axValue), CFStringGetTypeID())
+        assertValueCopyRefused(
+            count: axValue,
+            "kAXValue must not be copied when kAXNumberOfCharacters is an AXValue"
+        )
+    }
+
     private func assertValueCopyRefused(
         count: CFTypeRef?,
         _ message: String,
@@ -356,6 +490,33 @@ final class SelectionValueCopyTests: XCTestCase {
         )
     }
 
+    /// An accepted count reads `kAXNumberOfCharacters`, then `kAXValue` — two closure calls.
+    private func assertValueCopyAccepted(
+        count: CFTypeRef?,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let reads = Reads()
+        let sliced = slice(count: count, reads: reads)
+        XCTAssertEqual(sliced, "abcd", message, file: file, line: line)
+        XCTAssertTrue(reads.copiedValue, message, file: file, line: line)
+        XCTAssertEqual(
+            reads.calls,
+            2,
+            "\(message) (closure calls=\(reads.calls) attributes=\(reads.attributes))",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            reads.attributes,
+            [kAXNumberOfCharactersAttribute as String, kAXValueAttribute as String],
+            message,
+            file: file,
+            line: line
+        )
+    }
+
     private func cfNumber(_ value: Double, type: CFNumberType) -> CFNumber {
         var storage = value
         guard let number = CFNumberCreate(kCFAllocatorDefault, type, &storage) else {
@@ -365,6 +526,14 @@ final class SelectionValueCopyTests: XCTestCase {
     }
 
     private func cfNumber(_ value: Float, type: CFNumberType) -> CFNumber {
+        var storage = value
+        guard let number = CFNumberCreate(kCFAllocatorDefault, type, &storage) else {
+            preconditionFailure("CFNumberCreate failed")
+        }
+        return number
+    }
+
+    private func cfNumber(_ value: Int64, type: CFNumberType) -> CFNumber {
         var storage = value
         guard let number = CFNumberCreate(kCFAllocatorDefault, type, &storage) else {
             preconditionFailure("CFNumberCreate failed")
