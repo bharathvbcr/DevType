@@ -381,6 +381,163 @@ final class DevTypeCLITests: XCTestCase {
         XCTAssertEqual((try jsonObject(allowed.out))["text"] as? String, "nope")
     }
 
+    /// `--library` is an override only as a real flag. A flag-shaped token is not the value of
+    /// `--text` or `--group`, and a token after search `--` does not drop the session library.
+    func testInheritedLibraryFlagIsNotAValueOrSearchToken() throws {
+        let elsewhere = directory.appendingPathComponent("default-store", isDirectory: true)
+        let defaultLibrary = elsewhere.appendingPathComponent("snippets.json")
+        let isolated = [SnippetStore.storeDirEnvKey: elsewhere.path]
+        let seeded = run([
+            "--json", "--library", defaultLibrary.path,
+            "snippet", "add", "--trigger", ":hi", "--text", "hello",
+        ], environment: isolated)
+        XCTAssertEqual(seeded.code, 0, seeded.err + seeded.out)
+        let beforeDefault = try Data(contentsOf: defaultLibrary)
+
+        let stolenText = run([
+            "--json", "snippet", "set", ":hi", "--text", "--library=owned",
+        ], environment: isolated)
+        XCTAssertEqual(stolenText.code, 2, stolenText.out + stolenText.err)
+        XCTAssertEqual((try jsonObject(stolenText.out))["error"] as? String, "usage")
+        XCTAssertEqual(try Data(contentsOf: defaultLibrary), beforeDefault)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "owned"))
+
+        let stolenGroup = run([
+            "--json", "snippet", "set", ":hi", "--group", "--library=owned",
+        ], environment: isolated)
+        XCTAssertEqual(stolenGroup.code, 2, stolenGroup.out + stolenGroup.err)
+        XCTAssertEqual(try Data(contentsOf: defaultLibrary), beforeDefault)
+
+        let session = run([
+            "--json", "--library", library.path,
+            "snippet", "add", "--trigger", ":hi", "--text", "session",
+        ], environment: isolated)
+        XCTAssertEqual(session.code, 0, session.err + session.out)
+        var lines = [
+            "snippet search session -- --library=owned",
+            "snippet set :hi --text=--library=owned",
+            "quit",
+        ]
+        let repl = run(
+            ["--json", "--library", library.path, "repl"],
+            environment: isolated,
+            input: { lines.isEmpty ? nil : lines.removeFirst() }
+        )
+        XCTAssertEqual(repl.code, 0, repl.err + repl.out)
+        let objects = try topLevelJSONObjects(repl.out)
+        XCTAssertEqual(objects.count, 2, repl.out)
+        XCTAssertEqual(objects[0]["ok"] as? Bool, true)
+        let hits = try XCTUnwrap(objects[0]["snippets"] as? [[String: Any]])
+        XCTAssertTrue(hits.contains { $0["trigger"] as? String == ":hi" }, repl.out)
+        let updated = try XCTUnwrap(objects[1]["snippet"] as? [String: Any])
+        XCTAssertEqual(updated["replacement"] as? String, "--library=owned")
+        XCTAssertEqual(try Data(contentsOf: defaultLibrary), beforeDefault)
+        let sessionBytes = try Data(contentsOf: library)
+        XCTAssertTrue(String(decoding: sessionBytes, as: UTF8.self).contains("--library=owned"))
+        XCTAssertFalse(String(decoding: beforeDefault, as: UTF8.self).contains("--library=owned"))
+    }
+
+    /// Creating a library must not publish the built-in examples before the add is accepted,
+    /// and an evicted iCloud placeholder is not a brand-new file to fill with those examples.
+    func testRejectedCreateDoesNotSeedDemosOrAdoptEvictedLibrary() throws {
+        let duplicate = run([
+            "--json", "--library", library.path,
+            "snippet", "add", "--trigger", ":eml", "--text", "other",
+        ])
+        XCTAssertEqual(duplicate.code, 1, duplicate.out + duplicate.err)
+        XCTAssertEqual((try jsonObject(duplicate.out))["error"] as? String, "duplicate_trigger")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: library.path))
+
+        let evicted = directory.appendingPathComponent("evicted.json")
+        let placeholder = evicted.deletingLastPathComponent()
+            .appendingPathComponent(".\(evicted.lastPathComponent).icloud")
+        FileManager.default.createFile(atPath: placeholder.path, contents: Data("placeholder".utf8))
+        let adopted = run([
+            "--json", "--library", evicted.path,
+            "snippet", "add", "--trigger", ":eml", "--text", "other",
+        ])
+        XCTAssertEqual(adopted.code, 1, adopted.out + adopted.err)
+        let adoptedBody = try jsonObject(adopted.out)
+        XCTAssertEqual(adoptedBody["error"] as? String, "save_refused")
+        XCTAssertEqual(adoptedBody["message"] as? String, "Library not available at configured location")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: evicted.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: placeholder.path))
+        XCTAssertNotEqual(adoptedBody["error"] as? String, "duplicate_trigger")
+    }
+
+    /// An undecodable library is a failed read. Whitespace is an empty library and stays on disk.
+    func testStatusSurfacesUndecodableLibraryAndKeepsWhitespace() throws {
+        let blank = Data(" \n\t \r\n".utf8)
+        try blank.write(to: library)
+        let empty = run(["--json", "--library", library.path, "status"])
+        XCTAssertEqual(empty.code, 0, empty.err + empty.out)
+        let emptyBody = try jsonObject(empty.out)
+        XCTAssertEqual(emptyBody["ok"] as? Bool, true)
+        XCTAssertEqual(emptyBody["snippets"] as? Int, 0)
+        XCTAssertEqual(emptyBody["groups"] as? Int, 0)
+        XCTAssertEqual(try Data(contentsOf: library), blank)
+
+        let corrupt = Data("{\"snippets\":".utf8)
+        let corruptURL = directory.appendingPathComponent("corrupt.json")
+        try corrupt.write(to: corruptURL)
+        let failed = run(["--json", "--library", corruptURL.path, "status"])
+        XCTAssertEqual(failed.code, 1, failed.out + failed.err)
+        let failedBody = try jsonObject(failed.out)
+        XCTAssertEqual(failedBody["ok"] as? Bool, false)
+        XCTAssertEqual(failedBody["error"] as? String, "library_unreadable")
+        XCTAssertNil(failedBody["snippets"])
+        XCTAssertEqual(try Data(contentsOf: corruptURL), corrupt)
+
+        let again = run(["--json", "--library", corruptURL.path, "status"])
+        XCTAssertEqual(again.code, 1, again.out)
+        XCTAssertEqual((try jsonObject(again.out))["error"] as? String, "library_unreadable")
+        XCTAssertEqual(try Data(contentsOf: corruptURL), corrupt)
+        let reloaded = SnippetStore(
+            location: SnippetStore.Location(fileURL: corruptURL, expectsExistingLibrary: true),
+            localSupportDirectory: directory.appendingPathComponent("corrupt-support", isDirectory: true),
+            watcherFactory: { _ in nil },
+            secretStore: SecretStore(backing: InMemorySecretBackingStore()),
+            secretPurgeEnabled: false
+        )
+        XCTAssertTrue(reloaded.isLibraryReadFailed)
+        XCTAssertEqual(try Data(contentsOf: corruptURL), corrupt)
+    }
+
+    /// Pretty-printed objects one after another, including ones whose last value is itself an object.
+    /// Splitting on a column-zero `}` drops that closer when the nested value already ends in `}`.
+    private func topLevelJSONObjects(_ text: String) throws -> [[String: Any]] {
+        var objects: [[String: Any]] = []
+        var depth = 0
+        var start: String.Index?
+        var inString = false
+        var escaped = false
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                if depth == 0 { start = index }
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0, let start {
+                    objects.append(try jsonObject(String(text[start...index])))
+                }
+            }
+            index = text.index(after: index)
+        }
+        return objects
+    }
+
     /// Pretty-printed objects, one after another. `JSONSerialization` accepts one value, so split
     /// where one object's closing brace ends and the next object begins.
     private func jsonObjects(_ text: String) throws -> [[String: Any]] {
