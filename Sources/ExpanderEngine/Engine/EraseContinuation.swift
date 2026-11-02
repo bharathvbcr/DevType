@@ -60,6 +60,17 @@ struct EraseContinuationFacts: Equatable {
     /// single-page app re-rendering another field — passes every text and frame check below, so
     /// this is the one fact that refuses it, in every phase.
     var identityContradicted: Bool = false
+    /// False when the authorizing mismatch skipped `CFEqual` (an unstable role after the erase).
+    /// A nil `mismatch` is then only a pid match. The default keeps every existing caller on the
+    /// checked path, where a nil mismatch is still permission to proceed.
+    var elementIdentityChecked: Bool = true
+    /// What a full element compare would have reported. Consulted only when
+    /// `elementIdentityChecked` is false and `mismatch` is nil. Nil means the live element
+    /// still `CFEqual`s the captured one — sufficient, and not required.
+    var observedElementMismatch: PasteboardBroker.PasteTarget.Mismatch? = nil
+    /// True only when both screen frames are usable and they differ. Nil means a frame was
+    /// missing, which does not prove a different control. False means both frames match.
+    var framesDisagree: Bool? = nil
 }
 
 struct EraseContinuationRefusal: Equatable {
@@ -101,6 +112,12 @@ enum EraseContinuation {
     static func decide(_ facts: EraseContinuationFacts) -> EraseContinuationDecision {
         if let refusal = operationRefusal(facts) {
             return .refuse(refusal)
+        }
+        // An unstable role after the erase does not require CFEqual — a combo box's node flicker
+        // would otherwise abort a vouched expansion. A pid match alone is not that permission:
+        // the live element is judged here, and a different control in the same process refuses.
+        if facts.mismatch == nil, !facts.elementIdentityChecked {
+            return decideUncheckedIdentity(facts)
         }
         guard let mismatch = facts.mismatch else {
             return .proceed
@@ -168,6 +185,48 @@ enum EraseContinuation {
                 return .refuse(refusal)
             }
             return .retarget
+        }
+    }
+
+    /// Pid matched and element identity was not required. `observedElementMismatch` is the
+    /// compare `CFEqual` would have made. A combo box that swaps its node at the same frame,
+    /// with nothing contradicting that it is the same control, keeps the HID post. A different
+    /// control — another frame, a contradicted identity, or a stable text field that is not this
+    /// erase — does not.
+    private static func decideUncheckedIdentity(
+        _ facts: EraseContinuationFacts
+    ) -> EraseContinuationDecision {
+        guard let observed = facts.observedElementMismatch else {
+            return .proceed
+        }
+        switch observed {
+        case .noCapturedProcess, .processChanged, .focusLost, .focusArrived:
+            return .refuse(targetRefusal(facts.phase, observed))
+        case .rangeChanged:
+            return .proceed
+        case .elementChanged:
+            let refusal = targetRefusal(facts.phase, observed)
+            if facts.identityContradicted || facts.framesDisagree == true {
+                return .refuse(refusal)
+            }
+            let stableText = ControlIdentity.roleAllowsInsertionRetarget(facts.liveRole)
+            let unstable = AXWriteCapabilityStore.isAXWriteUnstableRole(facts.liveRole)
+            if facts.deletionMatched, stableText {
+                // Adopting the inner text field is a typed expansion's retarget. Undo and voice
+                // do not adopt, and they also do not abort: the keys keep going to the focused
+                // node without a new paste target.
+                return facts.allowsRetarget ? .retarget : .proceed
+            }
+            if facts.deletionMatched, unstable {
+                return .proceed
+            }
+            if !facts.deletionMatched, stableText {
+                return .refuse(refusal)
+            }
+            if unstable, facts.framesDisagree != true, !facts.identityContradicted {
+                return .proceed
+            }
+            return .refuse(refusal)
         }
     }
 

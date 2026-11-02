@@ -446,6 +446,16 @@ public final class TextInjectionPipeline {
         ledger.undoAttemptIsCurrent(attempt)
     }
 
+    /// The undo target against this pipeline's focus and frontmost app — the same two reads
+    /// `PasteTarget.isCurrent` makes in production, through the environment a test scripts.
+    private func undoTargetIsCurrent(_ target: PasteboardBroker.PasteTarget) -> Bool {
+        target.liveMismatch(
+            checkRange: false,
+            observeFocus: environment.focusedElement,
+            currentPID: { self.environment.frontmostApp().processIdentifier }
+        ) == nil
+    }
+
     /// Caret changes also revoke an undo already dispatched to main.
     public func clearLastExpansion() {
         ledger.invalidateUndo()
@@ -596,7 +606,12 @@ public final class TextInjectionPipeline {
     /// work may go on against `context.target`, which `adoptVouchedContinuation` has re-pointed at
     /// the replacement when it was one. False leaves the refusal it stashed for the caller to record.
     private func followsVouchedReplacement(_ context: InjectContext) -> Bool {
-        if canContinue(context, phase: .afterMutation) { return true }
+        // A pid-only continue (unstable role, CFEqual skipped) is not permission. The same
+        // adopt call decides it, so a different control in this process does not get the rest.
+        let identityChecked = PasteboardBroker.verifyFocusedElement(
+            role: context.focusedRole, phase: .afterMutation
+        )
+        if identityChecked, canContinue(context, phase: .afterMutation) { return true }
         switch adoptVouchedContinuation(
             context, rangeGate: .afterMutation, checkRange: false, continuation: .beforeInsertion
         ) {
@@ -659,6 +674,17 @@ public final class TextInjectionPipeline {
         let mismatch = context.target.mismatch(
             observing: element, pid: pid, checkRange: checkRange, checkElement: checkElement
         )
+        // The authorizing mismatch stays pid-only when identity is not required. The live
+        // element is still read, so a different control in this process is visible to `decide`.
+        var uncheckedElement: AXUIElement?
+        var observedMismatch: PasteboardBroker.PasteTarget.Mismatch?
+        if !checkElement {
+            let live = environment.focusedElement()
+            uncheckedElement = live
+            observedMismatch = context.target.mismatch(
+                observing: live, pid: pid, checkRange: false, checkElement: true
+            )
+        }
         let allows = allowsEraseRetarget(context.request)
         let operationBlocked = !revisionCurrent || block != nil || secureInputBlocked || axUntrusted
         let elementOrRange = mismatch == .elementChanged || mismatch == .rangeChanged
@@ -733,6 +759,46 @@ public final class TextInjectionPipeline {
                 }
             }
         }
+        var framesDisagree: Bool?
+        if !checkElement, !operationBlocked, observedMismatch == .elementChanged, let live = uncheckedElement {
+            AXContextChecker.applyMessagingTimeout(to: live)
+            let liveAttributes = verifier.controlAttributes(of: live)
+            identityContradicted = ControlIdentity.conflict(context.adopted.baseline, liveAttributes) != nil
+            liveRole = environment.focusedRole(live)
+            let picture = eraseFieldPicture(live, attributes: liveAttributes)
+            if let anchor = context.adopted.eraseAnchor {
+                if ControlIdentity.usableFrame(anchor.frame) != nil,
+                   ControlIdentity.usableFrame(picture.frame) != nil {
+                    framesDisagree = !ControlIdentity.framesMatch(anchor.frame, picture.frame)
+                }
+                let maxRemoved = continuation == .duringErase
+                    ? removedGraphemes
+                    : (context.erasePlan.expectedText?.count ?? 0)
+                deletionMatched = EraseContinuation.deletionConfirms(
+                    phase: continuation,
+                    anchor: anchor,
+                    live: picture,
+                    expectedText: context.erasePlan.expectedText,
+                    caseInsensitive: context.erasePlan.caseInsensitive,
+                    maxRemovedGraphemes: maxRemoved
+                )
+                if continuation == .beforeInsertion {
+                    deletionLagging = EraseContinuation.deletionIsLagging(
+                        anchor: anchor,
+                        live: picture,
+                        expectedText: context.erasePlan.expectedText,
+                        caseInsensitive: context.erasePlan.caseInsensitive
+                    )
+                }
+                reading = EraseContinuation.fieldReading(
+                    expected: context.erasePlan.expectedText,
+                    value: picture.value,
+                    caretLocation: picture.caretLocation,
+                    selectionLength: picture.selectionLength,
+                    caseInsensitive: context.erasePlan.caseInsensitive
+                )
+            }
+        }
         let facts = EraseContinuationFacts(
             phase: continuation,
             revisionCurrent: revisionCurrent,
@@ -746,7 +812,10 @@ public final class TextInjectionPipeline {
             liveRole: liveRole,
             fieldReading: reading,
             deletionLagging: deletionLagging,
-            identityContradicted: identityContradicted
+            identityContradicted: identityContradicted,
+            elementIdentityChecked: checkElement,
+            observedElementMismatch: checkElement ? nil : observedMismatch,
+            framesDisagree: framesDisagree
         )
         let decision = EraseContinuation.decide(facts)
         context.adopted.lastRefusalMayClear = false
@@ -754,7 +823,7 @@ public final class TextInjectionPipeline {
         case .proceed:
             context.adopted.lastRefusal = nil
         case .retarget:
-            guard let element else {
+            guard let element = element ?? uncheckedElement else {
                 let refusal = EraseContinuation.unadoptedRefusal(continuation, mismatch)
                 context.adopted.lastRefusal = refusal
                 return .refuse(refusal)
@@ -863,17 +932,29 @@ public final class TextInjectionPipeline {
         PermissionCoordinator.shared.recordInjectOutcome(.refused(safeReason), refuseContext: nil, path: path)
         guard ExpansionUndoPolicy.classifyUndoExit(accepted: false, heldBackspace: heldBackspace)
                 == .refusedWithBackspaceReturned, undoAttemptIsCurrent(attempt),
-              attempt.target.isCurrent(checkRange: false),
+              undoTargetIsCurrent(attempt.target),
+              environment.isProcessTrusted(),
               !environment.secureInputActive(), environment.canPostEvents() else { return }
         if !hid.postUnicodeKeyEvent(unicode: "\u{7F}", keyCode: CGKeyCode(kVK_Delete), flags: []) {
             PermissionCoordinator.shared.recordInjectOutcome(.failedSilent, refuseContext: nil, path: "undoKeyReturn")
         }
     }
 
-    private func performUndo(_ attempt: UndoAttempt, heldBackspace: SwallowedKey? = nil) {
-        guard attempt.record.isFresh(), undoAttemptIsCurrent(attempt), attempt.target.isCurrent(checkRange: false),
-              environment.isProcessTrusted(), !environment.secureInputActive() else {
-            finishRefusedUndo("context changed", path: "undoContextChanged", attempt: attempt, heldBackspace: nil)
+    func performUndo(_ attempt: UndoAttempt, heldBackspace: SwallowedKey? = nil) {
+        switch ExpansionUndoPolicy.preflightUndo(
+            fresh: attempt.record.isFresh(),
+            attemptCurrent: undoAttemptIsCurrent(attempt),
+            targetCurrent: undoTargetIsCurrent(attempt.target),
+            processTrusted: environment.isProcessTrusted(),
+            secureInputActive: environment.secureInputActive()
+        ) {
+        case .proceed:
+            break
+        case .refuse(let returnHeldBackspace):
+            finishRefusedUndo(
+                "context changed", path: "undoContextChanged", attempt: attempt,
+                heldBackspace: returnHeldBackspace ? heldBackspace : nil
+            )
             return
         }
         let field = readFieldForUndo()
@@ -1558,7 +1639,12 @@ public final class TextInjectionPipeline {
         let postingContinue: () -> Bool = {
             // The first backspace pair is the first write of an HID erase.
             if postedBackspaces == 0, !beginWrite() { return false }
-            if self.canContinue(context, phase: .afterMutation) {
+            // Identity was required, and it still matches: keep posting. When it was skipped,
+            // fall through to the adopt below instead of treating a pid match as permission.
+            let identityChecked = PasteboardBroker.verifyFocusedElement(
+                role: context.focusedRole, phase: .afterMutation
+            )
+            if identityChecked, self.canContinue(context, phase: .afterMutation) {
                 if context.adopted.eraseAnchor == nil, let element = context.focusedElement {
                     context.adopted.eraseAnchor = self.eraseFieldPicture(element, attributes: context.adopted.baseline)
                 }
@@ -1952,6 +2038,9 @@ public final class TextInjectionPipeline {
             // before the backspaces.
             let focus = FocusedElementSource.resolved(context.focusedElement)
             let focusedRole = context.focusedRole
+            // What the AX and clipboard recovery insert. A partial unicode post replaces this
+            // with the events that did not land, so the prefix is not inserted twice.
+            var recoveryText = textToInject
             switch InjectionPlanner.insertAfterErase(
                 bundleID: context.frontBundleID,
                 text: textToInject,
@@ -1973,7 +2062,11 @@ public final class TextInjectionPipeline {
                         events,
                         shouldContinue: canProceedAfterMutation
                     )
-                    if posted > 0 {
+                    // A full post that stays `postedUnverified` is the success path.
+                    // `posted == 0` falls through with the whole expansion, same as a host that
+                    // never took the unicode path. A partial post has already typed a prefix, so
+                    // the recovery below inserts only the events that did not post.
+                    if posted == events.count, posted > 0 {
                         self.positionCursorIfNeeded(
                             text: textToInject,
                             cursorOffset: cursorOffset,
@@ -1985,7 +2078,7 @@ public final class TextInjectionPipeline {
                             self.hid.postTrailingKeys(keysToPress, shouldContinue: canProceedAfterMutation)
                             self.finishSucceeded(
                                 outcome: .postedUnverified,
-                                path: posted == events.count ? "unicodeInsert" : "unicodeInsertPartial",
+                                path: "unicodeInsert",
                                 context: context,
                                 injectedText: textToInject,
                                 undoable: resolved.undoable,
@@ -1993,6 +2086,19 @@ public final class TextInjectionPipeline {
                             )
                         }
                         return
+                    }
+                    if posted > 0 {
+                        guard let suffix = Self.unpostedUnicodeText(events, posted: posted) else {
+                            // The tail is not clipboard text. Pasting the whole expansion would
+                            // insert the landed prefix a second time, and undo of that string
+                            // would not match the field. Record nothing.
+                            PermissionCoordinator.shared.recordInjectOutcome(
+                                .failedSilent, refuseContext: nil, path: "unicodeInsert"
+                            )
+                            completion(.failedSilent)
+                            return
+                        }
+                        recoveryText = suffix
                     }
                 }
             case .clipboard:
@@ -2015,7 +2121,7 @@ public final class TextInjectionPipeline {
             // replace, and the same predicate).
             if InjectionPlanner.mayWriteViaAX(shellLike: shellLike, preferHID: preferHID),
                self.ax.attemptAXDirectInjection(
-                   text: textToInject,
+                   text: recoveryText,
                    bundleID: context.frontBundleID,
                    focus: focus
                ) {
@@ -2049,8 +2155,8 @@ public final class TextInjectionPipeline {
 
             let hidPasteBaseline = self.verifier.captureFocusedTextObservation(focus: focus)
             self.clipboard.pasteViaClipboard(
-                text: textToInject,
-                expectedText: textToInject,
+                text: recoveryText,
+                expectedText: recoveryText,
                 baseline: hidPasteBaseline,
                 focus: focus,
                 bundleID: context.frontBundleID,
@@ -2072,7 +2178,8 @@ public final class TextInjectionPipeline {
                 // #endregion
                 self.finishPasteDelivery(
                     result: result,
-                    expectedText: textToInject,
+                    expectedText: recoveryText,
+                    undoText: textToInject,
                     baseline: hidPasteBaseline,
                     context: context,
                     focusedRole: focusedRole,
@@ -2617,6 +2724,7 @@ public final class TextInjectionPipeline {
     private func finishPasteDelivery(
         result: PasteboardBroker.PasteDeliveryResult,
         expectedText: String,
+        undoText: String,
         baseline: DeliveryVerifier.FocusedTextObservation?,
         context: InjectContext,
         focusedRole: String? = nil,
@@ -2657,7 +2765,7 @@ public final class TextInjectionPipeline {
         switch result {
         case .delivered:
             positionCursorIfNeeded(
-                text: expectedText,
+                text: undoText,
                 cursorOffset: cursorOffset,
                 totalUTF16Length: totalUTF16Length,
                 allowHID: true,
@@ -2669,7 +2777,7 @@ public final class TextInjectionPipeline {
                     outcome: .succeeded,
                     path: path,
                     context: context,
-                    injectedText: expectedText,
+                    injectedText: undoText,
                     undoable: ExpansionUndoPolicy.undoPointAllowed(
                         trailingKeys: trailingKeys,
                         cursorOffset: cursorOffset,
@@ -2689,7 +2797,7 @@ public final class TextInjectionPipeline {
                 outcome: .postedUnverified,
                 path: path,
                 context: context,
-                injectedText: expectedText,
+                injectedText: undoText,
                 undoable: ExpansionUndoPolicy.undoPointAllowed(
                     trailingKeys: trailingKeys,
                     cursorOffset: cursorOffset,
@@ -2987,6 +3095,26 @@ public final class TextInjectionPipeline {
     }
 
     // MARK: - Cursor placement
+
+    /// The unicode events `posted` did not type, joined as the text a later insert must add.
+    /// Nil when that tail contains a key event: it is not clipboard text, and pasting the whole
+    /// expansion would repeat the characters that already landed.
+    private static func unpostedUnicodeText(
+        _ events: [HIDKeyPoster.UnicodeInsertEvent],
+        posted: Int
+    ) -> String? {
+        guard posted > 0, posted < events.count else { return nil }
+        var text = ""
+        for event in events[posted...] {
+            switch event {
+            case .text(let value):
+                text.append(contentsOf: value)
+            case .key:
+                return nil
+            }
+        }
+        return text.isEmpty ? nil : text
+    }
 
     private func positionCursorIfNeeded(
         text: String,

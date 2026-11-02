@@ -57,6 +57,83 @@ final class EraseContinuationTests: XCTestCase {
         XCTAssertEqual(decision, .proceed)
     }
 
+    /// A pid match with element identity skipped is not permission to keep posting. CFEqual is
+    /// still sufficient, and a combo box that only swapped its node is not a different control.
+    func testAPidOnlyMatchDoesNotContinueIntoADifferentControl() {
+        let phase = EraseContinuationPhase.duringErase
+        func unchecked(
+            observed: PasteboardBroker.PasteTarget.Mismatch?,
+            role: String? = "AXComboBox",
+            deletionMatched: Bool = false,
+            framesDisagree: Bool? = false,
+            identityContradicted: Bool = false,
+            allowsRetarget: Bool = true,
+            axUntrusted: Bool = false
+        ) -> EraseContinuationFacts {
+            facts(
+                phase: phase, axUntrusted: axUntrusted, mismatch: nil, allowsRetarget: allowsRetarget,
+                liveRole: role, deletionMatched: deletionMatched, identityContradicted: identityContradicted,
+                elementIdentityChecked: false, observedElementMismatch: observed, framesDisagree: framesDisagree
+            )
+        }
+
+        XCTAssertEqual(
+            EraseContinuation.decide(facts(phase: phase, mismatch: nil)),
+            .proceed,
+            "a checked nil mismatch is still permission"
+        )
+        XCTAssertEqual(EraseContinuation.decide(unchecked(observed: nil)), .proceed)
+        XCTAssertEqual(EraseContinuation.decide(unchecked(observed: .rangeChanged)), .proceed)
+        XCTAssertEqual(
+            EraseContinuation.decide(unchecked(observed: .elementChanged, framesDisagree: nil)),
+            .proceed,
+            "a missing frame is not a different control, and CFEqual is not required"
+        )
+        XCTAssertEqual(
+            EraseContinuation.decide(unchecked(observed: .elementChanged, deletionMatched: true, framesDisagree: false)),
+            .proceed
+        )
+        XCTAssertEqual(
+            EraseContinuation.decide(unchecked(
+                observed: .elementChanged, role: "AXTextField", deletionMatched: true, framesDisagree: false
+            )),
+            .retarget
+        )
+        XCTAssertEqual(
+            EraseContinuation.decide(unchecked(
+                observed: .elementChanged, role: "AXTextField", deletionMatched: true,
+                framesDisagree: false, allowsRetarget: false
+            )),
+            .proceed,
+            "undo does not adopt the inner field, and it does not abort on it"
+        )
+
+        for observed: PasteboardBroker.PasteTarget.Mismatch in [
+            .focusLost, .focusArrived, .processChanged, .noCapturedProcess,
+        ] {
+            guard case .refuse = EraseContinuation.decide(unchecked(observed: observed)) else {
+                XCTFail("\(observed) must refuse")
+                continue
+            }
+        }
+        for row in [
+            unchecked(observed: .elementChanged, framesDisagree: true),
+            unchecked(observed: .elementChanged, identityContradicted: true),
+            unchecked(observed: .elementChanged, role: "AXTextArea", deletionMatched: false, framesDisagree: false),
+            unchecked(observed: .elementChanged, role: "AXTextArea", deletionMatched: false, framesDisagree: nil),
+            unchecked(observed: .elementChanged, role: nil, framesDisagree: false),
+        ] {
+            guard case .refuse = EraseContinuation.decide(row) else {
+                XCTFail("expected a refusal for \(row.liveRole ?? "nil") frames=\(String(describing: row.framesDisagree))")
+                continue
+            }
+        }
+        guard case .refuse = EraseContinuation.decide(unchecked(observed: .elementChanged, axUntrusted: true)) else {
+            XCTFail("an untrusted process refuses before the pid-only branch")
+            return
+        }
+    }
+
     func testSecondReadingThatMatchesAgainProceedsWithoutRetargeting() {
         XCTAssertEqual(
             EraseContinuation.decide(facts(phase: .beforeInsertion, mismatch: nil, allowsRetarget: true,
@@ -1208,7 +1285,11 @@ final class EraseContinuationTests: XCTestCase {
         livePrecondition: ErasePreconditionResult? = nil,
         liveRole: String? = nil,
         fieldReading: EraseFieldReading? = nil,
-        deletionMatched: Bool = false
+        deletionMatched: Bool = false,
+        identityContradicted: Bool = false,
+        elementIdentityChecked: Bool = true,
+        observedElementMismatch: PasteboardBroker.PasteTarget.Mismatch? = nil,
+        framesDisagree: Bool? = nil
     ) -> EraseContinuationFacts {
         EraseContinuationFacts(
             phase: phase,
@@ -1221,7 +1302,11 @@ final class EraseContinuationTests: XCTestCase {
             deletionMatched: deletionMatched,
             livePrecondition: livePrecondition,
             liveRole: liveRole,
-            fieldReading: fieldReading
+            fieldReading: fieldReading,
+            identityContradicted: identityContradicted,
+            elementIdentityChecked: elementIdentityChecked,
+            observedElementMismatch: observedElementMismatch,
+            framesDisagree: framesDisagree
         )
     }
 

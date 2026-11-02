@@ -65,6 +65,31 @@ public enum ExpansionUndoPolicy {
             : .refusedWithoutHeldKey
     }
 
+    /// The early guard on `performUndo`, before the field is read. Pure for tests.
+    ///
+    /// A record that aged out of the undo window still owes the swallowed delete, but only when
+    /// that is the sole failure: the attempt, the target, trust and Secure Input still hold.
+    /// An input revision, a different process, a lost trust grant or Secure Input does not get
+    /// the key back — another delete would land in whatever is focused now.
+    public enum UndoPreflight: Equatable {
+        case proceed
+        case refuse(returnHeldBackspace: Bool)
+    }
+
+    public static func preflightUndo(
+        fresh: Bool,
+        attemptCurrent: Bool,
+        targetCurrent: Bool,
+        processTrusted: Bool,
+        secureInputActive: Bool
+    ) -> UndoPreflight {
+        if fresh, attemptCurrent, targetCurrent, processTrusted, !secureInputActive {
+            return .proceed
+        }
+        let freshnessOnly = !fresh && attemptCurrent && targetCurrent && processTrusted && !secureInputActive
+        return .refuse(returnHeldBackspace: freshnessOnly)
+    }
+
     /// Characters the user may type after an expansion and still have undo work. Bounded so a
     /// stale record can never authorise erasing an unbounded amount of text.
     static let undoMaxTypedAfter = 16

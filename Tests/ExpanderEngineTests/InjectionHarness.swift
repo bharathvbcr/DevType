@@ -41,23 +41,30 @@ final class InjectionHarness {
 
         /// What a reader of `element` sees right now.
         func access() -> DeliveryVerifier.TextAccess {
+            // A posted paste re-reads the field after the test has dropped the harness
+            // (`scheduleDeferredPasteReverify`). A weak page answers "nothing" then;
+            // unowned crashed the next test in the process.
             .init(
-                focusedElement: { [unowned self] in self.focused },
-                numberOfCharacters: { [unowned self] element in
-                    guard !self.unreadable.contains(self.key(element)) else { return nil }
+                focusedElement: { [weak self] in self?.focused },
+                numberOfCharacters: { [weak self] element in
+                    guard let self, !self.unreadable.contains(self.key(element)) else { return nil }
                     return self.values[self.key(element)].map { ($0 as NSString).length }
                 },
-                selectedRange: { [unowned self] element in
-                    self.unreadable.contains(self.key(element)) ? nil : self.selections[self.key(element)]
+                selectedRange: { [weak self] element in
+                    guard let self else { return nil }
+                    return self.unreadable.contains(self.key(element)) ? nil : self.selections[self.key(element)]
                 },
-                stringForRange: { [unowned self] element, range in
-                    guard !self.unreadable.contains(self.key(element)),
+                stringForRange: { [weak self] element, range in
+                    guard let self, !self.unreadable.contains(self.key(element)),
                           let value = self.values[self.key(element)] else { return nil }
                     let text = value as NSString
                     guard range.location >= 0, NSMaxRange(range) <= text.length else { return nil }
                     return text.substring(with: range)
                 },
-                observation: { [unowned self] element in
+                observation: { [weak self] element in
+                    guard let self else {
+                        return .init(value: nil, selectedText: nil, selectedRange: nil, target: element)
+                    }
                     let k = self.key(element)
                     if self.unreadable.contains(k) {
                         return .init(value: nil, selectedText: nil, selectedRange: nil, target: element)
@@ -66,29 +73,46 @@ final class InjectionHarness {
                     return .init(value: self.values[k], selectedText: nil,
                                  caretLocation: range?.location, selectedRange: range, target: element)
                 },
-                frame: { [unowned self] element in self.frames[self.key(element)] },
-                role: { [unowned self] element in self.roles[self.key(element)] },
-                pid: { [unowned self] element in self.pids[self.key(element)] },
-                attributes: { [unowned self] element in self.attributes[self.key(element)] ?? .none }
+                frame: { [weak self] element in
+                    guard let self else { return nil }
+                    return self.frames[self.key(element)]
+                },
+                role: { [weak self] element in
+                    guard let self else { return nil }
+                    return self.roles[self.key(element)]
+                },
+                pid: { [weak self] element in
+                    guard let self else { return nil }
+                    return self.pids[self.key(element)]
+                },
+                attributes: { [weak self] element in
+                    guard let self else { return .none }
+                    return self.attributes[self.key(element)] ?? .none
+                }
             )
         }
 
         /// The erase guard's view of the same field.
         func eraseAccess() -> EraseExecutor.TextAccess {
             EraseExecutor.TextAccess(
-                value: { [unowned self] element in
-                    self.unreadable.contains(self.key(element)) ? nil : self.values[self.key(element)]
+                value: { [weak self] element in
+                    guard let self else { return nil }
+                    return self.unreadable.contains(self.key(element)) ? nil : self.values[self.key(element)]
                 },
-                selectedRange: { [unowned self] element in
-                    self.unreadable.contains(self.key(element)) ? nil : self.selections[self.key(element)]
+                selectedRange: { [weak self] element in
+                    guard let self else { return nil }
+                    return self.unreadable.contains(self.key(element)) ? nil : self.selections[self.key(element)]
                 },
-                stringForRange: { [unowned self] element, range in
-                    guard let value = self.values[self.key(element)] else { return nil }
+                stringForRange: { [weak self] element, range in
+                    guard let self, let value = self.values[self.key(element)] else { return nil }
                     let text = value as NSString
                     guard range.location >= 0, NSMaxRange(range) <= text.length else { return nil }
                     return text.substring(with: range)
                 },
-                role: { [unowned self] element in self.roles[self.key(element)] },
+                role: { [weak self] element in
+                    guard let self else { return nil }
+                    return self.roles[self.key(element)]
+                },
                 acceptsTextMutation: { _ in true }
             )
         }
@@ -232,6 +256,15 @@ final class InjectionHarness {
     var hostPastes = true
     /// Runs on every backspace, with the number of backspaces so far, after the host acted.
     var onBackspace: (InjectionHarness, Int) -> Void = { _, _ in }
+    /// Runs after a key other than backspace, Command, or ⌘V is posted. Unicode inserts use
+    /// key code 0, so a test can stop the poster after the first character of a typed insert.
+    var onPostedKey: (InjectionHarness, Int) -> Void = { _, _ in }
+    /// The next `canPost` answers no, once. Set from `onPostedKey` to stop a unicode burst
+    /// while leaving the clipboard's own post allowed.
+    var failTheNextPost = false
+    /// Unicode key-downs (key code 0) insert their character into the focused field, which is
+    /// what a real host does and the default log-only path does not.
+    var landUnicodeKeys = false
     /// Runs on every live focus read the pipeline makes, before it is answered — where a test makes
     /// the world change between one continue-check and the next.
     var onFocusRead: (InjectionHarness) -> Void = { _ in }
@@ -290,7 +323,16 @@ final class InjectionHarness {
         let board = board
         poster = HIDKeyPoster(
             commandEventIO: .init(
-                canPost: { box.harness?.canPostEvents ?? false },
+                canPost: {
+                    guard let harness = box.harness, harness.canPostEvents else { return false }
+                    // One refusal, consumed by the next check. A partial unicode insert stops
+                    // on this without also refusing the clipboard recovery that follows.
+                    if harness.failTheNextPost {
+                        harness.failTheNextPost = false
+                        return false
+                    }
+                    return true
+                },
                 post: { event in box.harness?.host(event) },
                 pause: {}
             ),
@@ -369,12 +411,17 @@ final class InjectionHarness {
             hid: poster,
             eraser: eraser
         )
-        keeper = { [unowned self] text in
+        keeper = { [weak self] text in
+            guard let self else { return false }
             self.boardAtKeep.append(self.board.string(forType: .string))
             self.record(.keep(text))
             return self.keepAnswer
         }
-        focusQuery = { [unowned self] completion in
+        focusQuery = { [weak self] completion in
+            guard let self else {
+                completion(.missing)
+                return
+            }
             self.record(.focusQuery)
             self.record(.boardBusy(self.broker.publicationGateRemaining() > 0))
             let index = self.focusQueries
@@ -387,7 +434,7 @@ final class InjectionHarness {
             }
         }
         box.harness = self
-        pipeline.onReplaceNotLanded = { [unowned self] copied in self.toasts.append(copied) }
+        pipeline.onReplaceNotLanded = { [weak self] copied in self?.toasts.append(copied) }
     }
 
     deinit {
@@ -423,7 +470,26 @@ final class InjectionHarness {
         case kVK_Delete, kVK_ANSI_V, kVK_Command:
             break
         default:
-            if down { record(.key(code)) }
+            if down {
+                record(.key(code))
+                if code == 0, landUnicodeKeys, let focused = page.focused {
+                    var length = 0
+                    var units = [UniChar](repeating: 0, count: 64)
+                    event.keyboardGetUnicodeString(
+                        maxStringLength: units.count,
+                        actualStringLength: &length,
+                        unicodeString: &units
+                    )
+                    if length > 0 {
+                        let text = units.withUnsafeBufferPointer { buffer -> String in
+                            guard let base = buffer.baseAddress else { return "" }
+                            return String(utf16CodeUnits: base, count: min(length, units.count))
+                        }
+                        if !text.isEmpty { page.insert(text, into: focused) }
+                    }
+                }
+                onPostedKey(self, code)
+            }
         }
     }
 
@@ -508,7 +574,10 @@ final class InjectionHarness {
             erasePlan: erasing ? ErasePlan(text: trigger) : .empty,
             preResolvedText: result,
             preResolvedCursorOffset: cursorFromEnd.map { (result as NSString).length - $0 },
-            shouldContinue: { [unowned self] in !self.targetMovedAfterPaste && operationStillOurs() },
+            shouldContinue: { [weak self] in
+                guard let self else { return false }
+                return !self.targetMovedAfterPaste && operationStillOurs()
+            },
             targetFocus: .resolved(field),
             completion: { outcome = $0; finished = true }
         )
@@ -563,7 +632,10 @@ final class InjectionHarness {
             snippetLookup: nil,
             focus: .resolved(field),
             replacesSelection: replacesSelection,
-            shouldContinue: { [unowned self] in !self.targetMovedAfterPaste && operationStillOurs() },
+            shouldContinue: { [weak self] in
+                guard let self else { return false }
+                return !self.targetMovedAfterPaste && operationStillOurs()
+            },
             operationIsCurrent: operationStillOurs,
             completion: { outcome = $0; finished = true }
         )
