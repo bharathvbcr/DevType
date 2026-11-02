@@ -504,7 +504,7 @@ else
   fi
   # bash 3.2 (system /bin/bash) treats "${empty[@]}" as unbound under `set -u`, so the
   # default non-hardened path would abort here. The `+` expansion drops to nothing instead.
-  codesign --force --deep --sign "${SIGN_ARG}" --identifier "${BUNDLE_ID}" \
+  codesign --force --sign "${SIGN_ARG}" --identifier "${BUNDLE_ID}" \
     ${CODESIGN_EXTRA[@]+"${CODESIGN_EXTRA[@]}"} "${APP_BUNDLE}" >/dev/null
 fi
 

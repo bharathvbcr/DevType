@@ -91,4 +91,58 @@ for TOOLCHAIN_KEY in DTXcode DTXcodeBuild DTSDKName DTPlatformVersion; do
   fi
 done
 
+# package-app.sh states the sign step uses no --deep. That invocation must match,
+# and hardened-runtime selection must stay on CODESIGN_EXTRA rather than notarize policy.
+PACKAGE_APP="${ROOT}/Scripts/package-app.sh"
+sign_invocation="$(
+  awk '
+    /^[[:space:]]*codesign[[:space:]]/ && index($0, "--sign \"${SIGN_ARG}\"") {
+      line = $0
+      while (line ~ /\\[[:space:]]*$/) {
+        if ((getline next_line) <= 0) {
+          break
+        }
+        sub(/\\[[:space:]]*$/, "", line)
+        line = line " " next_line
+      }
+      print line
+      exit
+    }
+  ' "${PACKAGE_APP}"
+)"
+if [[ -z "${sign_invocation}" ]]; then
+  echo "error: package-app.sh sign invocation was not found" >&2
+  exit 1
+fi
+if grep -Eq '(^|[[:space:]])--deep([[:space:]]|$)' <<<"${sign_invocation}"; then
+  echo "error: package-app.sh sign invocation passes --deep" >&2
+  printf '%s\n' "${sign_invocation}" >&2
+  exit 1
+fi
+for required_token in \
+  '--force' \
+  '--sign "${SIGN_ARG}"' \
+  '--identifier "${BUNDLE_ID}"' \
+  '${CODESIGN_EXTRA[@]+"${CODESIGN_EXTRA[@]}"}'
+do
+  if ! grep -Fq -- "${required_token}" <<<"${sign_invocation}"; then
+    echo "error: package-app.sh sign invocation dropped ${required_token}" >&2
+    printf '%s\n' "${sign_invocation}" >&2
+    exit 1
+  fi
+done
+if ! grep -Fq 'HARDENED_REQUEST="${DEVTYPE_HARDENED_RUNTIME:-auto}"' "${PACKAGE_APP}" \
+  || ! grep -Fq 'devtype_effective_hardened_runtime "${HARDENED_REQUEST}" "${SIGN_KIND}"' "${PACKAGE_APP}" \
+  || ! grep -Fq 'CODESIGN_EXTRA=(--entitlements "${ENTITLEMENTS}")' "${PACKAGE_APP}" \
+  || ! grep -Fq 'if [[ "${HARDENED}" == "1" ]]; then' "${PACKAGE_APP}" \
+  || ! grep -Fq 'CODESIGN_EXTRA+=(--options runtime --timestamp)' "${PACKAGE_APP}" \
+  || ! grep -Fq 'Sign with stable bundle ID (no --deep; sign the bundle itself).' "${PACKAGE_APP}"; then
+  echo "error: hardened-runtime selection or the no --deep statement changed" >&2
+  exit 1
+fi
+if grep -q 'DEVTYPE_SKIP_NOTARIZE' "${PACKAGE_APP}"; then
+  echo "error: package-app.sh must not consult DEVTYPE_SKIP_NOTARIZE" >&2
+  exit 1
+fi
+
 echo "package signing contract regression passed"
