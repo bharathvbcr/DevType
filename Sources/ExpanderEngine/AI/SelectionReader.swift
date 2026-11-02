@@ -711,9 +711,9 @@ public enum SelectionReader {
     ///   and text-marker forms when the primary attribute reports nothing. **Off for
     ///   high-frequency callers**, which pay for the extra IPC on every keystroke.
     /// - Parameter allowValueSlice: permit the `kAXValue`-sliced-by-range rung, which pulls the
-    ///   element's *whole* value across AX IPC when `kAXNumberOfCharacters` is an `Int` at or
-    ///   below `maxSliceableDocumentCharacters`. Off for `SelectionMonitor`; the explicit reads
-    ///   keep it.
+    ///   element's *whole* value across AX IPC when `kAXNumberOfCharacters` is a whole number
+    ///   from zero through `maxSliceableDocumentCharacters`. Off for `SelectionMonitor`; the
+    ///   explicit reads keep it.
     public static func copySelectedText(
         from element: AXUIElement,
         allowSlowRetry: Bool = false,
@@ -899,8 +899,9 @@ public enum SelectionReader {
     /// selection out of it. The range guard bounds the selection; the character count is what
     /// bounds the document. Selecting one line in a 50 MB log would otherwise drag all 50 MB
     /// onto the main thread — the pathological case for a rung that only exists as a third
-    /// fallback anyway. A missing count, or one that is not an `Int`, does not authorize that
-    /// copy: without a usable count the document is unbounded.
+    /// fallback anyway. A missing count, a boolean, a fraction, or a negative does not authorize
+    /// that copy. A whole number from zero through this ceiling does, including a whole-valued
+    /// double.
     static let maxSliceableDocumentCharacters = 2_000_000
 
     /// `kAXValue` sliced by the selected range, for elements implementing neither parameterized
@@ -924,16 +925,17 @@ public enum SelectionReader {
     /// Attribute-read seam for the value-slice rung. Production passes
     /// `AXUIElementCopyAttributeValue`; tests pass a stand-in and must not call Accessibility.
     ///
-    /// `kAXNumberOfCharacters` is read first. Only an `Int` at or below
-    /// `maxSliceableDocumentCharacters` may then read `kAXValue`.
+    /// `kAXNumberOfCharacters` is read first. Only a non-boolean whole number in
+    /// `0...maxSliceableDocumentCharacters` — an integer, or a finite double that is exactly
+    /// that integer — may then read `kAXValue`.
     static func copyValueSubstring(
         utf16Range: CFRange,
         copyAttribute: (String) -> CFTypeRef?
     ) -> String? {
-        // The count is the only bound on the document. Missing or not an Int, refuse
-        // before kAXValue is read — falling through would copy an unbounded value.
-        guard let characterCount = copyAttribute(kAXNumberOfCharactersAttribute as String) as? Int,
-              characterCount <= maxSliceableDocumentCharacters else {
+        // The count is the only bound on the document. Missing, boolean, fractional, or
+        // negative, refuse before kAXValue is read.
+        guard let countRef = copyAttribute(kAXNumberOfCharactersAttribute as String),
+              sliceableDocumentCharacterCount(countRef) != nil else {
             return nil
         }
 
@@ -950,6 +952,62 @@ public enum SelectionReader {
         }
         guard let string else { return nil }
         return substring(of: string, utf16Range: utf16Range)
+    }
+
+    /// A document length that may authorize copying `kAXValue`.
+    ///
+    /// `as? Int` is not enough: `CFBoolean` and `NSNumber(value: true/false)` bridge to 1 and 0,
+    /// and a negative `Int` is still `<= maxSliceableDocumentCharacters`. A whole-valued double
+    /// is a real Accessibility answer and is allowed. A truncating bridge must not turn 1.5
+    /// into an authorized length.
+    private static func sliceableDocumentCharacterCount(_ value: CFTypeRef) -> Int? {
+        if CFGetTypeID(value) == CFBooleanGetTypeID() {
+            return nil
+        }
+        guard CFGetTypeID(value) == CFNumberGetTypeID() else {
+            return nil
+        }
+        let number = unsafeBitCast(value, to: CFNumber.self)
+        switch CFNumberGetType(number) {
+        case .sInt8Type, .sInt16Type, .sInt32Type, .sInt64Type,
+             .charType, .shortType, .intType, .longType, .longLongType,
+             .cfIndexType, .nsIntegerType:
+            var intValue: Int64 = 0
+            guard CFNumberGetValue(number, .sInt64Type, &intValue) else { return nil }
+            guard intValue >= 0, intValue <= Int64(maxSliceableDocumentCharacters) else { return nil }
+            return Int(intValue)
+        case .float32Type, .floatType:
+            var floatValue: Float = 0
+            guard CFNumberGetValue(number, .float32Type, &floatValue), floatValue.isFinite else {
+                return nil
+            }
+            return integralCharacterCount(Double(floatValue))
+        case .float64Type, .doubleType:
+            var doubleValue = 0.0
+            guard CFNumberGetValue(number, .doubleType, &doubleValue) else { return nil }
+            return integralCharacterCount(doubleValue)
+        case .cgFloatType:
+            var cgValue: CGFloat = 0
+            guard CFNumberGetValue(number, .cgFloatType, &cgValue) else { return nil }
+            return integralCharacterCount(Double(cgValue))
+        default:
+            return nil
+        }
+    }
+
+    /// Finite, exactly integral, and inside the document ceiling. `value == trunc(value)`
+    /// rejects a fraction even when converting to `Int` would truncate it.
+    private static func integralCharacterCount(_ value: Double) -> Int? {
+        guard value.isFinite,
+              value >= 0,
+              value <= Double(maxSliceableDocumentCharacters) else {
+            return nil
+        }
+        let integral = value.rounded(.towardZero)
+        guard value == integral else { return nil }
+        let count = Int(integral)
+        guard Double(count) == value else { return nil }
+        return count
     }
 
     /// UTF-16-safe slice, bounds-checked against the value the app just handed us.
