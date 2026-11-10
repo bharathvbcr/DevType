@@ -113,7 +113,8 @@ final class PreferencesWindowController: NSWindowController {
     static let shared = PreferencesWindowController()
 
     private var preferences: PreferencesViewController?
-    private weak var hotkeyManager: HotkeyManager?
+    /// Internal so a test can assert a nil `show` kept the same instance. Not public.
+    weak var hotkeyManager: HotkeyManager?
     private var renderedLanguage: AppLanguage?
     private var localizationRefreshDeferred = false
     private var sheetEndObserver: NSObjectProtocol?
@@ -142,13 +143,14 @@ final class PreferencesWindowController: NSWindowController {
 
     /// Opens (or raises) Preferences, optionally jumping to a section.
     ///
-    /// `hotkeyManager` is refreshed on *every* call, not only when the window is
-    /// first created: the controller outlives individual callers, and pinning the
-    /// manager from first show left a window opened via a nil-manager path acting
-    /// on nil forever — macro edits then went to defaults instead of the live
-    /// registration. Nil-safe: callers without a manager keep today's behaviour.
+    /// The manager is refreshed on every call. A nil argument does not replace a
+    /// manager already held — Keyboard Shortcuts passes nil because it has none of
+    /// its own — and the refresh uses the manager kept. A non-nil argument still
+    /// replaces it, so a later real manager is not stuck behind an earlier nil.
+    /// The first open with a truly nil manager stores nil.
     func show(tab: PreferencesTab? = nil, hotkeyManager: HotkeyManager?) {
-        self.hotkeyManager = hotkeyManager
+        let manager = hotkeyManager ?? self.hotkeyManager
+        self.hotkeyManager = manager
         if window == nil {
             let controller = makePreferencesController()
             preferences = controller
@@ -165,7 +167,7 @@ final class PreferencesWindowController: NSWindowController {
             // `reloadAll()` below is this open's one full pass.
             performLocalizationRefresh(reloadingReplacement: false)
         }
-        preferences?.refreshHotkeyManager(hotkeyManager)
+        preferences?.refreshHotkeyManager(manager)
         if let tab { preferences?.select(tab) }
         // The single full reload per open. `viewDidLoad`/`viewWillAppear` deliberately do not
         // reload: they ran in addition to this call and tripled the work of opening the window.

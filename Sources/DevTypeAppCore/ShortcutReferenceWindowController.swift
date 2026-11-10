@@ -318,6 +318,7 @@ final class ShortcutReferenceViewController: NSViewController, NSTableViewDataSo
 
     @objc private func openHotkeysPrefs() {
         view.window?.close()
+        // Nil keeps a manager a previous open installed; it does not clear one.
         PreferencesWindowController.shared.show(tab: .hotkeys, hotkeyManager: nil)
     }
 
