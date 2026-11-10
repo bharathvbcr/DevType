@@ -58,6 +58,20 @@ public final class LegacyAppleSpeechAdapter: SpeechRecognizer, @unchecked Sendab
         }
     }
 
+    /// The file request batch recognition starts from. Contextual strings are capped here so a
+    /// test can read them without starting a recognition task.
+    static func urlRecognitionRequest(for request: SpeechRequest) -> SFSpeechURLRecognitionRequest {
+        let recognitionRequest = SFSpeechURLRecognitionRequest(url: request.audio.fileURL)
+        recognitionRequest.requiresOnDeviceRecognition = true
+        if #available(macOS 14.0, *), !request.vocabulary.terms.isEmpty {
+            let capped = AppleSpeechAnalyzerRuntime.contextualTerms(from: request.vocabulary.terms)
+            if !capped.isEmpty {
+                recognitionRequest.contextualStrings = capped
+            }
+        }
+        return recognitionRequest
+    }
+
     public func transcribe(_ request: SpeechRequest) -> AsyncThrowingStream<SpeechEvent, Error> {
         AsyncThrowingStream { continuation in
             guard authorizationStatus() == .authorized else {
@@ -101,13 +115,7 @@ public final class LegacyAppleSpeechAdapter: SpeechRecognizer, @unchecked Sendab
                 return
             }
 
-            let recognitionRequest = SFSpeechURLRecognitionRequest(url: request.audio.fileURL)
-            recognitionRequest.requiresOnDeviceRecognition = true
-            if #available(macOS 14.0, *), !request.vocabulary.terms.isEmpty {
-                // Apple contextual strings guidance: max 100 entries
-                let capped = Array(request.vocabulary.terms.prefix(100))
-                recognitionRequest.contextualStrings = capped
-            }
+            let recognitionRequest = Self.urlRecognitionRequest(for: request)
 
             let startTime = Date()
             let duration = request.audio.durationSeconds
