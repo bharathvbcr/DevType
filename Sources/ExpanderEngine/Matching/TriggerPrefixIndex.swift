@@ -14,9 +14,10 @@ import Foundation
 /// Built once per library change inside `SnippetMatchSnapshot`, never on the keystroke path.
 public struct TriggerPrefixIndex: Equatable, Sendable {
 
-    /// Folded keys of triggers that are a strict prefix of at least one other enabled trigger
-    /// **and** fire without a terminator. A trigger that waits for a terminator cannot shadow,
-    /// so holding it would add latency for nothing.
+    /// Matcher keys of triggers that are a strict prefix of another enabled trigger once both
+    /// are lowercased, **and** that fire without a terminator. Case-sensitive keys stay
+    /// verbatim; case-insensitive keys are already lowercased. A trigger that waits for a
+    /// terminator cannot shadow, so holding it would add latency for nothing.
     private let ambiguous: Set<String>
     /// Every folded trigger key, for viable-extension queries.
     private let allKeys: [String]
@@ -51,7 +52,13 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
         // One sorted view answers every query. The nested scan this replaces was O(n²) and
         // ran synchronously on the main thread inside `EventTapEngine.snippets` on every
         // library save — 118 ms at 2,000 triggers. See `TriggerPrefixScan`.
-        let scan = TriggerPrefixScan(foldedKeys: keys)
+        //
+        // The scan sees one lowercased key space, the same fold `hasViableExtension` uses.
+        // Matcher keys keep a case-sensitive trigger verbatim, so `;Signature`.hasPrefix(";sig")
+        // is false and `Signature` sorts before `sig`. The set still stores `entry.key`.
+        // Lowercased once here: both the scan and the per-keystroke extension check reuse it.
+        let lowercased = keys.map { $0.lowercased() }
+        let scan = TriggerPrefixScan(foldedKeys: lowercased)
         for (index, entry) in entries.enumerated() where entry.firesWithoutTerminator {
             if scan.hasStrictExtension(of: index) {
                 ambiguous.insert(entry.key)
@@ -60,9 +67,6 @@ public struct TriggerPrefixIndex: Equatable, Sendable {
 
         self.ambiguous = ambiguous
         self.allKeys = keys
-        // Pre-folded once at init: `hasViableExtension` runs per keystroke while a hold is live,
-        // and `key.lowercased()` allocated a fresh string for every key on every keystroke.
-        let lowercased = keys.map { $0.lowercased() }
         self.allKeysLowercased = lowercased
         self.allKeyLengthsLowercased = lowercased.map { $0.count }
         self.completeKeys = Set(keys)

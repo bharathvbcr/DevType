@@ -87,6 +87,125 @@ final class PrefixDebounceTests: XCTestCase {
         XCTAssertTrue(index.isAmbiguous(trigger: "`SLM", caseSensitive: false))
     }
 
+    /// `;sig` (case-insensitive) and `;Signature` (case-sensitive) are one prefix once folded.
+    /// Comparing the stored keys with case-sensitive `hasPrefix` misses it, and `Signature`
+    /// sorts before `sig`, so the short trigger used to fire on the keystroke.
+    func testMixedCaseSemicolonPrefixHoldsOnlyTheShortTrigger() {
+        let index = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet(";Signature", caseSensitive: true),
+            prefixTriggerSnippet(";sig", caseSensitive: false)
+        ])
+        XCTAssertTrue(index.isAmbiguous(trigger: ";sig", caseSensitive: false))
+        XCTAssertTrue(
+            index.isAmbiguous(trigger: ";SIG", caseSensitive: false),
+            "A case-insensitive lookup folds, so any spelling of `;sig` must be held."
+        )
+        XCTAssertFalse(
+            index.isAmbiguous(trigger: ";Signature", caseSensitive: true),
+            "The longer trigger is reachable only if the short one waits; it is not itself ambiguous."
+        )
+        XCTAssertFalse(
+            index.isAmbiguous(trigger: ";signature", caseSensitive: true),
+            "A case-sensitive lookup stays verbatim and must not fold into the short key."
+        )
+    }
+
+    /// The short key is the case-sensitive spelling. The set stores that spelling, not its fold.
+    func testCaseSensitiveShortTriggerKeepsAVerbatimAmbiguousKey() {
+        let index = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet(";signature", caseSensitive: false),
+            prefixTriggerSnippet(";Sig", caseSensitive: true)
+        ])
+        XCTAssertTrue(index.isAmbiguous(trigger: ";Sig", caseSensitive: true))
+        XCTAssertFalse(
+            index.isAmbiguous(trigger: ";sig", caseSensitive: true),
+            "Folding a case-sensitive query would invent a key the index did not store."
+        )
+        XCTAssertFalse(index.isAmbiguous(trigger: ";signature", caseSensitive: false))
+    }
+
+    func testBacktickMixedCasePairHoldsTheShortTrigger() {
+        let index = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet("`Signature", caseSensitive: true),
+            prefixTriggerSnippet("`sig", caseSensitive: false)
+        ])
+        XCTAssertTrue(index.isAmbiguous(trigger: "`sig", caseSensitive: false))
+        XCTAssertFalse(index.isAmbiguous(trigger: "`Signature", caseSensitive: true))
+    }
+
+    /// No longer sibling means no hold, even when the trigger starts with punctuation.
+    func testPunctuationTriggerWithNoLongerSiblingIsNotAmbiguous() {
+        let index = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet(";sig", caseSensitive: false),
+            prefixTriggerSnippet(";other", caseSensitive: true)
+        ])
+        XCTAssertFalse(index.isAmbiguous(trigger: ";sig", caseSensitive: false))
+        XCTAssertFalse(index.isAmbiguous(trigger: ";other", caseSensitive: true))
+        XCTAssertFalse(index.hasAnyAmbiguity)
+    }
+
+    func testSameCasePrefixPairStaysAmbiguous() {
+        let index = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet(";sig", caseSensitive: false),
+            prefixTriggerSnippet(";signature", caseSensitive: false)
+        ])
+        XCTAssertTrue(index.isAmbiguous(trigger: ";sig", caseSensitive: false))
+        XCTAssertFalse(index.isAmbiguous(trigger: ";signature", caseSensitive: false))
+    }
+
+    /// Both directions of mixed `isCaseSensitive` on a punctuation-started prefix, plus a
+    /// chain where the middle trigger is itself a prefix of something longer.
+    func testMixedCaseSensitivityOnAPunctuationStartedPrefix() {
+        let shortInsensitive = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet(";sig", caseSensitive: false),
+            prefixTriggerSnippet(";Signature", caseSensitive: true),
+            prefixTriggerSnippet(";other", caseSensitive: true)
+        ])
+        XCTAssertTrue(shortInsensitive.isAmbiguous(trigger: ";sig", caseSensitive: false))
+        XCTAssertFalse(shortInsensitive.isAmbiguous(trigger: ";Signature", caseSensitive: true))
+        XCTAssertFalse(shortInsensitive.isAmbiguous(trigger: ";other", caseSensitive: true))
+
+        let shortSensitive = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet(";Sig", caseSensitive: true),
+            prefixTriggerSnippet(";signature", caseSensitive: false)
+        ])
+        XCTAssertTrue(shortSensitive.isAmbiguous(trigger: ";Sig", caseSensitive: true))
+        XCTAssertFalse(shortSensitive.isAmbiguous(trigger: ";signature", caseSensitive: false))
+
+        let chain = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet(";sig", caseSensitive: false),
+            prefixTriggerSnippet(";Signature", caseSensitive: true),
+            prefixTriggerSnippet(";SignatureExtra", caseSensitive: true)
+        ])
+        XCTAssertTrue(chain.isAmbiguous(trigger: ";sig", caseSensitive: false))
+        XCTAssertTrue(
+            chain.isAmbiguous(trigger: ";Signature", caseSensitive: true),
+            "`;Signature` is a folded prefix of `;SignatureExtra`, so it waits too."
+        )
+        XCTAssertFalse(chain.isAmbiguous(trigger: ";SignatureExtra", caseSensitive: true))
+    }
+
+    /// Equal after folding is not a strict extension, so neither spelling waits.
+    func testEqualFoldedMixedCaseKeysAreNotAmbiguous() {
+        let index = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet(";sig", caseSensitive: false),
+            prefixTriggerSnippet(";SIG", caseSensitive: true)
+        ])
+        XCTAssertFalse(index.isAmbiguous(trigger: ";sig", caseSensitive: false))
+        XCTAssertFalse(index.isAmbiguous(trigger: ";SIG", caseSensitive: true))
+    }
+
+    /// A word-boundary alphabetic trigger waits for a terminator, so folding must not hold it.
+    func testWordBoundaryAlphabeticMixedCaseStaysUnambiguous() {
+        let index = TriggerPrefixIndex(snippets: [
+            prefixTriggerSnippet("sig", caseSensitive: false, requireWordBoundary: true),
+            prefixTriggerSnippet("Signature", caseSensitive: true, requireWordBoundary: true)
+        ])
+        XCTAssertFalse(index.isAmbiguous(trigger: "sig", caseSensitive: false))
+        XCTAssertFalse(index.isAmbiguous(trigger: "Signature", caseSensitive: true))
+        XCTAssertFalse(index.hasAnyAmbiguity)
+    }
+
     // MARK: - Viable extensions
 
     func testPartialWordTowardALongerTriggerIsViable() {
