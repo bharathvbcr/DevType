@@ -158,6 +158,30 @@ public enum WhisperServerSetup {
         return url
     }
 
+    /// Inference URL for a `whisper-server` this controller has just spawned.
+    ///
+    /// Same scheme, host, and port as `spawnedChildProbeURL` (`--host 127.0.0.1`, `--port`).
+    /// The saved endpoint's path is kept, so a preference of `/inference` still posts there
+    /// instead of the readiness root. Callers must reject an out-of-range port first; this
+    /// traps on the same range as the probe URL.
+    static func spawnedChildInferenceURL(port: Int, savedEndpoint: URL) -> URL {
+        precondition((1 ... 65_535).contains(port), "whisper-server port is outside 1...65535")
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = port
+        let savedPath = URLComponents(url: savedEndpoint, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? ""
+        if savedPath == "/" {
+            components.path = "/"
+        } else if !savedPath.isEmpty {
+            components.percentEncodedPath = savedPath.hasPrefix("/") ? savedPath : "/" + savedPath
+        }
+        guard let url = components.url, url.host == "127.0.0.1", url.port == port else {
+            preconditionFailure("http://127.0.0.1:\(port) inference URL must stay on the bound port")
+        }
+        return url
+    }
+
     /// Whether the configured whisper.cpp server is answering at its request-path root.
     public static func isReachable(
         endpoint: URL = VoicePreferences.whisperEndpoint,

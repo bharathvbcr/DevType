@@ -74,6 +74,8 @@ public final class WhisperServerController: @unchecked Sendable {
 
     private let lock = UnfairLock()
     private var process: Process?
+    /// Inference URL for `process`. Cleared in every assignment that drops that ownership.
+    private var boundInferenceURL: URL?
     private var outputLog = ""
     private var isStarting = false
     private var isDownloadingModel = false
@@ -120,6 +122,18 @@ public final class WhisperServerController: @unchecked Sendable {
         lock.withLock { process?.isRunning == true }
     }
 
+    /// Where to send inference for the child this controller spawned.
+    ///
+    /// Nil unless that child is still running, so a saved `localhost` or `[::1]` endpoint
+    /// DevType did not spawn is left unchanged. The URL is `http://127.0.0.1` on the `--port`
+    /// that was passed, with the saved path kept.
+    var managedInferenceURL: URL? {
+        lock.withLock {
+            guard process?.isRunning == true else { return nil }
+            return boundInferenceURL
+        }
+    }
+
     /// Recent server output, for diagnosing a model that will not load.
     public var recentLog: String {
         lock.withLock { outputLog }
@@ -153,6 +167,7 @@ public final class WhisperServerController: @unchecked Sendable {
                 pipe.fileHandleForReading.readabilityHandler = nil
             }
             self.process = nil
+            self.boundInferenceURL = nil
             outputLog = ""
             isStarting = true
             return .admitted
@@ -219,6 +234,7 @@ public final class WhisperServerController: @unchecked Sendable {
         }
 
         let port = endpoint.port ?? 8080
+        let inferenceURL = WhisperServerSetup.spawnedChildInferenceURL(port: port, savedEndpoint: endpoint)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
         process.arguments = ["--host", "127.0.0.1", "--port", "\(port)", "-m", verifiedModel.fileURL.path]
@@ -254,6 +270,7 @@ public final class WhisperServerController: @unchecked Sendable {
 
         lock.withLock {
             self.process = process
+            self.boundInferenceURL = inferenceURL
         }
         guard !Task.isCancelled else {
             stopManagedProcess(process)
@@ -384,6 +401,7 @@ public final class WhisperServerController: @unchecked Sendable {
             lock.withLock {
                 guard process === expected else { return }
                 process = nil
+                boundInferenceURL = nil
             }
         } else {
             clearProcess(ifMatching: expected)
@@ -461,6 +479,7 @@ public final class WhisperServerController: @unchecked Sendable {
                 pipe.fileHandleForReading.readabilityHandler = nil
             }
             process = nil
+            boundInferenceURL = nil
         }
     }
 
