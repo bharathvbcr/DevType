@@ -255,20 +255,40 @@ extension SnippetStore {
         // This is invisible without the check: both snippets look fine individually, the
         // longer one simply never fires. Note it is asymmetric — only the *shorter* trigger's
         // firing rule matters, since the longer one is never reached.
-        // Fold exactly as the matcher keys: case-insensitive triggers compare lowercased.
-        // Folded once here rather than inside the scan — the nested loop this replaces folded
-        // its candidate on every comparison, so a 1,000-trigger library allocated a million
-        // strings to answer a question about prefixes. 180 ms at 2,000 triggers, on the main
-        // thread, per keystroke while the Conflicts chip was active. See `TriggerPrefixScan`.
-        let foldedKeys = all.map { $0.caseSensitive ? $0.trigger : $0.trigger.lowercased() }
-        let scan = TriggerPrefixScan(foldedKeys: foldedKeys)
+        //
+        // Two scans, same index order as `all`. `verbatimKeys` is the matcher key
+        // (case-sensitive verbatim, case-insensitive lowercased). `allLower` is every trigger
+        // passed through `String.lowercased()` only — no combining-mark strip, and İ (U+0130)
+        // is not rewritten to ASCII i. One all-lowercased scan would make case-sensitive
+        // `` `SLM `` a prefix of case-sensitive `` `slmabout ``. `String.hasPrefix` is
+        // case-sensitive, so the folded scan is what sees `` `sig `` against `` `Signature ``.
+        // Equal folded keys are not strict extensions; `` `sig `` / `` `Sig `` stay a case
+        // shadow from the loop above. See `TriggerPrefixScan`.
+        let verbatimKeys = all.map { $0.caseSensitive ? $0.trigger : $0.trigger.lowercased() }
+        let allLower = all.map { $0.trigger.lowercased() }
+        let verbatimScan = TriggerPrefixScan(foldedKeys: verbatimKeys)
+        let foldedScan = TriggerPrefixScan(foldedKeys: allLower)
         for (index, shadower) in all.enumerated() where shadower.firesWithoutTerminator {
+            var seen = Set<Int>()
             var shadowed: [Entry] = []
-            scan.forEachStrictExtension(of: index) { other in
+            func collect(_ other: Int) {
                 // A duplicate UUID names the same snippet twice; the old scan skipped those by
-                // identity and this must keep doing so.
+                // identity and this must keep doing so. The same victim can also arrive from
+                // both scans.
                 guard all[other].id != shadower.id else { return }
+                guard seen.insert(other).inserted else { return }
                 shadowed.append(all[other])
+            }
+            if shadower.caseSensitive {
+                verbatimScan.forEachStrictExtension(of: index, collect)
+                foldedScan.forEachStrictExtension(of: index) { other in
+                    // A case-sensitive other is not taken from the folded scan, so
+                    // `` `SLM `` does not shadow `` `slmabout ``.
+                    guard !all[other].caseSensitive else { return }
+                    collect(other)
+                }
+            } else {
+                foldedScan.forEachStrictExtension(of: index, collect)
             }
             guard !shadowed.isEmpty else { continue }
             let ordered = shadowed.sorted { $0.trigger < $1.trigger }
