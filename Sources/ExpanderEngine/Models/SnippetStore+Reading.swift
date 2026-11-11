@@ -82,16 +82,34 @@ extension SnippetStore {
         }
     }
 
+    /// A coordinated read that would pass `ceiling` bytes. `ceiling` is
+    /// `LibraryConflictRecovery.maximumCandidateBytes` unless a test passes a smaller one.
+    struct OversizedLibraryRead: LocalizedError, Equatable {
+        let byteCount: Int
+        let ceiling: Int
+
+        var errorDescription: String? {
+            "Library file is \(byteCount) bytes, over the \(ceiling)-byte read limit."
+        }
+    }
+
     /// §1.13: coordinated read so we never observe a half-written or
-    /// mid-sync file.
-    private static func coordinatedRead(at url: URL) throws -> Data {
+    /// mid-sync file. A file the filesystem reports as larger than `maximumBytes`
+    /// is refused before the bytes are allocated. The read itself also stops at
+    /// `maximumBytes`, so a file that grows during the read cannot be copied whole
+    /// into a `.corrupted` safety backup.
+    static func coordinatedRead(
+        at url: URL,
+        maximumBytes: Int = LibraryConflictRecovery.maximumCandidateBytes,
+        statedByteCount: ((URL) -> Int?)? = nil
+    ) throws -> Data {
         var result: Data?
         var readError: Error?
         var coordinationError: NSError?
         let coordinator = NSFileCoordinator(filePresenter: nil)
         coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { actualURL in
             do {
-                result = try Data(contentsOf: actualURL)
+                result = try readBounded(at: actualURL, maximumBytes: maximumBytes, statedByteCount: statedByteCount)
             } catch {
                 readError = error
             }
@@ -102,7 +120,50 @@ extension SnippetStore {
         return result
     }
 
-    static func loadFrom(_ location: Location, backups: LibraryBackupStore) -> Loaded {
+    /// When `statedByteCount` is set it replaces the filesystem size. A nil size
+    /// from that closure, or a filesystem that reports none, still caps the read.
+    private static func readBounded(
+        at url: URL,
+        maximumBytes: Int,
+        statedByteCount: ((URL) -> Int?)?
+    ) throws -> Data {
+        let stated: Int?
+        if let statedByteCount {
+            stated = statedByteCount(url)
+        } else {
+            stated = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        }
+        if let stated, stated > maximumBytes {
+            throw OversizedLibraryRead(byteCount: stated, ceiling: maximumBytes)
+        }
+
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var data = Data()
+        if let stated, stated > 0, stated <= maximumBytes {
+            data.reserveCapacity(stated)
+        }
+        // One byte past the ceiling distinguishes "exactly the ceiling" from
+        // "grew past it" without reading the rest of the file.
+        let probe = maximumBytes == Int.max ? maximumBytes : maximumBytes + 1
+        while data.count < probe {
+            let room = probe - data.count
+            // 64 KiB is the read chunk, not a second ceiling.
+            guard let chunk = try handle.read(upToCount: min(65_536, room)), !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        guard data.count <= maximumBytes else {
+            throw OversizedLibraryRead(byteCount: data.count, ceiling: maximumBytes)
+        }
+        return data
+    }
+
+    static func loadFrom(
+        _ location: Location,
+        backups: LibraryBackupStore,
+        maximumBytes: Int = LibraryConflictRecovery.maximumCandidateBytes,
+        statedByteCount: ((URL) -> Int?)? = nil
+    ) -> Loaded {
         var out = Loaded()
         let url = location.fileURL
 
@@ -120,7 +181,7 @@ extension SnippetStore {
 
         let raw: Data
         do {
-            raw = try coordinatedRead(at: url)
+            raw = try coordinatedRead(at: url, maximumBytes: maximumBytes, statedByteCount: statedByteCount)
         } catch {
             DevTypeLog.store.error(
                 "[Store] Failed to read snippets \(DevTypeLog.errorMetadata(error), privacy: .public)"
