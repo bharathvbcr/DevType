@@ -214,25 +214,45 @@ extension SnippetStore {
         digestLock.unlock()
     }
 
-    /// Every load from disk records its digest here. A blank read sets the cleanup hold; only a
-    /// load that decoded a real, conflict-free document clears it. A missing, unreadable,
-    /// corrupt or conflicted read leaves it as it was: none of those replaces the empty
-    /// library a blank read adopted, so none is evidence the secrets are orphans.
+    /// Every load from disk records its digest here, and decides the orphan-secret cleanup hold.
+    ///
+    /// A blank file and a missing file both set the hold. Each yields a library that references
+    /// no secret — empty, or the seeded defaults — without saying anything about the secrets
+    /// already in the keychain: a truncated sync, a deleted `snippets.json`, or a lost library
+    /// location all look like this. Only a load that decoded a real, conflict-free document
+    /// clears the hold. An unreadable, corrupt or conflicted read leaves it as it was.
     func recordLoadedDigest(_ loaded: Loaded) {
         digestLock.lock()
         savedDigest = loaded.digest
-        if loaded.isBlank {
-            lastLoadReadBlankFile = true
+        if loaded.isBlank || !loaded.fileWasPresent {
+            // Every blank or missing load starts over: a secret this session introduced may
+            // still be referenced by the real library this read just lost, so it is no longer
+            // known to be this session's to delete.
+            secretIDsIntroducedDuringHold = []
+            secretCleanupHeld = true
         } else if loaded.decodeSucceeded, loaded.hardFailure == nil, loaded.conflicts.isEmpty {
-            lastLoadReadBlankFile = false
+            secretCleanupHeld = false
+            secretIDsIntroducedDuringHold = []
         }
         digestLock.unlock()
     }
 
-    func lastLoadWasBlank() -> Bool {
+    /// While the hold is on, an ordinary save records the secret IDs it newly referenced, so
+    /// that deleting one of those snippets later in the session can still purge its value.
+    /// Restores and other recovery writes do not record: what they bring back predates the hold.
+    func noteSecretsIntroducedDuringHold(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        digestLock.lock()
+        if secretCleanupHeld { secretIDsIntroducedDuringHold.formUnion(ids) }
+        digestLock.unlock()
+    }
+
+    /// Cleanup policy for one orphaned secret: always, unless the hold is on and the secret was
+    /// not introduced during it. The flag and the set are read together under `digestLock`.
+    func mayPurgeOrphanSecret(_ id: UUID) -> Bool {
         digestLock.lock()
         defer { digestLock.unlock() }
-        return lastLoadReadBlankFile
+        return !secretCleanupHeld || secretIDsIntroducedDuringHold.contains(id)
     }
 
     static func sha256(of data: Data) -> String {

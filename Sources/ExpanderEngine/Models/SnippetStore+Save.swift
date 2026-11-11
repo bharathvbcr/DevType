@@ -156,6 +156,7 @@ extension SnippetStore {
         }
         defer { secretCommitLease?.end() }
 
+        var newlyReferencedIDs: Set<UUID> = []
         if secretPurgeEnabled {
             // A latched library never committed a cache; recovery then treats every secret the
             // restored library references as new, so each must still have a stored value.
@@ -164,7 +165,7 @@ extension SnippetStore {
                 publishSaveFailure(failure)
                 return DiskWrite(outcome: failure, backupURL: nil)
             }
-            let newlyReferencedIDs = liveSecretIDs.subtracting(previouslyLiveSecretIDs)
+            newlyReferencedIDs = liveSecretIDs.subtracting(previouslyLiveSecretIDs)
             guard newlyReferencedIDs.allSatisfy({ secretStore.hasSecret(for: $0) }) else {
                 let failure = SaveOutcome.failed(
                     "A newly referenced secret has no stored value; the library was not changed."
@@ -193,6 +194,11 @@ extension SnippetStore {
             saveBlockLock.lock()
             _hardFailure = nil
             saveBlockLock.unlock()
+        }
+        // Only an ordinary save. A restore (or any write that keeps a safety backup) brings back
+        // secrets that predate the cleanup hold, and those stay protected until a real load.
+        if safetyKind == nil, !bypassLatch {
+            noteSecretsIntroducedDuringHold(newlyReferencedIDs)
         }
 
         lock.lock()
@@ -224,30 +230,26 @@ extension SnippetStore {
     /// would otherwise read "these are all the snippets that exist" and delete the real library's
     /// secrets. Only the shared store, which owns the whole library, is allowed to purge.
     ///
-    /// A blank `snippets.json` loads as an empty library, which references no secret. That is
-    /// not evidence the secrets are orphans — a truncated sync or an editor accident looks the
-    /// same, and a deleted keychain value cannot come back from a library backup. While the last
-    /// load read a blank file, live IDs are reported as unknown, so every candidate is deferred.
-    /// A save does not lift this; only a load that decodes a real document does.
+    /// A blank `snippets.json` loads as an empty library, and a missing local one is seeded with
+    /// the default snippets. Neither references any secret, and neither is evidence the secrets
+    /// are orphans: a truncated sync, a deleted file or a lost library location look the same,
+    /// and a deleted keychain value cannot come back from a library backup. While the cleanup
+    /// hold is on (`recordLoadedDigest`), only secrets that an ordinary save during the hold
+    /// newly referenced may be purged; every other stored secret is retained (not deferred, so
+    /// nothing shows as pending). A save does not lift the hold; only a load that decodes a real
+    /// document does.
     ///
-    /// The IDs are read before the flag: a load records the flag before it swaps the cache, so a
-    /// blank load landing between the two reads is still seen.
+    /// `mayPurgeOrphanSecret` is asked at selection and again inside the conditional delete, so
+    /// a blank or missing-file load landing mid-pass still protects what it should.
     @discardableResult
     func purgeOrphanSecrets(
         keepingLatest latestLiveIDs: () -> Set<UUID>?
     ) -> SecretStore.PurgeSummary {
         guard secretPurgeEnabled else { return .init() }
         let summary = secretStore.purgeOrphans(
-            keepingLatest: { [weak self] in
-                guard let self else { return nil }
-                let ids = latestLiveIDs()
-                return self.lastLoadWasBlank() ? nil : ids
-            },
-            confirmingLatest: { [weak self] in
-                guard let self else { return nil }
-                let ids = self.confirmedLiveSecretIDsForCleanup()
-                return self.lastLoadWasBlank() ? nil : ids
-            })
+            keepingLatest: latestLiveIDs,
+            confirmingLatest: { [weak self] in self?.confirmedLiveSecretIDsForCleanup() },
+            mayDelete: { [weak self] id in self?.mayPurgeOrphanSecret(id) ?? false })
         saveBlockLock.lock()
         _pendingSecretCleanupCount = summary.pending
         saveBlockLock.unlock()

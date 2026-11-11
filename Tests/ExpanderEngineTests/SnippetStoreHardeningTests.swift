@@ -544,6 +544,12 @@ final class SnippetStoreAtomicGroupMutationTests: XCTestCase {
             .appendingPathComponent("DevTypeSecretPurgeRetry-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
+        // Start from a real (empty) library. A missing file is seeded and holds orphan-secret
+        // cleanup; the orphan below is stored before the store exists, so it predates the hold
+        // and is (correctly) retained by it (MissingLibrarySecretPurgeTests). This test is about
+        // cleanup mechanics, not that hold.
+        try? JSONEncoder().encode(SnippetDocument(groups: []))
+            .write(to: directory.appendingPathComponent("snippets.json"))
 
         let backing = InMemorySecretBackingStore()
         let secrets = SecretStore(backing: backing)
@@ -586,6 +592,12 @@ final class SnippetStoreAtomicGroupMutationTests: XCTestCase {
             .appendingPathComponent("DevTypeSecretPurgeNonblocking-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
+        // Start from a real (empty) library. A missing file is seeded and holds orphan-secret
+        // cleanup; the orphan below is stored before the store exists, so it predates the hold
+        // and is (correctly) retained by it (MissingLibrarySecretPurgeTests). This test is about
+        // cleanup mechanics, not that hold.
+        try? JSONEncoder().encode(SnippetDocument(groups: []))
+            .write(to: directory.appendingPathComponent("snippets.json"))
 
         let backing = SuspendedFirstDeleteBacking()
         let secrets = SecretStore(backing: backing)

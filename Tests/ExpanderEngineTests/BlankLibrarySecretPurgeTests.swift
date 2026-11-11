@@ -7,8 +7,9 @@ import XCTest
 /// An empty library also means no snippet references any keychain secret, so orphan cleanup
 /// used to delete every stored secret on the next launch or reload. A blank file is far more
 /// often a truncated sync or an editor accident than a deliberate wipe, and a deleted secret
-/// cannot be restored from a library backup. Cleanup therefore waits while the last library
-/// read from disk was blank, and resumes once a load reads a real document.
+/// cannot be restored from a library backup. While the last library read from disk was blank,
+/// cleanup therefore keeps every secret except those this session introduced and then
+/// dropped, and resumes fully once a load reads a real document.
 ///
 /// Adapted from audit/ft-d612c083-blank-library, whose contract (blank = hard read failure)
 /// was not taken. Its contract-neutral cases are kept unchanged.
@@ -126,7 +127,8 @@ final class BlankLibrarySecretPurgeTests: XCTestCase {
             let cleanup = fixture.store.retryOrphanSecretCleanup()
             XCTAssertEqual(cleanup.removed, 0, "a blank file must not purge secrets: \(label)")
             XCTAssertEqual(cleanup.attempted, 0, label)
-            XCTAssertGreaterThan(cleanup.deferred, 0, "cleanup waits, it does not decide: \(label)")
+            XCTAssertEqual(cleanup.deferred, 0, "a protected secret is retained, not left pending: \(label)")
+            XCTAssertEqual(fixture.store.pendingSecretCleanupCount, 0, label)
             XCTAssertEqual(fixture.backing.accounts(), [fixture.secretID.uuidString], label)
         }
     }
@@ -431,13 +433,82 @@ final class BlankLibrarySecretPurgeTests: XCTestCase {
             let summary = store.retryOrphanSecretCleanup()
             XCTAssertEqual(summary.removed, 0, label)
             XCTAssertEqual(summary.attempted, 0, label)
-            XCTAssertGreaterThan(summary.deferred, 0, "a blank library must defer: \(label)")
+            XCTAssertEqual(summary.deferred, 0, "a protected secret is retained, not left pending: \(label)")
             XCTAssertEqual(probe.conditionalDeletes, 0, "purge must not reach a delete: \(label)")
             XCTAssertEqual(probe.approvedDeletes, 0, label)
             XCTAssertEqual(probe.accounts(), [secretID.uuidString], label)
         }
 
         try assertColdInitOnBrokenJSONDefers(secretID: secretID)
+    }
+
+    /// During the hold, a secret introduced and dropped in this session is purged; the secret
+    /// that predates the blank load is not.
+    func testASecretIntroducedAndDroppedAfterABlankLoadIsPurgedButTheOldOneIsKept() throws {
+        let fixture = try makeLoadedLibrary()
+        try Data().write(to: fixture.file)
+        fixture.store.reloadFromDisk()
+
+        let secrets = fixture.store.secretStore
+        let keep = SnippetModel(title: "Keep", triggerKeyword: ";k", replacementText: "", isSecret: true)
+        let drop = SnippetModel(title: "Drop", triggerKeyword: ";d", replacementText: "", isSecret: true)
+        secrets.store("keep-me", for: keep.id)
+        secrets.store("delete-me", for: drop.id)
+        XCTAssertTrue(fixture.store.saveGroups([SnippetGroup(name: "General", snippets: [keep, drop])]).didSave)
+        XCTAssertTrue(fixture.store.saveGroups([SnippetGroup(name: "General", snippets: [keep])]).didSave)
+
+        let summary = fixture.store.retryOrphanSecretCleanup()
+        XCTAssertNil(secrets.secret(for: drop.id))
+        XCTAssertEqual(secrets.secret(for: keep.id), "keep-me")
+        XCTAssertTrue(fixture.backing.accounts().contains(fixture.secretID.uuidString))
+        XCTAssertEqual(summary.deferred, 0)
+        XCTAssertEqual(fixture.store.pendingSecretCleanupCount, 0)
+    }
+
+    /// A restore during the hold brings back secrets that predate it. Dropping one of them again
+    /// in the same session must not purge it: restores do not count as introducing a secret.
+    func testARestoredSecretDroppedDuringTheHoldIsKept() throws {
+        let fixture = try makeLoadedLibrary()
+        let groups = fixture.store.loadGroups()
+        var edited = groups
+        edited[0].snippets.append(SnippetModel(title: "B", triggerKeyword: ":b", replacementText: "new"))
+        XCTAssertTrue(fixture.store.saveGroups(edited).didSave)
+        let backup = try XCTUnwrap(fixture.store.libraryBackups().first { $0.kind == .save }).url
+
+        try Data().write(to: fixture.file)
+        fixture.store.reloadFromDisk()
+        XCTAssertTrue(fixture.store.restoreLibrary(fromBackup: backup).didRestore)
+        XCTAssertTrue(fixture.store.loadSnippets().map(\.id).contains(fixture.secretID))
+
+        let withoutSecret = fixture.store.loadGroups().map { group -> SnippetGroup in
+            var group = group
+            group.snippets.removeAll { $0.id == fixture.secretID }
+            return group
+        }
+        XCTAssertTrue(fixture.store.saveGroups(withoutSecret).didSave)
+        XCTAssertEqual(fixture.store.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(fixture.backing.accounts(), [fixture.secretID.uuidString])
+    }
+
+    /// The policy is asked again inside the conditional delete: a hold that starts between
+    /// candidate selection and the delete still retains the secret.
+    func testThePolicyIsCheckedAgainInsideTheConditionalDelete() {
+        let orphan = UUID()
+        let backing = InMemorySecretBackingStore(seed: [orphan.uuidString: "synthetic"])
+        let store = SecretStore(backing: backing)
+        var asked = 0
+        let summary = store.purgeOrphans(
+            keepingLatest: { [] },
+            confirmingLatest: { [] },
+            mayDelete: { _ in
+                asked += 1
+                return asked == 1
+            }
+        )
+        XCTAssertEqual(asked, 2, "asked at selection and again inside the delete")
+        XCTAssertEqual(summary.removed, 0)
+        XCTAssertEqual(summary.deferred, 0)
+        XCTAssertEqual(backing.accounts(), [orphan.uuidString])
     }
 
     /// A launch onto broken JSON latches the read failure. The cache stays unset rather than
@@ -531,6 +602,173 @@ final class BlankLibrarySecretPurgeTests: XCTestCase {
             ("utf16le-bom \(text.prefix(12))", Data([0xFF, 0xFE]) + le),
             ("utf16be-bom \(text.prefix(12))", Data([0xFE, 0xFF]) + be),
         ]
+    }
+}
+
+/// A missing local `snippets.json` is seeded with the default snippets, none of them secret.
+/// Secrets live in the keychain, outside the library directory, so they survive a deleted
+/// library file, a lost library-location preference, or a launch pointed at a fresh directory.
+/// Launch cleanup used to read the seeded defaults as "every secret is an orphan" and delete
+/// them all. Under the same hold as a blank file, it now keeps them until a load decodes a real
+/// document. That load is the next launch, because the seeded defaults are written to disk:
+/// the protection lasts one session (see testTheNextLaunchOntoTheSeededDefaultsLiftsTheHold).
+final class MissingLibrarySecretPurgeTests: XCTestCase {
+    private struct ColdStart {
+        let support: URL
+        let file: URL
+        let probe: PurgeProbeBacking
+        let store: SnippetStore
+        let secretID: UUID
+    }
+
+    private func coldStartOnAMissingLibrary() throws -> ColdStart {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DevTypeMissingLibrary-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("snippets.json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        let secretID = UUID()
+        let probe = PurgeProbeBacking(seed: [secretID.uuidString: "synthetic"])
+        let store = SnippetStore(
+            location: .init(fileURL: file, expectsExistingLibrary: false),
+            localSupportDirectory: root,
+            watcherFactory: { _ in nil },
+            secretStore: SecretStore(backing: probe),
+            secretPurgeEnabled: true
+        )
+        return ColdStart(support: root, file: file, probe: probe, store: store, secretID: secretID)
+    }
+
+    func testLaunchCleanupAfterSeedingAMissingLibraryKeepsEverySecret() throws {
+        let start = try coldStartOnAMissingLibrary()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: start.file.path), "the defaults are seeded")
+        XCTAssertFalse(start.store.loadSnippets().isEmpty)
+        XCTAssertFalse(start.store.isLibraryReadFailed)
+
+        start.probe.resetCounts()
+        let summary = start.store.retryOrphanSecretCleanup()
+        XCTAssertEqual(summary.removed, 0)
+        XCTAssertEqual(summary.attempted, 0)
+        XCTAssertEqual(summary.deferred, 0, "a protected secret is retained, not left pending")
+        XCTAssertEqual(start.store.pendingSecretCleanupCount, 0)
+        XCTAssertEqual(start.probe.conditionalDeletes, 0, "purge must not reach a delete")
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+    }
+
+    /// Where the hold ends, as for a blank file: not at a save in the same session, but at the
+    /// next load that decodes a real document — normally the next launch. From then on the saved
+    /// library is what the user has, and a secret it does not reference is an orphan.
+    func testASaveKeepsTheHoldAndTheNextLaunchLiftsIt() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let mine = SnippetModel(title: "Mine", triggerKeyword: ":mine", replacementText: "x")
+        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [mine])]).didSave)
+        XCTAssertEqual(start.store.retryOrphanSecretCleanup().removed, 0, "a save does not lift the hold")
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+
+        let relaunched = SnippetStore(
+            location: .init(fileURL: start.file, expectsExistingLibrary: false),
+            localSupportDirectory: start.support,
+            watcherFactory: { _ in nil },
+            secretStore: SecretStore(backing: start.probe),
+            secretPurgeEnabled: true
+        )
+        XCTAssertEqual(relaunched.loadSnippets().map(\.triggerKeyword), [":mine"])
+        _ = relaunched.retryOrphanSecretCleanup()
+        XCTAssertTrue(start.probe.accounts().isEmpty, "a launch onto a real document lifts the hold")
+    }
+
+    /// KNOWN LIMIT, pinned so it cannot change unnoticed: with no save at all, the seeded
+    /// defaults are already on disk, so the second launch reads them as a real document, lifts
+    /// the hold, and purges every secret they do not reference. The protection is one session.
+    /// Closing this needs a hold that survives relaunch, which is an open product decision.
+    func testTheNextLaunchOntoTheSeededDefaultsLiftsTheHold() throws {
+        let start = try coldStartOnAMissingLibrary()
+        XCTAssertEqual(start.store.retryOrphanSecretCleanup().removed, 0)
+
+        let relaunched = SnippetStore(
+            location: .init(fileURL: start.file, expectsExistingLibrary: false),
+            localSupportDirectory: start.support,
+            watcherFactory: { _ in nil },
+            secretStore: SecretStore(backing: start.probe),
+            secretPurgeEnabled: true
+        )
+        _ = relaunched.retryOrphanSecretCleanup()
+        XCTAssertTrue(start.probe.accounts().isEmpty, "known limit: the second launch purges")
+    }
+
+    /// A blank load after this session introduced a secret starts the session set over: the
+    /// real library the blank read lost may still reference it, so it is kept.
+    func testABlankLoadForgetsWhatTheSessionIntroduced() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let x = SnippetModel(title: "X", triggerKeyword: ";x", replacementText: "", isSecret: true)
+        start.store.secretStore.store("x-value", for: x.id)
+        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [x])]).didSave)
+
+        try Data().write(to: start.file)
+        start.store.reloadFromDisk()
+        XCTAssertTrue(start.store.loadSnippets().isEmpty)
+        let plain = SnippetModel(title: "P", triggerKeyword: ";p", replacementText: "p")
+        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [plain])]).didSave)
+
+        XCTAssertEqual(start.store.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(start.store.secretStore.secret(for: x.id), "x-value", "X may still be in the lost library")
+        XCTAssertTrue(start.probe.accounts().contains(start.secretID.uuidString))
+    }
+
+    /// During the hold, a secret this session introduced and then dropped is purged in-session;
+    /// the secret that predates the hold is not. Nothing is left pending.
+    func testASecretIntroducedAndDroppedDuringTheHoldIsPurgedButTheOldOneIsKept() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let secrets = start.store.secretStore
+        let keep = SnippetModel(title: "Keep", triggerKeyword: ";k", replacementText: "", isSecret: true)
+        let drop = SnippetModel(title: "Drop", triggerKeyword: ";d", replacementText: "", isSecret: true)
+        secrets.store("keep-me", for: keep.id)
+        secrets.store("delete-me", for: drop.id)
+        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [keep, drop])]).didSave)
+        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [keep])]).didSave)
+
+        let summary = start.store.retryOrphanSecretCleanup()
+        XCTAssertNil(secrets.secret(for: drop.id), "the snippet this session deleted takes its value with it")
+        XCTAssertEqual(secrets.secret(for: keep.id), "keep-me")
+        XCTAssertTrue(start.probe.accounts().contains(start.secretID.uuidString), "the pre-existing secret stays")
+        XCTAssertEqual(summary.deferred, 0)
+        XCTAssertEqual(start.store.pendingSecretCleanupCount, 0)
+    }
+
+    /// A first session on a fresh install: one secret saved, nothing pending.
+    func testAFreshInstallWithOneSecretShowsNothingPending() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let mine = SnippetModel(title: "Mine", triggerKeyword: ";m", replacementText: "", isSecret: true)
+        start.store.secretStore.store("v", for: mine.id)
+        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [mine])]).didSave)
+        let summary = start.store.retryOrphanSecretCleanup()
+        XCTAssertEqual(summary.deferred, 0)
+        XCTAssertEqual(summary.removed, 0)
+        XCTAssertEqual(start.store.pendingSecretCleanupCount, 0)
+    }
+
+    /// Characterization: this passed before the missing-file hold existed. A configured
+    /// (iCloud / linked) location that has not arrived yet blocks saves, so cleanup cannot
+    /// confirm; the hold keeps it that way.
+    func testAConfiguredLocationThatIsMissingKeepsEverySecret() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DevTypeMissingConfigured-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("snippets.json")
+        let secretID = UUID()
+        let probe = PurgeProbeBacking(seed: [secretID.uuidString: "synthetic"])
+        let store = SnippetStore(
+            location: .init(fileURL: file, expectsExistingLibrary: true),
+            localSupportDirectory: root,
+            watcherFactory: { _ in nil },
+            secretStore: SecretStore(backing: probe),
+            secretPurgeEnabled: true
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "nothing is seeded over a configured location")
+        XCTAssertEqual(store.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(probe.accounts(), [secretID.uuidString])
     }
 }
 

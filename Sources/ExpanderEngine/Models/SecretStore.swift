@@ -288,9 +288,14 @@ public final class SecretStore {
     /// claim (and the delete is skipped) or waits until the delete finishes; unrelated leases and
     /// mutations never wait behind slow backing I/O. The provider must be value-free and must not
     /// call back into `SecretStore`.
+    ///
+    /// `mayDelete`, when given, is a policy check on an orphan's ID: false retains it silently
+    /// (not deferred, not pending). It is asked at candidate selection and again inside the
+    /// conditional delete, so a policy change between the two still wins.
     @discardableResult
     func purgeOrphans(keepingLatest latestLiveIDs: () -> Set<UUID>?,
-                      confirmingLatest confirmedLiveIDs: (() -> Set<UUID>?)? = nil) -> PurgeSummary {
+                      confirmingLatest confirmedLiveIDs: (() -> Set<UUID>?)? = nil,
+                      mayDelete: ((UUID) -> Bool)? = nil) -> PurgeSummary {
         orphanPurgeExecutionLock.lock()
         defer { orphanPurgeExecutionLock.unlock() }
 
@@ -313,7 +318,8 @@ public final class SecretStore {
                 continue
             }
             guard !liveIDs.contains(id),
-                  orphanProtectionCounts[id] == nil else {
+                  orphanProtectionCounts[id] == nil,
+                  mayDelete?(id) ?? true else {
                 orphanProtectionCondition.unlock()
                 continue
             }
@@ -327,7 +333,7 @@ public final class SecretStore {
                 if let confirmedLiveIDs { current = confirmedLiveIDs() }
                 else { current = latestLiveIDs() }
                 guard let current else { deferred += 1; return false }
-                return !current.contains(id)
+                return !current.contains(id) && (mayDelete?(id) ?? true)
             })
 
             orphanProtectionCondition.lock()

@@ -520,9 +520,16 @@ public final class SnippetStore {
     var watcher: StoreWatching?
     let digestLock = NSLock()
     var savedDigest: FileDigest = .absent
-    /// The last load from disk read a blank file. Guarded by `digestLock`. Set only by loads,
-    /// never by saves: orphan-secret cleanup waits while it is true (see `purgeOrphanSecrets`).
-    var lastLoadReadBlankFile = false
+    /// The orphan-secret cleanup hold (see `purgeOrphanSecrets`). Set by a load that found the
+    /// library blank or missing; cleared only by a load that decoded a real document; never
+    /// changed by a save. Guarded by `digestLock`.
+    var secretCleanupHeld = false
+    /// While held: the secret IDs that ordinary saves newly referenced (against the cache just
+    /// before each save) since the last blank or missing load. Only these may be purged during
+    /// the hold; every other stored secret is retained. That includes an older secret the user
+    /// brings back by import or undo and then deletes. Emptied on every blank or missing load
+    /// and when the hold clears. Guarded by `digestLock`.
+    var secretIDsIntroducedDuringHold: Set<UUID> = []
 
     /// Serializes read-modify-write mutations (`importGroups`, `saveSnippets`) and
     /// the sanitize→write→cache-commit tail of every direct `saveGroups`.
