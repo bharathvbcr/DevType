@@ -194,21 +194,13 @@ extension SnippetStore {
 
         out.digest = .sha(sha256(of: raw))
 
-        let isBlank: Bool
-        if let first = firstNonWhitespaceByte(in: raw),
-           first == UInt8(ascii: "{") || first == UInt8(ascii: "[") {
-            // A JSON document is never blank; skip the whole-file String conversion.
-            isBlank = false
-        } else {
-            isBlank = raw.isEmpty
-                || String(data: raw, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
-        }
-        if isBlank {
+        if isBlankLibraryPayload(raw) {
             // An empty file is a legitimate (if suspicious) empty library — never
-            // a reason to write demo snippets. Surface it instead.
+            // a reason to write demo snippets. Surface it instead. `isBlank` also
+            // holds orphan-secret cleanup until a load reads a real document.
             out.loadIssue = out.loadIssue ?? .emptyFile(path: url.path)
             out.decodeSucceeded = true
+            out.isBlank = true
             return out
         }
 
@@ -234,5 +226,23 @@ extension SnippetStore {
             out.hardFailure = .failed("Could not decode \(url.path): \(error.localizedDescription)")
         }
         return out
+    }
+
+    /// Zero bytes, or only Unicode whitespace plus U+FEFF. A `{` or `[` after JSON
+    /// whitespace is a real document, including one that decodes to no snippets.
+    /// `String(data:encoding:)` drops only a leading BOM, so U+FEFF is removed explicitly
+    /// before the whitespace trim; otherwise a BOM between spaces is "broken JSON".
+    /// (From audit/ft-d612c083-blank-library 774b3c6; the outcome stays an empty library.)
+    static func isBlankLibraryPayload(_ raw: Data) -> Bool {
+        if raw.isEmpty { return true }
+        if let first = firstNonWhitespaceByte(in: raw),
+           first == UInt8(ascii: "{") || first == UInt8(ascii: "[") {
+            return false
+        }
+        guard let text = String(data: raw, encoding: .utf8) else { return false }
+        let withoutBOM = text.unicodeScalars.filter { $0.value != 0xFEFF }
+        return String(String.UnicodeScalarView(withoutBOM))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
     }
 }

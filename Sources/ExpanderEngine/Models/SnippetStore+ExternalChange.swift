@@ -78,7 +78,7 @@ extension SnippetStore {
             Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary),
             backups: backups
         )
-        setLastKnownDigest(loaded.digest)
+        recordLoadedDigest(loaded)
         let conflictsChanged = storePendingConflicts(loaded.conflicts)
         if conflictsChanged {
             // §1.13: includes the clearing of a previously reported conflict.

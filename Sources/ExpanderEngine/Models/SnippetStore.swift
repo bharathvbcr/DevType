@@ -520,6 +520,9 @@ public final class SnippetStore {
     var watcher: StoreWatching?
     let digestLock = NSLock()
     var savedDigest: FileDigest = .absent
+    /// The last load from disk read a blank file. Guarded by `digestLock`. Set only by loads,
+    /// never by saves: orphan-secret cleanup waits while it is true (see `purgeOrphanSecrets`).
+    var lastLoadReadBlankFile = false
 
     /// Serializes read-modify-write mutations (`importGroups`, `saveSnippets`) and
     /// the sanitize→write→cache-commit tail of every direct `saveGroups`.
@@ -693,14 +696,21 @@ public final class SnippetStore {
         self.backups = backups
 
         let loaded = Self.loadFrom(location, backups: backups)
-        _cachedGroups = loaded.groups
+        // `loaded.groups` is the default `[]` when decoding never produced a library.
+        // Publishing that makes `committedLiveSecretIDs()` an empty set, so a later
+        // purge treats every keychain account as an orphan. Leave the cache nil —
+        // distinct from a decoded empty library — for every hard failure, not only
+        // a blank file. The latch, digest, and load issue are still recorded.
+        if loaded.hardFailure == nil {
+            _cachedGroups = loaded.groups
+        }
         _lastLoadIssue = loaded.loadIssue
         _pendingConflicts = loaded.conflicts
         saveBlockLock.lock()
         _saveBlocked = loaded.hardFailure ?? loaded.blocked
         _hardFailure = loaded.hardFailure
         saveBlockLock.unlock()
-        setLastKnownDigest(loaded.digest)
+        recordLoadedDigest(loaded)
 
         // §0.3: only re-enter the load path to seed a genuinely absent local
         // library. A hard failure must not be re-read (it would take a second

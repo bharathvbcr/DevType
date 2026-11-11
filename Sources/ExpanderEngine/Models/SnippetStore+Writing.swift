@@ -214,6 +214,20 @@ extension SnippetStore {
         digestLock.unlock()
     }
 
+    /// Every load from disk records its digest here, together with whether the bytes were blank.
+    func recordLoadedDigest(_ loaded: Loaded) {
+        digestLock.lock()
+        savedDigest = loaded.digest
+        lastLoadReadBlankFile = loaded.isBlank
+        digestLock.unlock()
+    }
+
+    func lastLoadWasBlank() -> Bool {
+        digestLock.lock()
+        defer { digestLock.unlock() }
+        return lastLoadReadBlankFile
+    }
+
     static func sha256(of data: Data) -> String {
         hexString(of: SHA256.hash(data: data))
     }

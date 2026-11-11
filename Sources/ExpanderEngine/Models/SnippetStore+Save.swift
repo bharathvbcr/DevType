@@ -223,13 +223,26 @@ extension SnippetStore {
     /// the importers' scratch stores, and every test that saves two snippets to a temp directory —
     /// would otherwise read "these are all the snippets that exist" and delete the real library's
     /// secrets. Only the shared store, which owns the whole library, is allowed to purge.
+    ///
+    /// A blank `snippets.json` loads as an empty library, which references no secret. That is
+    /// not evidence the secrets are orphans — a truncated sync or an editor accident looks the
+    /// same, and a deleted keychain value cannot come back from a library backup. While the last
+    /// load read a blank file, live IDs are reported as unknown, so every candidate is deferred.
+    /// A save does not lift this; the next load that reads a real document does.
     @discardableResult
     func purgeOrphanSecrets(
         keepingLatest latestLiveIDs: () -> Set<UUID>?
     ) -> SecretStore.PurgeSummary {
         guard secretPurgeEnabled else { return .init() }
-        let summary = secretStore.purgeOrphans(keepingLatest: latestLiveIDs,
-            confirmingLatest: { [weak self] in self?.confirmedLiveSecretIDsForCleanup() })
+        let summary = secretStore.purgeOrphans(
+            keepingLatest: { [weak self] in
+                guard let self, !self.lastLoadWasBlank() else { return nil }
+                return latestLiveIDs()
+            },
+            confirmingLatest: { [weak self] in
+                guard let self, !self.lastLoadWasBlank() else { return nil }
+                return self.confirmedLiveSecretIDsForCleanup()
+            })
         saveBlockLock.lock()
         _pendingSecretCleanupCount = summary.pending
         saveBlockLock.unlock()

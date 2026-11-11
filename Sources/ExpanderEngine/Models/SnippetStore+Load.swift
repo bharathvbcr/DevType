@@ -137,7 +137,11 @@ extension SnippetStore {
             return (cached, _libraryRevision)
         }
         let groups = loadGroupsUnlocked()
-        _cachedGroups = groups
+        // Init leaves the cache nil on a hard failure. Caching the `[]` this
+        // returns would publish that empty library on the first read.
+        if hardFailure() == nil {
+            _cachedGroups = groups
+        }
         return (groups, _libraryRevision)
     }
 
@@ -161,6 +165,9 @@ extension SnippetStore {
         /// True when we actually produced a trustworthy library (including a
         /// legitimately empty one).
         var decodeSucceeded = false
+        /// The bytes were zero length or only whitespace: an empty library, but not
+        /// evidence that the user's secrets are orphans.
+        var isBlank = false
     }
 
     func loadGroupsUnlocked() -> [SnippetGroup] {
@@ -168,7 +175,7 @@ extension SnippetStore {
             Location(fileURL: fileURL, expectsExistingLibrary: expectsExistingLibrary),
             backups: backups
         )
-        setLastKnownDigest(loaded.digest)
+        recordLoadedDigest(loaded)
         // `lock` is held by our callers, so store without notifying.
         storePendingConflicts(loaded.conflicts)
         if let issue = loaded.loadIssue { _lastLoadIssue = issue }
