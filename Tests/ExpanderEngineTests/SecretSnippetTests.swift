@@ -438,6 +438,44 @@ final class SecretSnippetTests: XCTestCase {
         XCTAssertGreaterThan(broker.currentRestoreGeneration(), second)
     }
 
+    func testSuspendPendingRestoreKeepsTheUserSnapshotAndStillBumps() {
+        let broker = PasteboardBroker()
+        let board = NSPasteboard(name: NSPasteboard.Name("devtype.tests.secret.suspend.\(UUID())"))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        XCTAssertTrue(board.setString("expansion", forType: .string))
+        let parked: PasteboardBroker.PasteboardSnapshot = [[.string: Data("user clipboard".utf8)]]
+        let generation = broker.beginRestoreGeneration()
+        let ticket = PasteboardBroker.ClipboardTicket(
+            pasteboard: board,
+            oldItems: parked,
+            generation: generation,
+            targetChangeCount: board.changeCount
+        )
+        broker.registerPendingTicket(ticket)
+
+        let before = broker.currentRestoreGeneration()
+        XCTAssertEqual(broker.suspendPendingRestoreKeepingUserSnapshot(), parked)
+        XCTAssertGreaterThan(broker.currentRestoreGeneration(), before)
+        XCTAssertNil(
+            broker.suspendPendingRestoreKeepingUserSnapshot(),
+            "The ticket is cleared, so a second suspend has nothing left to keep"
+        )
+
+        broker.restore(ticket)
+        XCTAssertEqual(
+            board.string(forType: .string), "expansion",
+            "The bumped generation must make the expansion's restore a no-op"
+        )
+    }
+
+    func testSuspendWithNoTicketBumpsAndReturnsNil() {
+        let broker = PasteboardBroker()
+        let before = broker.currentRestoreGeneration()
+        XCTAssertNil(broker.suspendPendingRestoreKeepingUserSnapshot())
+        XCTAssertGreaterThan(broker.currentRestoreGeneration(), before)
+    }
+
     // MARK: - Unrepresentable states
 
     /// A secret carries no AI transform. Nothing routes one to the model today; the field merely

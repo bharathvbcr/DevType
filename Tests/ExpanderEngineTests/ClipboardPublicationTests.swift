@@ -43,7 +43,7 @@ final class ClipboardPublicationTests: XCTestCase {
                         },
                         currentChangeCount: { count }, writes: writes
                     )
-                    XCTAssertEqual(result, .ownershipLost)
+                    XCTAssertEqual(result, .ownershipLost(ownedChangeCount: 101))
                     XCTAssertEqual(calls, takeover)
                 }
             }
@@ -67,6 +67,21 @@ final class ClipboardPublicationTests: XCTestCase {
             )
             XCTAssertEqual(result, .notPrepared)
         }
+    }
+
+    func testOwnershipLostBeforeClearCarriesNoCountAndDoesNotClear() {
+        let count = 5
+        let result = PasteboardBroker.publishClipboard(
+            clearContents: {
+                XCTFail("A mismatched expected count must not clear")
+                return 0
+            },
+            currentChangeCount: { count },
+            writes: [{ true }],
+            expectedChangeCount: 4
+        )
+        XCTAssertEqual(result, .ownershipLost(ownedChangeCount: nil))
+        XCTAssertEqual(count, 5)
     }
 
     func testRestoreDoesNotOverwriteExternalCopyWithStandardMarkers() {

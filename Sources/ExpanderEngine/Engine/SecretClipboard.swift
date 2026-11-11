@@ -8,6 +8,7 @@ protocol SecretPasteboardWriting: AnyObject {
     @discardableResult func clearContents() -> Int
     func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool
     func setData(_ data: Data?, forType dataType: NSPasteboard.PasteboardType) -> Bool
+    func string(forType type: NSPasteboard.PasteboardType) -> String?
 }
 
 extension NSPasteboard: SecretPasteboardWriting {}
@@ -60,6 +61,9 @@ public final class SecretClipboard {
         let ticket: UInt64
         /// `changeCount` of the write we own. A later value means another writer owns the board.
         let changeCount: Int
+        /// User clipboard an expansion had parked, kept until this secret leaves the board.
+        /// Nil when there was nothing adoptable. Never the secret itself.
+        let userSnapshot: PasteboardBroker.PasteboardSnapshot?
     }
 
     /// Serializes this class's pasteboard I/O as well as ownership publication. External writers
@@ -149,12 +153,18 @@ public final class SecretClipboard {
         let ticket = nextOwnershipTicket
         let supersededWork = clearWorkItem
         clearWorkItem = nil
+        let previousOwnership = activeOwnership
         activeOwnership = nil
         lock.unlock()
         supersededWork?.cancel()
 
-        // A deliberate secret copy supersedes any prior automatic clipboard session.
-        broker?.invalidatePendingRestore()
+        // Supersede the expansion restore, but keep the user snapshot it was holding.
+        // Do not read the live board: it may be a previous secret.
+        let userSnapshot = Self.snapshotToRestore(
+            parked: broker?.suspendPendingRestoreKeepingUserSnapshot(),
+            previous: previousOwnership,
+            currentChangeCount: pasteboardWriter.changeCount
+        )
 
         let writer = pasteboardWriter
         let publication = PasteboardBroker.publishClipboard(
@@ -172,13 +182,38 @@ public final class SecretClipboard {
         case .writeFailed(let owned):
             // A partial secret must not remain unmarked. The original clear count is
             // the authority; sampling a newer owner's count would erase their copy.
-            if Self.mayClear(ownedChangeCount: owned, currentChangeCount: writer.changeCount) {
+            // When the expansion had parked a user snapshot, put that back instead of
+            // leaving the board empty. A concealed snapshot is not a user clipboard.
+            if let userSnapshot {
+                switch Self.restoreParkedUserSnapshot(
+                    userSnapshot, ownedChangeCount: owned, writer: writer
+                ) {
+                case .restored, .ownershipLost:
+                    break
+                case .failed:
+                    if Self.mayClear(ownedChangeCount: owned, currentChangeCount: writer.changeCount) {
+                        writer.clearContents()
+                    }
+                }
+            } else if Self.mayClear(ownedChangeCount: owned, currentChangeCount: writer.changeCount) {
                 writer.clearContents()
             }
             operationLock.unlock()
             DevTypeLog.inject.error("[Secret] clipboard publication failed")
             return .writeFailed
-        case .ownershipLost, .notPrepared:
+        case .ownershipLost(let ownedAfterClear):
+            // A nil count means the board moved before we cleared it. Do not guess.
+            // A count means we cleared, then lost it. An empty board gets the parked
+            // snapshot back; a string already there belongs to someone else.
+            if ownedAfterClear != nil,
+               let userSnapshot,
+               writer.string(forType: .string) == nil {
+                _ = Self.republishClearedUserSnapshot(userSnapshot, writer: writer)
+            }
+            operationLock.unlock()
+            DevTypeLog.inject.error("[Secret] clipboard ownership changed during publication")
+            return .writeFailed
+        case .notPrepared:
             operationLock.unlock()
             DevTypeLog.inject.error("[Secret] clipboard ownership changed during publication")
             return .writeFailed
@@ -193,7 +228,9 @@ public final class SecretClipboard {
         let work = schedule == nil ? DispatchWorkItem(block: clearAction) : nil
 
         lock.lock()
-        activeOwnership = Ownership(ticket: ticket, changeCount: ownedChangeCount)
+        activeOwnership = Ownership(
+            ticket: ticket, changeCount: ownedChangeCount, userSnapshot: userSnapshot
+        )
         clearWorkItem = work
         lock.unlock()
         operationLock.unlock()
@@ -245,8 +282,33 @@ public final class SecretClipboard {
             ownedChangeCount: ownership.changeCount,
             currentChangeCount: pasteboardWriter.changeCount
         ) {
-            pasteboardWriter.clearContents()
-            outcome = .cleared
+            if let snapshot = ownership.userSnapshot {
+                switch Self.restoreParkedUserSnapshot(
+                    snapshot,
+                    ownedChangeCount: ownership.changeCount,
+                    writer: pasteboardWriter
+                ) {
+                case .restored:
+                    outcome = .cleared
+                case .ownershipLost:
+                    outcome = .supersededByUser
+                case .failed:
+                    // Reconstruction or the write failed. If we still own the board the
+                    // secret is still there; remove it. If ownership moved, leave it.
+                    if Self.mayClear(
+                        ownedChangeCount: ownership.changeCount,
+                        currentChangeCount: pasteboardWriter.changeCount
+                    ) {
+                        pasteboardWriter.clearContents()
+                        outcome = .cleared
+                    } else {
+                        outcome = .supersededByUser
+                    }
+                }
+            } else {
+                pasteboardWriter.clearContents()
+                outcome = .cleared
+            }
         } else {
             outcome = .supersededByUser
         }
@@ -263,6 +325,96 @@ public final class SecretClipboard {
 
         DevTypeLog.inject.info("[Secret] clipboard clear → \(outcome.rawValue, privacy: .public)")
         return outcome
+    }
+
+    /// Parked expansion snapshot worth putting back. A concealed payload is refused by
+    /// `mayAdoptAsUserClipboard` and is not a user clipboard. When this copy found nothing
+    /// adoptable, keep the snapshot from the ownership we still hold — a second secret must
+    /// not treat the first secret, now sitting on the board, as the user's clipboard.
+    private static func snapshotToRestore(
+        parked: PasteboardBroker.PasteboardSnapshot?,
+        previous: Ownership?,
+        currentChangeCount: Int
+    ) -> PasteboardBroker.PasteboardSnapshot? {
+        if let adoptable = adoptableUserSnapshot(parked) {
+            return adoptable
+        }
+        guard let previous,
+              mayClear(ownedChangeCount: previous.changeCount, currentChangeCount: currentChangeCount)
+        else { return nil }
+        return adoptableUserSnapshot(previous.userSnapshot)
+    }
+
+    private static func adoptableUserSnapshot(
+        _ snapshot: PasteboardBroker.PasteboardSnapshot?
+    ) -> PasteboardBroker.PasteboardSnapshot? {
+        guard let snapshot, !snapshot.isEmpty else { return nil }
+        let types = snapshot.flatMap { Array($0.keys) }
+        guard PasteboardBroker.mayAdoptAsUserClipboard(types: types) else { return nil }
+        return snapshot
+    }
+
+    /// Same restore the user-clipboard write uses. `writeObjects` stays the pasteboard's own
+    /// publisher; a test writer only receives the representations that publisher already built.
+    private static func restoreParkedUserSnapshot(
+        _ snapshot: PasteboardBroker.PasteboardSnapshot,
+        ownedChangeCount: Int,
+        writer: SecretPasteboardWriting
+    ) -> PasteboardBroker.UserClipboardRestoreOutcome {
+        PasteboardBroker.restoreUserClipboardSnapshot(
+            snapshot,
+            ownedChangeCount: ownedChangeCount,
+            clearContents: { writer.clearContents() },
+            currentChangeCount: { writer.changeCount },
+            writeObjects: { publishRestoredItems($0, to: writer) }
+        )
+    }
+
+    /// The change count no longer matches, because that is how this publication failed.
+    /// Reconstruction still goes through `makeRestoredItems`; a refusal publishes nothing.
+    private static func republishClearedUserSnapshot(
+        _ snapshot: PasteboardBroker.PasteboardSnapshot,
+        writer: SecretPasteboardWriting
+    ) -> PasteboardBroker.UserClipboardRestoreOutcome {
+        PasteboardBroker.republishClearedSnapshot(
+            snapshot,
+            stillEmpty: { writer.string(forType: .string) == nil },
+            clearContents: { writer.clearContents() },
+            currentChangeCount: { writer.changeCount },
+            writeObjects: { publishRestoredItems($0, to: writer) }
+        )
+    }
+
+    private static func publishRestoredItems(
+        _ items: [NSPasteboardItem],
+        to writer: SecretPasteboardWriting
+    ) -> Bool {
+        if let pasteboard = writer as? NSPasteboard {
+            return pasteboard.writeObjects(items)
+        }
+        return writeRestoredItems(items, to: writer)
+    }
+
+    private static func writeRestoredItems(
+        _ items: [NSPasteboardItem],
+        to writer: SecretPasteboardWriting
+    ) -> Bool {
+        guard !items.isEmpty else { return false }
+        for item in items {
+            let types = item.types
+            guard !types.isEmpty else { return false }
+            for type in types {
+                guard let data = item.data(forType: type) else { return false }
+                let wrote: Bool
+                if type == .string, let string = String(data: data, encoding: .utf8) {
+                    wrote = writer.setString(string, forType: type)
+                } else {
+                    wrote = writer.setData(data, forType: type)
+                }
+                if !wrote { return false }
+            }
+        }
+        return true
     }
 
     /// True while a copied secret is still believed to be on the pasteboard.
