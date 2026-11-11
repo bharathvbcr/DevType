@@ -18,23 +18,16 @@ final class ConcealedPublicationOrderTests: XCTestCase {
         private var types: Set<String> = []
         private(set) var exposedWithoutMarkers = false
         private(set) var order: [String] = []
-        private var currentString: String?
 
         @discardableResult func clearContents() -> Int {
             changeCount += 1
             types = []
-            currentString = nil
             order.append("clear")
             return changeCount
         }
 
         func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool {
-            if dataType == .string { currentString = string }
-            return record(dataType)
-        }
-
-        func string(forType type: NSPasteboard.PasteboardType) -> String? {
-            type == .string ? currentString : nil
+            record(dataType)
         }
 
         func setData(_ data: Data?, forType dataType: NSPasteboard.PasteboardType) -> Bool {

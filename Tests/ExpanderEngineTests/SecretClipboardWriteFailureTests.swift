@@ -56,6 +56,7 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
             clearCount += 1
             changeCount += 1
             currentString = nil
+            currentImage = nil
             let owned = changeCount
             if takeoverAfterNextClear {
                 takeoverAfterNextClear = false
@@ -84,6 +85,11 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
                 takeoverAfterNextString = .none
                 changeCount += 1
                 currentString = text
+            case .image(let bytes):
+                takeoverAfterNextString = .none
+                changeCount += 1
+                currentString = nil
+                currentImage = bytes
             }
             return true
         }
@@ -121,11 +127,12 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
             case none
             case emptyBoard
             case replaced(String)
+            /// Another app copies an image: the board has content, but no `.string`.
+            case image(Data)
         }
 
-        func string(forType type: NSPasteboard.PasteboardType) -> String? {
-            type == .string ? currentString : nil
-        }
+        /// The image another app copied, until the next `clearContents`.
+        private(set) var currentImage: Data?
     }
 
     func testStringWriteFailureReturnsTypedFailureAndSchedulesNothing() {
@@ -938,14 +945,65 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
             schedule: { _, _ in scheduled += 1 }
         )
 
+        // Only `clearContents` moves the change count, so a moved count means another writer
+        // cleared the board after us. It is theirs, empty or not: the parked clipboard is
+        // dropped rather than written over a board DevType no longer owns.
         XCTAssertEqual(result, .writeFailed)
         XCTAssertFalse(result.didCopy)
         XCTAssertEqual(scheduled, 0)
-        XCTAssertEqual(writer.currentString, parked)
-        XCTAssertNotEqual(writer.currentString, "secret")
+        XCTAssertNil(writer.currentString)
+        XCTAssertEqual(writer.clearCount, 1, "no second clear over the new owner")
+        XCTAssertEqual(writer.stringWrites, 0)
     }
 
-    func testOwnershipLostAfterTheStringWriteDoesNotLeaveTheBoardEmptyOfTheUserClipboard() {
+    /// The new owner copied an image: there is no `.string`, but the board is not empty.
+    func testOwnershipLostToAnImageCopyLeavesTheImageAlone() {
+        let parked = "parked-user-clipboard"
+        let (broker, board) = park(parked)
+        defer { board.releaseGlobally() }
+        let writer = Writer(failure: .none)
+        let image = Data([0x89, 0x50, 0x4E, 0x47])
+        writer.takeoverAfterNextString = .image(image)
+        var scheduled = 0
+
+        let result = SecretClipboard().copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { _, _ in scheduled += 1 }
+        )
+
+        XCTAssertEqual(result, .writeFailed)
+        XCTAssertEqual(scheduled, 0)
+        XCTAssertEqual(writer.currentImage, image, "another app's image copy must survive")
+        XCTAssertNil(writer.currentString)
+        XCTAssertEqual(writer.clearCount, 1, "no clear after the takeover")
+        XCTAssertEqual(writer.stringWrites, 1, "only the secret's own string write")
+    }
+
+    /// The secret's string write fails while we still own the board, then the parked restore's
+    /// write fails too. The restore cleared first, so the markers the failed copy wrote are gone
+    /// and the board is left empty; with the count moved by that clear, no further clear runs.
+    func testFailedCopyWhoseParkedRestoreAlsoFailsLeavesTheBoardEmpty() {
+        let (broker, board) = park("parked-user-clipboard")
+        defer { board.releaseGlobally() }
+        let writer = Writer(failure: .none)
+        writer.failStringWrites = 2
+
+        let result = SecretClipboard().copyResult(
+            "secret",
+            pasteboardWriter: writer,
+            broker: broker,
+            schedule: { _, _ in XCTFail("a failed copy schedules nothing") }
+        )
+
+        XCTAssertEqual(result, .writeFailed)
+        XCTAssertNil(writer.currentString)
+        XCTAssertEqual(writer.stringWrites, 2, "the secret write, then the parked restore's write")
+        XCTAssertEqual(writer.clearCount, 2, "publication clear, then the restore's own clear")
+    }
+
+    func testOwnershipLostAfterTheStringWriteLeavesTheNewOwnersEmptyBoardAlone() {
         let parked = "parked-user-clipboard"
         let (broker, board) = park(parked)
         defer { board.releaseGlobally() }
@@ -960,11 +1018,14 @@ final class SecretClipboardWriteFailureTests: XCTestCase {
             schedule: { _, _ in scheduled += 1 }
         )
 
+        // An empty board after a count move is a writer that cleared and has not written yet.
         XCTAssertEqual(result, .writeFailed)
         XCTAssertFalse(result.didCopy)
         XCTAssertEqual(scheduled, 0)
-        XCTAssertEqual(writer.currentString, parked)
-        XCTAssertNotEqual(writer.currentString, "secret")
+        XCTAssertNil(writer.currentString)
+        XCTAssertNotEqual(writer.currentString, parked)
+        XCTAssertEqual(writer.clearCount, 1)
+        XCTAssertEqual(writer.stringWrites, 1)
     }
 
     func testOwnershipLostAfterTheStringWriteDoesNotOverwriteAReplacement() {

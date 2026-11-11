@@ -43,7 +43,7 @@ final class ClipboardPublicationTests: XCTestCase {
                         },
                         currentChangeCount: { count }, writes: writes
                     )
-                    XCTAssertEqual(result, .ownershipLost(ownedChangeCount: 101))
+                    XCTAssertEqual(result, .ownershipLost)
                     XCTAssertEqual(calls, takeover)
                 }
             }
@@ -69,7 +69,7 @@ final class ClipboardPublicationTests: XCTestCase {
         }
     }
 
-    func testOwnershipLostBeforeClearCarriesNoCountAndDoesNotClear() {
+    func testOwnershipLostBeforeClearDoesNotClear() {
         let count = 5
         let result = PasteboardBroker.publishClipboard(
             clearContents: {
@@ -80,7 +80,7 @@ final class ClipboardPublicationTests: XCTestCase {
             writes: [{ true }],
             expectedChangeCount: 4
         )
-        XCTAssertEqual(result, .ownershipLost(ownedChangeCount: nil))
+        XCTAssertEqual(result, .ownershipLost)
         XCTAssertEqual(count, 5)
     }
 
