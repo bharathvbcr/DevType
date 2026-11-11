@@ -169,8 +169,52 @@ private struct CLIArguments {
     private static func takeValue(named name: String, arguments: [String], index: inout Int) throws -> String {
         let next = index + 1
         guard next < arguments.count else { throw CLIFailure.usage("Missing value for --\(name).") }
+        let value = arguments[next]
+        // A following flag is the next option, not this option's value. Inline `--name=<value>`
+        // can still hold text that itself looks like a flag.
+        guard !value.hasPrefix("--") else { throw CLIFailure.usage("Missing value for --\(name).") }
         index = next
-        return arguments[next]
+        return value
+    }
+
+    /// True when a real `--library` / `--library=<path>` flag appears before a bare `--`
+    /// and is not the value of another flag. Tokens after `--`, and inline values such as
+    /// `--text=--library=owned`, do not count.
+    static func specifiesLibrary(_ arguments: [String]) -> Bool {
+        var index = 0
+        var ended = false
+        while index < arguments.count {
+            let token = arguments[index]
+            if !ended, token == "--" {
+                ended = true
+                index += 1
+                continue
+            }
+            if ended || !token.hasPrefix("--") {
+                index += 1
+                continue
+            }
+            let raw = String(token.dropFirst(2))
+            let name: String
+            let inline: String?
+            if let eq = raw.firstIndex(of: "=") {
+                name = String(raw[..<eq])
+                inline = String(raw[raw.index(after: eq)...])
+            } else {
+                name = raw
+                inline = nil
+            }
+            if name == "library" { return true }
+            if inline == nil, valued.contains(name) {
+                let next = index + 1
+                if next < arguments.count, !arguments[next].hasPrefix("--") {
+                    index = next + 1
+                    continue
+                }
+            }
+            index += 1
+        }
+        return false
     }
 }
 
@@ -335,13 +379,20 @@ private enum CLILibrary {
             )
         }
         let appSupport = CLIPaths.usesAppSupport(explicit: parsed.library, environment: environment)
+        // `fileExists` is false for an evicted iCloud item. That is an existing library
+        // waiting on a download, not a new file this call may fill with examples.
+        let materializing = !exists && SnippetStore.isPotentiallyMaterializing(url)
+        let expectsExisting = exists || materializing
         let store = SnippetStore(
-            location: SnippetStore.Location(fileURL: url, expectsExistingLibrary: exists),
+            location: SnippetStore.Location(fileURL: url, expectsExistingLibrary: expectsExisting),
             deviceDefaults: defaults,
             localSupportDirectory: CLIPaths.supportDirectory(library: url, usesAppSupport: appSupport),
             watcherFactory: { _ in nil },
             secretStore: SecretStore(backing: InMemorySecretBackingStore()),
-            secretPurgeEnabled: false
+            secretPurgeEnabled: false,
+            // Examples stay in memory until the add commits. A rejected add must not
+            // leave the file, or publish demos a concurrent reader could observe.
+            persistAbsentLibrarySeed: expectsExisting
         )
         return (store, !exists)
     }
@@ -475,6 +526,12 @@ private enum CLICommands {
         session: CLISession
     ) throws {
         let opened = try CLILibrary.store(parsed, injected: injected, environment: environment, defaults: defaults, create: false)
+        if opened.store.isLibraryReadFailed {
+            throw CLIFailure.failed(
+                "library_unreadable",
+                opened.store.libraryReadFailureReason ?? "The library could not be read."
+            )
+        }
         let groups = opened.store.loadSnippetGroups()
         let snippets = groups.flatMap(\.snippets)
         let secrets = opened.store.loadSecrets()
@@ -1069,7 +1126,7 @@ private enum CLIRepl {
         if base.allowDisabled, !line.contains("--allow-disabled") {
             prefix.append("--allow-disabled")
         }
-        if let library = base.library, !line.contains(where: { $0 == "--library" || $0.hasPrefix("--library=") }) {
+        if let library = base.library, !CLIArguments.specifiesLibrary(line) {
             prefix.append(contentsOf: ["--library", library])
         }
         return prefix + line

@@ -496,6 +496,10 @@ public final class SnippetStore {
 
     var fileURL: URL
     var expectsExistingLibrary: Bool
+    /// Absent-library examples are written in `loadGroupsUnlocked` only when this is true.
+    /// A caller that may reject its first mutation sets this false so the examples stay
+    /// in memory until a save commits.
+    let persistAbsentLibrarySeed: Bool
     let deviceDefaults: UserDefaults
     private let localSupportDirectory: URL
     var localDefaultURL: URL { localSupportDirectory.appendingPathComponent("snippets.json") }
@@ -672,12 +676,14 @@ public final class SnippetStore {
         localSupportDirectory: URL = SnippetStore.defaultLocalSupportDirectory,
         watcherFactory: @escaping (URL) -> StoreWatching? = { _ in nil },
         secretStore: SecretStore = .shared,
-        secretPurgeEnabled: Bool = false
+        secretPurgeEnabled: Bool = false,
+        persistAbsentLibrarySeed: Bool = true
     ) {
         self.secretStore = secretStore
         self.secretPurgeEnabled = secretPurgeEnabled
         self.fileURL = location.fileURL
         self.expectsExistingLibrary = location.expectsExistingLibrary
+        self.persistAbsentLibrarySeed = persistAbsentLibrarySeed
         self.deviceDefaults = deviceDefaults
         self.localSupportDirectory = localSupportDirectory
         self.watcherFactory = watcherFactory

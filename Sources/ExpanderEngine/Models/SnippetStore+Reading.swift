@@ -41,7 +41,7 @@ extension SnippetStore {
     /// been requested for it (evicted-item placeholder present, or the path sits in
     /// a ubiquity container) — the state where waiting on a background queue can
     /// still produce a library.
-    static func isPotentiallyMaterializing(_ url: URL) -> Bool {
+    public static func isPotentiallyMaterializing(_ url: URL) -> Bool {
         let fm = FileManager.default
         if fm.fileExists(atPath: url.path) { return false }
         let placeholder = url.deletingLastPathComponent()

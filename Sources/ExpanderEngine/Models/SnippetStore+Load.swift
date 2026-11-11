@@ -191,6 +191,10 @@ extension SnippetStore {
             let defaults = Self.sanitizeGroups(
                 [SnippetGroup(name: SnippetDocument.defaultGroupName, snippets: defaultSnippets())]
             )
+            // The app still publishes examples on first launch. A caller that passes
+            // `persistAbsentLibrarySeed: false` keeps them in memory until its own save,
+            // so a rejected mutation does not leave a file behind.
+            guard persistAbsentLibrarySeed else { return defaults }
             _ = writeGroupsToDisk(defaults, force: true)
             return defaults
         }
