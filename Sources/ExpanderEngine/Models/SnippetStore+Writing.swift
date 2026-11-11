@@ -214,11 +214,18 @@ extension SnippetStore {
         digestLock.unlock()
     }
 
-    /// Every load from disk records its digest here, together with whether the bytes were blank.
+    /// Every load from disk records its digest here. A blank read sets the cleanup hold; only a
+    /// load that decoded a real, conflict-free document clears it. A missing, unreadable,
+    /// corrupt or conflicted read leaves it as it was: none of those replaces the empty
+    /// library a blank read adopted, so none is evidence the secrets are orphans.
     func recordLoadedDigest(_ loaded: Loaded) {
         digestLock.lock()
         savedDigest = loaded.digest
-        lastLoadReadBlankFile = loaded.isBlank
+        if loaded.isBlank {
+            lastLoadReadBlankFile = true
+        } else if loaded.decodeSucceeded, loaded.hardFailure == nil, loaded.conflicts.isEmpty {
+            lastLoadReadBlankFile = false
+        }
         digestLock.unlock()
     }
 

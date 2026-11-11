@@ -228,7 +228,10 @@ extension SnippetStore {
     /// not evidence the secrets are orphans — a truncated sync or an editor accident looks the
     /// same, and a deleted keychain value cannot come back from a library backup. While the last
     /// load read a blank file, live IDs are reported as unknown, so every candidate is deferred.
-    /// A save does not lift this; the next load that reads a real document does.
+    /// A save does not lift this; only a load that decodes a real document does.
+    ///
+    /// The IDs are read before the flag: a load records the flag before it swaps the cache, so a
+    /// blank load landing between the two reads is still seen.
     @discardableResult
     func purgeOrphanSecrets(
         keepingLatest latestLiveIDs: () -> Set<UUID>?
@@ -236,12 +239,14 @@ extension SnippetStore {
         guard secretPurgeEnabled else { return .init() }
         let summary = secretStore.purgeOrphans(
             keepingLatest: { [weak self] in
-                guard let self, !self.lastLoadWasBlank() else { return nil }
-                return latestLiveIDs()
+                guard let self else { return nil }
+                let ids = latestLiveIDs()
+                return self.lastLoadWasBlank() ? nil : ids
             },
             confirmingLatest: { [weak self] in
-                guard let self, !self.lastLoadWasBlank() else { return nil }
-                return self.confirmedLiveSecretIDsForCleanup()
+                guard let self else { return nil }
+                let ids = self.confirmedLiveSecretIDsForCleanup()
+                return self.lastLoadWasBlank() ? nil : ids
             })
         saveBlockLock.lock()
         _pendingSecretCleanupCount = summary.pending

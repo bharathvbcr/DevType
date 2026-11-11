@@ -12,7 +12,7 @@ import XCTest
 ///
 /// Adapted from audit/ft-d612c083-blank-library, whose contract (blank = hard read failure)
 /// was not taken. Its contract-neutral cases are kept unchanged.
-final class BlankLibraryLoadTests: XCTestCase {
+final class BlankLibrarySecretPurgeTests: XCTestCase {
     private struct Fixture {
         let support: URL
         let file: URL
@@ -158,21 +158,55 @@ final class BlankLibraryLoadTests: XCTestCase {
         XCTAssertEqual(fixture.store.retryOrphanSecretCleanup().removed, 0, "a save does not lift the hold")
         XCTAssertEqual(fixture.backing.accounts(), [fixture.secretID.uuidString])
 
+        // The save also queued a background cleanup pass, which may run before or after this
+        // reload. Either way, once a real document is loaded the orphan is gone.
         fixture.store.reloadFromDisk()
-        let cleanup = fixture.store.retryOrphanSecretCleanup()
-        XCTAssertEqual(cleanup.removed, 1, "a load of a real document lifts the hold")
-        XCTAssertTrue(fixture.backing.accounts().isEmpty)
+        _ = fixture.store.retryOrphanSecretCleanup()
+        XCTAssertTrue(fixture.backing.accounts().isEmpty, "a load of a real document lifts the hold")
     }
 
-    /// Restoring the library that references the secret, after a blank load, keeps it.
-    func testRestoringTheLibraryAfterABlankLoadKeepsItsSecret() throws {
+    /// A blank read followed by reads that are not a document — corrupt bytes, then the Retry
+    /// the alert offers — must keep the hold. Retry clears the latch and serves the cached empty
+    /// library without re-reading, so without the hold cleanup would confirm an empty set.
+    func testACorruptReadAndRetryAfterABlankLoadKeepTheHold() throws {
         let fixture = try makeLoadedLibrary()
-        let original = try Data(contentsOf: fixture.file)
+        try Data().write(to: fixture.file)
+        fixture.store.reloadFromDisk()
+
+        try Data("{not-json".utf8).write(to: fixture.file)
+        fixture.store.reloadFromDisk()
+        XCTAssertTrue(fixture.store.isLibraryReadFailed)
+        fixture.store.clearLibraryReadFailure()
+        _ = fixture.store.loadGroups()
+        XCTAssertFalse(fixture.store.isLibraryReadFailed)
+
+        let cleanup = fixture.store.retryOrphanSecretCleanup()
+        XCTAssertEqual(cleanup.removed, 0)
+        XCTAssertEqual(fixture.backing.accounts(), [fixture.secretID.uuidString])
+
+        try FileManager.default.removeItem(at: fixture.file)
+        fixture.store.reloadFromDisk()
+        XCTAssertEqual(fixture.store.retryOrphanSecretCleanup().removed, 0, "a vanished file is not a document")
+        XCTAssertEqual(fixture.backing.accounts(), [fixture.secretID.uuidString])
+    }
+
+    /// "Restore from Backup…" after a blank load brings back the library that references the
+    /// secret, and the secret is still there to come back to.
+    func testRestoringFromABackupAfterABlankLoadKeepsItsSecret() throws {
+        let fixture = try makeLoadedLibrary()
+        // A save keeps the bytes it replaces — the library holding the secret — as a backup.
+        let groups = fixture.store.loadGroups()
+        let extra = SnippetModel(title: "B", triggerKeyword: ":b", replacementText: "new")
+        var edited = groups
+        edited[0].snippets.append(extra)
+        XCTAssertTrue(fixture.store.saveGroups(edited).didSave)
+        let backup = try XCTUnwrap(fixture.store.libraryBackups().first { $0.kind == .save }).url
+
         try Data().write(to: fixture.file)
         fixture.store.reloadFromDisk()
         XCTAssertEqual(fixture.store.retryOrphanSecretCleanup().removed, 0)
 
-        try original.write(to: fixture.file)
+        XCTAssertTrue(fixture.store.restoreLibrary(fromBackup: backup).didRestore)
         fixture.store.reloadFromDisk()
         XCTAssertEqual(
             fixture.store.loadSnippets().map(\.id).sorted(),
@@ -259,9 +293,9 @@ final class BlankLibraryLoadTests: XCTestCase {
         XCTAssertEqual(corruptedCopies(in: fixture.support).count, 1, "a repeated failed load must reuse the copy")
         XCTAssertEqual(fixture.backing.accounts(), [fixture.secretID.uuidString])
 
-        let summary = fixture.store.secretStore.purgeOrphans(keepingLatest: { nil })
-        XCTAssertEqual(summary.deferred, 1)
+        let summary = fixture.store.retryOrphanSecretCleanup()
         XCTAssertEqual(summary.removed, 0)
+        XCTAssertEqual(summary.attempted, 0)
         XCTAssertEqual(fixture.backing.accounts(), [fixture.secretID.uuidString])
     }
 
