@@ -89,8 +89,12 @@ extension SnippetStore {
     private func relocate(to location: Location, backupURL: URL?, message: String? = nil) -> RelocationResult {
         watcher?.stop()
         let previousDirectory = fileURL.deletingLastPathComponent()
+        let previousFile = fileURL
         fileURL = location.fileURL
         expectsExistingLibrary = location.expectsExistingLibrary
+        // The hold follows the library. The load below then decides it: DevType's own Save As /
+        // Stop Syncing write keeps it; linking to a library DevType did not write lifts it.
+        moveCleanupHoldRecord(from: previousFile)
         Self.setActiveLibraryDirectory(fileURL.deletingLastPathComponent())
         lock.lock()
         _cachedGroups = nil

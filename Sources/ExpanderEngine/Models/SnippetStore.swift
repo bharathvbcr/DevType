@@ -520,16 +520,14 @@ public final class SnippetStore {
     var watcher: StoreWatching?
     let digestLock = NSLock()
     var savedDigest: FileDigest = .absent
-    /// The orphan-secret cleanup hold (see `purgeOrphanSecrets`). Set by a load that found the
-    /// library blank or missing; cleared only by a load that decoded a real document; never
-    /// changed by a save. Guarded by `digestLock`.
-    var secretCleanupHeld = false
-    /// While held: the secret IDs that ordinary saves newly referenced (against the cache just
-    /// before each save) since the last blank or missing load. Only these may be purged during
-    /// the hold; every other stored secret is retained. That includes an older secret the user
-    /// brings back by import or undo and then deletes. Emptied on every blank or missing load
-    /// and when the hold clears. Guarded by `digestLock`.
-    var secretIDsIntroducedDuringHold: Set<UUID> = []
+    /// The orphan-secret cleanup hold (`SnippetStore+SecretCleanupHold.swift`). Guarded by
+    /// `digestLock`; changed only through `updateCleanupHold`.
+    var cleanupHold = SecretCleanupHold()
+    /// Where the hold's record survives relaunch. Nil for stores that do not own the library:
+    /// importer scratch stores, and stores that opt out.
+    let secretCleanupHoldDirectory: URL?
+    /// Serializes record writes so the file always ends at the latest in-memory state.
+    let cleanupHoldRecordLock = NSLock()
 
     /// Serializes read-modify-write mutations (`importGroups`, `saveSnippets`) and
     /// the sanitize→write→cache-commit tail of every direct `saveGroups`.
@@ -687,10 +685,16 @@ public final class SnippetStore {
         watcherFactory: @escaping (URL) -> StoreWatching? = { _ in nil },
         secretStore: SecretStore = .shared,
         secretPurgeEnabled: Bool = false,
-        persistAbsentLibrarySeed: Bool = true
+        persistAbsentLibrarySeed: Bool = true,
+        maintainsSecretCleanupHold: Bool? = nil,
+        secretCleanupHoldDirectory: URL = SnippetStore.defaultSecretCleanupHoldDirectory
     ) {
         self.secretStore = secretStore
         self.secretPurgeEnabled = secretPurgeEnabled
+        // Every store that owns the user's library keeps the record, whether or not it purges:
+        // the CLI writes the library too, and the app must still see the hold afterwards.
+        self.secretCleanupHoldDirectory = (maintainsSecretCleanupHold ?? secretPurgeEnabled)
+            ? secretCleanupHoldDirectory : nil
         self.fileURL = location.fileURL
         self.expectsExistingLibrary = location.expectsExistingLibrary
         self.persistAbsentLibrarySeed = persistAbsentLibrarySeed
@@ -702,6 +706,8 @@ public final class SnippetStore {
         )
         self.backups = backups
 
+        // Before the first load: a hold from an earlier launch must decide that load.
+        restoreCleanupHoldFromRecord()
         let loaded = Self.loadFrom(location, backups: backups)
         // `loaded.groups` is the default `[]` when decoding never produced a library.
         // Publishing that makes `committedLiveSecretIDs()` an empty set, so a later
