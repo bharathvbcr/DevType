@@ -241,15 +241,29 @@ extension AppDelegate {
         }
     }
 
+    /// Read on every nested lookup, not when the resolver is built. One cached snapshot serves
+    /// every app; tests replace this instead of touching `SnippetStore.shared`.
+    static var nestedSnippetFrontmostBundleID: () -> String? = {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    }
+
     /// Nested-snippet lookup for the current library. The index is rebuilt only when the store's
     /// revision moves; the revision and groups are read together so a save landing in between
     /// cannot pair an old index with a new revision.
     func nestedSnippetLookup() -> (String) -> String? {
         let (groups, revision) = SnippetStore.shared.loadGroupsWithRevision()
+        return nestedSnippetLookup(groups: groups, revision: revision)
+    }
+
+    /// Cache and resolver for an already-loaded library. Does not read or write `SnippetStore`.
+    func nestedSnippetLookup(groups: [SnippetGroup], revision: UInt64) -> (String) -> String? {
         if let cached = nestedResolverCache, cached.revision == revision {
             return cached.resolver.lookup
         }
-        let resolver = NestedSnippetResolver(snippets: groups.flatMap(\.snippets))
+        let resolver = NestedSnippetResolver(
+            snippets: groups.flatMap(\.snippets),
+            frontmostBundleID: { AppDelegate.nestedSnippetFrontmostBundleID() }
+        )
         nestedResolverCache = (revision, resolver)
         return resolver.lookup
     }

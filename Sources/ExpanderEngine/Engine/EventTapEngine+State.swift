@@ -32,7 +32,14 @@ extension EventTapEngine {
 
             // Build outside the lock: a rebuild can take milliseconds at large libraries and the
             // tap callback reads this lock on the keystroke path.
-            let snapshot = SnippetMatchSnapshot(snippets: matchable, revision: revision)
+            // Nested lookup reads the cached bundle when the reference resolves. Do not filter
+            // app scope into the snapshot (it is shared across apps) and do not call NSWorkspace
+            // here — the tap path already refuses that.
+            let snapshot = SnippetMatchSnapshot(
+                snippets: matchable,
+                revision: revision,
+                frontmostBundleID: { [weak self] in self?.cachedFrontmostBundleID }
+            )
 
             // Kept **unfiltered** for `silentNoExpandDiagnostics()` only. The matcher must never
             // see it: the whole point of the filter above is that a secret is not reachable from
