@@ -34,17 +34,24 @@ enum DiagnosticPrivacy {
         return hasher.finalize().prefix(6).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Bundle IDs and other diagnostic identifiers are useful verbatim at normal sizes. An
-    /// externally sourced outlier is represented only by bounded shape metadata so one field
-    /// cannot dominate the report or echo an arbitrary path-like payload.
+    /// Bundle IDs and other diagnostic identifiers are useful verbatim at normal sizes. A value
+    /// over the byte cap, or one that contains a Unicode control scalar (C0, DEL, or C1), is
+    /// represented only by bounded shape metadata so one field cannot dominate the report or
+    /// echo a newline-split payload. Space, letters, combining marks, and format scalars stay
+    /// verbatim while they are under the cap.
     static func boundedIdentifier(
         _ value: String,
         label: String,
         domain: String,
         maxUTF8Bytes: Int = 512
     ) -> String {
-        guard value.utf8.count > max(0, maxUTF8Bytes) else { return value }
-        return textShape(value, label: label, domain: domain)
+        let cap = max(0, maxUTF8Bytes)
+        if value.utf8.count > cap || value.unicodeScalars.contains(where: {
+            $0.properties.generalCategory == .control
+        }) {
+            return textShape(value, label: label, domain: domain)
+        }
+        return value
     }
 
     /// Length and invisible-character counts preserve mismatch evidence without retaining text.
