@@ -79,6 +79,9 @@ extension SnippetStore {
         do {
             local = choice == .local ? try Self.encodeLibrary(Self.sanitizeGroups(loadGroups())) : nil
         } catch { return .adoptionFailed(error.localizedDescription, recoveryURL: nil) }
+        // Keeping the local version writes these exact bytes outside `coordinatedReplace`;
+        // fingerprint them first so the cleanup hold knows the file as DevType's own.
+        if let local { noteOwnLibraryWrite(local, at: fileURL) }
         var result: LibraryConflictRecovery.Outcome?
         var coordinationError: NSError?
         let coordinator = NSFileCoordinator(filePresenter: nil)

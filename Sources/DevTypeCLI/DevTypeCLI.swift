@@ -392,7 +392,10 @@ private enum CLILibrary {
             secretPurgeEnabled: false,
             // Examples stay in memory until the add commits. A rejected add must not
             // leave the file, or publish demos a concurrent reader could observe.
-            persistAbsentLibrarySeed: expectsExisting
+            persistAbsentLibrarySeed: expectsExisting,
+            // The CLI never purges, but it writes the user's library: creating it where it was
+            // missing must start the hold the app will see, and its saves are DevType's own.
+            maintainsSecretCleanupHold: true
         )
         return (store, !exists)
     }

@@ -26,8 +26,10 @@ extension SnippetStore {
         case failed(String)
     }
 
-    /// The one coordinated replace every whole-library write goes through: saves, the forced
-    /// overwrite, and Save As / Stop Syncing onto an existing file.
+    /// The coordinated replace every whole-library write goes through — saves, the forced
+    /// overwrite, restore, seeding, and Save As / Stop Syncing — except keeping the local
+    /// version of an iCloud conflict, which writes through `LibraryConflictRecovery` and
+    /// fingerprints its bytes for the cleanup hold itself.
     ///
     /// §1.13: the digest re-check, the backup and the write happen inside one coordinated write
     /// block, so no other coordinated reader or writer (another DevType, iCloud, Finder) can land
@@ -38,6 +40,9 @@ extension SnippetStore {
         expecting expectedDigest: FileDigest?,
         backup requirement: BackupRequirement
     ) -> ReplaceResult {
+        // Write-ahead: fingerprint the bytes as DevType's own before they can land, so a crash
+        // after the write never makes this file look foreign to the cleanup hold.
+        noteOwnLibraryWrite(data, at: url)
         var result: ReplaceResult = .failed("File coordination did not run")
         var coordinationError: NSError?
         let coordinator = NSFileCoordinator(filePresenter: nil)
@@ -214,45 +219,11 @@ extension SnippetStore {
         digestLock.unlock()
     }
 
-    /// Every load from disk records its digest here, and decides the orphan-secret cleanup hold.
-    ///
-    /// A blank file and a missing file both set the hold. Each yields a library that references
-    /// no secret — empty, or the seeded defaults — without saying anything about the secrets
-    /// already in the keychain: a truncated sync, a deleted `snippets.json`, or a lost library
-    /// location all look like this. Only a load that decoded a real, conflict-free document
-    /// clears the hold. An unreadable, corrupt or conflicted read leaves it as it was.
+    /// Every load from disk records its digest here, then decides the orphan-secret cleanup
+    /// hold (`SnippetStore+SecretCleanupHold.swift`).
     func recordLoadedDigest(_ loaded: Loaded) {
-        digestLock.lock()
-        savedDigest = loaded.digest
-        if loaded.isBlank || !loaded.fileWasPresent {
-            // Every blank or missing load starts over: a secret this session introduced may
-            // still be referenced by the real library this read just lost, so it is no longer
-            // known to be this session's to delete.
-            secretIDsIntroducedDuringHold = []
-            secretCleanupHeld = true
-        } else if loaded.decodeSucceeded, loaded.hardFailure == nil, loaded.conflicts.isEmpty {
-            secretCleanupHeld = false
-            secretIDsIntroducedDuringHold = []
-        }
-        digestLock.unlock()
-    }
-
-    /// While the hold is on, an ordinary save records the secret IDs it newly referenced, so
-    /// that deleting one of those snippets later in the session can still purge its value.
-    /// Restores and other recovery writes do not record: what they bring back predates the hold.
-    func noteSecretsIntroducedDuringHold(_ ids: Set<UUID>) {
-        guard !ids.isEmpty else { return }
-        digestLock.lock()
-        if secretCleanupHeld { secretIDsIntroducedDuringHold.formUnion(ids) }
-        digestLock.unlock()
-    }
-
-    /// Cleanup policy for one orphaned secret: always, unless the hold is on and the secret was
-    /// not introduced during it. The flag and the set are read together under `digestLock`.
-    func mayPurgeOrphanSecret(_ id: UUID) -> Bool {
-        digestLock.lock()
-        defer { digestLock.unlock() }
-        return !secretCleanupHeld || secretIDsIntroducedDuringHold.contains(id)
+        setLastKnownDigest(loaded.digest)
+        updateCleanupHold(afterLoading: loaded)
     }
 
     static func sha256(of data: Data) -> String {

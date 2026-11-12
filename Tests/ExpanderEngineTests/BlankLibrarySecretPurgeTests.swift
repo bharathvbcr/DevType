@@ -150,7 +150,9 @@ final class BlankLibrarySecretPurgeTests: XCTestCase {
     /// from a backup later in that session still finds its secrets. The next load that reads a
     /// real document does lift it: from then on the saved library is what the user has, and a
     /// secret it does not reference is an orphan. A blank file is protected until then, not forever.
-    func testASaveKeepsTheHoldAndTheNextRealLoadLiftsIt() throws {
+    /// A save keeps the hold, and so does re-reading the file that save wrote: it is DevType's
+    /// own. Only a real library DevType did not write lifts it.
+    func testASaveKeepsTheHoldAndOnlyAForeignLibraryLiftsIt() throws {
         let fixture = try makeLoadedLibrary()
         try Data().write(to: fixture.file)
         fixture.store.reloadFromDisk()
@@ -158,13 +160,17 @@ final class BlankLibrarySecretPurgeTests: XCTestCase {
         let kept = SnippetModel(title: "B", triggerKeyword: ":b", replacementText: "new")
         XCTAssertTrue(fixture.store.saveGroups([SnippetGroup(name: "General", snippets: [kept])]).didSave)
         XCTAssertEqual(fixture.store.retryOrphanSecretCleanup().removed, 0, "a save does not lift the hold")
+        fixture.store.reloadFromDisk()
+        XCTAssertEqual(fixture.store.retryOrphanSecretCleanup().removed, 0, "DevType's own file does not lift it")
         XCTAssertEqual(fixture.backing.accounts(), [fixture.secretID.uuidString])
 
-        // The save also queued a background cleanup pass, which may run before or after this
-        // reload. Either way, once a real document is loaded the orphan is gone.
+        // Another Mac (or the user) puts a real library there.
+        let foreign = SnippetModel(title: "Elsewhere", triggerKeyword: ":e", replacementText: "x")
+        try JSONEncoder().encode(SnippetDocument(groups: [SnippetGroup(name: "General", snippets: [foreign])]))
+            .write(to: fixture.file)
         fixture.store.reloadFromDisk()
         _ = fixture.store.retryOrphanSecretCleanup()
-        XCTAssertTrue(fixture.backing.accounts().isEmpty, "a load of a real document lifts the hold")
+        XCTAssertTrue(fixture.backing.accounts().isEmpty, "a library DevType did not write lifts the hold")
     }
 
     /// A blank read followed by reads that are not a document — corrupt bytes, then the Retry
@@ -609,12 +615,12 @@ final class BlankLibrarySecretPurgeTests: XCTestCase {
 /// Secrets live in the keychain, outside the library directory, so they survive a deleted
 /// library file, a lost library-location preference, or a launch pointed at a fresh directory.
 /// Launch cleanup used to read the seeded defaults as "every secret is an orphan" and delete
-/// them all. Under the same hold as a blank file, it now keeps them until a load decodes a real
-/// document. That load is the next launch, because the seeded defaults are written to disk:
-/// the protection lasts one session (see testTheNextLaunchOntoTheSeededDefaultsLiftsTheHold).
+/// them all. Under the same hold as a blank file, it now keeps them, across relaunches, until
+/// a load decodes a real library that DevType did not write since the hold began.
 final class MissingLibrarySecretPurgeTests: XCTestCase {
     private struct ColdStart {
         let support: URL
+        let holds: URL
         let file: URL
         let probe: PurgeProbeBacking
         let store: SnippetStore
@@ -630,14 +636,29 @@ final class MissingLibrarySecretPurgeTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
         let secretID = UUID()
         let probe = PurgeProbeBacking(seed: [secretID.uuidString: "synthetic"])
-        let store = SnippetStore(
-            location: .init(fileURL: file, expectsExistingLibrary: false),
-            localSupportDirectory: root,
+        let holds = root.appendingPathComponent("Holds", isDirectory: true)
+        let store = launch(file, support: root, holds: holds, probe: probe, expectsExisting: false)
+        return ColdStart(support: root, holds: holds, file: file, probe: probe, store: store, secretID: secretID)
+    }
+
+    /// A launch of the shared store's shape: purge on, the hold record kept in `holds`.
+    private func launch(
+        _ file: URL, support: URL, holds: URL, probe: PurgeProbeBacking,
+        expectsExisting: Bool, defaults: UserDefaults = .standard
+    ) -> SnippetStore {
+        SnippetStore(
+            location: .init(fileURL: file, expectsExistingLibrary: expectsExisting),
+            deviceDefaults: defaults,
+            localSupportDirectory: support,
             watcherFactory: { _ in nil },
             secretStore: SecretStore(backing: probe),
-            secretPurgeEnabled: true
+            secretPurgeEnabled: true,
+            secretCleanupHoldDirectory: holds
         )
-        return ColdStart(support: root, file: file, probe: probe, store: store, secretID: secretID)
+    }
+
+    private func relaunch(_ start: ColdStart, at file: URL? = nil) -> SnippetStore {
+        launch(file ?? start.file, support: start.support, holds: start.holds, probe: start.probe, expectsExisting: false)
     }
 
     func testLaunchCleanupAfterSeedingAMissingLibraryKeepsEverySecret() throws {
@@ -656,45 +677,230 @@ final class MissingLibrarySecretPurgeTests: XCTestCase {
         XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
     }
 
-    /// Where the hold ends, as for a blank file: not at a save in the same session, but at the
-    /// next load that decodes a real document — normally the next launch. From then on the saved
-    /// library is what the user has, and a secret it does not reference is an orphan.
-    func testASaveKeepsTheHoldAndTheNextLaunchLiftsIt() throws {
-        let start = try coldStartOnAMissingLibrary()
-        let mine = SnippetModel(title: "Mine", triggerKeyword: ":mine", replacementText: "x")
-        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [mine])]).didSave)
-        XCTAssertEqual(start.store.retryOrphanSecretCleanup().removed, 0, "a save does not lift the hold")
-        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
-
-        let relaunched = SnippetStore(
-            location: .init(fileURL: start.file, expectsExistingLibrary: false),
-            localSupportDirectory: start.support,
-            watcherFactory: { _ in nil },
-            secretStore: SecretStore(backing: start.probe),
-            secretPurgeEnabled: true
-        )
-        XCTAssertEqual(relaunched.loadSnippets().map(\.triggerKeyword), [":mine"])
-        _ = relaunched.retryOrphanSecretCleanup()
-        XCTAssertTrue(start.probe.accounts().isEmpty, "a launch onto a real document lifts the hold")
-    }
-
-    /// KNOWN LIMIT, pinned so it cannot change unnoticed: with no save at all, the seeded
-    /// defaults are already on disk, so the second launch reads them as a real document, lifts
-    /// the hold, and purges every secret they do not reference. The protection is one session.
-    /// Closing this needs a hold that survives relaunch, which is an open product decision.
-    func testTheNextLaunchOntoTheSeededDefaultsLiftsTheHold() throws {
+    /// The second launch reads the seeded defaults DevType itself wrote. They are not the
+    /// user's library coming back, so the hold stays on and the secret survives.
+    func testTheNextLaunchOntoTheSeededDefaultsKeepsTheHold() throws {
         let start = try coldStartOnAMissingLibrary()
         XCTAssertEqual(start.store.retryOrphanSecretCleanup().removed, 0)
 
-        let relaunched = SnippetStore(
-            location: .init(fileURL: start.file, expectsExistingLibrary: false),
-            localSupportDirectory: start.support,
-            watcherFactory: { _ in nil },
-            secretStore: SecretStore(backing: start.probe),
-            secretPurgeEnabled: true
-        )
-        _ = relaunched.retryOrphanSecretCleanup()
-        XCTAssertTrue(start.probe.accounts().isEmpty, "known limit: the second launch purges")
+        for _ in 0..<3 {
+            let relaunched = relaunch(start)
+            XCTAssertTrue(relaunched.isSecretCleanupHeld)
+            XCTAssertEqual(relaunched.retryOrphanSecretCleanup().removed, 0)
+        }
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+    }
+
+    /// Saves are DevType's own writes, so they carry the hold across relaunch too. A library
+    /// DevType did not write is what ends it.
+    func testASaveKeepsTheHoldAcrossRelaunchUntilAForeignLibraryArrives() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let mine = SnippetModel(title: "Mine", triggerKeyword: ":mine", replacementText: "x")
+        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [mine])]).didSave)
+
+        let relaunched = relaunch(start)
+        XCTAssertEqual(relaunched.loadSnippets().map(\.triggerKeyword), [":mine"])
+        XCTAssertTrue(relaunched.isSecretCleanupHeld)
+        XCTAssertEqual(relaunched.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+
+        let foreign = SnippetModel(title: "Synced", triggerKeyword: ":s", replacementText: "y")
+        try JSONEncoder().encode(SnippetDocument(groups: [SnippetGroup(name: "General", snippets: [foreign])]))
+            .write(to: start.file)
+        let afterSync = relaunch(start)
+        XCTAssertFalse(afterSync.isSecretCleanupHeld, "a library DevType did not write lifts the hold")
+        _ = afterSync.retryOrphanSecretCleanup()
+        XCTAssertTrue(start.probe.accounts().isEmpty)
+    }
+
+    /// The user puts their original library back: it references the secret, the hold lifts,
+    /// and the secret is live again.
+    func testPuttingTheOriginalLibraryBackLiftsTheHoldAndKeepsItsSecret() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let original = SnippetModel(id: start.secretID, title: "Work", triggerKeyword: ";w", replacementText: "", isSecret: true)
+        try JSONEncoder().encode(SnippetDocument(groups: [SnippetGroup(name: "General", snippets: [original])]))
+            .write(to: start.file)
+        let relaunched = relaunch(start)
+        XCTAssertFalse(relaunched.isSecretCleanupHeld)
+        XCTAssertEqual(relaunched.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+    }
+
+    /// A record that exists but cannot be read keeps the hold (fail closed), and the next real
+    /// load is taken as DevType's own.
+    func testAnUnreadableRecordKeepsTheHold() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let records = try FileManager.default.contentsOfDirectory(at: start.holds, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+        XCTAssertEqual(records.count, 1)
+        try Data("{torn".utf8).write(to: records[0])
+
+        let first = relaunch(start)
+        XCTAssertTrue(first.isSecretCleanupHeld)
+        XCTAssertEqual(first.retryOrphanSecretCleanup().removed, 0)
+        let second = relaunch(start)
+        XCTAssertTrue(second.isSecretCleanupHeld, "the adopted file is DevType's own from now on")
+        XCTAssertEqual(second.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+    }
+
+    /// The record is keyed by the resolved path: a symlinked folder or the `/private` spelling of
+    /// a temporary path finds the same record. A miss here would read as "not held".
+    func testTheRecordIsFoundThroughAnotherSpellingOfThePath() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let link = start.support.deletingLastPathComponent()
+            .appendingPathComponent("DevTypeMissingLink-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: start.support)
+        addTeardownBlock { try? FileManager.default.removeItem(at: link) }
+
+        var spellings = [link.appendingPathComponent("snippets.json")]
+        let path = start.file.path
+        if path.hasPrefix("/private/") {
+            spellings.append(URL(fileURLWithPath: String(path.dropFirst("/private".count))))
+        } else if path.hasPrefix("/var/") || path.hasPrefix("/tmp/") {
+            spellings.append(URL(fileURLWithPath: "/private" + path))
+        }
+        for spelling in spellings {
+            let relaunched = relaunch(start, at: spelling)
+            XCTAssertTrue(relaunched.isSecretCleanupHeld, spelling.path)
+            XCTAssertEqual(relaunched.retryOrphanSecretCleanup().removed, 0, spelling.path)
+        }
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+    }
+
+    /// An own-written file that vanishes and comes back — an iCloud file evicted at launch and
+    /// materialized again — is still DevType's: the hold keeps the fingerprints of its writes
+    /// through a missing load, so it stays on.
+    func testAnOwnFileThatVanishesAndReturnsKeepsTheHold() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let mine = SnippetModel(title: "Mine", triggerKeyword: ":mine", replacementText: "x")
+        XCTAssertTrue(start.store.saveGroups([SnippetGroup(name: "General", snippets: [mine])]).didSave)
+        let bytes = try Data(contentsOf: start.file)
+
+        try FileManager.default.removeItem(at: start.file)
+        start.store.reloadFromDisk()
+        XCTAssertTrue(start.store.isSecretCleanupHeld)
+        try bytes.write(to: start.file)
+        start.store.reloadFromDisk()
+        XCTAssertTrue(start.store.isSecretCleanupHeld)
+
+        // The same across a relaunch whose first load finds the file missing.
+        try FileManager.default.removeItem(at: start.file)
+        let evicted = launch(start.file, support: start.support, holds: start.holds, probe: start.probe, expectsExisting: true)
+        XCTAssertTrue(evicted.isSecretCleanupHeld)
+        try bytes.write(to: start.file)
+        evicted.reloadFromDisk()
+        XCTAssertTrue(evicted.isSecretCleanupHeld)
+        XCTAssertEqual(evicted.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+    }
+
+    /// The user's real library — loaded before any hold — that vanishes and comes back
+    /// byte-for-byte was never DevType's write during the hold, so it lifts.
+    func testAPreHoldLibraryThatVanishesAndReturnsLiftsTheHold() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DevTypeVanish-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("snippets.json")
+        let theirs = SnippetModel(title: "Theirs", triggerKeyword: ":t", replacementText: "z")
+        let bytes = try JSONEncoder().encode(SnippetDocument(groups: [SnippetGroup(name: "General", snippets: [theirs])]))
+        try bytes.write(to: file)
+        let probe = PurgeProbeBacking(seed: [:])
+        let store = launch(file, support: root, holds: root.appendingPathComponent("Holds"), probe: probe, expectsExisting: true)
+        XCTAssertFalse(store.isSecretCleanupHeld)
+
+        try FileManager.default.removeItem(at: file)
+        store.reloadFromDisk()
+        XCTAssertTrue(store.isSecretCleanupHeld)
+        try bytes.write(to: file)
+        store.reloadFromDisk()
+        XCTAssertFalse(store.isSecretCleanupHeld)
+    }
+
+    /// The record key must not change between launches when the library's folder did not exist
+    /// at the hold's start, nor with a symlinked ancestor, nor with a different letter case on a
+    /// case-insensitive volume. The first launch quits without saving.
+    func testTheRecordKeyIsStableWhenTheFolderDidNotExistYet() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DevTypeFreshDir-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let link = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DevTypeFreshLink-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: root)
+        addTeardownBlock { try? FileManager.default.removeItem(at: link) }
+        let holds = root.appendingPathComponent("Holds", isDirectory: true)
+        let secretID = UUID()
+        let probe = PurgeProbeBacking(seed: [secretID.uuidString: "synthetic"])
+
+        let viaLink = link.appendingPathComponent("not/yet/here/snippets.json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: viaLink.deletingLastPathComponent().path))
+        let first = launch(viaLink, support: root, holds: holds, probe: probe, expectsExisting: false)
+        XCTAssertTrue(first.isSecretCleanupHeld)
+
+        let direct = root.appendingPathComponent("not/yet/here/snippets.json")
+        var spellings = [direct, viaLink]
+        if direct.path.hasPrefix("/private/") {
+            spellings.append(URL(fileURLWithPath: String(direct.path.dropFirst("/private".count))))
+        } else if direct.path.hasPrefix("/var/") || direct.path.hasPrefix("/tmp/") {
+            spellings.append(URL(fileURLWithPath: "/private" + direct.path))
+        }
+        let caseSensitive = (try? root.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+            .volumeSupportsCaseSensitiveNames) ?? true
+        if !caseSensitive {
+            spellings.append(root.appendingPathComponent("NOT/Yet/here/SNIPPETS.json"))
+        }
+        for spelling in spellings {
+            let relaunched = launch(spelling, support: root, holds: holds, probe: probe, expectsExisting: false)
+            XCTAssertTrue(relaunched.isSecretCleanupHeld, spelling.path)
+            XCTAssertEqual(relaunched.retryOrphanSecretCleanup().removed, 0, spelling.path)
+        }
+        XCTAssertEqual(probe.accounts(), [secretID.uuidString])
+    }
+
+    /// Save As writes the library somewhere new. That is DevType's own write: the hold moves
+    /// with the library and survives a relaunch at the new path.
+    func testSaveAsDuringTheHoldCarriesItToTheNewLocation() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let suite = "DevTypeHoldSaveAs-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: suite) }
+        let store = launch(start.file, support: start.support, holds: start.holds, probe: start.probe,
+                           expectsExisting: true, defaults: defaults)
+        XCTAssertTrue(store.isSecretCleanupHeld)
+
+        let elsewhere = start.support.appendingPathComponent("Shared", isDirectory: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        XCTAssertTrue(store.saveSnippetsAs(toDirectory: elsewhere).success)
+        XCTAssertTrue(store.isSecretCleanupHeld)
+        XCTAssertEqual(store.retryOrphanSecretCleanup().removed, 0)
+
+        let relaunched = launch(store.activeLocationURL, support: start.support, holds: start.holds,
+                                probe: start.probe, expectsExisting: true)
+        XCTAssertTrue(relaunched.isSecretCleanupHeld)
+        XCTAssertEqual(relaunched.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(start.probe.accounts(), [start.secretID.uuidString])
+    }
+
+    /// Linking to a library DevType did not write is the user's library arriving: it lifts.
+    func testLinkingToAnExistingLibraryLiftsTheHold() throws {
+        let start = try coldStartOnAMissingLibrary()
+        let suite = "DevTypeHoldLink-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: suite) }
+        let store = launch(start.file, support: start.support, holds: start.holds, probe: start.probe,
+                           expectsExisting: true, defaults: defaults)
+        let linked = start.support.appendingPathComponent("Linked/snippets.json")
+        try FileManager.default.createDirectory(at: linked.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let theirs = SnippetModel(title: "Theirs", triggerKeyword: ":t", replacementText: "z")
+        try JSONEncoder().encode(SnippetDocument(groups: [SnippetGroup(name: "General", snippets: [theirs])]))
+            .write(to: linked)
+
+        _ = store.linkToSnippets(at: linked)
+        XCTAssertFalse(store.isSecretCleanupHeld)
+        _ = store.retryOrphanSecretCleanup()
+        XCTAssertTrue(start.probe.accounts().isEmpty)
     }
 
     /// A blank load after this session introduced a secret starts the session set over: the

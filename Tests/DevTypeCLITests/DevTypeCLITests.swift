@@ -1,4 +1,4 @@
-import ExpanderEngine
+@testable import ExpanderEngine
 import XCTest
 @testable import DevTypeCLI
 
@@ -80,6 +80,58 @@ final class DevTypeCLITests: XCTestCase {
         XCTAssertEqual(invalid.code, 2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: library.path))
         XCTAssertTrue(invalid.err.contains("--trigger"))
+    }
+
+    /// The CLI creating the library where it was missing is the same event as the app seeding
+    /// it: the hold starts, and the file the CLI wrote is DevType's own. The app launching
+    /// afterwards must keep the secrets already in the keychain, not purge them.
+    func testALibraryTheCLICreatesKeepsTheAppsSecretCleanupHold() throws {
+        let added = run([
+            "--json", "--library", library.path,
+            "snippet", "add", "--trigger", ":cli", "--text", "from-cli", "--title", "CLI",
+        ])
+        XCTAssertEqual(added.code, 0, added.err + added.out)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: library.path))
+
+        let secretID = UUID()
+        let backing = InMemorySecretBackingStore(seed: [secretID.uuidString: "synthetic"])
+        let app = SnippetStore(
+            location: SnippetStore.Location(fileURL: library, expectsExistingLibrary: true),
+            localSupportDirectory: directory,
+            watcherFactory: { _ in nil },
+            secretStore: SecretStore(backing: backing),
+            secretPurgeEnabled: true
+        )
+        XCTAssertEqual(app.loadSnippets().map(\.triggerKeyword).contains(":cli"), true)
+        XCTAssertEqual(app.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(backing.accounts(), [secretID.uuidString])
+    }
+
+    /// The app is running under the hold when the CLI writes the library. The app's reload of
+    /// that file must find the CLI's write in the shared record, not treat it as foreign.
+    func testACLIWriteWhileTheAppIsRunningKeepsTheHold() throws {
+        let secretID = UUID()
+        let backing = InMemorySecretBackingStore(seed: [secretID.uuidString: "synthetic"])
+        let app = SnippetStore(
+            location: SnippetStore.Location(fileURL: library, expectsExistingLibrary: false),
+            localSupportDirectory: directory,
+            watcherFactory: { _ in nil },
+            secretStore: SecretStore(backing: backing),
+            secretPurgeEnabled: true
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: library.path), "the app seeded the missing library")
+        XCTAssertEqual(app.retryOrphanSecretCleanup().removed, 0)
+
+        let added = run([
+            "--json", "--library", library.path,
+            "snippet", "add", "--trigger", ":cli", "--text", "from-cli", "--title", "CLI",
+        ])
+        XCTAssertEqual(added.code, 0, added.err + added.out)
+
+        app.reloadFromDisk()
+        XCTAssertTrue(app.loadSnippets().map(\.triggerKeyword).contains(":cli"))
+        XCTAssertEqual(app.retryOrphanSecretCleanup().removed, 0)
+        XCTAssertEqual(backing.accounts(), [secretID.uuidString])
     }
 
     func testAddListGetSetRemoveRoundTrip() throws {
