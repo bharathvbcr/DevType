@@ -12,7 +12,8 @@ import ExpanderEngine
 /// never ran anywhere. Skipping for a reason that is true is fine; skipping by default is
 /// coverage that only looks like it exists.
 ///
-/// Set `DEVTYPE_SKIP_APPKIT_SMOKE=1` to opt out where briefly showing windows is unwelcome.
+/// The panels are never visible: `TestWindowShield` keeps every test window transparent at the
+/// WindowServer. Set `DEVTYPE_SKIP_APPKIT_SMOKE=1` to skip these tests anyway.
 final class SecretSearchWindowTests: XCTestCase {
     /// Whether this process belongs to a GUI session. `nil` in a launch daemon or an ssh
     /// login, where creating a panel would fail rather than merely look odd.

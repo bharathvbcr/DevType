@@ -120,6 +120,8 @@ Tests live in `Tests/DevTypeCLITests/` and use a temporary directory plus `InMem
 
 DevType maintains unit, fuzz, race, persistence, controller and stress tests, including `Tests/ExpanderEngineTests/`, `Tests/DevTypeAppTests/`, and `Tests/DevTypeCLITests/`. Read the actual test summary for the selected SDK and filter; skipped tests are not passing checks. The five audit performance tests require `DEVTYPE_BENCH=1`. Isolated native pasteboard/file-version tests do not replace physical cross-application focus, Secure Input or live iCloud validation.
 
+**Test windows stay off your screen.** Every test target links `Tests/TestWindowShield`, which keeps each window, panel and sheet a test creates fully transparent at the WindowServer. The window's own state (`isVisible`, `alphaValue`, frame, key status) still reads as it would on screen, so the AppKit tests run, and are not skipped, while you keep working. `TestWindowShieldTests` checks this against the WindowServer and fails if any test target stops linking the shield. To watch the windows while debugging a test, set `DEVTYPE_TEST_SHOW_WINDOWS=1`.
+
 ### Running Tests
 ```bash
 # Run all tests

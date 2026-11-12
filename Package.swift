@@ -121,9 +121,20 @@ let package = Package(
             name: "SourceTreeTestSupport",
             path: "Tests/SourceTreeTestSupport"
         ),
+        // Test support, not product code: keeps every window a test creates transparent at the
+        // WindowServer so a test run never shows windows over the person's work. ObjC because it
+        // must install from a load-time constructor, before the first test. Every test target
+        // depends on it; TestWindowShieldTests fails a test target that does not.
+        .target(
+            name: "TestWindowShield",
+            path: "Tests/TestWindowShield",
+            linkerSettings: [
+                .linkedFramework("AppKit")
+            ]
+        ),
         .testTarget(
             name: "ExpanderEngineTests",
-            dependencies: ["ExpanderEngine", "SourceTreeTestSupport"],
+            dependencies: ["ExpanderEngine", "SourceTreeTestSupport", "TestWindowShield"],
             resources: [
                 .copy("Fixtures")
             ]
@@ -134,19 +145,19 @@ let package = Package(
         // DevTypeSafetyTests filter selects it.
         .testTarget(
             name: "DevTypeSafetyOrderFrontTests",
-            dependencies: ["DevTypeSafety"]
+            dependencies: ["DevTypeSafety", "TestWindowShield"]
         ),
         .testTarget(
             name: "DevTypeAppTests",
-            dependencies: ["DevTypeAppCore", "SourceTreeTestSupport"]
+            dependencies: ["DevTypeAppCore", "SourceTreeTestSupport", "TestWindowShield"]
         ),
         .testTarget(
             name: "SafariHarnessCoreTests",
-            dependencies: ["SafariHarnessCore", "SourceTreeTestSupport"]
+            dependencies: ["SafariHarnessCore", "SourceTreeTestSupport", "TestWindowShield"]
         ),
         .testTarget(
             name: "DevTypeCLITests",
-            dependencies: ["DevTypeCLI"]
+            dependencies: ["DevTypeCLI", "TestWindowShield"]
         )
     ]
 )
