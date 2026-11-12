@@ -12,6 +12,8 @@ import XCTest
 ///   and returns the minimum. Min-of-N rejects scheduler noise; a real regression raises the floor.
 /// - `interleaved(_:_:warmup:rounds:)`: A/B comparison. Alternates A,B,A,B... so thermal and
 ///   load drift hit both sides equally, and returns each side's minimum.
+/// - `growthMinimums(rounds:base:scaled:_:)`: for growth-curve tests, which run in every suite
+///   (no `DEVTYPE_BENCH`). Each size's least thread CPU time, interleaved, in seconds.
 /// - `verdict(measuredMs:ceilingMs:)`: pure pass/fail decision (testable without XCTFail).
 /// - `assertWithin(_:ceilingMs:warmup:runs:file:line:_:)`: `measure`, print, and `XCTFail`
 ///   with measured vs ceiling when exceeded. Returns the measurement.
@@ -73,6 +75,41 @@ enum BenchmarkGate {
             bestB = min(bestB, elapsedMs(b))
         }
         return (bestA, bestB)
+    }
+
+    /// What a scaled-up input costs next to the base one, for tests that pin a growth curve
+    /// rather than an absolute time. Returns each size's least time in seconds, so the caller
+    /// asserts on `scaled / base`.
+    ///
+    /// The clock is the thread's CPU time, not elapsed time: a full suite on a loaded machine
+    /// deschedules the test and pages it in from swap, and wall-clock charged that to whichever
+    /// size it landed on — once reading ×8 for work that was ×2.6, and a single sample per size
+    /// read ×3.1 to ×4.5 for linear work under ×2. Each size is still measured `rounds` times,
+    /// interleaved, keeping the least, because CPU time alone does not even out which core the
+    /// thread ran on or what it was contending with. The base reading is floored at half a
+    /// millisecond so timer resolution cannot dominate the ratio on a fast machine.
+    static func growthMinimums<Input>(
+        rounds: Int = 7,
+        base: Input,
+        scaled: Input,
+        _ run: (Input) -> Void
+    ) -> (base: Double, scaled: Double) {
+        precondition(rounds > 0, "rounds must be positive")
+        func seconds(_ input: Input) -> Double {
+            let started = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+            run(input)
+            return Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - started) / 1_000_000_000
+        }
+
+        run(base)  // warm
+        run(scaled)
+        var bestBase = Double.infinity
+        var bestScaled = Double.infinity
+        for _ in 0..<rounds {
+            bestBase = min(bestBase, seconds(base))
+            bestScaled = min(bestScaled, seconds(scaled))
+        }
+        return (max(bestBase, 0.0005), bestScaled)
     }
 
     static func verdict(measuredMs: Double, ceilingMs: Double) -> Verdict {

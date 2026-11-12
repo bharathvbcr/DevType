@@ -43,39 +43,17 @@ final class MacroParserScanBoundTests: XCTestCase {
     /// threshold sits at the geometric midpoint, eight. The bounded paths measure nearer ×2.7,
     /// because the fixed case budget and the allowance floor weigh the small document more.
     ///
-    /// The clock is the thread's CPU time, not elapsed time: a full suite on a loaded machine
-    /// deschedules the test and pages it in from swap, and wall-clock charged that to whichever
-    /// size it landed on — once reading ×8 for work that was ×2.6. Each size is still measured
-    /// several times, interleaved, keeping the least, because CPU time alone does not even out
-    /// which core the thread ran on or what it was contending with.
+    /// How each size is timed (thread CPU time, interleaved, least of several) and why is
+    /// `BenchmarkGate.growthMinimums`.
     private static let growthScale = 4
     private static let growthThreshold = 8.0
 
     private func growthRatio(
-        rounds: Int = 7,
         document: (_ scale: Int) -> String,
         _ run: (String) -> Void
     ) -> (base: Double, scaled: Double) {
         // Built up front so only `run` is timed.
-        let small = document(1)
-        let large = document(Self.growthScale)
-        func seconds(_ source: String) -> Double {
-            let started = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
-            run(source)
-            return Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - started) / 1_000_000_000
-        }
-
-        run(small)  // warm
-        run(large)
-        var base = Double.infinity
-        var scaled = Double.infinity
-        for _ in 0..<rounds {
-            base = min(base, seconds(small))
-            scaled = min(scaled, seconds(large))
-        }
-        // The minimum shrinks the base reading, so the floor keeps timer resolution from
-        // dominating the ratio on a fast machine.
-        return (max(base, 0.0005), scaled)
+        BenchmarkGate.growthMinimums(base: document(1), scaled: document(Self.growthScale), run)
     }
 
     func testScanCostScalesSubQuadraticallyWithMarkerCount() {

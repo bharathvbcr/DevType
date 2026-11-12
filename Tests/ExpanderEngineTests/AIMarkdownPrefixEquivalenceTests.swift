@@ -160,26 +160,56 @@ final class AIMarkdownPrefixEquivalenceTests: XCTestCase {
     /// stays in cache. The defect is the growth curve, so that is what this pins: absolute
     /// timings just track whatever machine runs them.
     ///
-    /// Doubling the input doubles linear work and quadruples quadratic work. The threshold sits
-    /// between the two so an accidental return to per-pass copying fails here.
+    /// The old shape is quadratic in principle, but each layer's fixed cost dominates its copy
+    /// until the line is long, so it grows only a little faster than linear at the sizes a unit
+    /// test can afford. Thread CPU time in a debug build, least of several runs: this code costs
+    /// 0.016s at 12,500 markers and 0.123s at 100,000 (×7.8, linear); the old per-layer copy
+    /// costs 0.023s and 0.416s (×17.7). Doubling could not tell them apart (the old shape read
+    /// ×2.2 to ×2.9 per doubling), so the input grows eightfold and the threshold sits between
+    /// the two measured growths, not at the midpoint of ×8 and ×64, which the old shape never
+    /// reaches. `testTheGrowthGateFlagsTheOldPerLayerCopy` fails if it stops separating them.
+    /// Each size is timed the way `BenchmarkGate.growthMinimums` explains; one wall-clock sample
+    /// per size made this test fail on linear code in loaded full-suite runs.
+    private static let growthBaseMarkers = 12_500
+    private static let growthScale = 8
+    private static let growthThreshold = 12.0
+
+    private func stackedHeadings(_ markers: Int) -> String {
+        String(repeating: "# ", count: markers) + "payload"
+    }
+
     func testStackedHeadingsScaleSubQuadratically() {
-        func elapsed(markers: Int) -> TimeInterval {
-            let line = String(repeating: "# ", count: markers) + "payload"
-            _ = AIMarkdownStripper.strippingBlockPrefixes(line, allowed: .all)  // warm
-            let started = Date()
-            let stripped = AIMarkdownStripper.strippingBlockPrefixes(line, allowed: .all)
-            let took = Date().timeIntervalSince(started)
-            XCTAssertEqual(stripped, "payload")
-            return took
+        let base = stackedHeadings(Self.growthBaseMarkers)
+        let scaled = stackedHeadings(Self.growthBaseMarkers * Self.growthScale)
+        XCTAssertEqual(AIMarkdownStripper.strippingBlockPrefixes(base, allowed: .all), "payload")
+        XCTAssertEqual(AIMarkdownStripper.strippingBlockPrefixes(scaled, allowed: .all), "payload")
+
+        let growth = BenchmarkGate.growthMinimums(base: base, scaled: scaled) {
+            _ = AIMarkdownStripper.strippingBlockPrefixes($0, allowed: .all)
         }
 
-        let single = max(elapsed(markers: 25_000), 0.0005)
-        let double = elapsed(markers: 50_000)
-
         XCTAssertLessThan(
-            double / single,
-            3.0,
-            "doubling the markers must not quadruple the work — \(single)s → \(double)s"
+            growth.scaled / growth.base,
+            Self.growthThreshold,
+            "×\(Self.growthScale) the markers must cost about ×\(Self.growthScale) — \(growth.base)s → \(growth.scaled)s"
+        )
+    }
+
+    /// The measurement above must be able to fail. The previous algorithm, kept verbatim as the
+    /// oracle, copies the remainder on every layer; through the same gate it must read as
+    /// quadratic, or the scaling test would pass a return to that shape.
+    func testTheGrowthGateFlagsTheOldPerLayerCopy() {
+        let base = stackedHeadings(Self.growthBaseMarkers)
+        let scaled = stackedHeadings(Self.growthBaseMarkers * Self.growthScale)
+
+        let growth = BenchmarkGate.growthMinimums(rounds: 3, base: base, scaled: scaled) {
+            _ = referenceStrippingBlockPrefixes($0, allowed: .all)
+        }
+
+        XCTAssertGreaterThan(
+            growth.scaled / growth.base,
+            Self.growthThreshold,
+            "the old per-layer copy must read as quadratic — \(growth.base)s → \(growth.scaled)s"
         )
     }
 
